@@ -11,5 +11,5 @@
 - [ ] Each commit builds and follows Conventional Commits
 - [ ] Tests cover the change, including the failure case
 - [ ] Migrations and event contracts reviewed, if touched
-- [ ] Baseline updated and compatibility gate rerun, if a version changed
+- [ ] Compatibility gate rerun, if a version changed
 - [ ] No secrets
