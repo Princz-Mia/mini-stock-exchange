@@ -1,0 +1,192 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Flink job: compiled for release 17, tested on a real JDK 17 (JAVA17_HOME) and run on the
+  flink:2.2.1-java17 container. Has no Spring Boot parent; the connector manages its own Kafka client.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<groupId>com.mia_princz.mse</groupId>
+	<artifactId>analytics-job</artifactId>
+	<version>0.1.0</version>
+	<packaging>jar</packaging>
+	<name>analytics-job</name>
+
+	<properties>
+		<maven.compiler.release>17</maven.compiler.release>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+		<flink.version>2.2.1</flink.version>
+		<flink-connector-kafka.version>5.0.0-2.2</flink-connector-kafka.version>
+		<junit.version>6.0.3</junit.version>
+		<assertj.version>3.27.7</assertj.version>
+	</properties>
+
+	<dependencies>
+		<dependency>
+			<groupId>com.mia_princz.mse</groupId>
+			<artifactId>event-contracts</artifactId>
+			<version>0.1.0</version>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-connector-kafka</artifactId>
+			<version>${flink-connector-kafka.version}</version>
+		</dependency>
+
+		<!-- Supplied by flink-dist in the container (connector-base checked in flink-dist-2.2.1.jar). -->
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-streaming-java</artifactId>
+			<version>${flink.version}</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-connector-base</artifactId>
+			<version>${flink.version}</version>
+			<scope>provided</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.flink</groupId>
+			<artifactId>flink-clients</artifactId>
+			<version>${flink.version}</version>
+			<scope>provided</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>org.junit.jupiter</groupId>
+			<artifactId>junit-jupiter</artifactId>
+			<version>${junit.version}</version>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.assertj</groupId>
+			<artifactId>assertj-core</artifactId>
+			<version>${assertj.version}</version>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<finalName>analytics-job</finalName>
+		<pluginManagement>
+			<plugins>
+				<plugin>
+					<artifactId>maven-clean-plugin</artifactId>
+					<version>3.5.0</version>
+				</plugin>
+				<plugin>
+					<artifactId>maven-resources-plugin</artifactId>
+					<version>3.5.0</version>
+				</plugin>
+				<plugin>
+					<artifactId>maven-compiler-plugin</artifactId>
+					<version>3.15.0</version>
+				</plugin>
+				<plugin>
+					<artifactId>maven-jar-plugin</artifactId>
+					<version>3.5.1</version>
+				</plugin>
+				<plugin>
+					<artifactId>maven-install-plugin</artifactId>
+					<version>3.1.4</version>
+				</plugin>
+				<plugin>
+					<artifactId>maven-deploy-plugin</artifactId>
+					<version>3.1.4</version>
+				</plugin>
+				<plugin>
+					<artifactId>maven-site-plugin</artifactId>
+					<version>3.21.0</version>
+				</plugin>
+			</plugins>
+		</pluginManagement>
+		<plugins>
+			<plugin>
+				<artifactId>maven-enforcer-plugin</artifactId>
+				<version>3.6.3</version>
+				<executions>
+					<execution>
+						<id>enforce-flink-boundary</id>
+						<goals>
+							<goal>enforce</goal>
+						</goals>
+						<configuration>
+							<rules>
+								<bannedDependencies>
+									<excludes>
+										<exclude>org.springframework*</exclude>
+									</excludes>
+								</bannedDependencies>
+							</rules>
+						</configuration>
+					</execution>
+					<execution>
+						<id>require-jdk17-for-tests</id>
+						<phase>process-test-classes</phase>
+						<goals>
+							<goal>enforce</goal>
+						</goals>
+						<configuration>
+							<skip>${skipTests}</skip>
+							<rules>
+								<requireEnvironmentVariable>
+									<variableName>JAVA17_HOME</variableName>
+									<message>analytics-job tests must run on JDK 17. Set JAVA17_HOME to a JDK 17 install.</message>
+								</requireEnvironmentVariable>
+							</rules>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+			<plugin>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<version>3.5.6</version>
+				<configuration>
+					<jvm>${env.JAVA17_HOME}/bin/java</jvm>
+					<!-- Same opens as env.java.opts.all in the flink:2.2.1-java17 image. -->
+					<argLine>--add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.io=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/sun.nio.ch=ALL-UNNAMED --add-opens=java.base/java.lang.reflect=ALL-UNNAMED --add-opens=java.base/java.text=ALL-UNNAMED --add-opens=java.base/java.time=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED</argLine>
+				</configuration>
+			</plugin>
+			<plugin>
+				<artifactId>maven-shade-plugin</artifactId>
+				<version>3.6.2</version>
+				<executions>
+					<execution>
+						<phase>package</phase>
+						<goals>
+							<goal>shade</goal>
+						</goals>
+						<configuration>
+							<createDependencyReducedPom>false</createDependencyReducedPom>
+							<artifactSet>
+								<excludes>
+									<exclude>org.slf4j:*</exclude>
+									<exclude>org.apache.logging.log4j:*</exclude>
+								</excludes>
+							</artifactSet>
+							<filters>
+								<filter>
+									<artifact>*:*</artifact>
+									<excludes>
+										<exclude>module-info.class</exclude>
+										<exclude>META-INF/versions/*/module-info.class</exclude>
+										<exclude>META-INF/*.SF</exclude>
+										<exclude>META-INF/*.DSA</exclude>
+										<exclude>META-INF/*.RSA</exclude>
+									</excludes>
+								</filter>
+							</filters>
+							<transformers>
+								<transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+									<mainClass>com.mia_princz.mse.analytics.AnalyticsJob</mainClass>
+								</transformer>
+								<transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+							</transformers>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+		</plugins>
+	</build>
+</project>
