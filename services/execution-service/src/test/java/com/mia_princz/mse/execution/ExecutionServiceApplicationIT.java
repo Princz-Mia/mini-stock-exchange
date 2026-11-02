@@ -30,8 +30,8 @@ class ExecutionServiceApplicationIT {
 
 	@Test
 	void everythingElseIsDeniedByDefault() throws Exception {
-		assertThat(get("/api/v1/anything").statusCode()).isEqualTo(403);
-		assertThat(get("/actuator/env").statusCode()).isEqualTo(403);
+		assertThat(get("/api/v1/anything").statusCode()).isEqualTo(401);
+		assertThat(get("/actuator/env").statusCode()).isEqualTo(401);
 	}
 
 	private HttpResponse<String> get(String path) throws Exception {
