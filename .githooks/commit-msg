@@ -1,0 +1,18 @@
+#!/bin/sh
+# Enforces Conventional Commits on the subject line. Enable with: git config core.hooksPath .githooks
+subject=$(grep -v '^#' "$1" | sed -n '/./{p;q;}')
+
+case "$subject" in
+  Merge\ *|Revert\ *|fixup!\ *|squash!\ *) exit 0 ;;
+esac
+
+if ! printf '%s' "$subject" | grep -Eq '^(feat|fix|docs|test|build|ci|chore|refactor|perf|style|revert)(\([a-z0-9-]+\))?!?: .+'; then
+  echo "commit-msg: subject must look like 'feat(trading): add price-time book'" >&2
+  echo "commit-msg: got: $subject" >&2
+  exit 1
+fi
+
+if [ "${#subject}" -gt 72 ]; then
+  echo "commit-msg: subject is ${#subject} characters; keep it to 72" >&2
+  exit 1
+fi

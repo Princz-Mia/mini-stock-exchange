@@ -1,0 +1,6 @@
+# <type>(<optional scope>): <imperative summary, at most 72 characters>
+#
+# Types: feat fix docs test build ci chore refactor perf style revert
+# Scopes: execution market-data contracts analytics web simulator infra
+#
+# Body: explain why, not what. Wrap at 72 characters.

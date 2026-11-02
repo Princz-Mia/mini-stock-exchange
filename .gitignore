@@ -1,0 +1,102 @@
+# Mini Stock Exchange: root ignore rules for the entire monorepo.
+# Commit Maven Wrapper files, package-lock.json, uv.lock, version pins,
+# Avro schemas, migrations, Docker/Compose files and safe templates.
+
+# Local secrets and machine-specific configuration
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+application-local.yml
+application-local.yaml
+application-local.properties
+/secrets/
+/infra/secrets/
+/simulator/secrets/
+/simulator/credentials.local.json
+.secrets/
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+
+# Java / Maven / JVM diagnostics
+target/
+*.class
+.m2/
+.mvn/timing.properties
+.mvn/.cache/
+hs_err_pid*
+replay_pid*
+*.hprof
+*.jfr
+
+# React / TypeScript / Vite
+node_modules/
+/web/dist/
+/web/.vite/
+/web/.cache/
+/web/.eslintcache
+*.tsbuildinfo
+npm-debug.log*
+
+# Frontend test output and authenticated browser state
+/web/coverage/
+/web/playwright-report/
+/web/test-results/
+/web/playwright/.auth/
+
+# Python / uv / test caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+/simulator/build/
+/simulator/dist/
+
+# Local runtime state; keep curated benchmark reports under docs/.
+# Docker named volumes live outside Git; these cover local bind mounts.
+/infra/data/
+/infra/volumes/
+/infra/runtime/
+/infra/checkpoints/
+/infra/savepoints/
+/analytics-job/checkpoints/
+/analytics-job/savepoints/
+/runtime/
+/logs/
+/tmp/
+/simulator/runs/
+/benchmarks/results/
+*.log
+
+# IDE/editor local state
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating-system files
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
