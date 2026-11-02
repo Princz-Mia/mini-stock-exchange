@@ -16,6 +16,7 @@
 	<modules>
 		<module>event-contracts</module>
 		<module>services/execution-service</module>
+		<module>services/market-data-service</module>
 		<module>analytics-job</module>
 	</modules>
 
