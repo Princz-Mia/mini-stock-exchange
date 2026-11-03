@@ -5,6 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -27,6 +30,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import tools.jackson.databind.json.JsonMapper;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -36,7 +40,9 @@ import com.mia_princz.mse.execution.trading.adapter.JdbcTradingStore;
 import com.mia_princz.mse.execution.trading.adapter.SpringTransactionRunner;
 import com.mia_princz.mse.execution.trading.application.CancelOrder;
 import com.mia_princz.mse.execution.trading.application.CancelResult;
+import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.CommandWriter;
+import com.mia_princz.mse.execution.trading.application.IdempotencyConflictException;
 import com.mia_princz.mse.execution.trading.application.PlaceOrder;
 import com.mia_princz.mse.execution.trading.application.PlacementResult;
 import com.mia_princz.mse.execution.trading.application.PlacementResult.OrderState;
@@ -100,7 +106,7 @@ class TradingEngineIT {
 		jdbc.update("INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, ?, 10000)",
 				instrument, simulation, symbol(SYMBOLS.incrementAndGet()));
 
-		TradingStore store = new JdbcTradingStore(JdbcClient.create(dataSource));
+		TradingStore store = new JdbcTradingStore(JdbcClient.create(dataSource), JsonMapper.builder().build());
 		writer = new CommandWriter("test-writer", 1_000);
 		engine = new TradingEngine(failingBeforeCommit(store), new SpringTransactionRunner(transactionManager), writer,
 				Clock.systemUTC());
@@ -168,7 +174,7 @@ class TradingEngineIT {
 		List<DepthLevel> bookBefore = engine.depth(instrument, Side.SELL).get();
 
 		failAt.set("insertTradeEvent");
-		CompletableFuture<PlacementResult> failed = engine.place(order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 3));
+		CompletableFuture<PlacementResult> failed = engine.place(key(), order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 3));
 
 		assertThatThrownBy(failed::get).isInstanceOf(ExecutionException.class)
 			.rootCause()
@@ -238,7 +244,7 @@ class TradingEngineIT {
 		assertThat(buy.state()).isEqualTo(OrderState.PARTIALLY_FILLED);
 		assertThat(cash(buyer)).containsExactly(STARTING_CASH - 60_000, 40_400L);
 
-		CancelResult cancel = engine.cancel(new CancelOrder(buy.orderId(), buyer)).get();
+		CancelResult cancel = engine.cancel(key(), new CancelOrder(buy.orderId(), buyer)).get();
 
 		assertThat(cancel.status()).isEqualTo(CancelResult.Status.CANCELED);
 		assertThat(cancel.canceledQuantity()).isEqualTo(4);
@@ -258,10 +264,10 @@ class TradingEngineIT {
 	void cancellingTwiceIsASuccessfulNoOp() throws Exception {
 		UUID seller = funded();
 		PlacementResult sell = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
-		engine.cancel(new CancelOrder(sell.orderId(), seller)).get();
+		engine.cancel(key(), new CancelOrder(sell.orderId(), seller)).get();
 		Map<String, Object> before = snapshot();
 
-		CancelResult again = engine.cancel(new CancelOrder(sell.orderId(), seller)).get();
+		CancelResult again = engine.cancel(key(), new CancelOrder(sell.orderId(), seller)).get();
 
 		assertThat(again.status()).isEqualTo(CancelResult.Status.ALREADY_CANCELED);
 		Map<String, Object> after = snapshot();
@@ -279,13 +285,13 @@ class TradingEngineIT {
 		PlacementResult rejected = place(buyer, Side.BUY, OrderType.LIMIT, "1000000.00", 1_000);
 		PlacementResult resting = place(seller, Side.SELL, OrderType.LIMIT, "200.00", 1);
 
-		assertThat(engine.cancel(new CancelOrder(filled.orderId(), seller)).get().status())
+		assertThat(engine.cancel(key(), new CancelOrder(filled.orderId(), seller)).get().status())
 			.isEqualTo(CancelResult.Status.NOT_CANCELABLE);
-		assertThat(engine.cancel(new CancelOrder(rejected.orderId(), buyer)).get().status())
+		assertThat(engine.cancel(key(), new CancelOrder(rejected.orderId(), buyer)).get().status())
 			.isEqualTo(CancelResult.Status.NOT_CANCELABLE);
-		assertThat(engine.cancel(new CancelOrder(UUID.randomUUID(), buyer)).get().status())
+		assertThat(engine.cancel(key(), new CancelOrder(UUID.randomUUID(), buyer)).get().status())
 			.isEqualTo(CancelResult.Status.NOT_FOUND);
-		assertThat(engine.cancel(new CancelOrder(resting.orderId(), buyer)).get().status())
+		assertThat(engine.cancel(key(), new CancelOrder(resting.orderId(), buyer)).get().status())
 			.as("someone else's order looks like no order at all")
 			.isEqualTo(CancelResult.Status.NOT_FOUND);
 		assertThat(orderState(resting.orderId())).isEqualTo("OPEN");
@@ -297,7 +303,7 @@ class TradingEngineIT {
 		PlacementResult sell = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
 		jdbc.update("UPDATE simulation SET state = 'HALTED'");
 		try {
-			assertThat(engine.cancel(new CancelOrder(sell.orderId(), seller)).get().status())
+			assertThat(engine.cancel(key(), new CancelOrder(sell.orderId(), seller)).get().status())
 				.isEqualTo(CancelResult.Status.CANCELED);
 			assertThat(shares(seller)).containsExactly(STARTING_SHARES, 0L);
 		}
@@ -313,7 +319,7 @@ class TradingEngineIT {
 		Map<String, Object> before = snapshot();
 
 		failAt.set("touchAccounts");
-		CompletableFuture<CancelResult> failed = engine.cancel(new CancelOrder(sell.orderId(), seller));
+		CompletableFuture<CancelResult> failed = engine.cancel(key(), new CancelOrder(sell.orderId(), seller));
 
 		assertThatThrownBy(failed::get).isInstanceOf(ExecutionException.class)
 			.rootCause()
@@ -323,7 +329,7 @@ class TradingEngineIT {
 			.containsExactly(new DepthLevel(Price.parse("100.00"), 5, 1));
 
 		failAt.set(null);
-		assertThat(engine.cancel(new CancelOrder(sell.orderId(), seller)).get().status())
+		assertThat(engine.cancel(key(), new CancelOrder(sell.orderId(), seller)).get().status())
 			.isEqualTo(CancelResult.Status.CANCELED);
 		assertThat(engine.depth(instrument, Side.SELL).get()).isEmpty();
 		assertLedgerMatchesBalances();
@@ -348,7 +354,7 @@ class TradingEngineIT {
 					boolean market = random.nextInt(5) == 0;
 					long cents = 10_000 + random.nextLong(-10, 11) + (market ? (side == Side.BUY ? 15 : -15) : 0);
 					synchronized (results) {
-						results.add(engine.place(new PlaceOrder(UUID.randomUUID(), accounts.get(random.nextInt(4)),
+						results.add(engine.place(key(), new PlaceOrder(UUID.randomUUID(), accounts.get(random.nextInt(4)),
 								instrument, side, market ? OrderType.MARKET_PROTECTED : OrderType.LIMIT, new Price(cents),
 								new Quantity(random.nextLong(1, 31)))));
 					}
@@ -455,7 +461,7 @@ class TradingEngineIT {
 
 	private PlacementResult place(UUID account, Side side, OrderType type, String bound, long quantity)
 			throws Exception {
-		return engine.place(order(account, side, type, bound, quantity)).get();
+		return engine.place(key(), order(account, side, type, bound, quantity)).get();
 	}
 
 	private PlaceOrder order(UUID account, Side side, OrderType type, String bound, long quantity) {
@@ -496,6 +502,130 @@ class TradingEngineIT {
 						throw ex.getCause();
 					}
 				});
+	}
+
+	/** A fresh idempotency key for a command whose repeat behaviour the test does not care about. */
+	private static CommandKey key() {
+		return new CommandKey(UUID.randomUUID(), UUID.randomUUID(), "test", new byte[32]);
+	}
+
+	private static CommandKey key(UUID principal, UUID idempotencyKey, String request) {
+		try {
+			byte[] hash = MessageDigest.getInstance("SHA-256")
+				.digest(request.getBytes(StandardCharsets.UTF_8));
+			return new CommandKey(principal, idempotencyKey, "POST /api/v1/orders", hash);
+		}
+		catch (NoSuchAlgorithmException ex) {
+			throw new IllegalStateException(ex);
+		}
+	}
+
+	@Test
+	void aRepeatedKeyReturnsTheFirstResultWithoutDoingAnythingAgain() throws Exception {
+		UUID seller = funded();
+		UUID buyer = funded();
+		place(seller, Side.SELL, OrderType.LIMIT, "100.00", 10);
+		CommandKey key = key(buyer, UUID.randomUUID(), "buy 3 at 100.00");
+		PlaceOrder order = order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 3);
+		PlacementResult first = engine.place(key, order).get();
+		Map<String, Object> before = snapshot();
+
+		PlacementResult again = engine.place(key, order).get();
+
+		assertThat(again).isEqualTo(first);
+		assertThat(snapshot()).as("no new sequence, order, trade or ledger row").isEqualTo(before);
+		assertThat(cash(buyer)).containsExactly(STARTING_CASH - 30_000, 0L);
+	}
+
+	@Test
+	void concurrentRepeatsOfOneKeyProduceOneResult() throws Exception {
+		UUID seller = funded();
+		UUID buyer = funded();
+		place(seller, Side.SELL, OrderType.LIMIT, "100.00", 100);
+		CommandKey key = key(buyer, UUID.randomUUID(), "buy 1 at 100.00");
+		PlaceOrder order = order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 1);
+		List<CompletableFuture<PlacementResult>> attempts = new ArrayList<>();
+		List<Thread> clients = new ArrayList<>();
+		for (int i = 0; i < 20; i++) {
+			clients.add(Thread.ofVirtual().start(() -> {
+				synchronized (attempts) {
+					attempts.add(engine.place(key, order));
+				}
+			}));
+		}
+		for (Thread client : clients) {
+			client.join();
+		}
+
+		List<PlacementResult> results = new ArrayList<>();
+		for (CompletableFuture<PlacementResult> attempt : attempts) {
+			results.add(attempt.get());
+		}
+
+		assertThat(results).hasSize(20).allSatisfy((result) -> assertThat(result).isEqualTo(results.get(0)));
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM orders WHERE id = ?", Long.class, order.orderId()))
+			.isEqualTo(1);
+		assertThat(shares(buyer)).as("bought exactly once").containsExactly(STARTING_SHARES + 1, 0L);
+	}
+
+	@Test
+	void aKeyReusedForADifferentRequestIsAConflictThatChangesNothing() throws Exception {
+		UUID buyer = funded();
+		UUID idempotencyKey = UUID.randomUUID();
+		engine.place(key(buyer, idempotencyKey, "buy 1 at 10.00"), order(buyer, Side.BUY, OrderType.LIMIT, "10.00", 1))
+			.get();
+		Map<String, Object> before = snapshot();
+
+		CompletableFuture<PlacementResult> conflict = engine.place(key(buyer, idempotencyKey, "buy 2 at 10.00"),
+				order(buyer, Side.BUY, OrderType.LIMIT, "10.00", 2));
+
+		assertThatThrownBy(conflict::get).hasCauseInstanceOf(IdempotencyConflictException.class);
+		assertThat(snapshot()).isEqualTo(before);
+	}
+
+	@Test
+	void theSameKeyFromAnotherPrincipalIsANewCommand() throws Exception {
+		UUID first = funded();
+		UUID second = funded();
+		UUID shared = UUID.randomUUID();
+
+		PlacementResult a = engine.place(key(first, shared, "sell 1"), order(first, Side.SELL, OrderType.LIMIT, "500.00", 1))
+			.get();
+		PlacementResult b = engine
+			.place(key(second, shared, "sell 1"), order(second, Side.SELL, OrderType.LIMIT, "500.00", 1))
+			.get();
+
+		assertThat(b.orderId()).isNotEqualTo(a.orderId());
+		assertThat(b.commandSequence()).isGreaterThan(a.commandSequence());
+	}
+
+	@Test
+	void aFailedAttemptStoresNoResultSoTheSameKeyCanBeRetried() throws Exception {
+		UUID seller = funded();
+		UUID buyer = funded();
+		place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
+		CommandKey key = key(buyer, UUID.randomUUID(), "buy 2 at 100.00");
+		PlaceOrder order = order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 2);
+
+		failAt.set("insertTradeEvent");
+		assertThatThrownBy(() -> engine.place(key, order).get()).hasRootCauseMessage("injected failure before commit");
+		failAt.set(null);
+
+		assertThat(engine.place(key, order).get().state()).isEqualTo(OrderState.FILLED);
+		assertThat(shares(buyer)).containsExactly(STARTING_SHARES + 2, 0L);
+	}
+
+	@Test
+	void cancelRepeatsAreIdempotentToo() throws Exception {
+		UUID seller = funded();
+		PlacementResult sell = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
+		CommandKey key = new CommandKey(seller, UUID.randomUUID(), "POST /api/v1/orders/{id}/cancel", new byte[32]);
+
+		CancelResult first = engine.cancel(key, new CancelOrder(sell.orderId(), seller)).get();
+		CancelResult again = engine.cancel(key, new CancelOrder(sell.orderId(), seller)).get();
+
+		assertThat(first.status()).isEqualTo(CancelResult.Status.CANCELED);
+		assertThat(again).as("the original CANCELED, not ALREADY_CANCELED").isEqualTo(first);
 	}
 
 	private static String symbol(int number) {
