@@ -2,16 +2,9 @@ package com.mia_princz.mse.execution;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -42,17 +35,17 @@ class AuthenticationIT {
 
 	@Test
 	void loginRequiresACsrfToken() throws Exception {
-		assertThat(new Browser().post("/api/v1/auth/login", TRADER_LOGIN).statusCode()).isEqualTo(403);
+		assertThat(new TestBrowser(port).post("/api/v1/auth/login", TRADER_LOGIN).statusCode()).isEqualTo(403);
 	}
 
 	@Test
 	void identityRequiresASession() throws Exception {
-		assertThat(new Browser().get("/api/v1/me").statusCode()).isEqualTo(401);
+		assertThat(new TestBrowser(port).get("/api/v1/me").statusCode()).isEqualTo(401);
 	}
 
 	@Test
 	void loginRotatesTheSessionAndTheCsrfToken() throws Exception {
-		Browser browser = new Browser();
+		TestBrowser browser = new TestBrowser(port);
 		browser.fetchCsrfToken();
 		String anonymousSession = browser.cookies.get("SESSION");
 		String anonymousToken = browser.csrfToken;
@@ -67,7 +60,7 @@ class AuthenticationIT {
 		assertThat(me.statusCode()).isEqualTo(200);
 		assertThat(me.body()).as("after the session round trip").isEqualTo(identity);
 
-		Browser attacker = new Browser();
+		TestBrowser attacker = new TestBrowser(port);
 		attacker.cookies.put("SESSION", anonymousSession);
 		assertThat(attacker.get("/api/v1/me").statusCode()).as("pre-login session is useless").isEqualTo(401);
 
@@ -77,7 +70,7 @@ class AuthenticationIT {
 
 	@Test
 	void sessionCookieIsHttpOnlyAndSameSiteLax() throws Exception {
-		Browser browser = new Browser();
+		TestBrowser browser = new TestBrowser(port);
 		browser.fetchCsrfToken();
 
 		HttpResponse<String> login = browser.post("/api/v1/auth/login", TRADER_LOGIN);
@@ -96,7 +89,7 @@ class AuthenticationIT {
 
 	@Test
 	void sessionsLiveInTheDatabase() throws Exception {
-		Browser browser = new Browser();
+		TestBrowser browser = new TestBrowser(port);
 		browser.fetchCsrfToken();
 		browser.post("/api/v1/auth/login", TRADER_LOGIN);
 
@@ -107,7 +100,7 @@ class AuthenticationIT {
 
 	@Test
 	void wrongPasswordAndUnknownUserGetTheSameAnswer() throws Exception {
-		Browser browser = new Browser();
+		TestBrowser browser = new TestBrowser(port);
 		browser.fetchCsrfToken();
 
 		HttpResponse<String> wrongPassword = browser.post("/api/v1/auth/login",
@@ -124,7 +117,7 @@ class AuthenticationIT {
 
 	@Test
 	void malformedLoginIsRejected() throws Exception {
-		Browser browser = new Browser();
+		TestBrowser browser = new TestBrowser(port);
 		browser.fetchCsrfToken();
 
 		assertThat(browser.post("/api/v1/auth/login", "{\"username\":\"\",\"password\":\"x\"}").statusCode())
@@ -136,7 +129,7 @@ class AuthenticationIT {
 
 	@Test
 	void logoutRequiresACsrfTokenAndEndsTheSession() throws Exception {
-		Browser browser = new Browser();
+		TestBrowser browser = new TestBrowser(port);
 		browser.fetchCsrfToken();
 		browser.post("/api/v1/auth/login", TRADER_LOGIN);
 		String session = browser.cookies.get("SESSION");
@@ -148,7 +141,7 @@ class AuthenticationIT {
 		browser.fetchCsrfToken();
 		assertThat(browser.post("/api/v1/auth/logout", "").statusCode()).isEqualTo(204);
 
-		Browser replay = new Browser();
+		TestBrowser replay = new TestBrowser(port);
 		replay.cookies.put("SESSION", session);
 		assertThat(replay.get("/api/v1/me").statusCode()).isEqualTo(401);
 	}
@@ -161,58 +154,6 @@ class AuthenticationIT {
 		assertThat(users).extracting((user) -> user.get("username")).containsExactly("operator", "trader");
 		assertThat(users).extracting((user) -> user.get("role")).containsExactly("OPERATOR", "TRADER");
 		assertThat(users).allSatisfy((user) -> assertThat((String) user.get("password_hash")).startsWith("{bcrypt}"));
-	}
-
-	private final class Browser {
-
-		private static final Pattern TOKEN = Pattern.compile("\"token\":\"([^\"]+)\"");
-
-		final Map<String, String> cookies = new LinkedHashMap<>();
-
-		String csrfToken;
-
-		void fetchCsrfToken() throws Exception {
-			Matcher matcher = TOKEN.matcher(get("/api/v1/auth/csrf").body());
-			assertThat(matcher.find()).isTrue();
-			csrfToken = matcher.group(1);
-		}
-
-		HttpResponse<String> get(String path) throws Exception {
-			return send(request(path).GET());
-		}
-
-		HttpResponse<String> post(String path, String json) throws Exception {
-			HttpRequest.Builder request = request(path).header("Content-Type", "application/json")
-				.POST(HttpRequest.BodyPublishers.ofString(json));
-			if (csrfToken != null) {
-				request.header("X-CSRF-TOKEN", csrfToken);
-			}
-			return send(request);
-		}
-
-		private HttpRequest.Builder request(String path) {
-			HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path));
-			if (!cookies.isEmpty()) {
-				request.header("Cookie", cookies.entrySet()
-					.stream()
-					.map((cookie) -> cookie.getKey() + "=" + cookie.getValue())
-					.collect(Collectors.joining("; ")));
-			}
-			return request;
-		}
-
-		private HttpResponse<String> send(HttpRequest.Builder request) throws Exception {
-			try (HttpClient client = HttpClient.newHttpClient()) {
-				HttpResponse<String> response = client.send(request.build(), HttpResponse.BodyHandlers.ofString());
-				for (String header : response.headers().allValues("Set-Cookie")) {
-					String pair = header.split(";", 2)[0];
-					int separator = pair.indexOf('=');
-					cookies.put(pair.substring(0, separator), pair.substring(separator + 1));
-				}
-				return response;
-			}
-		}
-
 	}
 
 }
