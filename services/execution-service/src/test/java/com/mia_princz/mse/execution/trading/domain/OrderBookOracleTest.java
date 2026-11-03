@@ -12,7 +12,8 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Runs seeded random order streams through {@link OrderBook} and {@link ReferenceMatcher} side by side. After every
- * command both must agree on fills, outcome and resting orders, and every order's shares must add up.
+ * command both must agree on fills, outcome and resting orders, and every order's shares must add up. Depth predicted
+ * from a {@link BookDelta} before each change must equal the book's depth after it.
  */
 class OrderBookOracleTest {
 
@@ -45,7 +46,9 @@ class OrderBookOracleTest {
 			if (!restingIds.isEmpty() && random.nextInt(10) < 3) {
 				UUID orderId = restingIds.get(random.nextInt(restingIds.size()));
 				BookOrder expected = reference.cancel(orderId).orElseThrow();
+				Depth predicted = Depth.after(book, BookDelta.cancel(book.find(orderId).orElseThrow()), random);
 				assertThat(book.cancel(orderId)).as(where).contains(expected);
+				predicted.assertMatches(book, where + " (cancel)");
 				shares.get(orderId).canceled += expected.remainingQuantity();
 			}
 			else {
@@ -54,13 +57,30 @@ class OrderBookOracleTest {
 				MatchPlan actual = book.plan(order);
 				assertThat(actual.fills()).as(where).isEqualTo(expected.fills());
 				assertThat(actual.outcome()).as(where).isEqualTo(expected.outcome());
+				Depth predicted = Depth.after(book, BookDelta.of(actual), random);
 				book.apply(actual);
+				predicted.assertMatches(book, where + " (" + actual.outcome() + ")");
 				record(shares, actual);
 			}
 			assertSameBook(book, reference, where);
 			assertUncrossed(book, where);
 			assertSharesAddUp(book, shares, where);
 		}
+	}
+
+	/** Depth predicted before a change, at a random number of levels, to compare with the book after it. */
+	private record Depth(int levels, List<DepthLevel> bids, List<DepthLevel> asks) {
+
+		static Depth after(OrderBook book, BookDelta delta, Random random) {
+			int levels = 1 + random.nextInt(25);
+			return new Depth(levels, book.depthAfter(delta, Side.BUY, levels), book.depthAfter(delta, Side.SELL, levels));
+		}
+
+		void assertMatches(OrderBook book, String where) {
+			assertThat(bids).as(where + " bids").isEqualTo(book.depth(Side.BUY, levels));
+			assertThat(asks).as(where + " asks").isEqualTo(book.depth(Side.SELL, levels));
+		}
+
 	}
 
 	private static OrderRequest randomOrder(Random random, List<UUID> accounts, long sequence) {
