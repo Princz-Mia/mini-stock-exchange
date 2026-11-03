@@ -15,6 +15,7 @@ import com.mia_princz.mse.execution.trading.application.PlacementResult.OrderSta
 import com.mia_princz.mse.execution.trading.application.TradingStore.Market;
 import com.mia_princz.mse.execution.trading.application.TradingStore.NewOrder;
 import com.mia_princz.mse.execution.trading.application.TransactionRunner.CommitOutcomeUnknownException;
+import com.mia_princz.mse.execution.trading.domain.BookOrder;
 import com.mia_princz.mse.execution.trading.domain.DepthLevel;
 import com.mia_princz.mse.execution.trading.domain.Fill;
 import com.mia_princz.mse.execution.trading.domain.MatchPlan;
@@ -76,6 +77,11 @@ public final class TradingEngine {
 		return writer.submit(() -> process(command));
 	}
 
+	/** Cancels a resting order; allowed while the market is open or halted. */
+	public CompletableFuture<CancelResult> cancel(CancelOrder command) {
+		return writer.submit(() -> processCancel(command));
+	}
+
 	/** A snapshot of one side of a book, read on the writer thread so it never sees a half-applied plan. */
 	public CompletableFuture<List<DepthLevel>> depth(UUID instrumentId, Side side) {
 		return writer.submit(() -> books.get(instrumentId).depth(side, Integer.MAX_VALUE));
@@ -105,6 +111,62 @@ public final class TradingEngine {
 			}
 		}
 		return outcome.result();
+	}
+
+	private record CancelOutcome(CancelResult result, UUID instrumentId) {
+	}
+
+	private CancelResult processCancel(CancelOrder command) {
+		CancelOutcome outcome;
+		try {
+			outcome = transactions.inTransaction(() -> cancelInTransaction(command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException | BookOutOfStepException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+		if (outcome.result().status() == CancelResult.Status.CANCELED
+				&& books.get(outcome.instrumentId()).cancel(command.orderId()).isEmpty()) {
+			throw new WriterHaltException("A committed cancel found no order in the book",
+					new BookOutOfStepException(command.orderId()));
+		}
+		return outcome.result();
+	}
+
+	private CancelOutcome cancelInTransaction(CancelOrder command) {
+		Market market = store.lockMarket();
+		if (market.writerEpoch() != writerEpoch) {
+			throw new StaleWriterException();
+		}
+		long sequence = store.nextCommandSequence(simulationId);
+		TradingStore.ExistingOrder order = store.lockOrder(command.orderId())
+			.filter((existing) -> existing.accountId().equals(command.accountId()))
+			.orElse(null);
+		if (order == null) {
+			return new CancelOutcome(new CancelResult(command.orderId(), CancelResult.Status.NOT_FOUND, 0, sequence),
+					null);
+		}
+		CancelResult.Status status = switch (order.state()) {
+			case "CANCELED" -> CancelResult.Status.ALREADY_CANCELED;
+			case "FILLED", "REJECTED" -> CancelResult.Status.NOT_CANCELABLE;
+			default -> CancelResult.Status.CANCELED;
+		};
+		if (status != CancelResult.Status.CANCELED) {
+			return new CancelOutcome(new CancelResult(command.orderId(), status, 0, sequence), order.instrumentId());
+		}
+
+		BookOrder resting = books.get(order.instrumentId())
+			.find(command.orderId())
+			.filter((found) -> found.remainingQuantity() == order.working())
+			.orElseThrow(() -> new BookOutOfStepException(command.orderId()));
+		store.cancelOrder(command.orderId(), order.working(), "CANCELED_BY_OWNER");
+		SettlementPlan release = Settlement.cancel(order.instrumentId(), resting);
+		for (SettlementPlan.Batch batch : release.batches()) {
+			store.insertBatch(simulationId, batch.cause(), null, sequence, batch.postings());
+		}
+		release.balanceChanges().forEach(store::applyBalance);
+		store.touchAccounts(List.of(command.accountId()));
+		return new CancelOutcome(new CancelResult(command.orderId(), CancelResult.Status.CANCELED, order.working(),
+				sequence), order.instrumentId());
 	}
 
 	private Outcome placeInTransaction(PlaceOrder command, OrderBook book) {
@@ -198,6 +260,17 @@ public final class TradingEngine {
 				OrderState.REJECTED, code.name(), 0, 0, 0, null));
 		return new Outcome(new PlacementResult(command.orderId(), OrderState.REJECTED, code.name(), code, 0, 0, 0,
 				sequence), null);
+	}
+
+	/** The database and the in-memory book disagree about an order; continuing would trade on a wrong book. */
+	static final class BookOutOfStepException extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+
+		BookOutOfStepException(UUID orderId) {
+			super("The book and the database disagree about order " + orderId);
+		}
+
 	}
 
 	/** Another process has claimed the market since this engine started; this one must stop writing. */
