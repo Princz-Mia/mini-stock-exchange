@@ -23,6 +23,8 @@ final class ApiException extends RuntimeException {
 
 	private final Map<String, Object> properties = new LinkedHashMap<>();
 
+	private int retryAfterSeconds = 1;
+
 	ApiException(HttpStatus status, String code, String detail) {
 		this(status, code, detail, List.of());
 	}
@@ -39,8 +41,18 @@ final class ApiException extends RuntimeException {
 		return this;
 	}
 
+	/** How long a client should wait before retrying; sent as {@code Retry-After} with a 503. */
+	ApiException retryAfter(int seconds) {
+		this.retryAfterSeconds = seconds;
+		return this;
+	}
+
 	HttpStatus status() {
 		return status;
+	}
+
+	int retryAfterSeconds() {
+		return retryAfterSeconds;
 	}
 
 	ProblemDetail toProblem() {

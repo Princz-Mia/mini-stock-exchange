@@ -25,6 +25,20 @@ import com.mia_princz.mse.execution.trading.adapter.WriterOwnership;
 @Configuration(proxyBeanMethods = false)
 class OutboxConfiguration {
 
+	/** Independent of the relay, so admission holds even while the relay is down or switched off. */
+	@Bean
+	OutboxAdmission outboxAdmission(JdbcClient jdbcClient, Clock clock, MeterRegistry meters,
+			@Value("${mse.outbox.admission.max-events:50000}") long maxEvents,
+			@Value("${mse.outbox.admission.max-bytes:268435456}") long maxBytes,
+			@Value("${mse.outbox.admission.refresh:1s}") Duration refresh) {
+		OutboxAdmission admission = new OutboxAdmission(new JdbcOutbox(jdbcClient),
+				new OutboxAdmission.Limits(maxEvents, maxBytes, refresh), clock);
+		Gauge.builder("mse.outbox.admission.open", admission, (a) -> a.isOpen() ? 1 : 0)
+			.description("1 while new orders are admitted, 0 while the publication backlog stops them")
+			.register(meters);
+		return admission;
+	}
+
 	@Bean(initMethod = "start", destroyMethod = "close")
 	@ConditionalOnProperty(name = "mse.outbox.relay.enabled", matchIfMissing = true)
 	OutboxRelay outbox(JdbcClient jdbcClient, KafkaProperties kafka, KafkaConnectionDetails connection,
