@@ -42,6 +42,8 @@ import com.mia_princz.mse.execution.trading.application.CancelOrder;
 import com.mia_princz.mse.execution.trading.application.CancelResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.CommandWriter;
+import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterHaltException;
+import com.mia_princz.mse.execution.trading.application.ReconciliationException;
 import com.mia_princz.mse.execution.trading.application.IdempotencyConflictException;
 import com.mia_princz.mse.execution.trading.application.PlaceOrder;
 import com.mia_princz.mse.execution.trading.application.PlacementResult;
@@ -84,6 +86,8 @@ class TradingEngineIT {
 
 	private CommandWriter writer;
 
+	private TradingStore store;
+
 	private TradingEngine engine;
 
 	private UUID simulation;
@@ -106,7 +110,7 @@ class TradingEngineIT {
 		jdbc.update("INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, ?, 10000)",
 				instrument, simulation, symbol(SYMBOLS.incrementAndGet()));
 
-		TradingStore store = new JdbcTradingStore(JdbcClient.create(dataSource), JsonMapper.builder().build());
+		store = new JdbcTradingStore(JdbcClient.create(dataSource), JsonMapper.builder().build());
 		writer = new CommandWriter("test-writer", 1_000);
 		engine = new TradingEngine(failingBeforeCommit(store), new SpringTransactionRunner(transactionManager), writer,
 				Clock.systemUTC());
@@ -502,6 +506,86 @@ class TradingEngineIT {
 						throw ex.getCause();
 					}
 				});
+	}
+
+	/** A restart rebuilds every book exactly, including queue order, and claims a new writer epoch. */
+	@Test
+	void aRestartRebuildsTheBookExactly() throws Exception {
+		UUID seller = funded();
+		UUID buyer = funded();
+		PlacementResult earliest = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 3);
+		place(seller, Side.SELL, OrderType.LIMIT, "100.00", 4);
+		place(seller, Side.SELL, OrderType.LIMIT, "101.00", 5);
+		place(buyer, Side.BUY, OrderType.LIMIT, "99.00", 2);
+		place(buyer, Side.BUY, OrderType.LIMIT, "98.00", 1);
+		List<DepthLevel> asks = engine.depth(instrument, Side.SELL).get();
+		List<DepthLevel> bids = engine.depth(instrument, Side.BUY).get();
+		long epoch = jdbc.queryForObject("SELECT writer_epoch FROM simulation", Long.class);
+
+		restartEngine();
+
+		assertThat(jdbc.queryForObject("SELECT writer_epoch FROM simulation", Long.class)).isEqualTo(epoch + 1);
+		assertThat(engine.depth(instrument, Side.SELL).get()).isEqualTo(asks);
+		assertThat(engine.depth(instrument, Side.BUY).get()).isEqualTo(bids);
+		PlacementResult taker = place(buyer, Side.BUY, OrderType.LIMIT, "100.00", 3);
+		assertThat(jdbc.queryForObject("SELECT maker_order_id FROM trades WHERE taker_order_id = ?", UUID.class,
+				taker.orderId()))
+			.as("the earliest order at the best price still has priority")
+			.isEqualTo(earliest.orderId());
+		assertLedgerMatchesBalances();
+	}
+
+	/** Once another writer claims the market, this one's next command is refused and it halts. */
+	@Test
+	void aStaleWriterIsFencedOff() throws Exception {
+		UUID seller = funded();
+		place(seller, Side.SELL, OrderType.LIMIT, "100.00", 3);
+		jdbc.update("UPDATE simulation SET writer_epoch = writer_epoch + 1");
+		Map<String, Object> before = snapshot();
+
+		CompletableFuture<PlacementResult> fenced = engine.place(key(), order(seller, Side.SELL, OrderType.LIMIT, "100.00", 1));
+
+		assertThatThrownBy(fenced::get).hasCauseInstanceOf(WriterHaltException.class);
+		assertThat(writer.isAvailable()).isFalse();
+		Map<String, Object> after = snapshot();
+		assertThat(after).isEqualTo(before);
+	}
+
+	@Test
+	void aBalanceThatDisagreesWithTheLedgerStopsStartup() throws Exception {
+		UUID trader = funded();
+		jdbc.update("UPDATE cash_balance SET total_cents = total_cents + 1 WHERE account_id = ?", trader);
+		try {
+			assertThatThrownBy(this::restartEngine).isInstanceOf(ReconciliationException.class)
+				.hasMessageContaining(trader.toString())
+				.hasMessageContaining("the ledger says");
+		}
+		finally {
+			jdbc.update("UPDATE cash_balance SET total_cents = total_cents - 1 WHERE account_id = ?", trader);
+		}
+	}
+
+	@Test
+	void aReservationThatDisagreesWithOpenOrdersStopsStartup() throws Exception {
+		UUID seller = funded();
+		PlacementResult sell = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
+		jdbc.update("UPDATE orders SET working_quantity = 4, canceled_quantity = 1 WHERE id = ?", sell.orderId());
+		try {
+			assertThatThrownBy(this::restartEngine).isInstanceOf(ReconciliationException.class)
+				.hasMessageContaining("open orders hold 4");
+		}
+		finally {
+			jdbc.update("UPDATE orders SET working_quantity = 5, canceled_quantity = 0 WHERE id = ?", sell.orderId());
+		}
+	}
+
+	/** Simulates a process restart: the old writer stops, a new engine starts from the database. */
+	private void restartEngine() throws InterruptedException {
+		writer.close(Duration.ofSeconds(5));
+		writer = new CommandWriter("test-writer", 1_000);
+		engine = new TradingEngine(failingBeforeCommit(store), new SpringTransactionRunner(transactionManager), writer,
+				Clock.systemUTC());
+		engine.start();
 	}
 
 	/** A fresh idempotency key for a command whose repeat behaviour the test does not care about. */

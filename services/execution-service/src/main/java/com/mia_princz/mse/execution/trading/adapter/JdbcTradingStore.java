@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -17,10 +18,12 @@ import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.TradingStore;
+import com.mia_princz.mse.execution.trading.domain.BookOrder;
 import com.mia_princz.mse.execution.trading.domain.Fill;
 import com.mia_princz.mse.execution.trading.domain.OrderRequest;
 import com.mia_princz.mse.execution.trading.domain.OrderType;
 import com.mia_princz.mse.execution.trading.domain.Posting;
+import com.mia_princz.mse.execution.trading.domain.Price;
 import com.mia_princz.mse.execution.trading.domain.Side;
 import com.mia_princz.mse.execution.trading.domain.SettlementPlan;
 
@@ -28,6 +31,9 @@ import com.mia_princz.mse.execution.trading.domain.SettlementPlan;
 public final class JdbcTradingStore implements TradingStore {
 
 	private static final String TRADES_TOPIC = "mse.trades.v1";
+
+	/** Stands for cash where SQL needs a non-null asset key; no instrument has this ID. */
+	private static final UUID CASH = new UUID(0, 0);
 
 	private static final long TRADE_FINGERPRINT = SchemaNormalization
 		.parsingFingerprint64(TradeExecuted.getClassSchema());
@@ -50,6 +56,94 @@ public final class JdbcTradingStore implements TradingStore {
 					row.getLong("writer_epoch"), row.getInt("max_open_orders_per_account"),
 					row.getInt("max_open_orders_total"), row.getInt("max_fills_per_command")))
 			.single();
+	}
+
+	@Override
+	public long claimWriterEpoch(UUID simulationId) {
+		return jdbc.sql("UPDATE simulation SET writer_epoch = writer_epoch + 1 WHERE id = ? RETURNING writer_epoch")
+			.param(simulationId)
+			.query(Long.class)
+			.single();
+	}
+
+	@Override
+	public List<BookOrder> activeOrders(UUID instrumentId) {
+		return jdbc.sql("""
+				SELECT id, account_id, side, bound_cents, working_quantity, accepted_sequence FROM orders
+				WHERE instrument_id = ? AND state IN ('OPEN', 'PARTIALLY_FILLED') ORDER BY accepted_sequence""")
+			.param(instrumentId)
+			.query((row, index) -> new BookOrder(row.getObject("id", UUID.class), row.getObject("account_id", UUID.class),
+					Side.valueOf(row.getString("side")), new Price(row.getLong("bound_cents")),
+					row.getLong("working_quantity"), row.getLong("accepted_sequence")))
+			.list();
+	}
+
+	@Override
+	public List<String> reconciliationProblems(UUID simulationId) {
+		List<String> problems = new ArrayList<>();
+		// Customer balances must equal the sum of their ledger postings, in total and in the reserved bucket.
+		problems.addAll(jdbc.sql("""
+				WITH ledger AS (
+				    SELECT e.account_id, coalesce(e.instrument_id, :cash) AS asset, sum(e.delta) AS total,
+				        coalesce(sum(e.delta) FILTER (WHERE e.bucket = 'RESERVED'), 0) AS reserved
+				    FROM ledger_entry e JOIN account a ON a.id = e.account_id
+				    WHERE a.simulation_id = :simulation AND a.kind <> 'ISSUANCE'
+				    GROUP BY 1, 2),
+				balances AS (
+				    SELECT b.account_id, :cash AS asset, b.total_cents AS total, b.reserved_cents AS reserved
+				    FROM cash_balance b JOIN account a ON a.id = b.account_id WHERE a.simulation_id = :simulation
+				    UNION ALL
+				    SELECT p.account_id, p.instrument_id, p.total_quantity, p.reserved_quantity
+				    FROM position p JOIN account a ON a.id = p.account_id WHERE a.simulation_id = :simulation)
+				SELECT coalesce(l.account_id, b.account_id) AS account_id, coalesce(l.asset, b.asset) AS asset,
+				    coalesce(l.total, 0) AS ledger_total, coalesce(b.total, 0) AS balance_total,
+				    coalesce(l.reserved, 0) AS ledger_reserved, coalesce(b.reserved, 0) AS balance_reserved
+				FROM ledger l FULL JOIN balances b ON l.account_id = b.account_id AND l.asset = b.asset
+				WHERE coalesce(l.total, 0) <> coalesce(b.total, 0) OR coalesce(l.reserved, 0) <> coalesce(b.reserved, 0)
+				LIMIT 20""")
+			.param("simulation", simulationId)
+			.param("cash", CASH)
+			.query((row, index) -> "Balance of account " + row.getObject("account_id") + " in " + asset(row.getObject("asset", UUID.class))
+					+ " is " + row.getLong("balance_total") + " (reserved " + row.getLong("balance_reserved")
+					+ ") but the ledger says " + row.getLong("ledger_total") + " (reserved " + row.getLong("ledger_reserved") + ")")
+			.list());
+		// Every reserved amount must equal exactly the holds of that account's open orders.
+		problems.addAll(jdbc.sql("""
+				WITH holds AS (
+				    SELECT account_id, CASE WHEN side = 'BUY' THEN :cash ELSE instrument_id END AS asset,
+				        sum(CASE WHEN side = 'BUY' THEN bound_cents * working_quantity ELSE working_quantity END) AS held
+				    FROM orders WHERE simulation_id = :simulation AND state IN ('OPEN', 'PARTIALLY_FILLED')
+				    GROUP BY 1, 2),
+				reserved AS (
+				    SELECT b.account_id, :cash AS asset, b.reserved_cents AS reserved
+				    FROM cash_balance b JOIN account a ON a.id = b.account_id
+				    WHERE a.simulation_id = :simulation AND b.reserved_cents <> 0
+				    UNION ALL
+				    SELECT p.account_id, p.instrument_id, p.reserved_quantity
+				    FROM position p JOIN account a ON a.id = p.account_id
+				    WHERE a.simulation_id = :simulation AND p.reserved_quantity <> 0)
+				SELECT coalesce(h.account_id, r.account_id) AS account_id, coalesce(h.asset, r.asset) AS asset,
+				    coalesce(h.held, 0) AS held, coalesce(r.reserved, 0) AS reserved
+				FROM holds h FULL JOIN reserved r ON h.account_id = r.account_id AND h.asset = r.asset
+				WHERE coalesce(h.held, 0) <> coalesce(r.reserved, 0)
+				LIMIT 20""")
+			.param("simulation", simulationId)
+			.param("cash", CASH)
+			.query((row, index) -> "Account " + row.getObject("account_id") + " reserves " + row.getLong("reserved") + " in "
+					+ asset(row.getObject("asset", UUID.class)) + " but its open orders hold " + row.getLong("held"))
+			.list());
+		// The commit-time trigger already enforces this; checking again costs little and covers a dropped trigger.
+		problems.addAll(jdbc.sql("""
+				SELECT e.batch_id FROM ledger_entry e JOIN journal_batch b ON b.id = e.batch_id
+				WHERE b.simulation_id = ? GROUP BY e.batch_id, e.instrument_id HAVING sum(e.delta) <> 0 LIMIT 20""")
+			.param(simulationId)
+			.query((row, index) -> "Journal batch " + row.getObject("batch_id") + " does not balance")
+			.list());
+		return problems;
+	}
+
+	private static String asset(UUID asset) {
+		return CASH.equals(asset) ? "cash" : "instrument " + asset;
 	}
 
 	@Override

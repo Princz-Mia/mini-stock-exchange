@@ -113,6 +113,31 @@ public final class OrderBook {
 		revision++;
 	}
 
+	/**
+	 * Puts back a resting order loaded from the database, without matching. Orders must arrive in accepted-sequence
+	 * order, which rebuilds each price level's queue exactly as it was.
+	 */
+	public void restore(BookOrder order) {
+		if (orders.containsKey(order.orderId())) {
+			throw new IllegalArgumentException("Order is already in the book: " + order.orderId());
+		}
+		if (order.acceptedSequence() <= lastAcceptedSequence) {
+			throw new IllegalArgumentException("Orders must be restored in accepted-sequence order");
+		}
+		if (order.remainingQuantity() <= 0) {
+			throw new IllegalArgumentException("A resting order needs a positive remaining quantity");
+		}
+		insert(new OrderNode(order.orderId(), order.accountId(), order.side(), order.price(), order.remainingQuantity(),
+				order.acceptedSequence()));
+		lastAcceptedSequence = order.acceptedSequence();
+		revision++;
+	}
+
+	/** A crossed book has a bid at or above an ask, which matching never leaves behind. */
+	public boolean isCrossed() {
+		return !bids.isEmpty() && !asks.isEmpty() && bids.firstKey() >= asks.firstKey();
+	}
+
 	/** Removes a resting order, returning what it was. Empty if the order is not resting. */
 	public Optional<BookOrder> cancel(UUID orderId) {
 		OrderNode node = orders.get(orderId);

@@ -2,6 +2,7 @@ package com.mia_princz.mse.execution.trading.application;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -58,18 +59,35 @@ public final class TradingEngine {
 	}
 
 	/**
-	 * Loads the market and creates an empty book per instrument. Rebuilding resting orders after a restart, and
-	 * claiming writer ownership, are not part of this step yet.
+	 * Takes over the market and rebuilds every book from the database: claims a new writer epoch, which fences any
+	 * previous writer, restores resting orders in their original priority, then reconciles balances, the ledger and
+	 * open orders. Any disagreement fails startup instead of trading on state that cannot be trusted.
 	 */
 	public void start() {
 		transactions.inTransaction(() -> {
 			Market market = store.lockMarket();
-			simulationId = market.simulationId();
-			writerEpoch = market.writerEpoch();
-			for (TradingStore.Instrument instrument : store.instruments(simulationId)) {
-				books.put(instrument.id(), new OrderBook(market.maxFillsPerCommand()));
-				symbols.put(instrument.id(), instrument.symbol());
+			UUID simulation = market.simulationId();
+			long epoch = store.claimWriterEpoch(simulation);
+			Map<UUID, OrderBook> rebuilt = new HashMap<>();
+			Map<UUID, String> names = new HashMap<>();
+			List<String> problems = new ArrayList<>();
+			for (TradingStore.Instrument instrument : store.instruments(simulation)) {
+				OrderBook book = new OrderBook(market.maxFillsPerCommand());
+				store.activeOrders(instrument.id()).forEach(book::restore);
+				if (book.isCrossed()) {
+					problems.add("Book for " + instrument.symbol() + " is crossed after rebuilding");
+				}
+				rebuilt.put(instrument.id(), book);
+				names.put(instrument.id(), instrument.symbol());
 			}
+			problems.addAll(store.reconciliationProblems(simulation));
+			if (!problems.isEmpty()) {
+				throw new ReconciliationException(problems);
+			}
+			simulationId = simulation;
+			writerEpoch = epoch;
+			books.putAll(rebuilt);
+			symbols.putAll(names);
 			return null;
 		});
 	}
