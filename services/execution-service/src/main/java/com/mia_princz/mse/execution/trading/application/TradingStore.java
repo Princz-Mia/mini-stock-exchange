@@ -7,6 +7,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 import com.mia_princz.mse.execution.trading.domain.BookOrder;
+import com.mia_princz.mse.execution.trading.domain.DepthLevel;
 import com.mia_princz.mse.execution.trading.domain.Fill;
 import com.mia_princz.mse.execution.trading.domain.OrderRequest;
 import com.mia_princz.mse.execution.trading.domain.Posting;
@@ -92,5 +93,16 @@ public interface TradingStore {
 
 	void insertTradeEvent(UUID simulationId, UUID instrumentId, String symbol, Trade trade, Fill fill,
 			Instant executedAt, long commandSequence);
+
+	/**
+	 * The public state of one instrument once the current command commits: depth from the book plus the command's
+	 * changes, and everything else read from the database inside the same transaction.
+	 */
+	record MarketView(UUID simulationId, UUID instrumentId, Market market, List<DepthLevel> bids,
+			List<DepthLevel> asks, long commandSequence, Instant generatedAt) {
+	}
+
+	/** Writes the instrument's {@code MarketSnapshot} to the outbox, in the command's transaction. */
+	void insertMarketSnapshot(MarketView view);
 
 }

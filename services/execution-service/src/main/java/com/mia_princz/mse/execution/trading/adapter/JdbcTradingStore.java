@@ -14,16 +14,24 @@ import org.apache.avro.SchemaNormalization;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import tools.jackson.databind.json.JsonMapper;
 
+import com.mia_princz.mse.contracts.events.AggressorSide;
+import com.mia_princz.mse.contracts.events.BookLevel;
+import com.mia_princz.mse.contracts.events.MarketRules;
+import com.mia_princz.mse.contracts.events.MarketSnapshot;
+import com.mia_princz.mse.contracts.events.PublicTrade;
 import com.mia_princz.mse.contracts.events.TradeExecuted;
+import com.mia_princz.mse.contracts.events.VenueState;
 import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.TradingStore;
 import com.mia_princz.mse.execution.trading.domain.BookOrder;
+import com.mia_princz.mse.execution.trading.domain.DepthLevel;
 import com.mia_princz.mse.execution.trading.domain.Fill;
 import com.mia_princz.mse.execution.trading.domain.OrderRequest;
 import com.mia_princz.mse.execution.trading.domain.OrderType;
 import com.mia_princz.mse.execution.trading.domain.Posting;
 import com.mia_princz.mse.execution.trading.domain.Price;
+import com.mia_princz.mse.execution.trading.domain.Quantity;
 import com.mia_princz.mse.execution.trading.domain.Side;
 import com.mia_princz.mse.execution.trading.domain.SettlementPlan;
 
@@ -37,6 +45,17 @@ public final class JdbcTradingStore implements TradingStore {
 
 	private static final long TRADE_FINGERPRINT = SchemaNormalization
 		.parsingFingerprint64(TradeExecuted.getClassSchema());
+
+	private static final String MARKET_TOPIC = "mse.market.v1";
+
+	private static final long SNAPSHOT_FINGERPRINT = SchemaNormalization
+		.parsingFingerprint64(MarketSnapshot.getClassSchema());
+
+	/** Public trades carried in each snapshot, newest first. */
+	static final int RECENT_TRADES = 50;
+
+	/** An encoded snapshot must stay under this; a bigger one fails its command instead of being published. */
+	static final int SNAPSHOT_BUDGET_BYTES = 128 * 1024;
 
 	private final JdbcClient jdbc;
 
@@ -380,6 +399,66 @@ public final class JdbcTradingStore implements TradingStore {
 			.params(event.getEventId(), TRADES_TOPIC, simulationId + "|" + instrumentId, TRADE_FINGERPRINT, payload,
 					commandSequence)
 			.update(), "insert trade event");
+	}
+
+	@Override
+	public void insertMarketSnapshot(MarketView view) {
+		MarketSnapshot.Builder snapshot = jdbc.sql("""
+				SELECT symbol, reference_price_cents, tick_cents, lot_size, rule_version, last_trade_sequence
+				FROM instrument WHERE id = ? AND simulation_id = ?""")
+			.params(view.instrumentId(), view.simulationId())
+			.query((row, index) -> MarketSnapshot.newBuilder()
+				.setSymbol(row.getString("symbol"))
+				.setLastTradeSequence(row.getLong("last_trade_sequence"))
+				.setRules(new MarketRules(row.getInt("rule_version"), row.getLong("reference_price_cents"),
+						row.getLong("tick_cents"), row.getLong("lot_size"), Quantity.MIN_SHARES, Quantity.MAX_SHARES,
+						Price.MAX_CENTS, view.market().maxOpenOrdersPerAccount(), view.market().maxFillsPerCommand())))
+			.single();
+		// Read inside the command's transaction, so the command's own trades are already here.
+		List<PublicTrade> recent = jdbc.sql("""
+				SELECT t.id, t.trade_sequence, t.price_cents, t.quantity, t.executed_at, o.side
+				FROM trades t JOIN orders o ON o.id = t.taker_order_id
+				WHERE t.simulation_id = ? AND t.instrument_id = ?
+				ORDER BY t.trade_sequence DESC LIMIT ?""")
+			.params(view.simulationId(), view.instrumentId(), RECENT_TRADES)
+			.query((row, index) -> new PublicTrade(row.getObject("id", UUID.class), row.getLong("trade_sequence"),
+					row.getLong("price_cents"), row.getLong("quantity"), AggressorSide.valueOf(row.getString("side")),
+					row.getTimestamp("executed_at").toInstant()))
+			.list();
+		MarketSnapshot event = snapshot.setEventId(UUID.randomUUID())
+			.setSimulationId(view.simulationId())
+			.setInstrumentId(view.instrumentId())
+			.setVenueState(VenueState.valueOf(view.market().state()))
+			.setBids(levels(view.bids()))
+			.setAsks(levels(view.asks()))
+			.setRecentTrades(recent)
+			.setLastTrade(recent.isEmpty() ? null : recent.getFirst())
+			.setSourceCommandSequence(view.commandSequence())
+			.setGeneratedAt(view.generatedAt())
+			.build();
+		byte[] payload;
+		try {
+			payload = WireEvents.encode(event);
+		}
+		catch (IOException ex) {
+			throw new UncheckedIOException(ex);
+		}
+		if (payload.length > SNAPSHOT_BUDGET_BYTES) {
+			throw new IllegalStateException("Market snapshot for " + event.getSymbol() + " is " + payload.length
+					+ " bytes, over its " + SNAPSHOT_BUDGET_BYTES + "-byte budget");
+		}
+		expectOne(jdbc.sql("""
+				INSERT INTO outbox (event_id, topic, event_key, schema_fingerprint, payload, command_sequence)
+				VALUES (?, ?, ?, ?, ?, ?)""")
+			.params(event.getEventId(), MARKET_TOPIC, view.simulationId() + "|" + view.instrumentId(),
+					SNAPSHOT_FINGERPRINT, payload, view.commandSequence())
+			.update(), "insert market snapshot");
+	}
+
+	private static List<BookLevel> levels(List<DepthLevel> depth) {
+		return depth.stream()
+			.map((level) -> new BookLevel(level.price().cents(), level.quantity(), level.orderCount()))
+			.toList();
 	}
 
 	private static void expectOne(int rows, String what) {

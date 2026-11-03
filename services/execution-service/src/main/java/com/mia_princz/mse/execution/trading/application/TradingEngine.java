@@ -17,6 +17,7 @@ import com.mia_princz.mse.execution.trading.application.PlacementResult.OrderSta
 import com.mia_princz.mse.execution.trading.application.TradingStore.Market;
 import com.mia_princz.mse.execution.trading.application.TradingStore.NewOrder;
 import com.mia_princz.mse.execution.trading.application.TransactionRunner.CommitOutcomeUnknownException;
+import com.mia_princz.mse.execution.trading.domain.BookDelta;
 import com.mia_princz.mse.execution.trading.domain.BookOrder;
 import com.mia_princz.mse.execution.trading.domain.DepthLevel;
 import com.mia_princz.mse.execution.trading.domain.Fill;
@@ -34,6 +35,9 @@ import com.mia_princz.mse.execution.trading.domain.Side;
  * that transaction has committed; if anything leaves the two possibly out of step, the writer halts.
  */
 public final class TradingEngine {
+
+	/** Levels per side in a public market snapshot. */
+	static final int SNAPSHOT_LEVELS = 20;
 
 	private final TradingStore store;
 
@@ -191,6 +195,7 @@ public final class TradingEngine {
 		}
 		release.balanceChanges().forEach(store::applyBalance);
 		store.touchAccounts(List.of(command.accountId()));
+		snapshot(market, order.instrumentId(), books.get(order.instrumentId()), BookDelta.cancel(resting), sequence);
 		return new CancelOutcome(remember(key, 200,
 				new CancelResult(command.orderId(), CancelResult.Status.CANCELED, order.working(), sequence)),
 				order.instrumentId());
@@ -234,7 +239,20 @@ public final class TradingEngine {
 		store.insertOrder(new NewOrder(command.orderId(), simulationId, request, command.instrumentId(), result.state(),
 				result.reason(), result.filled(), result.working(), result.canceled(), sequence));
 		write(command, plan, sequence);
+		if (!plan.fills().isEmpty() || plan.rests()) {
+			snapshot(market, command.instrumentId(), book, BookDelta.of(plan), sequence);
+		}
 		return new Outcome(remember(key, 201, result), plan);
+	}
+
+	/**
+	 * The instrument's public state once this command commits, written in the same transaction. The depth comes from
+	 * the book and the command's own changes; the book itself changes only after the commit.
+	 */
+	private void snapshot(Market market, UUID instrumentId, OrderBook book, BookDelta delta, long sequence) {
+		store.insertMarketSnapshot(new TradingStore.MarketView(simulationId, instrumentId, market,
+				book.depthAfter(delta, Side.BUY, SNAPSHOT_LEVELS), book.depthAfter(delta, Side.SELL, SNAPSHOT_LEVELS),
+				sequence, clock.instant()));
 	}
 
 	private void write(PlaceOrder command, MatchPlan plan, long sequence) {

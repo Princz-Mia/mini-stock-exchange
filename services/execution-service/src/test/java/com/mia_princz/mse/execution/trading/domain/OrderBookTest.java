@@ -243,6 +243,41 @@ class OrderBookTest {
 		assertThat(book.isCrossed()).isTrue();
 	}
 
+	/** Golden alternative, predicted: the level at 100.00 empties and 4 appear on the bid, before anything changes. */
+	@Test
+	void depthAfterAPlanIsPredictedWithoutChangingTheBook() {
+		rest(UUID.randomUUID(), Side.SELL, "100.00", 6);
+		rest(UUID.randomUUID(), Side.SELL, "102.00", 1);
+		MatchPlan plan = book.plan(limit(BUYER, Side.BUY, "101.00", 10));
+
+		BookDelta delta = BookDelta.of(plan);
+
+		assertThat(book.depthAfter(delta, Side.SELL, 20)).containsExactly(new DepthLevel(Price.parse("102.00"), 1, 1));
+		assertThat(book.depthAfter(delta, Side.BUY, 20)).containsExactly(new DepthLevel(Price.parse("101.00"), 4, 1));
+		assertThat(book.depth(Side.SELL, 20)).as("book unchanged").hasSize(2);
+		assertThat(book.depth(Side.BUY, 20)).as("book unchanged").isEmpty();
+	}
+
+	@Test
+	void depthAfterACancelLeavesTheRestOfTheLevel() {
+		OrderRequest first = rest(UUID.randomUUID(), Side.BUY, "99.00", 3);
+		rest(UUID.randomUUID(), Side.BUY, "99.00", 4);
+
+		BookDelta delta = BookDelta.cancel(book.find(first.orderId()).orElseThrow());
+
+		assertThat(book.depthAfter(delta, Side.BUY, 20)).containsExactly(new DepthLevel(Price.parse("99.00"), 4, 1));
+	}
+
+	@Test
+	void deltaThatDoesNotFitTheBookIsRefused() {
+		OrderRequest resting = rest(UUID.randomUUID(), Side.BUY, "99.00", 3);
+		BookDelta stale = BookDelta.cancel(book.find(resting.orderId()).orElseThrow());
+		book.cancel(resting.orderId());
+
+		assertThatThrownBy(() -> book.depthAfter(stale, Side.BUY, 20)).isInstanceOf(IllegalStateException.class)
+			.hasMessageContaining("does not fit");
+	}
+
 	private OrderRequest rest(UUID account, Side side, String price, long quantity) {
 		OrderRequest order = limit(account, side, price, quantity);
 		assertThat(submit(order).outcome()).isEqualTo(MatchPlan.Outcome.RESTS);
