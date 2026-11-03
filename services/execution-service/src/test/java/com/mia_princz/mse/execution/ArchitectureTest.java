@@ -25,4 +25,16 @@ class ArchitectureTest {
 			.check(CLASSES);
 	}
 
+	/** Use cases reach the database and transactions only through their ports; adapters provide the technology. */
+	@Test
+	void applicationPackagesUsePortsNotInfrastructure() {
+		noClasses().that()
+			.resideInAPackage("..application..")
+			.should()
+			.dependOnClassesThat()
+			.resideInAnyPackage("org.springframework..", "jakarta..", "java.sql..", "javax.sql..", "org.apache.kafka..",
+					"org.apache.avro..", "com.mia_princz.mse.contracts..", "..adapter..")
+			.check(CLASSES);
+	}
+
 }
