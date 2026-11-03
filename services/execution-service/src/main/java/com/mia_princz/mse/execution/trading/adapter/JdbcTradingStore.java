@@ -11,9 +11,11 @@ import java.util.UUID;
 
 import org.apache.avro.SchemaNormalization;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import tools.jackson.databind.json.JsonMapper;
 
 import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.contracts.events.WireEvents;
+import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.TradingStore;
 import com.mia_princz.mse.execution.trading.domain.Fill;
 import com.mia_princz.mse.execution.trading.domain.OrderRequest;
@@ -32,8 +34,11 @@ public final class JdbcTradingStore implements TradingStore {
 
 	private final JdbcClient jdbc;
 
-	public JdbcTradingStore(JdbcClient jdbc) {
+	private final JsonMapper json;
+
+	public JdbcTradingStore(JdbcClient jdbc, JsonMapper json) {
 		this.jdbc = jdbc;
+		this.json = json;
 	}
 
 	@Override
@@ -224,6 +229,28 @@ public final class JdbcTradingStore implements TradingStore {
 			expectOne(jdbc.sql("UPDATE account SET version = version + 1 WHERE id = ?").param(account).update(),
 					"bump account version");
 		}
+	}
+
+	@Override
+	public <T> Optional<StoredResult<T>> findResult(UUID simulationId, CommandKey key, Class<T> type) {
+		return jdbc.sql("""
+				SELECT route, request_hash, response_body::text AS body FROM command_result
+				WHERE simulation_id = ? AND principal_id = ? AND idempotency_key = ?""")
+			.params(simulationId, key.principalId(), key.idempotencyKey())
+			.query((row, index) -> new StoredResult<>(row.getString("route"), row.getBytes("request_hash"),
+					json.readValue(row.getString("body"), type)))
+			.optional();
+	}
+
+	@Override
+	public void insertResult(UUID simulationId, CommandKey key, int status, Object result, long commandSequence) {
+		expectOne(jdbc.sql("""
+				INSERT INTO command_result (simulation_id, principal_id, idempotency_key, route, request_hash,
+				    response_status, response_body, command_sequence)
+				VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?)""")
+			.params(simulationId, key.principalId(), key.idempotencyKey(), key.route(), key.requestHash(), status,
+					json.writeValueAsString(result), commandSequence)
+			.update(), "insert command result");
 	}
 
 	@Override

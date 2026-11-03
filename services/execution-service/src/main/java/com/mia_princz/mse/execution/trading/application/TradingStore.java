@@ -33,6 +33,10 @@ public interface TradingStore {
 	record Trade(UUID id, long tradeSequence) {
 	}
 
+	/** The first committed result of a command, stored with the request it answered. */
+	record StoredResult<T>(String route, byte[] requestHash, T result) {
+	}
+
 	/** An order row as cancelling needs it, locked for the rest of the transaction. */
 	record ExistingOrder(UUID id, UUID accountId, UUID instrumentId, String state, long working) {
 	}
@@ -67,6 +71,11 @@ public interface TradingStore {
 	void applyBalance(SettlementPlan.BalanceKey key, SettlementPlan.BalanceChange change);
 
 	void touchAccounts(Collection<UUID> accountIds);
+
+	<T> Optional<StoredResult<T>> findResult(UUID simulationId, CommandKey key, Class<T> type);
+
+	/** {@code status} is the HTTP status the stored result is replayed with. */
+	void insertResult(UUID simulationId, CommandKey key, int status, Object result, long commandSequence);
 
 	void insertTradeEvent(UUID simulationId, UUID instrumentId, String symbol, Trade trade, Fill fill,
 			Instant executedAt, long commandSequence);
