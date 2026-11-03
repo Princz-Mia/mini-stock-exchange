@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
@@ -161,6 +162,46 @@ public final class OrderBook {
 				break;
 			}
 			depth.add(new DepthLevel(new Price(level.priceCents), level.quantity, level.orderCount));
+		}
+		return Collections.unmodifiableList(depth);
+	}
+
+	/**
+	 * Depth of one side as it will be once {@code delta} is applied, without applying it. Walks the book's levels
+	 * and the delta's prices together in priority order, so it costs O(D + R + C) for D levels returned, R levels
+	 * the delta empties, and C changed prices.
+	 *
+	 * @throws IllegalStateException if the delta does not fit the book, such as removing more than a level holds
+	 */
+	public List<DepthLevel> depthAfter(BookDelta delta, Side side, int maxLevels) {
+		NavigableMap<Long, PriceLevel> levels = levels(side);
+		// Bids sort best (highest) first; asks use natural order, for which comparator() would be null.
+		Comparator<Long> order = side == Side.BUY ? Comparator.reverseOrder() : Comparator.naturalOrder();
+		Iterator<PriceLevel> resting = levels.values().iterator();
+		Iterator<Map.Entry<Long, BookDelta.Change>> changes = delta.changes(side).entrySet().iterator();
+		PriceLevel level = resting.hasNext() ? resting.next() : null;
+		Map.Entry<Long, BookDelta.Change> change = changes.hasNext() ? changes.next() : null;
+		List<DepthLevel> depth = new ArrayList<>(maxLevels);
+		while (depth.size() < maxLevels && (level != null || change != null)) {
+			int position = level == null ? 1 : change == null ? -1 : order.compare(level.priceCents, change.getKey());
+			long price = position <= 0 ? level.priceCents : change.getKey();
+			long quantity = position <= 0 ? level.quantity : 0;
+			int count = position <= 0 ? level.orderCount : 0;
+			if (position >= 0) {
+				quantity = Math.addExact(quantity, change.getValue().quantity());
+				count += change.getValue().orders();
+				change = changes.hasNext() ? changes.next() : null;
+			}
+			if (position <= 0) {
+				level = resting.hasNext() ? resting.next() : null;
+			}
+			if (quantity < 0 || count < 0 || (quantity == 0) != (count == 0)) {
+				throw new IllegalStateException("Delta does not fit the book at " + price + ": " + quantity
+						+ " shares in " + count + " orders");
+			}
+			if (quantity > 0) {
+				depth.add(new DepthLevel(new Price(price), quantity, count));
+			}
 		}
 		return Collections.unmodifiableList(depth);
 	}
