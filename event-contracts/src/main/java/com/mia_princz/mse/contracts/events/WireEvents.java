@@ -8,7 +8,7 @@ import org.apache.avro.util.ClassSecurityValidator;
 /**
  * Single-object encoding entry point for every JVM that handles wire events. Avro 1.12.2 refuses to instantiate
  * generated classes it does not trust, so this class extends the global predicate with exactly these contracts.
- * New event types must be added here; packages are deliberately not trusted wholesale.
+ * New event types, and the records and enums nested in them, must be added here; packages are deliberately not trusted wholesale.
  */
 public final class WireEvents {
 
@@ -17,6 +17,12 @@ public final class WireEvents {
 				ClassSecurityValidator.builder()
 					.add(TradeExecuted.class.getName())
 					.add(CandleUpdated.class.getName())
+					.add(MarketSnapshot.class.getName())
+					.add(MarketRules.class.getName())
+					.add(BookLevel.class.getName())
+					.add(PublicTrade.class.getName())
+					.add(VenueState.class.getName())
+					.add(AggressorSide.class.getName())
 					.build()));
 	}
 
@@ -31,11 +37,19 @@ public final class WireEvents {
 		return CandleUpdated.fromByteBuffer(ByteBuffer.wrap(payload));
 	}
 
+	public static MarketSnapshot decodeSnapshot(byte[] payload) throws IOException {
+		return MarketSnapshot.fromByteBuffer(ByteBuffer.wrap(payload));
+	}
+
 	public static byte[] encode(TradeExecuted event) throws IOException {
 		return toArray(event.toByteBuffer());
 	}
 
 	public static byte[] encode(CandleUpdated event) throws IOException {
+		return toArray(event.toByteBuffer());
+	}
+
+	public static byte[] encode(MarketSnapshot event) throws IOException {
 		return toArray(event.toByteBuffer());
 	}
 
