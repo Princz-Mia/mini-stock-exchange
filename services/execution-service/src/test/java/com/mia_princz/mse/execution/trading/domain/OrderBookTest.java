@@ -208,6 +208,41 @@ class OrderBookTest {
 		assertThatThrownBy(() -> book.plan(old)).isInstanceOf(IllegalArgumentException.class);
 	}
 
+	@Test
+	void restoredOrdersKeepTheirQueuePositionAndMatchNormally() {
+		UUID first = UUID.randomUUID();
+		UUID second = UUID.randomUUID();
+		book.restore(new BookOrder(first, UUID.randomUUID(), Side.SELL, Price.parse("10.00"), 2, 5));
+		book.restore(new BookOrder(second, UUID.randomUUID(), Side.SELL, Price.parse("10.00"), 3, 8));
+		sequence = 8;
+
+		MatchPlan plan = submit(limit(BUYER, Side.BUY, "10.00", 4));
+
+		assertThat(plan.fills()).extracting(Fill::makerOrderId).containsExactly(first, second);
+		assertThat(book.find(second)).get()
+			.extracting(BookOrder::remainingQuantity)
+			.isEqualTo(1L);
+	}
+
+	@Test
+	void restoringOutOfOrderOrTwiceIsRefused() {
+		BookOrder order = new BookOrder(UUID.randomUUID(), UUID.randomUUID(), Side.BUY, Price.parse("10.00"), 1, 5);
+		book.restore(order);
+
+		assertThatThrownBy(() -> book.restore(order)).isInstanceOf(IllegalArgumentException.class);
+		assertThatThrownBy(() -> book.restore(
+				new BookOrder(UUID.randomUUID(), UUID.randomUUID(), Side.BUY, Price.parse("10.00"), 1, 4)))
+			.isInstanceOf(IllegalArgumentException.class);
+	}
+
+	@Test
+	void aRestoredBookThatCrossesIsDetected() {
+		book.restore(new BookOrder(UUID.randomUUID(), UUID.randomUUID(), Side.BUY, Price.parse("10.00"), 1, 1));
+		assertThat(book.isCrossed()).isFalse();
+		book.restore(new BookOrder(UUID.randomUUID(), UUID.randomUUID(), Side.SELL, Price.parse("10.00"), 1, 2));
+		assertThat(book.isCrossed()).isTrue();
+	}
+
 	private OrderRequest rest(UUID account, Side side, String price, long quantity) {
 		OrderRequest order = limit(account, side, price, quantity);
 		assertThat(submit(order).outcome()).isEqualTo(MatchPlan.Outcome.RESTS);
