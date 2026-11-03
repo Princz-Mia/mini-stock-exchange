@@ -10,6 +10,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.Comparator;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -34,7 +35,12 @@ import tools.jackson.databind.json.JsonMapper;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import com.mia_princz.mse.contracts.events.AggressorSide;
+import com.mia_princz.mse.contracts.events.BookLevel;
+import com.mia_princz.mse.contracts.events.MarketSnapshot;
+import com.mia_princz.mse.contracts.events.PublicTrade;
 import com.mia_princz.mse.contracts.events.TradeExecuted;
+import com.mia_princz.mse.contracts.events.VenueState;
 import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.execution.trading.adapter.JdbcTradingStore;
 import com.mia_princz.mse.execution.trading.adapter.SpringTransactionRunner;
@@ -158,14 +164,103 @@ class TradingEngineIT {
 			.containsExactly(new DepthLevel(Price.parse("101.00"), 2, 1));
 
 		List<byte[]> events = jdbc.queryForList(
-				"SELECT payload FROM outbox WHERE command_sequence = ? ORDER BY id", byte[].class, buy.commandSequence());
+				"SELECT payload FROM outbox WHERE command_sequence = ? AND topic = 'mse.trades.v1' ORDER BY id",
+				byte[].class, buy.commandSequence());
 		assertThat(events).hasSize(3);
 		TradeExecuted last = WireEvents.decodeTrade(events.get(2));
 		assertThat(last.getInstrumentId()).isEqualTo(instrument);
 		assertThat(last.getTradeSequence()).isEqualTo(3);
 		assertThat(last.getPriceCents()).isEqualTo(10_100);
 		assertThat(last.getQuantity()).isEqualTo(3);
+
+		MarketSnapshot market = marketSnapshot(buy.commandSequence());
+		assertThat(market.getAsks()).containsExactly(new BookLevel(10_100L, 2L, 1));
+		assertThat(market.getBids()).isEmpty();
+		assertThat(market.getRecentTrades()).extracting(PublicTrade::getTradeSequence, PublicTrade::getPriceCents,
+				PublicTrade::getQuantity)
+			.containsExactly(org.assertj.core.groups.Tuple.tuple(3L, 10_100L, 3L),
+					org.assertj.core.groups.Tuple.tuple(2L, 10_000L, 4L),
+					org.assertj.core.groups.Tuple.tuple(1L, 10_000L, 3L));
+		assertThat(market.getLastTrade().getAggressorSide()).isEqualTo(AggressorSide.BUY);
+		assertThat(market.getLastTradeSequence()).isEqualTo(3);
+		assertThat(market.getSourceCommandSequence()).isEqualTo(buy.commandSequence());
 		assertLedgerMatchesBalances();
+	}
+
+	/** A resting order changes the public book, so its command carries a snapshot; there are no trades yet. */
+	@Test
+	void restingOrderPublishesTheBookBeforeAnyTrade() throws Exception {
+		UUID seller = funded();
+		PlacementResult sell = place(seller, Side.SELL, OrderType.LIMIT, "100.50", 7);
+
+		MarketSnapshot snapshot = marketSnapshot(sell.commandSequence());
+
+		assertThat(snapshot.getAsks()).containsExactly(new BookLevel(10_050L, 7L, 1));
+		assertThat(snapshot.getBids()).isEmpty();
+		assertThat(snapshot.getLastTrade()).isNull();
+		assertThat(snapshot.getLastTradeSequence()).isZero();
+		assertThat(snapshot.getRecentTrades()).isEmpty();
+		assertThat(snapshot.getVenueState()).isEqualTo(VenueState.OPEN);
+		assertThat(snapshot.getRules().getReferencePriceCents()).isEqualTo(10_000);
+		assertThat(snapshot.getInstrumentId()).isEqualTo(instrument);
+		assertThat(jdbc.queryForObject("SELECT event_key FROM outbox WHERE event_id = ?", String.class,
+				snapshot.getEventId())).isEqualTo(simulation + "|" + instrument);
+	}
+
+	@Test
+	void cancelPublishesTheBookWithoutTheOrder() throws Exception {
+		UUID seller = funded();
+		PlacementResult first = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 3);
+		place(seller, Side.SELL, OrderType.LIMIT, "100.00", 4);
+
+		CancelResult cancel = engine.cancel(key(), new CancelOrder(first.orderId(), seller)).get();
+
+		assertThat(marketSnapshot(cancel.commandSequence()).getAsks()).containsExactly(new BookLevel(10_000L, 4L, 1));
+	}
+
+	/** Nothing public changes, so nothing is published: a rejection, an IOC that finds nothing, a no-op cancel. */
+	@Test
+	void commandsThatChangeNothingPublicWriteNoSnapshot() throws Exception {
+		UUID buyer = funded();
+		PlacementResult rejected = place(buyer, Side.BUY, OrderType.LIMIT, "100000.00", 1_000);
+		PlacementResult unfilled = place(buyer, Side.BUY, OrderType.MARKET_PROTECTED, "100.00", 5);
+		PlacementResult resting = place(buyer, Side.BUY, OrderType.LIMIT, "90.00", 1);
+		engine.cancel(key(), new CancelOrder(resting.orderId(), buyer)).get();
+		CancelResult again = engine.cancel(key(), new CancelOrder(resting.orderId(), buyer)).get();
+
+		assertThat(rejected.state()).isEqualTo(OrderState.REJECTED);
+		assertThat(unfilled.filled()).isZero();
+		assertThat(again.status()).isEqualTo(CancelResult.Status.ALREADY_CANCELED);
+		assertThat(jdbc.queryForObject("""
+				SELECT count(*) FROM outbox WHERE topic = 'mse.market.v1' AND command_sequence IN (?, ?, ?)""",
+				Long.class, rejected.commandSequence(), unfilled.commandSequence(), again.commandSequence())).isZero();
+	}
+
+	/** At most 20 levels a side and the 50 newest trades, newest first; the sequence still counts every trade. */
+	@Test
+	void snapshotIsBoundedAndNewestFirst() throws Exception {
+		// 80 resting orders, 16 per seller, under the 20 open orders an account may have.
+		List<UUID> sellers = List.of(funded(), funded(), funded(), funded(), funded());
+		for (int i = 0; i < 55; i++) {
+			place(sellers.get(i % 5), Side.SELL, OrderType.LIMIT, "100.00", 1);
+		}
+		for (int level = 0; level < 25; level++) {
+			place(sellers.get(level % 5), Side.SELL, OrderType.LIMIT, new Price(10_100 + level).format(), 1);
+		}
+		UUID buyer = funded();
+
+		PlacementResult buy = place(buyer, Side.BUY, OrderType.LIMIT, "100.00", 55);
+
+		MarketSnapshot snapshot = marketSnapshot(buy.commandSequence());
+		assertThat(snapshot.getAsks()).hasSize(20);
+		assertThat(snapshot.getAsks().getFirst()).isEqualTo(new BookLevel(10_100L, 1L, 1));
+		assertThat(snapshot.getRecentTrades()).hasSize(50);
+		assertThat(snapshot.getRecentTrades()).extracting(PublicTrade::getTradeSequence)
+			.isSortedAccordingTo(Comparator.reverseOrder())
+			.startsWith(55L);
+		assertThat(snapshot.getLastTrade()).isEqualTo(snapshot.getRecentTrades().getFirst());
+		assertThat(snapshot.getLastTradeSequence()).isEqualTo(55);
+		assertThat(snapshot.getRecentTrades()).extracting(PublicTrade::getAggressorSide).containsOnly(AggressorSide.BUY);
 	}
 
 	/** A database failure just before commit: nothing in the database changes, the book is untouched, work goes on. */
@@ -177,7 +272,7 @@ class TradingEngineIT {
 		Map<String, Object> before = snapshot();
 		List<DepthLevel> bookBefore = engine.depth(instrument, Side.SELL).get();
 
-		failAt.set("insertTradeEvent");
+		failAt.set("insertMarketSnapshot");
 		CompletableFuture<PlacementResult> failed = engine.place(key(), order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 3));
 
 		assertThatThrownBy(failed::get).isInstanceOf(ExecutionException.class)
@@ -461,6 +556,13 @@ class TradingEngineIT {
 				INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
 				VALUES (?, 'BOT', ?, ?, 0)""", account, instrument, STARTING_SHARES);
 		return account;
+	}
+
+	/** The single public snapshot written by one command. */
+	private MarketSnapshot marketSnapshot(long commandSequence) throws Exception {
+		return WireEvents.decodeSnapshot(jdbc.queryForObject(
+				"SELECT payload FROM outbox WHERE topic = 'mse.market.v1' AND command_sequence = ?", byte[].class,
+				commandSequence));
 	}
 
 	private PlacementResult place(UUID account, Side side, OrderType type, String bound, long quantity)
