@@ -10,8 +10,14 @@ public interface Outbox {
 	record PendingEvent(long id, UUID eventId, String topic, String key, byte[] payload) {
 	}
 
-	/** Unpublished events, oldest first. {@code oldestCreatedAt} is null when there are none. */
-	record Backlog(long events, Instant oldestCreatedAt) {
+	/**
+	 * Unpublished events: how many, their encoded size in bytes, and when the oldest was written ({@code null} when
+	 * there are none).
+	 */
+	record Backlog(long events, long bytes, Instant oldestCreatedAt) {
+
+		static final Backlog EMPTY = new Backlog(0, 0, null);
+
 	}
 
 	/** Committed, unpublished events in id order. */

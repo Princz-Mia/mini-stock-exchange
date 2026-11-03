@@ -45,10 +45,13 @@ public final class JdbcOutbox implements Outbox {
 
 	@Override
 	public Backlog backlog() {
-		return jdbc.sql("SELECT count(*) AS events, min(created_at) AS oldest FROM outbox WHERE published_at IS NULL")
+		return jdbc.sql("""
+				SELECT count(*) AS events, coalesce(sum(octet_length(payload)), 0) AS bytes, min(created_at) AS oldest
+				FROM outbox WHERE published_at IS NULL""")
 			.query((row, index) -> {
 				OffsetDateTime oldest = row.getObject("oldest", OffsetDateTime.class);
-				return new Backlog(row.getLong("events"), oldest == null ? null : oldest.toInstant());
+				return new Backlog(row.getLong("events"), row.getLong("bytes"),
+						oldest == null ? null : oldest.toInstant());
 			})
 			.single();
 	}
