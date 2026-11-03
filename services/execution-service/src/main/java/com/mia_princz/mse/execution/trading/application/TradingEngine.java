@@ -1,0 +1,214 @@
+package com.mia_princz.mse.execution.trading.application;
+
+import java.time.Clock;
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+
+import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterHaltException;
+import com.mia_princz.mse.execution.trading.application.PlacementResult.OrderState;
+import com.mia_princz.mse.execution.trading.application.TradingStore.Market;
+import com.mia_princz.mse.execution.trading.application.TradingStore.NewOrder;
+import com.mia_princz.mse.execution.trading.application.TransactionRunner.CommitOutcomeUnknownException;
+import com.mia_princz.mse.execution.trading.domain.DepthLevel;
+import com.mia_princz.mse.execution.trading.domain.Fill;
+import com.mia_princz.mse.execution.trading.domain.MatchPlan;
+import com.mia_princz.mse.execution.trading.domain.OrderBook;
+import com.mia_princz.mse.execution.trading.domain.OrderRequest;
+import com.mia_princz.mse.execution.trading.domain.RejectionCode;
+import com.mia_princz.mse.execution.trading.domain.Settlement;
+import com.mia_princz.mse.execution.trading.domain.SettlementPlan;
+import com.mia_princz.mse.execution.trading.domain.Side;
+
+/**
+ * Processes trading commands on the single writer. Each command is one database transaction covering the risk check,
+ * matching, the order and trade rows, the ledger, the balances and the outbox. The in-memory book changes only after
+ * that transaction has committed; if anything leaves the two possibly out of step, the writer halts.
+ */
+public final class TradingEngine {
+
+	private final TradingStore store;
+
+	private final TransactionRunner transactions;
+
+	private final CommandWriter writer;
+
+	private final Clock clock;
+
+	private final Map<UUID, OrderBook> books = new HashMap<>();
+
+	private final Map<UUID, String> symbols = new HashMap<>();
+
+	private UUID simulationId;
+
+	private long writerEpoch;
+
+	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock) {
+		this.store = store;
+		this.transactions = transactions;
+		this.writer = writer;
+		this.clock = clock;
+	}
+
+	/**
+	 * Loads the market and creates an empty book per instrument. Rebuilding resting orders after a restart, and
+	 * claiming writer ownership, are not part of this step yet.
+	 */
+	public void start() {
+		transactions.inTransaction(() -> {
+			Market market = store.lockMarket();
+			simulationId = market.simulationId();
+			writerEpoch = market.writerEpoch();
+			for (TradingStore.Instrument instrument : store.instruments(simulationId)) {
+				books.put(instrument.id(), new OrderBook(market.maxFillsPerCommand()));
+				symbols.put(instrument.id(), instrument.symbol());
+			}
+			return null;
+		});
+	}
+
+	public CompletableFuture<PlacementResult> place(PlaceOrder command) {
+		return writer.submit(() -> process(command));
+	}
+
+	/** A snapshot of one side of a book, read on the writer thread so it never sees a half-applied plan. */
+	public CompletableFuture<List<DepthLevel>> depth(UUID instrumentId, Side side) {
+		return writer.submit(() -> books.get(instrumentId).depth(side, Integer.MAX_VALUE));
+	}
+
+	private record Outcome(PlacementResult result, MatchPlan plan) {
+	}
+
+	private PlacementResult process(PlaceOrder command) {
+		OrderBook book = books.get(command.instrumentId());
+		if (book == null) {
+			throw new IllegalArgumentException("Unknown instrument " + command.instrumentId());
+		}
+		Outcome outcome;
+		try {
+			outcome = transactions.inTransaction(() -> placeInTransaction(command, book));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+		if (outcome.plan() != null) {
+			try {
+				book.apply(outcome.plan());
+			}
+			catch (RuntimeException ex) {
+				throw new WriterHaltException("The book could not apply a committed plan", ex);
+			}
+		}
+		return outcome.result();
+	}
+
+	private Outcome placeInTransaction(PlaceOrder command, OrderBook book) {
+		Market market = store.lockMarket();
+		if (market.writerEpoch() != writerEpoch) {
+			throw new StaleWriterException();
+		}
+		long sequence = store.nextCommandSequence(simulationId);
+		if (!"OPEN".equals(market.state())) {
+			return reject(command, RejectionCode.MARKET_NOT_OPEN, sequence);
+		}
+		TradingStore.Available available = store.available(command.accountId(), command.instrumentId());
+		long hold = Settlement.holdAmount(command.side(), command.bound(), command.quantity().shares());
+		if (command.side() == Side.BUY && available.cashCents() < hold) {
+			return reject(command, RejectionCode.INSUFFICIENT_CASH, sequence);
+		}
+		if (command.side() == Side.SELL && available.shares() < hold) {
+			return reject(command, RejectionCode.INSUFFICIENT_SHARES, sequence);
+		}
+
+		OrderRequest request = new OrderRequest(command.orderId(), command.accountId(), command.side(), command.type(),
+				command.bound(), command.quantity(), sequence);
+		MatchPlan plan = book.plan(request);
+		if (plan.outcome() == MatchPlan.Outcome.EXECUTION_LIMIT_EXCEEDED) {
+			return reject(command, RejectionCode.EXECUTION_LIMIT_EXCEEDED, sequence);
+		}
+		if (plan.rests() && (store.openOrders(command.accountId()) >= market.maxOpenOrdersPerAccount()
+				|| store.openOrdersTotal(simulationId) >= market.maxOpenOrdersTotal())) {
+			return reject(command, RejectionCode.ORDER_LIMIT_EXCEEDED, sequence);
+		}
+
+		PlacementResult result = accepted(command, plan, sequence);
+		store.insertOrder(new NewOrder(command.orderId(), simulationId, request, command.instrumentId(), result.state(),
+				result.reason(), result.filled(), result.working(), result.canceled(), sequence));
+		write(command, plan, sequence);
+		return new Outcome(result, plan);
+	}
+
+	private void write(PlaceOrder command, MatchPlan plan, long sequence) {
+		Instant executedAt = clock.instant();
+		Map<Integer, TradingStore.Trade> trades = new HashMap<>();
+		Set<UUID> touched = new LinkedHashSet<>();
+		touched.add(command.accountId());
+		for (int i = 0; i < plan.fills().size(); i++) {
+			Fill fill = plan.fills().get(i);
+			store.recordMakerFill(fill.makerOrderId(), fill.quantity());
+			TradingStore.Trade trade = store.insertTrade(simulationId, command.instrumentId(), plan.taker(), fill,
+					executedAt, sequence);
+			trades.put(i, trade);
+			touched.add(fill.makerAccountId());
+		}
+		SettlementPlan settlement = Settlement.of(command.instrumentId(), plan);
+		for (SettlementPlan.Batch batch : settlement.batches()) {
+			TradingStore.Trade trade = trades.get(batch.fillIndex());
+			store.insertBatch(simulationId, batch.cause(), trade == null ? null : trade.id(), sequence, batch.postings());
+		}
+		settlement.balanceChanges().forEach(store::applyBalance);
+		store.touchAccounts(touched);
+		for (int i = 0; i < plan.fills().size(); i++) {
+			store.insertTradeEvent(simulationId, command.instrumentId(), symbols.get(command.instrumentId()), trades.get(i),
+					plan.fills().get(i), executedAt, sequence);
+		}
+	}
+
+	private static PlacementResult accepted(PlaceOrder command, MatchPlan plan, long sequence) {
+		long filled = plan.filledQuantity();
+		long remaining = plan.remainingQuantity();
+		OrderState state;
+		String reason = null;
+		long working = 0;
+		long canceled = 0;
+		if (plan.outcome() == MatchPlan.Outcome.FILLED) {
+			state = OrderState.FILLED;
+		}
+		else if (plan.rests()) {
+			state = filled == 0 ? OrderState.OPEN : OrderState.PARTIALLY_FILLED;
+			working = remaining;
+		}
+		else {
+			state = OrderState.CANCELED;
+			reason = plan.outcome().name();
+			canceled = remaining;
+		}
+		return new PlacementResult(command.orderId(), state, reason, null, filled, working, canceled, sequence);
+	}
+
+	private Outcome reject(PlaceOrder command, RejectionCode code, long sequence) {
+		OrderRequest request = new OrderRequest(command.orderId(), command.accountId(), command.side(), command.type(),
+				command.bound(), command.quantity(), sequence);
+		store.insertOrder(new NewOrder(command.orderId(), simulationId, request, command.instrumentId(),
+				OrderState.REJECTED, code.name(), 0, 0, 0, null));
+		return new Outcome(new PlacementResult(command.orderId(), OrderState.REJECTED, code.name(), code, 0, 0, 0,
+				sequence), null);
+	}
+
+	/** Another process has claimed the market since this engine started; this one must stop writing. */
+	static final class StaleWriterException extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+
+		StaleWriterException() {
+			super("The writer epoch changed; another writer owns the market");
+		}
+
+	}
+
+}
