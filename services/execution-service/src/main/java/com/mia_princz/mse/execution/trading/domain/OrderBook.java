@@ -1,0 +1,257 @@
+package com.mia_princz.mse.execution.trading.domain;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.NavigableMap;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.TreeMap;
+import java.util.UUID;
+
+/**
+ * Price-time priority book for one instrument. Not thread-safe: the single writer is its only user.
+ *
+ * <p>
+ * Each side is a sorted map of price levels; each level is a FIFO doubly linked list of orders with an aggregate
+ * quantity, and every order is also indexed by ID. Inserting is O(log P), cancelling a known order O(1) plus O(log P)
+ * when its level empties, and matching O(F + E log P) for F fills and E emptied levels.
+ */
+public final class OrderBook {
+
+	private final int maxFillsPerCommand;
+
+	private final NavigableMap<Long, PriceLevel> bids = new TreeMap<>(Comparator.reverseOrder());
+
+	private final NavigableMap<Long, PriceLevel> asks = new TreeMap<>();
+
+	private final Map<UUID, OrderNode> orders = new HashMap<>();
+
+	private long revision;
+
+	private long lastAcceptedSequence = Long.MIN_VALUE;
+
+	public OrderBook(int maxFillsPerCommand) {
+		if (maxFillsPerCommand < 1) {
+			throw new IllegalArgumentException("maxFillsPerCommand must be positive");
+		}
+		this.maxFillsPerCommand = maxFillsPerCommand;
+	}
+
+	/** Computes what the order would do. The book is not changed. */
+	public MatchPlan plan(OrderRequest taker) {
+		if (orders.containsKey(taker.orderId())) {
+			throw new IllegalArgumentException("Order is already in the book: " + taker.orderId());
+		}
+		if (taker.acceptedSequence() <= lastAcceptedSequence) {
+			throw new IllegalArgumentException("Accepted sequence must increase");
+		}
+		List<Fill> fills = new ArrayList<>();
+		long remaining = taker.quantity().shares();
+		MatchPlan.Outcome stopped = null;
+		levels: for (PriceLevel level : levels(taker.side().opposite()).values()) {
+			if (!taker.crosses(level.priceCents)) {
+				break;
+			}
+			for (OrderNode maker = level.head; maker != null; maker = maker.next) {
+				if (maker.accountId.equals(taker.accountId())) {
+					stopped = MatchPlan.Outcome.SELF_TRADE_PREVENTED;
+					break levels;
+				}
+				if (fills.size() == maxFillsPerCommand) {
+					return new MatchPlan(taker, revision, List.of(), MatchPlan.Outcome.EXECUTION_LIMIT_EXCEEDED);
+				}
+				long quantity = Math.min(remaining, maker.remaining);
+				fills.add(new Fill(maker.orderId, maker.accountId, maker.price, quantity, maker.remaining - quantity));
+				remaining -= quantity;
+				if (remaining == 0) {
+					break levels;
+				}
+			}
+		}
+		return new MatchPlan(taker, revision, fills, outcome(taker, remaining, stopped));
+	}
+
+	private static MatchPlan.Outcome outcome(OrderRequest taker, long remaining, MatchPlan.Outcome stopped) {
+		if (remaining == 0) {
+			return MatchPlan.Outcome.FILLED;
+		}
+		if (stopped != null) {
+			return stopped;
+		}
+		return taker.type() == OrderType.LIMIT ? MatchPlan.Outcome.RESTS : MatchPlan.Outcome.IOC_REMAINDER_CANCELED;
+	}
+
+	/** Applies a plan computed from this exact book state. */
+	public void apply(MatchPlan plan) {
+		if (plan.bookRevision() != revision) {
+			throw new IllegalStateException("Plan was computed from book revision " + plan.bookRevision()
+					+ " but the book is at " + revision);
+		}
+		OrderRequest taker = plan.taker();
+		for (Fill fill : plan.fills()) {
+			OrderNode maker = orders.get(fill.makerOrderId());
+			maker.remaining -= fill.quantity();
+			maker.level.quantity -= fill.quantity();
+			if (maker.remaining != fill.makerRemainingAfter()) {
+				throw new IllegalStateException("Plan does not match the book for order " + fill.makerOrderId());
+			}
+			if (maker.remaining == 0) {
+				remove(maker);
+			}
+		}
+		if (plan.rests()) {
+			insert(new OrderNode(taker.orderId(), taker.accountId(), taker.side(), taker.bound(),
+					plan.remainingQuantity(), taker.acceptedSequence()));
+		}
+		if (plan.outcome() != MatchPlan.Outcome.EXECUTION_LIMIT_EXCEEDED) {
+			lastAcceptedSequence = taker.acceptedSequence();
+		}
+		revision++;
+	}
+
+	/** Removes a resting order, returning what it was. Empty if the order is not resting. */
+	public Optional<BookOrder> cancel(UUID orderId) {
+		OrderNode node = orders.get(orderId);
+		if (node == null) {
+			return Optional.empty();
+		}
+		remove(node);
+		revision++;
+		return Optional.of(node.snapshot());
+	}
+
+	public Optional<BookOrder> find(UUID orderId) {
+		return Optional.ofNullable(orders.get(orderId)).map(OrderNode::snapshot);
+	}
+
+	/** Aggregated levels in priority order, at most {@code maxLevels} of them. */
+	public List<DepthLevel> depth(Side side, int maxLevels) {
+		List<DepthLevel> depth = new ArrayList<>(Math.min(maxLevels, levels(side).size()));
+		for (PriceLevel level : levels(side).values()) {
+			if (depth.size() == maxLevels) {
+				break;
+			}
+			depth.add(new DepthLevel(new Price(level.priceCents), level.quantity, level.orderCount));
+		}
+		return Collections.unmodifiableList(depth);
+	}
+
+	/** The resting orders of one side in priority order. Linear in the book size; for tests and diagnostics. */
+	public List<BookOrder> orders(Side side) {
+		List<BookOrder> result = new ArrayList<>();
+		for (PriceLevel level : levels(side).values()) {
+			for (OrderNode node = level.head; node != null; node = node.next) {
+				result.add(node.snapshot());
+			}
+		}
+		return result;
+	}
+
+	public int size() {
+		return orders.size();
+	}
+
+	public long revision() {
+		return revision;
+	}
+
+	private NavigableMap<Long, PriceLevel> levels(Side side) {
+		return side == Side.BUY ? bids : asks;
+	}
+
+	private void insert(OrderNode node) {
+		PriceLevel level = levels(node.side).computeIfAbsent(node.price.cents(), PriceLevel::new);
+		node.level = level;
+		node.prev = level.tail;
+		if (level.tail == null) {
+			level.head = node;
+		}
+		else {
+			level.tail.next = node;
+		}
+		level.tail = node;
+		level.quantity += node.remaining;
+		level.orderCount++;
+		orders.put(node.orderId, node);
+	}
+
+	private void remove(OrderNode node) {
+		PriceLevel level = node.level;
+		if (node.prev == null) {
+			level.head = node.next;
+		}
+		else {
+			node.prev.next = node.next;
+		}
+		if (node.next == null) {
+			level.tail = node.prev;
+		}
+		else {
+			node.next.prev = node.prev;
+		}
+		level.quantity -= node.remaining;
+		level.orderCount--;
+		if (level.head == null) {
+			levels(node.side).remove(level.priceCents);
+		}
+		orders.remove(node.orderId);
+	}
+
+	private static final class PriceLevel {
+
+		private final long priceCents;
+
+		private OrderNode head;
+
+		private OrderNode tail;
+
+		private long quantity;
+
+		private int orderCount;
+
+		private PriceLevel(long priceCents) {
+			this.priceCents = priceCents;
+		}
+
+	}
+
+	private static final class OrderNode {
+
+		private final UUID orderId;
+
+		private final UUID accountId;
+
+		private final Side side;
+
+		private final Price price;
+
+		private final long acceptedSequence;
+
+		private long remaining;
+
+		private PriceLevel level;
+
+		private OrderNode prev;
+
+		private OrderNode next;
+
+		private OrderNode(UUID orderId, UUID accountId, Side side, Price price, long remaining, long acceptedSequence) {
+			this.orderId = Objects.requireNonNull(orderId);
+			this.accountId = Objects.requireNonNull(accountId);
+			this.side = side;
+			this.price = price;
+			this.remaining = remaining;
+			this.acceptedSequence = acceptedSequence;
+		}
+
+		private BookOrder snapshot() {
+			return new BookOrder(orderId, accountId, side, price, remaining, acceptedSequence);
+		}
+
+	}
+
+}
