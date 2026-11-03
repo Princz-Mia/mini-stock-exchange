@@ -6,6 +6,7 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import org.apache.avro.SchemaNormalization;
@@ -122,6 +123,28 @@ public final class JdbcTradingStore implements TradingStore {
 			.param("quantity", quantity)
 			.param("id", makerOrderId)
 			.update(), "fill maker " + makerOrderId);
+	}
+
+	@Override
+	public Optional<ExistingOrder> lockOrder(UUID orderId) {
+		return jdbc.sql("SELECT id, account_id, instrument_id, state, working_quantity FROM orders WHERE id = ? FOR UPDATE")
+			.param(orderId)
+			.query((row, index) -> new ExistingOrder(row.getObject("id", UUID.class),
+					row.getObject("account_id", UUID.class), row.getObject("instrument_id", UUID.class),
+					row.getString("state"), row.getLong("working_quantity")))
+			.optional();
+	}
+
+	@Override
+	public void cancelOrder(UUID orderId, long quantity, String reason) {
+		expectOne(jdbc.sql("""
+				UPDATE orders SET canceled_quantity = canceled_quantity + :quantity, working_quantity = 0,
+				    state = 'CANCELED', reason = :reason, version = version + 1, updated_at = now()
+				WHERE id = :id AND working_quantity = :quantity AND state IN ('OPEN', 'PARTIALLY_FILLED')""")
+			.param("quantity", quantity)
+			.param("reason", reason)
+			.param("id", orderId)
+			.update(), "cancel order " + orderId);
 	}
 
 	@Override
