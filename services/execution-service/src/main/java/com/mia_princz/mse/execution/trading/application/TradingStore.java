@@ -3,6 +3,7 @@ package com.mia_princz.mse.execution.trading.application;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import com.mia_princz.mse.execution.trading.domain.Fill;
@@ -32,6 +33,10 @@ public interface TradingStore {
 	record Trade(UUID id, long tradeSequence) {
 	}
 
+	/** An order row as cancelling needs it, locked for the rest of the transaction. */
+	record ExistingOrder(UUID id, UUID accountId, UUID instrumentId, String state, long working) {
+	}
+
 	/** Locks the market row for the rest of the transaction; every trading command starts here. */
 	Market lockMarket();
 
@@ -48,6 +53,10 @@ public interface TradingStore {
 	void insertOrder(NewOrder order);
 
 	void recordMakerFill(UUID makerOrderId, long quantity);
+
+	Optional<ExistingOrder> lockOrder(UUID orderId);
+
+	void cancelOrder(UUID orderId, long quantity, String reason);
 
 	Trade insertTrade(UUID simulationId, UUID instrumentId, OrderRequest taker, Fill fill, Instant executedAt,
 			long commandSequence);

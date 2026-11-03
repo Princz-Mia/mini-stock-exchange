@@ -14,7 +14,7 @@ import java.util.Random;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.sql.DataSource;
@@ -34,6 +34,8 @@ import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.execution.trading.adapter.JdbcTradingStore;
 import com.mia_princz.mse.execution.trading.adapter.SpringTransactionRunner;
+import com.mia_princz.mse.execution.trading.application.CancelOrder;
+import com.mia_princz.mse.execution.trading.application.CancelResult;
 import com.mia_princz.mse.execution.trading.application.CommandWriter;
 import com.mia_princz.mse.execution.trading.application.PlaceOrder;
 import com.mia_princz.mse.execution.trading.application.PlacementResult;
@@ -71,7 +73,8 @@ class TradingEngineIT {
 	@Autowired
 	PlatformTransactionManager transactionManager;
 
-	private final AtomicBoolean failBeforeCommit = new AtomicBoolean();
+	/** The store method that throws, simulating a failure after every earlier write but before the commit. */
+	private final AtomicReference<String> failAt = new AtomicReference<>();
 
 	private CommandWriter writer;
 
@@ -164,7 +167,7 @@ class TradingEngineIT {
 		Map<String, Object> before = snapshot();
 		List<DepthLevel> bookBefore = engine.depth(instrument, Side.SELL).get();
 
-		failBeforeCommit.set(true);
+		failAt.set("insertTradeEvent");
 		CompletableFuture<PlacementResult> failed = engine.place(order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 3));
 
 		assertThatThrownBy(failed::get).isInstanceOf(ExecutionException.class)
@@ -173,7 +176,7 @@ class TradingEngineIT {
 		assertThat(snapshot()).isEqualTo(before);
 		assertThat(engine.depth(instrument, Side.SELL).get()).isEqualTo(bookBefore);
 
-		failBeforeCommit.set(false);
+		failAt.set(null);
 		PlacementResult retried = place(buyer, Side.BUY, OrderType.LIMIT, "100.00", 3);
 		assertThat(retried.state()).isEqualTo(OrderState.FILLED);
 		assertThat(engine.depth(instrument, Side.SELL).get())
@@ -222,6 +225,107 @@ class TradingEngineIT {
 		assertThat(result.filled()).isEqualTo(2);
 		assertThat(result.canceled()).isEqualTo(3);
 		assertThat(cash(buyer)).containsExactly(STARTING_CASH - 10_000, 0L);
+		assertLedgerMatchesBalances();
+	}
+
+	/** Golden alternative: 6 fill, 4 rest holding 40,400 cents, and cancelling releases exactly that. */
+	@Test
+	void cancelReleasesExactlyTheRemainingHold() throws Exception {
+		UUID seller = funded();
+		UUID buyer = funded();
+		place(seller, Side.SELL, OrderType.LIMIT, "100.00", 6);
+		PlacementResult buy = place(buyer, Side.BUY, OrderType.LIMIT, "101.00", 10);
+		assertThat(buy.state()).isEqualTo(OrderState.PARTIALLY_FILLED);
+		assertThat(cash(buyer)).containsExactly(STARTING_CASH - 60_000, 40_400L);
+
+		CancelResult cancel = engine.cancel(new CancelOrder(buy.orderId(), buyer)).get();
+
+		assertThat(cancel.status()).isEqualTo(CancelResult.Status.CANCELED);
+		assertThat(cancel.canceledQuantity()).isEqualTo(4);
+		assertThat(cash(buyer)).containsExactly(STARTING_CASH - 60_000, 0L);
+		assertThat(jdbc.queryForMap(
+				"SELECT state, filled_quantity, working_quantity, canceled_quantity FROM orders WHERE id = ?",
+				buy.orderId()))
+			.containsEntry("state", "CANCELED")
+			.containsEntry("filled_quantity", 6L)
+			.containsEntry("working_quantity", 0L)
+			.containsEntry("canceled_quantity", 4L);
+		assertThat(engine.depth(instrument, Side.BUY).get()).isEmpty();
+		assertLedgerMatchesBalances();
+	}
+
+	@Test
+	void cancellingTwiceIsASuccessfulNoOp() throws Exception {
+		UUID seller = funded();
+		PlacementResult sell = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
+		engine.cancel(new CancelOrder(sell.orderId(), seller)).get();
+		Map<String, Object> before = snapshot();
+
+		CancelResult again = engine.cancel(new CancelOrder(sell.orderId(), seller)).get();
+
+		assertThat(again.status()).isEqualTo(CancelResult.Status.ALREADY_CANCELED);
+		Map<String, Object> after = snapshot();
+		after.remove("command_sequence");
+		before.remove("command_sequence");
+		assertThat(after).isEqualTo(before);
+	}
+
+	@Test
+	void filledRejectedUnknownAndOtherAccountsOrdersCannotBeCancelled() throws Exception {
+		UUID seller = funded();
+		UUID buyer = funded();
+		PlacementResult filled = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 2);
+		place(buyer, Side.BUY, OrderType.LIMIT, "100.00", 2);
+		PlacementResult rejected = place(buyer, Side.BUY, OrderType.LIMIT, "1000000.00", 1_000);
+		PlacementResult resting = place(seller, Side.SELL, OrderType.LIMIT, "200.00", 1);
+
+		assertThat(engine.cancel(new CancelOrder(filled.orderId(), seller)).get().status())
+			.isEqualTo(CancelResult.Status.NOT_CANCELABLE);
+		assertThat(engine.cancel(new CancelOrder(rejected.orderId(), buyer)).get().status())
+			.isEqualTo(CancelResult.Status.NOT_CANCELABLE);
+		assertThat(engine.cancel(new CancelOrder(UUID.randomUUID(), buyer)).get().status())
+			.isEqualTo(CancelResult.Status.NOT_FOUND);
+		assertThat(engine.cancel(new CancelOrder(resting.orderId(), buyer)).get().status())
+			.as("someone else's order looks like no order at all")
+			.isEqualTo(CancelResult.Status.NOT_FOUND);
+		assertThat(orderState(resting.orderId())).isEqualTo("OPEN");
+	}
+
+	@Test
+	void cancellingIsAllowedWhileTheMarketIsHalted() throws Exception {
+		UUID seller = funded();
+		PlacementResult sell = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
+		jdbc.update("UPDATE simulation SET state = 'HALTED'");
+		try {
+			assertThat(engine.cancel(new CancelOrder(sell.orderId(), seller)).get().status())
+				.isEqualTo(CancelResult.Status.CANCELED);
+			assertThat(shares(seller)).containsExactly(STARTING_SHARES, 0L);
+		}
+		finally {
+			jdbc.update("UPDATE simulation SET state = 'OPEN'");
+		}
+	}
+
+	@Test
+	void aCancelFailingBeforeCommitLeavesTheOrderResting() throws Exception {
+		UUID seller = funded();
+		PlacementResult sell = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
+		Map<String, Object> before = snapshot();
+
+		failAt.set("touchAccounts");
+		CompletableFuture<CancelResult> failed = engine.cancel(new CancelOrder(sell.orderId(), seller));
+
+		assertThatThrownBy(failed::get).isInstanceOf(ExecutionException.class)
+			.rootCause()
+			.hasMessageContaining("injected");
+		assertThat(snapshot()).isEqualTo(before);
+		assertThat(engine.depth(instrument, Side.SELL).get())
+			.containsExactly(new DepthLevel(Price.parse("100.00"), 5, 1));
+
+		failAt.set(null);
+		assertThat(engine.cancel(new CancelOrder(sell.orderId(), seller)).get().status())
+			.isEqualTo(CancelResult.Status.CANCELED);
+		assertThat(engine.depth(instrument, Side.SELL).get()).isEmpty();
 		assertLedgerMatchesBalances();
 	}
 
@@ -378,11 +482,11 @@ class TradingEngineIT {
 		return jdbc.queryForObject("SELECT last_command_sequence FROM simulation", Long.class);
 	}
 
-	/** Fails the last write of a command, after every other row is written but before the commit. */
+	/** Fails the chosen store call; pick a command's last write to fail after everything else but before the commit. */
 	private TradingStore failingBeforeCommit(TradingStore store) {
 		return (TradingStore) Proxy.newProxyInstance(TradingStore.class.getClassLoader(),
 				new Class<?>[] { TradingStore.class }, (proxy, method, args) -> {
-					if (failBeforeCommit.get() && method.getName().equals("insertTradeEvent")) {
+					if (method.getName().equals(failAt.get())) {
 						throw new IllegalStateException("injected failure before commit");
 					}
 					try {
