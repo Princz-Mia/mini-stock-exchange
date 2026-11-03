@@ -26,6 +26,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import tools.jackson.databind.json.JsonMapper;
 
+import com.mia_princz.mse.execution.outbox.OutboxAdmission;
 import com.mia_princz.mse.execution.trading.application.CancelOrder;
 import com.mia_princz.mse.execution.trading.application.CancelResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
@@ -56,12 +57,15 @@ class OrderController {
 
 	private final TradingQueries queries;
 
+	private final OutboxAdmission admission;
+
 	private final Duration timeout;
 
-	OrderController(TradingEngine engine, TradingQueries queries,
+	OrderController(TradingEngine engine, TradingQueries queries, OutboxAdmission admission,
 			@Value("${mse.trading.command-timeout:5s}") Duration timeout) {
 		this.engine = engine;
 		this.queries = queries;
+		this.admission = admission;
 		this.timeout = timeout;
 	}
 
@@ -78,6 +82,13 @@ class OrderController {
 		TradingQueries.Trader trader = trader(authentication);
 		UUID key = idempotencyKey(keyHeader);
 		OrderBody.Valid order = body.validate();
+		if (!admission.admitsNewOrders()) {
+			// Not queued, like a full writer queue, so retrying with the same key later is safe.
+			throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "EXCHANGE_BUSY",
+					"New orders are paused until market data publication catches up; cancels still work")
+				.with("reason", "PUBLICATION_BACKLOG")
+				.retryAfter(5);
+		}
 		CommandKey commandKey = new CommandKey(trader.userId(), key, PLACE_ROUTE, order.hash());
 		PlaceOrder command = new PlaceOrder(UUID.randomUUID(), trader.accountId(), order.instrumentId(), order.side(),
 				order.type(), order.bound(), order.quantity());
@@ -113,7 +124,7 @@ class OrderController {
 	ResponseEntity<ProblemDetail> problem(ApiException ex) {
 		ResponseEntity.BodyBuilder response = ResponseEntity.status(ex.status());
 		if (ex.status() == HttpStatus.SERVICE_UNAVAILABLE) {
-			response.header("Retry-After", "1");
+			response.header("Retry-After", Integer.toString(ex.retryAfterSeconds()));
 		}
 		return response.body(ex.toProblem());
 	}

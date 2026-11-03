@@ -59,7 +59,7 @@ public final class OutboxRelay implements HealthIndicator, AutoCloseable {
 
 	private volatile boolean running;
 
-	private volatile Outbox.Backlog backlog = new Outbox.Backlog(0, null);
+	private volatile Outbox.Backlog backlog = Outbox.Backlog.EMPTY;
 
 	private volatile Instant backlogCheckedAt = Instant.EPOCH;
 
