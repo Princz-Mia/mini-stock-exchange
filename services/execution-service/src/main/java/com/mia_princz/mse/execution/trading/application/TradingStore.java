@@ -42,6 +42,9 @@ public interface TradingStore {
 	record ExistingOrder(UUID id, UUID accountId, UUID instrumentId, String state, long working) {
 	}
 
+	/** Whether a market has been set up yet. Before that there is nothing to trade or rebuild. */
+	boolean hasSimulation();
+
 	/** Locks the market row for the rest of the transaction; every trading command starts here. */
 	Market lockMarket();
 

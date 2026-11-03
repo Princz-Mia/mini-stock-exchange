@@ -48,6 +48,11 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public boolean hasSimulation() {
+		return jdbc.sql("SELECT EXISTS (SELECT 1 FROM simulation)").query(Boolean.class).single();
+	}
+
+	@Override
 	public Market lockMarket() {
 		return jdbc.sql("""
 				SELECT id, state, writer_epoch, max_open_orders_per_account, max_open_orders_total, max_fills_per_command
