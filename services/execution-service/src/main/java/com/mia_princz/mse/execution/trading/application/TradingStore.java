@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import com.mia_princz.mse.execution.trading.domain.BookOrder;
 import com.mia_princz.mse.execution.trading.domain.Fill;
 import com.mia_princz.mse.execution.trading.domain.OrderRequest;
 import com.mia_princz.mse.execution.trading.domain.Posting;
@@ -43,6 +44,15 @@ public interface TradingStore {
 
 	/** Locks the market row for the rest of the transaction; every trading command starts here. */
 	Market lockMarket();
+
+	/** Takes over the market: increments the writer epoch, so a previous writer's next transaction is refused. */
+	long claimWriterEpoch(UUID simulationId);
+
+	/** Open and partially filled orders of one instrument, in accepted-sequence order. */
+	List<BookOrder> activeOrders(UUID instrumentId);
+
+	/** Every disagreement between balances, the ledger and open orders. Empty means consistent. */
+	List<String> reconciliationProblems(UUID simulationId);
 
 	long nextCommandSequence(UUID simulationId);
 
