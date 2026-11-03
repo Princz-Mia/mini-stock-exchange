@@ -3,8 +3,10 @@ package com.mia_princz.mse.execution;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -12,9 +14,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.serialization.ByteArrayDeserializer;
+import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.kafka.autoconfigure.KafkaConnectionDetails;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -26,6 +33,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
+import com.mia_princz.mse.contracts.events.TradeExecuted;
+import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
 
 /**
@@ -68,6 +77,9 @@ class OrderApiIT {
 
 	@Autowired
 	TradingEngine engine;
+
+	@Autowired
+	KafkaConnectionDetails kafka;
 
 	private UUID instrument;
 
@@ -235,6 +247,47 @@ class OrderApiIT {
 		HttpResponse<String> tooLate = cancel(trader, UUID.randomUUID(), sold);
 		assertThat(tooLate.statusCode()).isEqualTo(409);
 		assertThat(code(tooLate)).isEqualTo("ORDER_NOT_CANCELABLE");
+	}
+
+	@Test
+	void aTradeReachesKafkaThroughTheRelay() throws Exception {
+		place(trader, UUID.randomUUID(), limit("SELL", 4, "100.00"));
+		place(other(), UUID.randomUUID(), limit("BUY", 4, "100.00"));
+		UUID tradeId = jdbc.queryForObject("SELECT id FROM trades WHERE instrument_id = ?", UUID.class, instrument);
+
+		TradeExecuted published = null;
+		Map<String, Object> config = Map.of(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG,
+				String.join(",", kafka.getBootstrapServers()), ConsumerConfig.GROUP_ID_CONFIG,
+				"order-api-" + UUID.randomUUID(), ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+		try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(config, new StringDeserializer(),
+				new ByteArrayDeserializer())) {
+			consumer.subscribe(List.of("mse.trades.v1"));
+			long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+			while (published == null && System.nanoTime() < deadline) {
+				for (var record : consumer.poll(Duration.ofMillis(200))) {
+					TradeExecuted trade = WireEvents.decodeTrade(record.value());
+					if (trade.getTradeId().equals(tradeId)) {
+						assertThat(record.key()).isEqualTo(trade.getSimulationId() + "|" + instrument);
+						published = trade;
+					}
+				}
+			}
+		}
+
+		assertThat(published).as("trade on mse.trades.v1").isNotNull();
+		assertThat(published.getPriceCents()).isEqualTo(10_000);
+		assertThat(published.getQuantity()).isEqualTo(4);
+		// The record can be read just before the relay marks it, so give the mark a moment.
+		long marked = 0;
+		for (int attempt = 0; attempt < 50 && marked == 0; attempt++) {
+			marked = jdbc.queryForObject(
+					"SELECT count(*) FROM outbox WHERE event_id = ? AND published_at IS NOT NULL", Long.class,
+					published.getEventId());
+			if (marked == 0) {
+				Thread.sleep(100);
+			}
+		}
+		assertThat(marked).as("outbox row marked published").isEqualTo(1);
 	}
 
 	@Test
