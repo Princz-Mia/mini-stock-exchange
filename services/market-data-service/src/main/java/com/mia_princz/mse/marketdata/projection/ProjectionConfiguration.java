@@ -24,6 +24,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import tools.jackson.databind.json.JsonMapper;
 
+import com.mia_princz.mse.contracts.events.WireEvents;
+
 @Configuration(proxyBeanMethods = false)
 class ProjectionConfiguration {
 
@@ -39,18 +41,22 @@ class ProjectionConfiguration {
 	}
 
 	@Bean
+	TradeProjection tradeProjection(JdbcClient jdbcClient) {
+		return new TradeProjection(jdbcClient);
+	}
+
+	@Bean
 	Checkpoints checkpoints(JdbcClient jdbcClient) {
 		return new Checkpoints(jdbcClient);
 	}
 
-	@Bean(initMethod = "start", destroyMethod = "close")
-	@ConditionalOnProperty(name = "mse.market-feed.enabled", matchIfMissing = true)
-	MarketFeedConsumer marketFeed(KafkaProperties kafka, KafkaConnectionDetails connection,
-			PlatformTransactionManager transactionManager, SnapshotProjection projection, Checkpoints checkpoints,
-			Clock clock, MeterRegistry meters, @Value("${mse.market-feed.poll-timeout:500ms}") Duration pollTimeout,
-			@Value("${mse.market-feed.lag-check-interval:2s}") Duration lagCheckInterval,
-			@Value("${mse.market-feed.stale-after:10s}") Duration staleAfter,
-			@Value("${mse.market-feed.retry-backoff:2s}") Duration retryBackoff) {
+	@Bean
+	FeedFactory feedFactory(KafkaProperties kafka, KafkaConnectionDetails connection,
+			PlatformTransactionManager transactionManager, Checkpoints checkpoints, Clock clock, MeterRegistry meters,
+			@Value("${mse.feed.poll-timeout:500ms}") Duration pollTimeout,
+			@Value("${mse.feed.lag-check-interval:2s}") Duration lagCheckInterval,
+			@Value("${mse.feed.stale-after:10s}") Duration staleAfter,
+			@Value("${mse.feed.retry-backoff:2s}") Duration retryBackoff) {
 		Map<String, Object> config = new HashMap<>(kafka.buildConsumerProperties());
 		// The brokers come from the connection details, as for Boot's own clients, not from the properties alone.
 		config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, connection.getConsumer().getBootstrapServers());
@@ -58,22 +64,49 @@ class ProjectionConfiguration {
 		config.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, false);
 		config.remove(ConsumerConfig.GROUP_ID_CONFIG);
 		config.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-		MarketFeedConsumer feed = new MarketFeedConsumer(
-				() -> new KafkaConsumer<>(config, new StringDeserializer(), new ByteArrayDeserializer()),
-				new TransactionTemplate(transactionManager), projection, checkpoints,
-				new MarketFeedConsumer.Settings(SnapshotProjection.TOPIC, pollTimeout, lagCheckInterval, staleAfter,
-						retryBackoff),
-				clock);
-		Gauge.builder("mse.market.feed.lag", feed, MarketFeedConsumer::lag)
-			.description("Snapshots on Kafka not yet projected; -1 before the first measurement")
-			.register(meters);
-		Gauge.builder("mse.market.feed.live", feed, (f) -> f.state() == MarketFeedConsumer.State.LIVE ? 1 : 0)
-			.description("1 while the projection is caught up and Kafka answers")
-			.register(meters);
-		FunctionCounter.builder("mse.market.feed.applied", feed, MarketFeedConsumer::appliedSnapshots)
-			.description("Snapshots that replaced an instrument's projection")
-			.register(meters);
-		return feed;
+		return (topic, handler) -> {
+			Map<String, Object> feedConfig = new HashMap<>(config);
+			feedConfig.put(ConsumerConfig.CLIENT_ID_CONFIG, "market-data-" + topic);
+			MarketFeedConsumer feed = new MarketFeedConsumer(
+					() -> new KafkaConsumer<>(feedConfig, new StringDeserializer(), new ByteArrayDeserializer()),
+					new TransactionTemplate(transactionManager), handler, checkpoints,
+					new MarketFeedConsumer.Settings(topic, pollTimeout, lagCheckInterval, staleAfter, retryBackoff),
+					clock);
+			Gauge.builder("mse.feed.lag", feed, MarketFeedConsumer::lag)
+				.description("Records on Kafka not yet projected; -1 before the first measurement")
+				.tag("topic", topic)
+				.register(meters);
+			Gauge.builder("mse.feed.live", feed, (f) -> f.state() == MarketFeedConsumer.State.LIVE ? 1 : 0)
+				.description("1 while the projection is caught up and Kafka answers")
+				.tag("topic", topic)
+				.register(meters);
+			FunctionCounter.builder("mse.feed.applied", feed, MarketFeedConsumer::appliedEvents)
+				.description("Records that changed the projection")
+				.tag("topic", topic)
+				.register(meters);
+			return feed;
+		};
+	}
+
+	@Bean(initMethod = "start", destroyMethod = "close")
+	@ConditionalOnProperty(name = "mse.market-feed.enabled", matchIfMissing = true)
+	MarketFeedConsumer marketFeed(FeedFactory feeds, SnapshotProjection projection) {
+		return feeds.create(SnapshotProjection.TOPIC,
+				(payload) -> projection.apply(WireEvents.decodeSnapshot(payload)));
+	}
+
+	@Bean(initMethod = "start", destroyMethod = "close")
+	@ConditionalOnProperty(name = "mse.trade-feed.enabled", matchIfMissing = true)
+	MarketFeedConsumer tradeFeed(FeedFactory feeds, TradeProjection projection) {
+		return feeds.create(TradeProjection.TOPIC, (payload) -> projection.apply(WireEvents.decodeTrade(payload)));
+	}
+
+	/** One feed per topic, each with its own thread, health component and tagged metrics. */
+	@FunctionalInterface
+	interface FeedFactory {
+
+		MarketFeedConsumer create(String topic, MarketFeedConsumer.Handler handler);
+
 	}
 
 }
