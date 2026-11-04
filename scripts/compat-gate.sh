@@ -195,7 +195,8 @@ proxy_routes() {
     assert_equal '/ (SPA)' 200 "$(http_status /)" &&
     assert_equal '/deep/link (SPA fallback)' 200 "$(http_status /deep/link)" &&
     assert_equal '/api/v1/orders (Execution, denied)' 401 "$(http_status /api/v1/orders)" &&
-    assert_equal '/api/v1/instruments (Market Data, denied)' 403 "$(http_status /api/v1/instruments)" &&
+    assert_match '/api/v1/instruments (Market Data, public)' '"instruments":\[' "$(curl -s -m 10 "http://localhost:$web_port/api/v1/instruments")" &&
+    assert_equal '/api/v1/instruments/x/candles (Market Data, denied)' 403 "$(http_status /api/v1/instruments/x/candles)" &&
     assert_equal '/api/v1/internal/x (blocked at proxy)' 404 "$(http_status /api/v1/internal/x)" &&
     assert_match '/actuator/health serves the SPA, not Actuator' '^<!doctype html>' "$(curl -s "http://localhost:$web_port/actuator/health")"
 }
@@ -218,7 +219,7 @@ independence() {
     compose up -d --no-deps --wait --wait-timeout 180 market-data-service >> "$log" 2>&1 &&
     compose stop execution-service >> "$log" 2>&1 &&
     assert_match 'orders with Execution down' '^50[24]$' "$(http_status /api/v1/orders)" &&
-    assert_equal 'instruments with Execution down' 403 "$(http_status /api/v1/instruments)" &&
+    assert_equal 'instruments with Execution down' 200 "$(http_status /api/v1/instruments)" &&
     assert_match 'Market Data readiness' '"status":"UP"' "$(readiness market-data-service)" &&
     compose start execution-service >> "$log" 2>&1 &&
     compose up -d --no-deps --wait --wait-timeout 180 execution-service >> "$log" 2>&1
