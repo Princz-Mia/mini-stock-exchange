@@ -136,6 +136,13 @@
 			<artifactId>testcontainers-postgresql</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<!-- Validates real responses against api/openapi.yaml (JSON Schema 2020-12, Jackson 3). -->
+		<dependency>
+			<groupId>com.networknt</groupId>
+			<artifactId>json-schema-validator</artifactId>
+			<version>3.0.8</version>
+			<scope>test</scope>
+		</dependency>
 	</dependencies>
 
 	<build>

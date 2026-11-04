@@ -21,6 +21,25 @@ final class Snapshots {
 	private Snapshots() {
 	}
 
+	/** An instrument before its first trade: no book, no tape, no last trade. */
+	static MarketSnapshot untraded(UUID instrument, long commandSequence) {
+		return MarketSnapshot.newBuilder()
+			.setEventId(UUID.randomUUID())
+			.setSimulationId(SIMULATION)
+			.setInstrumentId(instrument)
+			.setSymbol("NOVA")
+			.setVenueState(VenueState.OPEN)
+			.setRules(new MarketRules(1, 10_000L, 1L, 1L, 1L, 10_000L, 100_000_000L, 20, 1_000))
+			.setBids(List.of())
+			.setAsks(List.of())
+			.setRecentTrades(List.of())
+			.setLastTrade(null)
+			.setLastTradeSequence(0)
+			.setSourceCommandSequence(commandSequence)
+			.setGeneratedAt(Instant.now().truncatedTo(ChronoUnit.MICROS))
+			.build();
+	}
+
 	static MarketSnapshot snapshot(UUID instrument, long commandSequence, int levels) {
 		List<BookLevel> bids = new ArrayList<>();
 		for (int i = 0; i < levels; i++) {

@@ -158,10 +158,10 @@ try {
         Assert-ClassVersion 'event-contracts\target\event-contracts-0.1.0.jar' 'com.mia_princz.mse.contracts.events.TradeExecuted' 61
     }
 
-    Step 'Frontend: npm ci, typecheck, lint, test, build' {
+    Step 'Frontend: npm ci, API contract, typecheck, lint, test, build' {
         Push-Location web
         try {
-            foreach ($arguments in @(@('ci'), @('run', 'typecheck'), @('run', 'lint'), @('test'), @('run', 'build'))) {
+            foreach ($arguments in @(@('ci'), @('run', 'api:check'), @('run', 'typecheck'), @('run', 'lint'), @('test'), @('run', 'build'))) {
                 Invoke-Checked 'npm.cmd' $arguments
             }
         }
