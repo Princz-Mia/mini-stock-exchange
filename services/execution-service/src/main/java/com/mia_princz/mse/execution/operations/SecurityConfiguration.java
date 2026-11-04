@@ -48,7 +48,8 @@ class SecurityConfiguration {
 				.authenticated()
 				.requestMatchers(HttpMethod.POST, "/api/v1/orders", "/api/v1/orders/*/cancel")
 				.hasRole("TRADER")
-				.requestMatchers(HttpMethod.GET, "/api/v1/orders/*", "/api/v1/commands/*")
+				.requestMatchers(HttpMethod.GET, "/api/v1/orders", "/api/v1/orders/*", "/api/v1/commands/*",
+						"/api/v1/portfolio", "/api/v1/portfolio/trades")
 				.hasRole("TRADER")
 				.anyRequest()
 				.denyAll())

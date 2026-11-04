@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -12,16 +13,15 @@ import java.util.concurrent.TimeoutException;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
-import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import tools.jackson.databind.json.JsonMapper;
@@ -104,6 +104,31 @@ class OrderController {
 		return cancellation(await(key, () -> engine.cancel(commandKey, new CancelOrder(orderId, trader.accountId()))));
 	}
 
+	record OrderPage(List<TradingQueries.OrderView> orders, String nextCursor) {
+	}
+
+	/** Active orders all at once (at most the per-account limit), or the whole history in keyset pages. */
+	@GetMapping("/orders")
+	OrderPage orders(@RequestParam(defaultValue = "all") String status, @RequestParam(required = false) String cursor,
+			@RequestParam(defaultValue = "50") int limit, Authentication authentication) {
+		UUID account = trader(authentication).accountId();
+		if ("active".equals(status)) {
+			return new OrderPage(queries.activeOrders(account), null);
+		}
+		if (!"all".equals(status)) {
+			throw ApiException.invalid("status", "INVALID_VALUE", "status must be all or active");
+		}
+		Pages.checkLimit(limit);
+		TradingQueries.OrderPosition after = cursor == null ? null : Cursors.orders(cursor);
+		List<TradingQueries.OrderView> page = queries.orders(account, after, limit + 1);
+		if (page.size() <= limit) {
+			return new OrderPage(page, null);
+		}
+		TradingQueries.OrderView last = page.get(limit - 1);
+		return new OrderPage(page.subList(0, limit),
+				Cursors.orders(new TradingQueries.OrderPosition(last.createdAt(), UUID.fromString(last.orderId()))));
+	}
+
 	@GetMapping("/orders/{orderId}")
 	TradingQueries.OrderView order(@PathVariable UUID orderId, Authentication authentication) {
 		return queries.order(orderId, trader(authentication).accountId())
@@ -118,15 +143,6 @@ class OrderController {
 					"No committed result for this key; retrying it is safe"));
 		return PLACE_ROUTE.equals(stored.route()) ? placement(STORED.readValue(stored.body(), PlacementResult.class))
 				: cancellation(STORED.readValue(stored.body(), CancelResult.class));
-	}
-
-	@ExceptionHandler(ApiException.class)
-	ResponseEntity<ProblemDetail> problem(ApiException ex) {
-		ResponseEntity.BodyBuilder response = ResponseEntity.status(ex.status());
-		if (ex.status() == HttpStatus.SERVICE_UNAVAILABLE) {
-			response.header("Retry-After", Integer.toString(ex.retryAfterSeconds()));
-		}
-		return response.body(ex.toProblem());
 	}
 
 	private static ResponseEntity<?> placement(PlacementResult result) {
@@ -201,9 +217,7 @@ class OrderController {
 	}
 
 	private TradingQueries.Trader trader(Authentication authentication) {
-		return queries.trader(authentication.getName())
-			.orElseThrow(() -> new ApiException(HttpStatus.FORBIDDEN, "NO_TRADING_ACCOUNT",
-					"This user has no trading account"));
+		return Pages.trader(queries, authentication);
 	}
 
 	private static UUID idempotencyKey(String header) {
