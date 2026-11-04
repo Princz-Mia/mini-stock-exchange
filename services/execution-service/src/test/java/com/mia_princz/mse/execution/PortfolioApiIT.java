@@ -1,0 +1,274 @@
+package com.mia_princz.mse.execution;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.net.http.HttpResponse;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
+import org.springframework.boot.test.web.server.LocalServerPort;
+import org.springframework.context.annotation.Import;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+
+import com.mia_princz.mse.execution.trading.application.TradingEngine;
+
+/**
+ * The private reads over HTTP: portfolio, own executions and own orders. Each test gets its own instrument and two
+ * traders of its own, so balances start from known amounts: 10,000.00 cash and 100 shares at a 100.00 reference.
+ * The instruments exist before the engine starts, because it rebuilds its books only then.
+ */
+@Import(TestcontainersConfiguration.class)
+@SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT,
+		properties = { "mse.test.database=portfolio-api", "mse.dev-users.trader-password=" + PortfolioApiIT.PASSWORD,
+				"mse.dev-users.operator-password=" + PortfolioApiIT.PASSWORD })
+class PortfolioApiIT {
+
+	static final String PASSWORD = "test-portfolio-password";
+
+	private static final JsonMapper JSON = JsonMapper.builder().build();
+
+	private static final List<UUID> INSTRUMENTS = new ArrayList<>();
+
+	private static final AtomicInteger NEXT = new AtomicInteger();
+
+	@LocalServerPort
+	int port;
+
+	@Autowired
+	JdbcTemplate jdbc;
+
+	@Autowired
+	PlatformTransactionManager transactionManager;
+
+	@Autowired
+	TradingEngine engine;
+
+	private UUID instrument;
+
+	private TestBrowser trader;
+
+	private TestBrowser other;
+
+	@BeforeEach
+	void market() throws Exception {
+		synchronized (INSTRUMENTS) {
+			if (INSTRUMENTS.isEmpty()) {
+				new TransactionTemplate(transactionManager).executeWithoutResult((status) -> simulation());
+				engine.start();
+			}
+		}
+		int n = NEXT.getAndIncrement();
+		instrument = INSTRUMENTS.get(n);
+		new TransactionTemplate(transactionManager).executeWithoutResult((status) -> {
+			fundedTrader("trader" + n);
+			fundedTrader("other" + n);
+		});
+		trader = TestBrowser.loggedIn(port, "trader" + n, PASSWORD);
+		other = TestBrowser.loggedIn(port, "other" + n, PASSWORD);
+	}
+
+	@Test
+	void portfolioBeforeAnyTradeUsesTheLabelledReference() throws Exception {
+		JsonNode portfolio = json(trader.get("/api/v1/portfolio"));
+
+		assertThat(portfolio.get("cash").get("total").asString()).isEqualTo("10000.00");
+		assertThat(portfolio.get("cash").get("available").asString()).isEqualTo("10000.00");
+		assertThat(portfolio.get("cash").get("reserved").asString()).isEqualTo("0.00");
+		JsonNode holding = portfolio.get("holdings").get(0);
+		assertThat(holding.get("total").asLong()).isEqualTo(100);
+		assertThat(holding.get("mark").get("source").asString()).isEqualTo("REFERENCE");
+		assertThat(holding.get("mark").get("price").asString()).isEqualTo("100.00");
+		assertThat(holding.get("mark").get("at").isNull()).isTrue();
+		assertThat(holding.get("value").asString()).isEqualTo("10000.00");
+		assertThat(portfolio.get("equity").asString()).isEqualTo("20000.00");
+	}
+
+	/** Resting orders move cash and shares from available to reserved; equity counts each once, so it holds. */
+	@Test
+	void reservedCashAndSharesAreCountedOnce() throws Exception {
+		place(trader, "BUY", 2, "90.00");
+		place(trader, "SELL", 3, "120.00");
+
+		JsonNode portfolio = json(trader.get("/api/v1/portfolio"));
+		JsonNode holding = portfolio.get("holdings").get(0);
+		assertThat(holding.get("available").asLong()).isEqualTo(97);
+		assertThat(holding.get("reserved").asLong()).isEqualTo(3);
+		assertThat(holding.get("value").asString()).as("all 100 shares, reserved ones too").isEqualTo("10000.00");
+
+		assertThat(portfolio.get("cash").get("total").asString()).isEqualTo("10000.00");
+		assertThat(portfolio.get("cash").get("available").asString()).isEqualTo("9820.00");
+		assertThat(portfolio.get("cash").get("reserved").asString()).isEqualTo("180.00");
+		assertThat(portfolio.get("equity").asString()).isEqualTo("20000.00");
+	}
+
+	@Test
+	void aTradeMovesCashSharesAndTheMark() throws Exception {
+		place(trader, "SELL", 4, "101.00");
+		place(other, "BUY", 4, "101.00");
+
+		JsonNode seller = json(trader.get("/api/v1/portfolio"));
+		JsonNode holding = seller.get("holdings").get(0);
+		assertThat(seller.get("cash").get("total").asString()).isEqualTo("10404.00");
+		assertThat(holding.get("total").asLong()).isEqualTo(96);
+		assertThat(holding.get("mark").get("source").asString()).isEqualTo("LAST_TRADE");
+		assertThat(holding.get("mark").get("price").asString()).isEqualTo("101.00");
+		assertThat(holding.get("mark").get("at").isNull()).isFalse();
+		assertThat(holding.get("value").asString()).isEqualTo("9696.00");
+		assertThat(seller.get("equity").asString()).isEqualTo("20100.00");
+		assertThat(Long.parseLong(seller.get("accountVersion").asString())).isPositive();
+
+		JsonNode sold = json(trader.get("/api/v1/portfolio/trades")).get("trades").get(0);
+		assertThat(sold.get("side").asString()).isEqualTo("SELL");
+		assertThat(sold.get("liquidity").asString()).isEqualTo("MAKER");
+		assertThat(sold.get("notional").asString()).isEqualTo("404.00");
+		JsonNode bought = json(other.get("/api/v1/portfolio/trades")).get("trades").get(0);
+		assertThat(bought.get("side").asString()).isEqualTo("BUY");
+		assertThat(bought.get("liquidity").asString()).isEqualTo("TAKER");
+		assertThat(bought.get("tradeId").asString()).isEqualTo(sold.get("tradeId").asString());
+	}
+
+	/** Five fills in two commands, in pages of two: newest first, each exactly once, nothing of the other side's. */
+	@Test
+	void ownTradesPageNewestFirst() throws Exception {
+		for (int i = 0; i < 3; i++) {
+			place(trader, "SELL", 1, "100.00");
+		}
+		place(other, "BUY", 3, "100.00");
+		place(trader, "SELL", 2, "100.50");
+		place(other, "BUY", 1, "100.50");
+		place(other, "BUY", 1, "100.50");
+
+		List<String> seen = new ArrayList<>();
+		List<Integer> sizes = new ArrayList<>();
+		String path = "/api/v1/portfolio/trades?limit=2";
+		JsonNode page = json(trader.get(path));
+		while (true) {
+			sizes.add(page.get("trades").size());
+			page.get("trades").forEach((trade) -> seen.add(trade.get("tradeId").asString()));
+			if (page.get("nextCursor").isNull()) {
+				break;
+			}
+			page = json(trader.get(path + "&cursor=" + page.get("nextCursor").asString()));
+		}
+
+		assertThat(sizes).containsExactly(2, 2, 1);
+		assertThat(seen).doesNotHaveDuplicates();
+		assertThat(seen.getFirst()).as("the newest command first").isEqualTo(newestTradeId());
+	}
+
+	@Test
+	void activeOrdersAndTheFullHistory() throws Exception {
+		String resting = place(trader, "BUY", 1, "95.00");
+		place(trader, "BUY", 1, "94.00");
+		HttpResponse<String> rejected = trader.post("/api/v1/orders", limit("BUY", 10_000, "900.00"), "Idempotency-Key",
+				UUID.randomUUID().toString());
+		assertThat(rejected.statusCode()).isEqualTo(422);
+		trader.post("/api/v1/orders/" + resting + "/cancel", "", "Idempotency-Key", UUID.randomUUID().toString());
+		place(other, "BUY", 1, "93.00");
+
+		JsonNode active = json(trader.get("/api/v1/orders?status=active"));
+		assertThat(active.get("orders").size()).isEqualTo(1);
+		assertThat(active.get("orders").get(0).get("limitPrice").asString()).isEqualTo("94.00");
+		assertThat(active.get("orders").get(0).get("symbol").asString()).startsWith("PORT");
+		assertThat(active.get("nextCursor").isNull()).isTrue();
+
+		JsonNode first = json(trader.get("/api/v1/orders?limit=2"));
+		JsonNode second = json(trader.get("/api/v1/orders?limit=2&cursor=" + first.get("nextCursor").asString()));
+		List<String> states = new ArrayList<>();
+		first.get("orders").forEach((order) -> states.add(order.get("state").asString()));
+		second.get("orders").forEach((order) -> states.add(order.get("state").asString()));
+		assertThat(states).as("newest first, rejected included").containsExactly("REJECTED", "OPEN", "CANCELED");
+		assertThat(second.get("nextCursor").isNull()).isTrue();
+	}
+
+	@Test
+	void badPagingRequestsAreRefused() throws Exception {
+		assertThat(trader.get("/api/v1/orders?limit=201").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/orders?status=done").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/orders?cursor=bm90LWEtY3Vyc29y").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/portfolio/trades?limit=0").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/portfolio/trades?limit=many").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/portfolio/trades?cursor=%25").statusCode()).isEqualTo(400);
+		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
+		assertThat(operator.get("/api/v1/portfolio").statusCode()).isEqualTo(403);
+		assertThat(new TestBrowser(port).get("/api/v1/orders").statusCode()).isEqualTo(401);
+	}
+
+	private String place(TestBrowser browser, String side, long quantity, String price) throws Exception {
+		HttpResponse<String> response = browser.post("/api/v1/orders", limit(side, quantity, price), "Idempotency-Key",
+				UUID.randomUUID().toString());
+		assertThat(response.statusCode()).as(response.body()).isEqualTo(201);
+		return JSON.readTree(response.body()).get("orderId").asString();
+	}
+
+	private String limit(String side, long quantity, String price) {
+		return """
+				{"instrumentId":"%s","side":"%s","type":"LIMIT","timeInForce":"GTC","quantity":%d,"limitPrice":"%s"}"""
+			.formatted(instrument, side, quantity, price);
+	}
+
+	private String newestTradeId() {
+		return jdbc.queryForObject("""
+				SELECT id::text FROM trades WHERE instrument_id = ?
+				ORDER BY command_sequence DESC, trade_sequence DESC LIMIT 1""", String.class, instrument);
+	}
+
+	private static JsonNode json(HttpResponse<String> response) {
+		assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
+		return JSON.readTree(response.body());
+	}
+
+	private void simulation() {
+		UUID simulation = UUID.randomUUID();
+		jdbc.update("INSERT INTO simulation (id, state, opened_at) VALUES (?, 'OPEN', now())", simulation);
+		jdbc.update("INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'ISSUANCE', 'Issuance')",
+				UUID.randomUUID(), simulation);
+		for (int i = 0; i < 8; i++) {
+			UUID id = UUID.randomUUID();
+			jdbc.update(
+					"INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, ?, 10000)",
+					id, simulation, "PORT" + (char) ('A' + i));
+			INSTRUMENTS.add(id);
+		}
+	}
+
+	/** A trader user with an account holding 10,000.00 and 100 shares of this test's instrument, from genesis. */
+	private void fundedTrader(String username) {
+		UUID user = UUID.randomUUID();
+		UUID account = UUID.randomUUID();
+		UUID batch = UUID.randomUUID();
+		UUID simulation = jdbc.queryForObject("SELECT id FROM simulation", UUID.class);
+		UUID issuance = jdbc.queryForObject("SELECT id FROM account WHERE kind = 'ISSUANCE'", UUID.class);
+		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, ?, 'TRADER')", user,
+				username, "{noop}" + PASSWORD);
+		jdbc.update("""
+				INSERT INTO account (id, simulation_id, kind, display_name, owner_user_id)
+				VALUES (?, ?, 'TRADER', ?, ?)""", account, simulation, username, user);
+		jdbc.update("INSERT INTO journal_batch (id, simulation_id, cause, command_sequence) VALUES (?, ?, 'GENESIS', 1)",
+				batch, simulation);
+		String post = "INSERT INTO ledger_entry (batch_id, account_id, instrument_id, bucket, delta) VALUES (?, ?, ?, 'AVAILABLE', ?)";
+		jdbc.update(post, batch, issuance, null, -1_000_000);
+		jdbc.update(post, batch, account, null, 1_000_000);
+		jdbc.update(post, batch, issuance, instrument, -100);
+		jdbc.update(post, batch, account, instrument, 100);
+		jdbc.update("""
+				INSERT INTO cash_balance (account_id, account_kind, total_cents, reserved_cents)
+				VALUES (?, 'TRADER', 1000000, 0)""", account);
+		jdbc.update("""
+				INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
+				VALUES (?, 'TRADER', ?, 100, 0)""", account, instrument);
+	}
+
+}

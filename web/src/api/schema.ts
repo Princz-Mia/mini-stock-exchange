@@ -79,7 +79,12 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        readonly get?: never;
+        /**
+         * The caller's own orders, newest first.
+         * @description With status=active, every open or partially filled order, at most 20, in one response. With status=all,
+         *     every order including rejected ones, in keyset pages.
+         */
+        readonly get: operations["listOrders"];
         readonly put?: never;
         /**
          * Place an order for the logged-in trader's account.
@@ -139,6 +144,44 @@ export interface paths {
          * @description 404 means nothing committed under the key, so retrying the original request with it is safe.
          */
         readonly get: operations["getCommand"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/portfolio": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * The caller's cash, holdings and estimated equity, all from one consistent read.
+         * @description Cash and holdings come from the same committed state. Each holding is marked to the instrument's latest
+         *     execution, or to its labelled reference price before the first trade.
+         */
+        readonly get: operations["getPortfolio"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/portfolio/trades": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** The caller's own executions, newest first, in keyset pages. */
+        readonly get: operations["listOwnTrades"];
         readonly put?: never;
         readonly post?: never;
         readonly delete?: never;
@@ -293,6 +336,7 @@ export interface components {
         readonly OrderDetail: {
             readonly orderId: components["schemas"]["Uuid"];
             readonly instrumentId: components["schemas"]["Uuid"];
+            readonly symbol: string;
             readonly side: components["schemas"]["Side"];
             /** @enum {string} */
             readonly type: "LIMIT" | "MARKET_PROTECTED";
@@ -311,7 +355,78 @@ export interface components {
             /** @enum {string} */
             readonly state: "OPEN" | "PARTIALLY_FILLED" | "FILLED" | "CANCELED" | "REJECTED";
             readonly reason: string | null;
+            /** @description Increases with every change to the order. */
             readonly version: components["schemas"]["Sequence"];
+            readonly createdAt: components["schemas"]["Timestamp"];
+            readonly updatedAt: components["schemas"]["Timestamp"];
+        };
+        readonly OrderPage: {
+            readonly orders: readonly components["schemas"]["OrderDetail"][];
+            /** @description Null on the last page, and always null for status=active. */
+            readonly nextCursor: string | null;
+        };
+        /** @description An amount with exactly two decimals, such as "12345.67". */
+        readonly Money: string;
+        readonly Portfolio: {
+            readonly cash: components["schemas"]["Cash"];
+            readonly holdings: readonly components["schemas"]["Holding"][];
+            /** @description Total cash plus every holding at its mark; reserved amounts are counted once. */
+            readonly equity: components["schemas"]["Money"];
+            /** @description Increases with every command that changes this account's money or orders. */
+            readonly accountVersion: components["schemas"]["Sequence"];
+            /** @description The last command reflected here. */
+            readonly asOfCommandSequence: components["schemas"]["Sequence"];
+        };
+        readonly Cash: {
+            readonly total: components["schemas"]["Money"];
+            readonly available: components["schemas"]["Money"];
+            readonly reserved: components["schemas"]["Money"];
+        };
+        readonly Holding: {
+            readonly instrumentId: components["schemas"]["Uuid"];
+            readonly symbol: string;
+            /** Format: int64 */
+            readonly total: number;
+            /** Format: int64 */
+            readonly available: number;
+            /** Format: int64 */
+            readonly reserved: number;
+            readonly mark: components["schemas"]["Mark"];
+            /** @description total at the mark. */
+            readonly value: components["schemas"]["Money"];
+        };
+        readonly Mark: {
+            readonly price: components["schemas"]["Price"];
+            /**
+             * @description REFERENCE before the instrument's first trade; label it as such.
+             * @enum {string}
+             */
+            readonly source: "LAST_TRADE" | "REFERENCE";
+            /** @description When the last trade happened; null for a reference price. */
+            readonly at: components["schemas"]["Timestamp"] | null;
+        };
+        readonly OwnTrade: {
+            readonly tradeId: components["schemas"]["Uuid"];
+            readonly instrumentId: components["schemas"]["Uuid"];
+            readonly symbol: string;
+            /** @description The caller's side of the trade. */
+            readonly side: components["schemas"]["Side"];
+            /**
+             * @description MAKER when the caller's order was resting, TAKER when it arrived.
+             * @enum {string}
+             */
+            readonly liquidity: "MAKER" | "TAKER";
+            readonly price: components["schemas"]["Price"];
+            /** Format: int64 */
+            readonly quantity: number;
+            readonly notional: components["schemas"]["Money"];
+            readonly executedAt: components["schemas"]["Timestamp"];
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly OwnTradePage: {
+            readonly trades: readonly components["schemas"]["OwnTrade"][];
+            /** @description Null on the last page. */
+            readonly nextCursor: string | null;
         };
         readonly Cancellation: {
             readonly orderId: components["schemas"]["Uuid"];
@@ -423,6 +538,15 @@ export interface components {
         };
     };
     responses: {
+        /** @description Not a trader, refused before the controller with no body; or NO_TRADING_ACCOUNT. */
+        readonly NotTrader: {
+            headers: {
+                readonly [name: string]: unknown;
+            };
+            content: {
+                readonly "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
         /** @description A problem, with its code. */
         readonly Problem: {
             headers: {
@@ -457,6 +581,9 @@ export interface components {
         readonly IdempotencyKey: string;
         readonly OrderId: string;
         readonly InstrumentId: string;
+        readonly Limit: number;
+        /** @description The nextCursor of the previous page. Opaque. */
+        readonly Cursor: string;
     };
     requestBodies: never;
     headers: never;
@@ -575,6 +702,40 @@ export interface operations {
                 };
                 content?: never;
             };
+        };
+    };
+    readonly listOrders: {
+        readonly parameters: {
+            readonly query?: {
+                readonly status?: "all" | "active";
+                readonly limit?: components["parameters"]["Limit"];
+                /** @description The nextCursor of the previous page. Opaque. */
+                readonly cursor?: components["parameters"]["Cursor"];
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description One page of orders. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["OrderPage"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            readonly 403: components["responses"]["NotTrader"];
         };
     };
     readonly placeOrder: {
@@ -774,6 +935,67 @@ export interface operations {
             readonly 404: components["responses"]["Problem"];
             readonly 409: components["responses"]["Problem"];
             readonly 422: components["responses"]["Problem"];
+        };
+    };
+    readonly getPortfolio: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The portfolio. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Portfolio"];
+                };
+            };
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            readonly 403: components["responses"]["NotTrader"];
+        };
+    };
+    readonly listOwnTrades: {
+        readonly parameters: {
+            readonly query?: {
+                readonly limit?: components["parameters"]["Limit"];
+                /** @description The nextCursor of the previous page. Opaque. */
+                readonly cursor?: components["parameters"]["Cursor"];
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description One page of executions. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["OwnTradePage"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            readonly 403: components["responses"]["NotTrader"];
         };
     };
     readonly listInstruments: {

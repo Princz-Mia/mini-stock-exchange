@@ -47,6 +47,11 @@ final class ApiException extends RuntimeException {
 		return this;
 	}
 
+	static ApiException invalid(String field, String code, String message) {
+		return new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "The request is invalid",
+				List.of(new FieldError(field, code, message)));
+	}
+
 	HttpStatus status() {
 		return status;
 	}
