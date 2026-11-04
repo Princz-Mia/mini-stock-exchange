@@ -18,11 +18,13 @@ import java.util.function.BooleanSupplier;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.admin.RecordsToDelete;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
@@ -40,18 +42,21 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 import com.mia_princz.mse.contracts.events.MarketSnapshot;
+import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.marketdata.projection.Checkpoints;
 import com.mia_princz.mse.marketdata.projection.MarketFeedConsumer;
 import com.mia_princz.mse.marketdata.projection.MarketFeedConsumer.State;
 import com.mia_princz.mse.marketdata.projection.SnapshotProjection;
+import com.mia_princz.mse.marketdata.projection.TradeProjection;
 
 /**
  * The feed against real Kafka and PostgreSQL. The application's own feed is off; each test drives feeds of its own
  * on a topic of its own with three partitions.
  */
 @Import(TestcontainersConfiguration.class)
-@SpringBootTest(properties = { "mse.test.database=market-feed", "mse.market-feed.enabled=false" })
+@SpringBootTest(properties = { "mse.test.database=market-feed", "mse.market-feed.enabled=false",
+		"mse.trade-feed.enabled=false" })
 class MarketFeedConsumerIT {
 
 	private static final AtomicInteger TOPICS = new AtomicInteger();
@@ -70,6 +75,9 @@ class MarketFeedConsumerIT {
 
 	@Autowired
 	SnapshotProjection projection;
+
+	@Autowired
+	TradeProjection tradeProjection;
 
 	@Autowired
 	Checkpoints checkpoints;
@@ -116,7 +124,7 @@ class MarketFeedConsumerIT {
 		while (feed.state() != State.LIVE && System.nanoTime() < deadline) {
 			Thread.onSpinWait();
 		}
-		long appliedWhenLive = feed.appliedSnapshots();
+		long appliedWhenLive = feed.appliedEvents();
 		assertThat(feed.state()).isEqualTo(State.LIVE);
 		assertThat(appliedWhenLive).as("applied when first live").isEqualTo(30);
 		for (UUID instrument : instruments) {
@@ -141,7 +149,8 @@ class MarketFeedConsumerIT {
 		waitUntil(() -> sequenceOrZero(instrument) == 3);
 
 		waitUntil(() -> second.state() == State.LIVE);
-		assertThat(second.appliedSnapshots()).as("only the new snapshot was read").isEqualTo(1);
+		assertThat(second.appliedEvents()).as("only the new snapshot was read").isEqualTo(1);
+		assertThat(second.health().getDetails()).as("nothing was deleted").doesNotContainKey("historyGap");
 		assertThat(checkpoints.load(topic).values().stream().mapToLong(Long::longValue).sum()).isEqualTo(3);
 	}
 
@@ -189,13 +198,81 @@ class MarketFeedConsumerIT {
 		assertThat(feed.health().getStatus().getCode()).isEqualTo("OUT_OF_SERVICE");
 	}
 
+	/** The same trade redelivered, and again under a new event id: one tape row. */
+	@Test
+	void tradesAreProjectedOncePerTradeId() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		TradeExecuted trade = Trades.trade(instrument, 1);
+		publishTrade(trade);
+		publishTrade(trade);
+		publishTrade(TradeExecuted.newBuilder(trade).setEventId(UUID.randomUUID()).build());
+		publishTrade(Trades.trade(instrument, 2));
+		MarketFeedConsumer feed = feed(Map.of(), tradeHandler());
+
+		feed.start();
+
+		waitUntil(() -> feed.state() == State.LIVE);
+		assertThat(jdbc.queryForList("SELECT trade_sequence FROM public_trade WHERE instrument_id = ? ORDER BY 1",
+				Long.class, instrument)).containsExactly(1L, 2L);
+		assertThat(feed.appliedEvents()).isEqualTo(2);
+	}
+
+	/** A different trade under a sequence already projected is a contradiction: the feed pauses there. */
+	@Test
+	void contradictoryTradePausesTheFeed() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		publishTrade(Trades.trade(instrument, 1));
+		publishTrade(Trades.trade(instrument, 1));
+		publishTrade(Trades.trade(instrument, 2));
+		MarketFeedConsumer feed = feed(Map.of(), tradeHandler());
+
+		feed.start();
+
+		waitUntil(() -> feed.state() == State.PAUSED);
+		assertThat(feed.health().getDetails().get("error").toString()).contains("another trade already has");
+		assertThat(jdbc.queryForList("SELECT trade_sequence FROM public_trade WHERE instrument_id = ?", Long.class,
+				instrument)).as("nothing after the contradiction").containsExactly(1L);
+	}
+
+	/** Retention deleted records past the checkpoint: the feed says which ones, then carries on from what is left. */
+	@Test
+	void recordsDeletedBeforeProjectionAreReportedAsAGap() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		int partition = send(Snapshots.SIMULATION + "|" + instrument,
+				WireEvents.encode(Snapshots.snapshot(instrument, 1, 1)));
+		MarketFeedConsumer first = feed(Map.of());
+		first.start();
+		waitUntil(() -> first.state() == State.LIVE);
+		first.close();
+		// Deleted exactly up to the checkpoint: nothing unread was lost.
+		deleteBefore(partition, 1);
+		MarketFeedConsumer second = feed(Map.of());
+		second.start();
+		waitUntil(() -> second.state() == State.LIVE);
+		second.close();
+		assertThat(second.health().getDetails()).as("nothing unread deleted").doesNotContainKey("historyGap");
+		for (long sequence = 2; sequence <= 4; sequence++) {
+			publish(Snapshots.snapshot(instrument, sequence, 1));
+		}
+		deleteBefore(partition, 3);
+		MarketFeedConsumer third = feed(Map.of());
+
+		third.start();
+
+		waitUntil(() -> third.state() == State.LIVE);
+		assertThat(third.health().getDetails()).containsEntry("historyGap",
+				topic + "-" + partition + " offsets 1 to 2");
+		assertThat(sequence(instrument)).as("continued from the oldest retained record").isEqualTo(4);
+	}
+
 	@Test
 	void withoutKafkaTheFeedIsNeverLive() throws Exception {
 		Map<String, Object> config = consumerConfig(Map.of());
 		config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:1");
 		MarketFeedConsumer feed = new MarketFeedConsumer(
 				() -> new KafkaConsumer<>(config, new StringDeserializer(), new ByteArrayDeserializer()),
-				new TransactionTemplate(transactionManager), projection, checkpoints, settings(), Clock.systemUTC());
+				new TransactionTemplate(transactionManager), snapshotHandler(), checkpoints, settings(),
+				Clock.systemUTC());
 		feeds.add(feed);
 
 		feed.start();
@@ -205,13 +282,37 @@ class MarketFeedConsumerIT {
 		assertThat(feed.health().getStatus().getCode()).isEqualTo("OUT_OF_SERVICE");
 	}
 
+	private void deleteBefore(int partition, long offset) throws Exception {
+		try (Admin admin = Admin.create(Map.of(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, brokers()))) {
+			admin.deleteRecords(Map.of(new TopicPartition(topic, partition), RecordsToDelete.beforeOffset(offset)))
+				.all()
+				.get();
+		}
+	}
+
 	private MarketFeedConsumer feed(Map<String, Object> overrides) {
+		return feed(overrides, snapshotHandler());
+	}
+
+	private MarketFeedConsumer feed(Map<String, Object> overrides, MarketFeedConsumer.Handler handler) {
 		Map<String, Object> config = consumerConfig(overrides);
 		MarketFeedConsumer feed = new MarketFeedConsumer(
 				() -> new KafkaConsumer<>(config, new StringDeserializer(), new ByteArrayDeserializer()),
-				new TransactionTemplate(transactionManager), projection, checkpoints, settings(), Clock.systemUTC());
+				new TransactionTemplate(transactionManager), handler, checkpoints, settings(), Clock.systemUTC());
 		feeds.add(feed);
 		return feed;
+	}
+
+	private MarketFeedConsumer.Handler snapshotHandler() {
+		return (payload) -> projection.apply(WireEvents.decodeSnapshot(payload));
+	}
+
+	private MarketFeedConsumer.Handler tradeHandler() {
+		return (payload) -> tradeProjection.apply(WireEvents.decodeTrade(payload));
+	}
+
+	private void publishTrade(TradeExecuted trade) throws Exception {
+		send(trade.getSimulationId() + "|" + trade.getInstrumentId(), WireEvents.encode(trade));
 	}
 
 	private MarketFeedConsumer.Settings settings() {

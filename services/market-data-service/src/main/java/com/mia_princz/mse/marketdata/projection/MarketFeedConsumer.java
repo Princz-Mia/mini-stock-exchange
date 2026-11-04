@@ -25,20 +25,18 @@ import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.boot.health.contributor.Status;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import com.mia_princz.mse.contracts.events.MarketSnapshot;
-import com.mia_princz.mse.contracts.events.WireEvents;
-
 /**
- * Projects market snapshots from Kafka into this service's database. It reads every partition of the topic itself,
+ * Projects one Kafka topic into this service's database through a {@link Handler}. It reads every partition itself,
  * starting from the offsets saved in {@code projection_checkpoint}, or from the beginning when there are none, so an
  * empty database rebuilds from the retained topic. Each poll is applied in one transaction together with the new
  * checkpoints; Kafka keeps no consumer-group offsets for it.
  *
  * <p>
  * The feed is {@link State#LIVE} only after reaching the end offsets the topic had when it connected, so an empty or
- * half-rebuilt projection is never reported as current. A record that cannot be decoded pauses the feed at that
- * offset instead of being skipped. The feed's state is outside readiness: stale public data is reported, not
- * treated as a reason to stop serving.
+ * half-rebuilt projection is never reported as current. A record that cannot be decoded, or that contradicts the
+ * projection, pauses the feed at that offset instead of being skipped. A checkpoint older than the topic's oldest retained record is reported as a
+ * history gap. The feed's state is outside readiness: stale public data is reported, not treated as a reason to stop
+ * serving.
  */
 public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable {
 
@@ -69,11 +67,23 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 			Duration retryBackoff) {
 	}
 
+	/** Decodes and applies one record inside the batch transaction; returns whether it changed the projection. */
+	@FunctionalInterface
+	public interface Handler {
+
+		/**
+		 * @throws IOException or {@link AvroRuntimeException} when the record cannot be read, or
+		 * {@link UnusableRecordException} when it contradicts the projection; the feed pauses either way
+		 */
+		boolean apply(byte[] payload) throws IOException;
+
+	}
+
 	private final Supplier<Consumer<String, byte[]>> consumers;
 
 	private final TransactionTemplate transactions;
 
-	private final SnapshotProjection projection;
+	private final Handler handler;
 
 	private final Checkpoints checkpoints;
 
@@ -99,17 +109,19 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 
 	private volatile String pausedAt;
 
+	private volatile String historyGap;
+
 	private Map<TopicPartition, Long> targets = Map.of();
 
 	public MarketFeedConsumer(Supplier<Consumer<String, byte[]>> consumers, TransactionTemplate transactions,
-			SnapshotProjection projection, Checkpoints checkpoints, Settings settings, Clock clock) {
+			Handler handler, Checkpoints checkpoints, Settings settings, Clock clock) {
 		this.consumers = consumers;
 		this.transactions = transactions;
-		this.projection = projection;
+		this.handler = handler;
 		this.checkpoints = checkpoints;
 		this.settings = settings;
 		this.clock = clock;
-		this.thread = Thread.ofPlatform().name("market-feed").unstarted(this::loop);
+		this.thread = Thread.ofPlatform().name("feed-" + settings.topic()).unstarted(this::loop);
 	}
 
 	public void start() {
@@ -136,8 +148,9 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 				if (state == State.LIVE) {
 					state = State.STALE;
 				}
-				log.warn("Market feed reconnecting in {} ms: {}", settings.retryBackoff().toMillis(), ex.getMessage());
-				log.debug("Market feed failure", ex);
+				log.warn("Feed {} reconnecting in {} ms: {}", settings.topic(), settings.retryBackoff().toMillis(),
+						ex.getMessage());
+				log.debug("Feed failure", ex);
 				sleepQuietly(settings.retryBackoff());
 			}
 			finally {
@@ -156,6 +169,15 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 			.toList();
 		consumer.assign(partitions);
 		Map<Integer, Long> saved = checkpoints.load(settings.topic());
+		Map<TopicPartition, Long> oldest = consumer.beginningOffsets(partitions, KAFKA_CALL_TIMEOUT);
+		for (TopicPartition partition : partitions) {
+			Long next = saved.get(partition.partition());
+			if (next != null && next < oldest.get(partition)) {
+				// Retention deleted records this projection never read; they are gone from Kafka.
+				historyGap = partition + " offsets " + next + " to " + (oldest.get(partition) - 1);
+				log.warn("History gap on {}: records were deleted before they were projected", historyGap);
+			}
+		}
 		for (TopicPartition partition : partitions) {
 			Long next = saved.get(partition.partition());
 			if (next == null) {
@@ -178,7 +200,7 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 			if (state == State.CATCHING_UP && reached(consumer, targets)) {
 				state = State.LIVE;
 				error = null;
-				log.info("Market feed is live");
+				log.info("Feed {} is live", settings.topic());
 			}
 			Instant now = clock.instant();
 			if (!now.isBefore(lagCheckedAt.plus(settings.lagCheckInterval()))) {
@@ -192,17 +214,17 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 	private boolean applyBatch(ConsumerRecords<String, byte[]> records) {
 		Boolean complete = transactions.execute((status) -> {
 			for (ConsumerRecord<String, byte[]> record : records) {
-				MarketSnapshot snapshot;
+				boolean changed;
 				try {
-					snapshot = WireEvents.decodeSnapshot(record.value());
+					changed = handler.apply(record.value());
 				}
-				catch (IOException | AvroRuntimeException ex) {
+				catch (IOException | AvroRuntimeException | UnusableRecordException ex) {
 					pausedAt = record.topic() + "/" + record.partition() + "@" + record.offset();
-					error = "Unreadable record at " + pausedAt + ": " + ex.getMessage();
-					log.error("Market feed paused: {}", error);
+					error = "Unusable record at " + pausedAt + ": " + ex.getMessage();
+					log.error("Feed paused: {}", error);
 					return false;
 				}
-				if (projection.apply(snapshot)) {
+				if (changed) {
 					applied.incrementAndGet();
 				}
 				checkpoints.save(record.topic(), record.partition(), record.offset() + 1);
@@ -232,7 +254,7 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 					&& (state == State.LIVE || state == State.CATCHING_UP)) {
 				state = State.STALE;
 				error = "Kafka has not answered since " + lastContact;
-				log.warn("Market feed is stale: {}", error);
+				log.warn("Feed {} is stale: {}", settings.topic(), error);
 			}
 			return;
 		}
@@ -266,14 +288,14 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 		return lag;
 	}
 
-	public long appliedSnapshots() {
+	public long appliedEvents() {
 		return applied.get();
 	}
 
 	@Override
 	public Health health() {
 		Health.Builder health = state == State.LIVE ? Health.up() : Health.status(Status.OUT_OF_SERVICE);
-		health.withDetail("state", state.name()).withDetail("lag", lag).withDetail("appliedSnapshots", applied.get());
+		health.withDetail("state", state.name()).withDetail("lag", lag).withDetail("applied", applied.get());
 		String problem = error;
 		if (problem != null) {
 			health.withDetail("error", problem);
@@ -281,6 +303,10 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 		String at = pausedAt;
 		if (at != null) {
 			health.withDetail("pausedAt", at);
+		}
+		String gap = historyGap;
+		if (gap != null) {
+			health.withDetail("historyGap", gap);
 		}
 		return health.build();
 	}
@@ -292,7 +318,13 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 		if (consumer != null) {
 			consumer.wakeup();
 		}
-		if (thread.getState() != Thread.State.NEW) {
+		if (thread.getState() == Thread.State.NEW) {
+			return;
+		}
+		// The wakeup ends a poll cleanly. An interrupt is only for a thread asleep between retries: an interrupted
+		// thread cannot close its Kafka consumer cleanly, and Kafka logs that as an error.
+		thread.join(Duration.ofSeconds(2));
+		if (thread.isAlive()) {
 			thread.interrupt();
 			thread.join(Duration.ofSeconds(10));
 		}
