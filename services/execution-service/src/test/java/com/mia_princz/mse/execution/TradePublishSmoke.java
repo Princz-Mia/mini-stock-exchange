@@ -39,20 +39,26 @@ class TradePublishSmoke {
 			KafkaTemplate<String, byte[]> template = new KafkaTemplate<>(factory);
 			String key = simulationId + "|" + instrumentId;
 			long[][] fills = { { 1, 10_000, 3 }, { 2, 10_000, 4 }, { 2, 10_000, 4 }, { 3, 10_100, 3 } };
+			byte[] previous = null;
+			long previousSequence = 0;
 			for (long[] fill : fills) {
-				TradeExecuted trade = TradeExecuted.newBuilder()
-					.setEventId(UUID.randomUUID())
-					.setSimulationId(simulationId)
-					.setInstrumentId(instrumentId)
-					.setSymbol("NOVA")
-					.setTradeId(UUID.randomUUID())
-					.setTradeSequence(fill[0])
-					.setCommandSequence(fill[0])
-					.setExecutedAt(minute.plusSeconds(fill[0]))
-					.setPriceCents(fill[1])
-					.setQuantity(fill[2])
-					.build();
-				template.send("mse.trades.v1", key, WireEvents.encode(trade)).get();
+				// A redelivery resends the same bytes, as the outbox relay does: same event id, same trade id.
+				byte[] payload = fill[0] == previousSequence ? previous
+						: WireEvents.encode(TradeExecuted.newBuilder()
+							.setEventId(UUID.randomUUID())
+							.setSimulationId(simulationId)
+							.setInstrumentId(instrumentId)
+							.setSymbol("NOVA")
+							.setTradeId(UUID.randomUUID())
+							.setTradeSequence(fill[0])
+							.setCommandSequence(fill[0])
+							.setExecutedAt(minute.plusSeconds(fill[0]))
+							.setPriceCents(fill[1])
+							.setQuantity(fill[2])
+							.build());
+				template.send("mse.trades.v1", key, payload).get();
+				previous = payload;
+				previousSequence = fill[0];
 			}
 		}
 		finally {
