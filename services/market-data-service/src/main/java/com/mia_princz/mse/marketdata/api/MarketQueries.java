@@ -1,6 +1,7 @@
 package com.mia_princz.mse.marketdata.api;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -32,6 +33,17 @@ class MarketQueries {
 	}
 
 	record Trade(UUID tradeId, long tradeSequence, long priceCents, long quantity, Instant executedAt) {
+	}
+
+	/** A tape entry as the snapshot carries it, with the side that took liquidity. */
+	record TapeTrade(UUID tradeId, long tradeSequence, long priceCents, long quantity, String aggressorSide,
+			Instant executedAt) {
+	}
+
+	/** Everything a live frame shows, from one row: the complete public state of the instrument. */
+	record Live(UUID instrumentId, String symbol, String venueState, List<Level> bids, List<Level> asks,
+			Long lastPriceCents, List<TapeTrade> recentTrades, long lastTradeSequence, long sourceCommandSequence,
+			Instant generatedAt) {
 	}
 
 	private final JdbcClient jdbc;
@@ -67,6 +79,22 @@ class MarketQueries {
 			.query((row, index) -> new Book(instrumentId, row.getString("symbol"), row.getString("venue_state"),
 					levels(row.getString("bids"), depth), levels(row.getString("asks"), depth),
 					row.getLong("source_command_sequence"), row.getTimestamp("generated_at").toInstant()))
+			.optional();
+	}
+
+	Optional<Live> live(UUID instrumentId) {
+		return jdbc.sql("""
+				SELECT i.symbol, m.venue_state, m.bids::text AS bids, m.asks::text AS asks, m.last_price_cents,
+				    m.recent_trades::text AS recent_trades, m.last_trade_sequence, m.source_command_sequence,
+				    m.generated_at
+				FROM market_snapshot m JOIN instrument_projection i ON i.instrument_id = m.instrument_id
+				WHERE m.instrument_id = ?""")
+			.param(instrumentId)
+			.query((row, index) -> new Live(instrumentId, row.getString("symbol"), row.getString("venue_state"),
+					levels(row.getString("bids"), Integer.MAX_VALUE), levels(row.getString("asks"), Integer.MAX_VALUE),
+					row.getObject("last_price_cents", Long.class), tape(row.getString("recent_trades")),
+					row.getLong("last_trade_sequence"), row.getLong("source_command_sequence"),
+					row.getTimestamp("generated_at").toInstant()))
 			.optional();
 	}
 
@@ -108,6 +136,16 @@ class MarketQueries {
 
 	private static Level level(JsonNode node) {
 		return new Level(node.get("priceCents").asLong(), node.get("quantity").asLong(), node.get("orderCount").asInt());
+	}
+
+	private static List<TapeTrade> tape(String json) {
+		List<TapeTrade> trades = new ArrayList<>();
+		for (JsonNode trade : STORED.readTree(json)) {
+			trades.add(new TapeTrade(UUID.fromString(trade.get("tradeId").asString()), trade.get("tradeSequence").asLong(),
+					trade.get("priceCents").asLong(), trade.get("quantity").asLong(),
+					trade.get("aggressorSide").asString(), Instant.parse(trade.get("executedAt").asString())));
+		}
+		return trades;
 	}
 
 	private static List<Level> levels(String json, int depth) {
