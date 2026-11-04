@@ -20,7 +20,7 @@ class SecurityConfiguration {
 				.permitAll()
 				// Public market data: anyone may read it, nobody may change it here.
 				.requestMatchers(HttpMethod.GET, "/api/v1/instruments", "/api/v1/instruments/*/book",
-						"/api/v1/instruments/*/trades")
+						"/api/v1/instruments/*/trades", "/api/v1/market-events")
 				.permitAll()
 				.anyRequest()
 				.denyAll())
