@@ -16,6 +16,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.kafka.autoconfigure.KafkaConnectionDetails;
 import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -24,6 +25,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import tools.jackson.databind.json.JsonMapper;
 
+import com.mia_princz.mse.contracts.events.MarketSnapshot;
 import com.mia_princz.mse.contracts.events.WireEvents;
 
 @Configuration(proxyBeanMethods = false)
@@ -90,9 +92,17 @@ class ProjectionConfiguration {
 
 	@Bean(initMethod = "start", destroyMethod = "close")
 	@ConditionalOnProperty(name = "mse.market-feed.enabled", matchIfMissing = true)
-	MarketFeedConsumer marketFeed(FeedFactory feeds, SnapshotProjection projection) {
-		return feeds.create(SnapshotProjection.TOPIC,
-				(payload) -> projection.apply(WireEvents.decodeSnapshot(payload)));
+	MarketFeedConsumer marketFeed(FeedFactory feeds, SnapshotProjection projection,
+			ApplicationEventPublisher events) {
+		return feeds.create(SnapshotProjection.TOPIC, (payload) -> {
+			MarketSnapshot snapshot = WireEvents.decodeSnapshot(payload);
+			boolean changed = projection.apply(snapshot);
+			if (changed) {
+				// Inside the batch transaction; after-commit listeners see it only if the batch commits.
+				events.publishEvent(new SnapshotProjected(snapshot.getInstrumentId()));
+			}
+			return changed;
+		});
 	}
 
 	@Bean(initMethod = "start", destroyMethod = "close")
