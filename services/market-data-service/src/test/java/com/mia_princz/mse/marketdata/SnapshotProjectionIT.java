@@ -15,7 +15,7 @@ import com.mia_princz.mse.marketdata.projection.SnapshotProjection;
 
 /** The projection rules on their own: newer replaces, everything else is a no-op. The feed is off. */
 @Import(TestcontainersConfiguration.class)
-@SpringBootTest(properties = "mse.market-feed.enabled=false")
+@SpringBootTest(properties = { "mse.market-feed.enabled=false", "mse.trade-feed.enabled=false" })
 class SnapshotProjectionIT {
 
 	@Autowired
