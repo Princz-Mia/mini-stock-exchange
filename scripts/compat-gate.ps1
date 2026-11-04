@@ -235,7 +235,8 @@ try {
         Assert-Equal '/ (SPA)' '200' (Get-Http '/')
         Assert-Equal '/deep/link (SPA fallback)' '200' (Get-Http '/deep/link')
         Assert-Equal '/api/v1/orders (Execution, denied)' '401' (Get-Http '/api/v1/orders')
-        Assert-Equal '/api/v1/instruments (Market Data, denied)' '403' (Get-Http '/api/v1/instruments')
+        Assert-Match '/api/v1/instruments (Market Data, public)' '"instruments":\[' ((& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/instruments") | Out-String)
+        Assert-Equal '/api/v1/instruments/x/candles (Market Data, denied)' '403' (Get-Http '/api/v1/instruments/x/candles')
         Assert-Equal '/api/v1/internal/x (blocked at proxy)' '404' (Get-Http '/api/v1/internal/x')
         $actuator = (& curl.exe -s "http://localhost:$webPort/actuator/health") | Out-String
         Assert-Match '/actuator/health serves the SPA, not Actuator' '^\s*<!doctype html>' $actuator
@@ -260,7 +261,7 @@ try {
 
         Invoke-Checked 'docker' ($compose + @('stop', 'execution-service'))
         Assert-Match 'orders with Execution down' '^50[24]$' (Get-Http '/api/v1/orders')
-        Assert-Equal 'instruments with Execution down' '403' (Get-Http '/api/v1/instruments')
+        Assert-Equal 'instruments with Execution down' '200' (Get-Http '/api/v1/instruments')
         Assert-Match 'Market Data readiness' '"status":"UP"' (Get-Readiness 'market-data-service')
         Invoke-Checked 'docker' ($compose + @('start', 'execution-service'))
         Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '180', 'execution-service'))

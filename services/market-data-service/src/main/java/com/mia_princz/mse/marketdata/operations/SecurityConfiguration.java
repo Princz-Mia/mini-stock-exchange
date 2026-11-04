@@ -2,6 +2,7 @@ package com.mia_princz.mse.marketdata.operations;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
@@ -16,6 +17,10 @@ class SecurityConfiguration {
 		return http
 			.authorizeHttpRequests((requests) -> requests
 				.requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/prometheus")
+				.permitAll()
+				// Public market data: anyone may read it, nobody may change it here.
+				.requestMatchers(HttpMethod.GET, "/api/v1/instruments", "/api/v1/instruments/*/book",
+						"/api/v1/instruments/*/trades")
 				.permitAll()
 				.anyRequest()
 				.denyAll())
