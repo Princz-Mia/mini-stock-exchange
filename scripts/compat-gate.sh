@@ -211,6 +211,19 @@ login_flow() {
     assert_match 'me' '"roles":\["TRADER"\]' "$(curl -s -b "$jar" "$base/me")"
 }
 
+browser_flow() {
+  # No operator setup command yet: seed one instrument and two funded traders, then restart Execution so it
+  # rebuilds its books from the database.
+  local counterparty_password
+  counterparty_password=$(secret)
+  compose cp web/e2e/seed-market.sql postgres:/tmp/seed-market.sql >> "$log" 2>&1 &&
+    compose exec -T -e PGPASSWORD="$execution_owner_password" postgres psql -h 127.0.0.1 -q -U execution_owner       -d execution_db -v counterparty_password="$counterparty_password" -f /tmp/seed-market.sql >> "$log" 2>&1 &&
+    compose restart execution-service >> "$log" 2>&1 &&
+    compose up -d --no-deps --wait --wait-timeout 180 execution-service >> "$log" 2>&1 &&
+    (cd web && npx playwright install chromium &&
+      E2E_BASE_URL="http://localhost:$web_port" E2E_TRADER_PASSWORD="$trader_password"         E2E_COUNTERPARTY_PASSWORD="$counterparty_password" npm run e2e) >> "$log" 2>&1
+}
+
 independence() {
   compose stop market-data-service >> "$log" 2>&1 &&
     assert_match 'instruments with Market Data down' '^50[24]$' "$(http_status /api/v1/instruments)" &&
@@ -261,6 +274,7 @@ step 'Toolchain versions' toolchain &&
   step 'Proxy: routes by path to the owning service' proxy_routes &&
   step 'Login: session and CSRF through the proxy' login_flow &&
   step 'Independence: each service survives the other stopping' independence &&
+  step 'Browser: sign in, partial fill, cancel, portfolio' browser_flow &&
   step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' avro_pipeline &&
   step 'Outage isolation: services stay ready without Kafka' kafka_outage ||
   status=1
