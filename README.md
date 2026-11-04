@@ -27,6 +27,7 @@ flowchart TD
 | `services/market-data-service` | Rebuildable public market data |
 | `analytics-job` | Flink job that turns trades into one-minute candles |
 | `event-contracts` | Avro message schemas shared by the Java modules |
+| `api` | The OpenAPI 3.1 contract for the HTTP API |
 | `web` | React terminal and the reverse proxy |
 | `simulator` | Trading bots |
 | `infra` | Database, Kafka and monitoring setup |
@@ -85,5 +86,12 @@ cd simulator; uv sync --frozen; uv run --frozen ruff check .; uv run --frozen py
 ```
 
 On Linux or macOS, use `sh ./mvnw` and `bash scripts/compat-gate.sh`.
+
+### The API contract
+
+`api/openapi.yaml` is the source of truth for the HTTP API. To change an endpoint, change the contract first, then the code:
+
+- `cd web; npm run api:generate` regenerates the TypeScript types in `web/src/api/schema.ts`. CI runs `npm run api:check` and fails if they are out of date.
+- Each service's `ApiContractIT` checks real responses against the contract's schemas, and checks that the routes it serves are exactly the operations tagged with its name.
 
 Run `git config core.hooksPath .githooks` once after cloning. It enables a hook that checks commit messages follow [Conventional Commits](https://www.conventionalcommits.org/). Pull requests need green CI, and new database tables need explicit `GRANT`s to the service's runtime role in their migration.
