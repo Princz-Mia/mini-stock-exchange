@@ -237,6 +237,7 @@ try {
         Assert-Equal '/api/v1/orders (Execution, denied)' '401' (Get-Http '/api/v1/orders')
         Assert-Match '/api/v1/instruments (Market Data, public)' '"instruments":\[' ((& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/instruments") | Out-String)
         Assert-Equal '/api/v1/instruments/x/candles (Market Data, denied)' '403' (Get-Http '/api/v1/instruments/x/candles')
+        Assert-Match '/api/v1/market-events, no market yet (Market Data)' '"code":"INSTRUMENT_NOT_FOUND"' ((& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/market-events?instrumentId=00000000-0000-0000-0000-000000000001") | Out-String)
         Assert-Equal '/api/v1/internal/x (blocked at proxy)' '404' (Get-Http '/api/v1/internal/x')
         $actuator = (& curl.exe -s "http://localhost:$webPort/actuator/health") | Out-String
         Assert-Match '/actuator/health serves the SPA, not Actuator' '^\s*<!doctype html>' $actuator
