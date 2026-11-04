@@ -125,6 +125,13 @@ class ApiContractIT {
 		check(trader.post("/api/v1/orders/" + soldId + "/cancel", "", "Idempotency-Key",
 				UUID.randomUUID().toString()), "POST", cancel, 409);
 
+		check(trader.get("/api/v1/orders"), "GET", "/api/v1/orders", 200);
+		check(trader.get("/api/v1/orders?status=active"), "GET", "/api/v1/orders", 200);
+		check(trader.get("/api/v1/orders?limit=0"), "GET", "/api/v1/orders", 400);
+		check(trader.get("/api/v1/portfolio"), "GET", "/api/v1/portfolio", 200);
+		check(trader.get("/api/v1/portfolio/trades"), "GET", "/api/v1/portfolio/trades", 200);
+		check(trader.get("/api/v1/portfolio/trades?cursor=nope"), "GET", "/api/v1/portfolio/trades", 400);
+
 		String command = "/api/v1/commands/{key}";
 		check(trader.get("/api/v1/commands/" + restingKey), "GET", command, 201);
 		check(trader.get("/api/v1/commands/" + cancelKey), "GET", command, 200);
@@ -132,6 +139,7 @@ class ApiContractIT {
 
 		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
 		check(operator.get("/api/v1/orders/" + restingId), "GET", read, 403);
+		check(operator.get("/api/v1/portfolio"), "GET", "/api/v1/portfolio", 403);
 		check(operator.post(place, limit(instrument, "BUY", 1, "90.00"), "Idempotency-Key",
 				UUID.randomUUID().toString()), "POST", place, 403);
 
