@@ -12,6 +12,8 @@
 *.conf text eol=lf
 *.avsc text eol=lf
 .env.example text eol=lf
+# Generated from api/openapi.yaml; the drift check compares it byte for byte with fresh output.
+/web/src/api/schema.ts text eol=lf
 
 *.cmd text eol=crlf
 *.bat text eol=crlf
