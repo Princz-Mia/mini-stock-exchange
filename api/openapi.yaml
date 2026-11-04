@@ -1,0 +1,621 @@
+openapi: 3.1.0
+info:
+  title: Mini Stock Exchange API
+  version: 1.0.0
+  description: |
+    The public HTTP API, served under one origin. Each operation is tagged with the service that owns it;
+    the reverse proxy routes by path.
+
+    Conventions:
+    - Prices are decimal strings with exactly two places, such as "100.25".
+    - Sequences are strings, because they are 64-bit and JavaScript loses precision above 2^53.
+    - Times are UTC ISO-8601.
+    - Errors are RFC 9457 problem details. Every error the application raises carries a stable `code`;
+      errors produced by the framework for malformed requests may not.
+    - Mutating requests need the session cookie and the CSRF token in the header named by GET /auth/csrf.
+    - `x-may-be-empty: true` on a response means it can also come with no body, when the security layer
+      refuses the request before the application sees it.
+
+servers:
+  - url: /
+
+tags:
+  - name: execution
+    description: Identity, orders and command results. Owned by the execution service.
+  - name: market-data
+    description: Public market data and the live stream. Owned by the market data service.
+
+paths:
+  /api/v1/auth/csrf:
+    get:
+      tags: [execution]
+      operationId: getCsrfToken
+      summary: The CSRF token for this session, to send in the named header on every mutating request.
+      responses:
+        '200':
+          description: The token and the header to send it in.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CsrfToken' }
+
+  /api/v1/auth/login:
+    post:
+      tags: [execution]
+      operationId: login
+      summary: Start a session. Rotates the session id and the CSRF token, so fetch a new token afterwards.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Logged in.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Identity' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: Wrong password or unknown user; both get the same answer, code INVALID_CREDENTIALS.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '403':
+          description: Missing or invalid CSRF token. No body.
+
+  /api/v1/auth/logout:
+    post:
+      tags: [execution]
+      operationId: logout
+      summary: End the session.
+      responses:
+        '204':
+          description: Logged out.
+        '403':
+          description: Missing or invalid CSRF token. No body.
+
+  /api/v1/me:
+    get:
+      tags: [execution]
+      operationId: getIdentity
+      summary: Who the session belongs to.
+      responses:
+        '200':
+          description: The logged-in user.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Identity' }
+        '401':
+          description: No session. No body.
+
+  /api/v1/orders:
+    post:
+      tags: [execution]
+      operationId: placeOrder
+      summary: Place an order for the logged-in trader's account.
+      description: |
+        The account always comes from the session. The same Idempotency-Key with the same request returns the
+        first committed answer, with the same status; with a different request it is a conflict.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrderRequest' }
+      responses:
+        '201':
+          description: Accepted and committed. The order may be open, filled, or canceled (an IOC remainder).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: |
+            Not a trader or missing CSRF token, refused before the controller with no body; or NO_TRADING_ACCOUNT.
+          x-may-be-empty: true
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422':
+          description: |
+            Rejected and committed, with the reason as code: INSUFFICIENT_CASH, INSUFFICIENT_SHARES,
+            MARKET_NOT_OPEN, ORDER_LIMIT_EXCEEDED, EXECUTION_LIMIT_EXCEEDED; plus orderId and commandSequence.
+            UNKNOWN_INSTRUMENT is not committed.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
+  /api/v1/orders/{orderId}:
+    get:
+      tags: [execution]
+      operationId: getOrder
+      summary: One of the caller's own orders. Another account's order is indistinguishable from a missing one.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: The order.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderDetail' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not a trader.
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /api/v1/orders/{orderId}/cancel:
+    post:
+      tags: [execution]
+      operationId: cancelOrder
+      summary: Cancel one of the caller's resting orders.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Canceled now, or already canceled before.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Cancellation' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: |
+            Not a trader or missing CSRF token, refused before the controller with no body; or NO_TRADING_ACCOUNT.
+          x-may-be-empty: true
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '409':
+          description: ORDER_NOT_CANCELABLE (filled or rejected), or IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
+  /api/v1/commands/{key}:
+    get:
+      tags: [execution]
+      operationId: getCommand
+      summary: The first committed answer for one of the caller's idempotency keys, with its original status.
+      description: 404 means nothing committed under the key, so retrying the original request with it is safe.
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: A cancel's answer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Cancellation' }
+        '201':
+          description: A placement's answer.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not a trader.
+        '404': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+
+  /api/v1/instruments:
+    get:
+      tags: [market-data]
+      operationId: listInstruments
+      summary: Every instrument with its rules, quotes and how current the data is.
+      responses:
+        '200':
+          description: The catalogue.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Instruments' }
+
+  /api/v1/instruments/{instrumentId}/book:
+    get:
+      tags: [market-data]
+      operationId: getBook
+      summary: Aggregate depth per side, best first.
+      parameters:
+        - $ref: '#/components/parameters/InstrumentId'
+        - name: depth
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 20, default: 20 }
+      responses:
+        '200':
+          description: The book.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Book' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /api/v1/instruments/{instrumentId}/trades:
+    get:
+      tags: [market-data]
+      operationId: listTrades
+      summary: The public tape, newest first, in keyset pages.
+      parameters:
+        - $ref: '#/components/parameters/InstrumentId'
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: cursor
+          in: query
+          description: The nextCursor of the previous page. Opaque.
+          schema: { type: string }
+      responses:
+        '200':
+          description: One page of trades.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Trades' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /api/v1/market-events:
+    get:
+      tags: [market-data]
+      operationId: streamMarket
+      summary: Live market for one instrument, as server-sent events.
+      description: |
+        Event `market` carries a MarketFrame: the complete public state, first on connecting and then at most
+        four times a second after committed changes. Each frame replaces the previous one. Event `heartbeat`
+        carries a Heartbeat after 10 seconds without a frame. A new bootId means the service restarted.
+      parameters:
+        - name: instrumentId
+          in: query
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The stream. Each event's data is JSON, a MarketFrame or a Heartbeat.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+        '503':
+          description: TOO_MANY_STREAMS. Retry after the Retry-After header.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: A client-chosen UUID, kept for retries of the same request.
+      schema: { type: string, format: uuid }
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    InstrumentId:
+      name: instrumentId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    Problem:
+      description: A problem, with its code.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unavailable:
+      description: EXCHANGE_BUSY (not queued; retry with the same key), or TRADING_UNAVAILABLE. Has Retry-After.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    OutcomeUnknown:
+      description: COMMAND_OUTCOME_UNKNOWN. The command may still commit; look it up by commandKey.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Price:
+      type: string
+      pattern: '^(0|[1-9][0-9]{0,18})\.[0-9]{2}$'
+      examples: ['100.25']
+    Sequence:
+      type: string
+      pattern: '^[0-9]+$'
+    Uuid:
+      type: string
+      format: uuid
+    Timestamp:
+      type: string
+      format: date-time
+
+    Problem:
+      type: object
+      required: [status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        code:
+          type: string
+          description: Stable machine-readable reason. Set on every error the application raises.
+        errors:
+          type: array
+          items: { $ref: '#/components/schemas/FieldError' }
+        orderId: { $ref: '#/components/schemas/Uuid' }
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+        commandKey: { $ref: '#/components/schemas/Uuid' }
+        reason: { type: string }
+    FieldError:
+      type: object
+      additionalProperties: false
+      required: [field, code, message]
+      properties:
+        field: { type: string }
+        code: { type: string }
+        message: { type: string }
+
+    CsrfToken:
+      type: object
+      additionalProperties: false
+      required: [headerName, token]
+      properties:
+        headerName: { type: string }
+        token: { type: string }
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: { type: string, minLength: 1, maxLength: 100 }
+        password: { type: string, minLength: 1, maxLength: 200 }
+    Identity:
+      type: object
+      additionalProperties: false
+      required: [username, roles]
+      properties:
+        username: { type: string }
+        roles:
+          type: array
+          items: { type: string, enum: [TRADER, OPERATOR] }
+
+    OrderRequest:
+      type: object
+      additionalProperties: false
+      description: LIMIT goes with GTC and limitPrice; MARKET_PROTECTED with IOC and protectionPrice.
+      required: [instrumentId, side, type, timeInForce, quantity]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        side: { $ref: '#/components/schemas/Side' }
+        type: { type: string, enum: [LIMIT, MARKET_PROTECTED] }
+        timeInForce: { type: string, enum: [GTC, IOC] }
+        quantity: { type: integer, minimum: 1, maximum: 10000 }
+        limitPrice: { $ref: '#/components/schemas/Price' }
+        protectionPrice: { $ref: '#/components/schemas/Price' }
+    Side:
+      type: string
+      enum: [BUY, SELL]
+    Order:
+      type: object
+      additionalProperties: false
+      required: [orderId, state, reason, filledQuantity, workingQuantity, canceledQuantity, commandSequence]
+      properties:
+        orderId: { $ref: '#/components/schemas/Uuid' }
+        state: { type: string, enum: [OPEN, PARTIALLY_FILLED, FILLED, CANCELED] }
+        reason:
+          type: [string, 'null']
+          description: Why an IOC remainder was canceled, such as IOC_REMAINDER_CANCELED.
+        filledQuantity: { type: integer, format: int64 }
+        workingQuantity: { type: integer, format: int64 }
+        canceledQuantity: { type: integer, format: int64 }
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+    OrderDetail:
+      type: object
+      additionalProperties: false
+      required: [orderId, instrumentId, side, type, timeInForce, limitPrice, protectionPrice, requestedQuantity,
+        filledQuantity, workingQuantity, canceledQuantity, state, reason, version]
+      properties:
+        orderId: { $ref: '#/components/schemas/Uuid' }
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        side: { $ref: '#/components/schemas/Side' }
+        type: { type: string, enum: [LIMIT, MARKET_PROTECTED] }
+        timeInForce: { type: string, enum: [GTC, IOC] }
+        limitPrice:
+          oneOf: [{ $ref: '#/components/schemas/Price' }, { type: 'null' }]
+        protectionPrice:
+          oneOf: [{ $ref: '#/components/schemas/Price' }, { type: 'null' }]
+        requestedQuantity: { type: integer, format: int64 }
+        filledQuantity: { type: integer, format: int64 }
+        workingQuantity: { type: integer, format: int64 }
+        canceledQuantity: { type: integer, format: int64 }
+        state: { type: string, enum: [OPEN, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED] }
+        reason: { type: [string, 'null'] }
+        version: { $ref: '#/components/schemas/Sequence' }
+    Cancellation:
+      type: object
+      additionalProperties: false
+      required: [orderId, status, canceledQuantity, commandSequence]
+      properties:
+        orderId: { $ref: '#/components/schemas/Uuid' }
+        status: { type: string, enum: [CANCELED, ALREADY_CANCELED] }
+        canceledQuantity: { type: integer, format: int64 }
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+
+    Feed:
+      type: object
+      additionalProperties: false
+      description: How current the data is. Show staleness to the user rather than presenting old data as live.
+      required: [state, lag]
+      properties:
+        state: { type: string, enum: [STARTING, CATCHING_UP, LIVE, STALE, PAUSED, DISABLED] }
+        lag:
+          type: integer
+          format: int64
+          description: Records on Kafka not yet projected; -1 before the first measurement.
+    Quote:
+      type: object
+      additionalProperties: false
+      required: [price, quantity, orderCount]
+      properties:
+        price: { $ref: '#/components/schemas/Price' }
+        quantity: { type: integer, format: int64 }
+        orderCount: { type: integer }
+    Instrument:
+      type: object
+      additionalProperties: false
+      required: [instrumentId, symbol, venueState, referencePrice, tick, lotSize, minQuantity, maxQuantity, maxPrice,
+        lastPrice, bestBid, bestAsk, lastTradeSequence, sourceCommandSequence, generatedAt]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        symbol: { type: string, pattern: '^[A-Z]{1,8}$' }
+        venueState: { $ref: '#/components/schemas/VenueState' }
+        referencePrice:
+          $ref: '#/components/schemas/Price'
+          description: Shown before the first trade; never executable liquidity.
+        tick: { $ref: '#/components/schemas/Price' }
+        lotSize: { type: integer, format: int64 }
+        minQuantity: { type: integer, format: int64 }
+        maxQuantity: { type: integer, format: int64 }
+        maxPrice: { $ref: '#/components/schemas/Price' }
+        lastPrice:
+          oneOf: [{ $ref: '#/components/schemas/Price' }, { type: 'null' }]
+        bestBid:
+          oneOf: [{ $ref: '#/components/schemas/Quote' }, { type: 'null' }]
+        bestAsk:
+          oneOf: [{ $ref: '#/components/schemas/Quote' }, { type: 'null' }]
+        lastTradeSequence: { $ref: '#/components/schemas/Sequence' }
+        sourceCommandSequence: { $ref: '#/components/schemas/Sequence' }
+        generatedAt: { $ref: '#/components/schemas/Timestamp' }
+    VenueState:
+      type: string
+      enum: [SETUP, OPEN, HALTED, UNKNOWN]
+    Instruments:
+      type: object
+      additionalProperties: false
+      required: [instruments, feed]
+      properties:
+        instruments:
+          type: array
+          items: { $ref: '#/components/schemas/Instrument' }
+        feed: { $ref: '#/components/schemas/Feed' }
+    Book:
+      type: object
+      additionalProperties: false
+      required: [instrumentId, symbol, venueState, bids, asks, sourceCommandSequence, generatedAt, feed]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        symbol: { type: string }
+        venueState: { $ref: '#/components/schemas/VenueState' }
+        bids:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/Quote' }
+        asks:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/Quote' }
+        sourceCommandSequence:
+          $ref: '#/components/schemas/Sequence'
+          description: The market revision; a higher one is newer.
+        generatedAt: { $ref: '#/components/schemas/Timestamp' }
+        feed: { $ref: '#/components/schemas/Feed' }
+    Trade:
+      type: object
+      additionalProperties: false
+      required: [tradeId, tradeSequence, price, quantity, executedAt]
+      properties:
+        tradeId: { $ref: '#/components/schemas/Uuid' }
+        tradeSequence: { $ref: '#/components/schemas/Sequence' }
+        price: { $ref: '#/components/schemas/Price' }
+        quantity: { type: integer, format: int64 }
+        executedAt: { $ref: '#/components/schemas/Timestamp' }
+    Trades:
+      type: object
+      additionalProperties: false
+      required: [instrumentId, trades, nextCursor, latestTradeSequence, feed]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        trades:
+          type: array
+          maxItems: 200
+          items: { $ref: '#/components/schemas/Trade' }
+        nextCursor:
+          type: [string, 'null']
+          description: Null on the last page.
+        latestTradeSequence: { $ref: '#/components/schemas/Sequence' }
+        feed: { $ref: '#/components/schemas/Feed' }
+    TapeTrade:
+      type: object
+      additionalProperties: false
+      required: [tradeId, tradeSequence, price, quantity, aggressorSide, executedAt]
+      properties:
+        tradeId: { $ref: '#/components/schemas/Uuid' }
+        tradeSequence: { $ref: '#/components/schemas/Sequence' }
+        price: { $ref: '#/components/schemas/Price' }
+        quantity: { type: integer, format: int64 }
+        aggressorSide: { $ref: '#/components/schemas/Side' }
+        executedAt: { $ref: '#/components/schemas/Timestamp' }
+    MarketFrame:
+      type: object
+      additionalProperties: false
+      description: Data of a `market` event. Replaces the previous frame entirely.
+      required: [bootId, instrumentId, symbol, venueState, sourceCommandSequence, bids, asks, lastPrice, recentTrades,
+        lastTradeSequence, generatedAt, feed]
+      properties:
+        bootId: { $ref: '#/components/schemas/Uuid' }
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        symbol: { type: string }
+        venueState: { $ref: '#/components/schemas/VenueState' }
+        sourceCommandSequence: { $ref: '#/components/schemas/Sequence' }
+        bids:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/Quote' }
+        asks:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/Quote' }
+        lastPrice:
+          oneOf: [{ $ref: '#/components/schemas/Price' }, { type: 'null' }]
+        recentTrades:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/TapeTrade' }
+        lastTradeSequence: { $ref: '#/components/schemas/Sequence' }
+        generatedAt: { $ref: '#/components/schemas/Timestamp' }
+        feed: { $ref: '#/components/schemas/Feed' }
+    Heartbeat:
+      type: object
+      additionalProperties: false
+      description: Data of a `heartbeat` event. A live connection does not mean current data; check feed.
+      required: [bootId, feed, at]
+      properties:
+        bootId: { $ref: '#/components/schemas/Uuid' }
+        feed: { $ref: '#/components/schemas/Feed' }
+        at: { $ref: '#/components/schemas/Timestamp' }
