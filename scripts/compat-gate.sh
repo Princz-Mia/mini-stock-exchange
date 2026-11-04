@@ -128,7 +128,7 @@ maven_verify() {
 }
 
 frontend() {
-  (cd web && npm ci && npm run typecheck && npm run lint && npm test && npm run build) >> "$log" 2>&1 &&
+  (cd web && npm ci && npm run api:check && npm run typecheck && npm run lint && npm test && npm run build) >> "$log" 2>&1 &&
     [ -f web/dist/index.html ]
 }
 
@@ -251,7 +251,7 @@ teardown() {
 status=0
 step 'Toolchain versions' toolchain &&
   step 'Maven verify: services, contracts, Flink on JDK 17' maven_verify &&
-  step 'Frontend: npm ci, typecheck, lint, test, build' frontend &&
+  step 'Frontend: npm ci, API contract, typecheck, lint, test, build' frontend &&
   step 'Simulator: frozen uv sync, ruff, pytest' simulator &&
   step 'Compose: clean stack builds and turns healthy' stack_up &&
   step 'Runtimes: Oracle JDK 25 services, Flink JDK 17' runtimes &&

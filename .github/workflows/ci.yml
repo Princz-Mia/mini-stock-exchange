@@ -44,6 +44,8 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+      # The client types must match the OpenAPI contract exactly.
+      - run: npm run api:check
       - run: npm run typecheck
       - run: npm run lint
       - run: npm test
