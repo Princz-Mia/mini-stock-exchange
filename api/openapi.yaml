@@ -89,6 +89,30 @@ paths:
           description: No session. No body.
 
   /api/v1/orders:
+    get:
+      tags: [execution]
+      operationId: listOrders
+      summary: The caller's own orders, newest first.
+      description: |
+        With status=active, every open or partially filled order, at most 20, in one response. With status=all,
+        every order including rejected ones, in keyset pages.
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string, enum: [all, active], default: all }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of orders.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderPage' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          $ref: '#/components/responses/NotTrader'
     post:
       tags: [execution]
       operationId: placeOrder
@@ -217,6 +241,45 @@ paths:
         '409': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
 
+  /api/v1/portfolio:
+    get:
+      tags: [execution]
+      operationId: getPortfolio
+      summary: The caller's cash, holdings and estimated equity, all from one consistent read.
+      description: |
+        Cash and holdings come from the same committed state. Each holding is marked to the instrument's latest
+        execution, or to its labelled reference price before the first trade.
+      responses:
+        '200':
+          description: The portfolio.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Portfolio' }
+        '401':
+          description: No session. No body.
+        '403':
+          $ref: '#/components/responses/NotTrader'
+
+  /api/v1/portfolio/trades:
+    get:
+      tags: [execution]
+      operationId: listOwnTrades
+      summary: The caller's own executions, newest first, in keyset pages.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page of executions.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OwnTradePage' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          $ref: '#/components/responses/NotTrader'
+
   /api/v1/instruments:
     get:
       tags: [market-data]
@@ -317,8 +380,23 @@ components:
       in: path
       required: true
       schema: { type: string, format: uuid }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Cursor:
+      name: cursor
+      in: query
+      description: The nextCursor of the previous page. Opaque.
+      schema: { type: string }
 
   responses:
+    NotTrader:
+      description: Not a trader, refused before the controller with no body; or NO_TRADING_ACCOUNT.
+      x-may-be-empty: true
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
     Problem:
       description: A problem, with its code.
       content:
@@ -438,11 +516,13 @@ components:
     OrderDetail:
       type: object
       additionalProperties: false
-      required: [orderId, instrumentId, side, type, timeInForce, limitPrice, protectionPrice, requestedQuantity,
-        filledQuantity, workingQuantity, canceledQuantity, state, reason, version]
+      required: [orderId, instrumentId, symbol, side, type, timeInForce, limitPrice, protectionPrice,
+        requestedQuantity, filledQuantity, workingQuantity, canceledQuantity, state, reason, version, createdAt,
+        updatedAt]
       properties:
         orderId: { $ref: '#/components/schemas/Uuid' }
         instrumentId: { $ref: '#/components/schemas/Uuid' }
+        symbol: { type: string }
         side: { $ref: '#/components/schemas/Side' }
         type: { type: string, enum: [LIMIT, MARKET_PROTECTED] }
         timeInForce: { type: string, enum: [GTC, IOC] }
@@ -456,7 +536,113 @@ components:
         canceledQuantity: { type: integer, format: int64 }
         state: { type: string, enum: [OPEN, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED] }
         reason: { type: [string, 'null'] }
-        version: { $ref: '#/components/schemas/Sequence' }
+        version:
+          $ref: '#/components/schemas/Sequence'
+          description: Increases with every change to the order.
+        createdAt: { $ref: '#/components/schemas/Timestamp' }
+        updatedAt: { $ref: '#/components/schemas/Timestamp' }
+    OrderPage:
+      type: object
+      additionalProperties: false
+      required: [orders, nextCursor]
+      properties:
+        orders:
+          type: array
+          maxItems: 200
+          items: { $ref: '#/components/schemas/OrderDetail' }
+        nextCursor:
+          type: [string, 'null']
+          description: Null on the last page, and always null for status=active.
+    Money:
+      type: string
+      description: An amount with exactly two decimals, such as "12345.67".
+      pattern: '^-?(0|[1-9][0-9]{0,18})\.[0-9]{2}$'
+    Portfolio:
+      type: object
+      additionalProperties: false
+      required: [cash, holdings, equity, accountVersion, asOfCommandSequence]
+      properties:
+        cash: { $ref: '#/components/schemas/Cash' }
+        holdings:
+          type: array
+          items: { $ref: '#/components/schemas/Holding' }
+        equity:
+          $ref: '#/components/schemas/Money'
+          description: Total cash plus every holding at its mark; reserved amounts are counted once.
+        accountVersion:
+          $ref: '#/components/schemas/Sequence'
+          description: Increases with every command that changes this account's money or orders.
+        asOfCommandSequence:
+          $ref: '#/components/schemas/Sequence'
+          description: The last command reflected here.
+    Cash:
+      type: object
+      additionalProperties: false
+      required: [total, available, reserved]
+      properties:
+        total: { $ref: '#/components/schemas/Money' }
+        available: { $ref: '#/components/schemas/Money' }
+        reserved: { $ref: '#/components/schemas/Money' }
+    Holding:
+      type: object
+      additionalProperties: false
+      required: [instrumentId, symbol, total, available, reserved, mark, value]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        symbol: { type: string }
+        total: { type: integer, format: int64 }
+        available: { type: integer, format: int64 }
+        reserved: { type: integer, format: int64 }
+        mark: { $ref: '#/components/schemas/Mark' }
+        value:
+          $ref: '#/components/schemas/Money'
+          description: total at the mark.
+    Mark:
+      type: object
+      additionalProperties: false
+      required: [price, source, at]
+      properties:
+        price: { $ref: '#/components/schemas/Price' }
+        source:
+          type: string
+          enum: [LAST_TRADE, REFERENCE]
+          description: REFERENCE before the instrument's first trade; label it as such.
+        at:
+          oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: When the last trade happened; null for a reference price.
+    OwnTrade:
+      type: object
+      additionalProperties: false
+      required: [tradeId, instrumentId, symbol, side, liquidity, price, quantity, notional, executedAt,
+        commandSequence]
+      properties:
+        tradeId: { $ref: '#/components/schemas/Uuid' }
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        symbol: { type: string }
+        side:
+          $ref: '#/components/schemas/Side'
+          description: The caller's side of the trade.
+        liquidity:
+          type: string
+          enum: [MAKER, TAKER]
+          description: MAKER when the caller's order was resting, TAKER when it arrived.
+        price: { $ref: '#/components/schemas/Price' }
+        quantity: { type: integer, format: int64 }
+        notional: { $ref: '#/components/schemas/Money' }
+        executedAt: { $ref: '#/components/schemas/Timestamp' }
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+    OwnTradePage:
+      type: object
+      additionalProperties: false
+      required: [trades, nextCursor]
+      properties:
+        trades:
+          type: array
+          maxItems: 200
+          items: { $ref: '#/components/schemas/OwnTrade' }
+        nextCursor:
+          type: [string, 'null']
+          description: Null on the last page.
     Cancellation:
       type: object
       additionalProperties: false
