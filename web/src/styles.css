@@ -293,3 +293,208 @@ tbody th {
 .login-card button {
   margin-top: var(--space-3);
 }
+
+/* Terminal: watchlist, market, ticket; open orders across the bottom. Stacks on narrow screens. */
+.terminal {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr) 320px;
+  grid-template-areas:
+    'watchlist market ticket'
+    'orders orders orders';
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.terminal > .watchlist {
+  grid-area: watchlist;
+}
+
+.terminal-market {
+  grid-area: market;
+  display: grid;
+  gap: var(--space-4);
+}
+
+.terminal > .ticket,
+.terminal-empty {
+  grid-area: ticket;
+}
+
+.terminal-orders {
+  grid-area: orders;
+}
+
+@media (max-width: 1100px) {
+  .terminal {
+    grid-template-columns: 1fr;
+    grid-template-areas: 'ticket' 'market' 'watchlist' 'orders';
+  }
+}
+
+.market-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.market-header h1 {
+  font-size: 20px;
+}
+
+.last-price {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.transport {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.transport-stale,
+.transport-connecting {
+  color: var(--warn-text);
+}
+
+.chart {
+  height: 280px;
+  min-width: 0;
+}
+
+.terminal-market > .panel,
+.market-split > .panel {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.market-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4);
+}
+
+.book {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+.watchlist-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.watchlist-item {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  border: none;
+  background: transparent;
+  padding: var(--space-2);
+}
+
+.watchlist-item[aria-pressed='true'] {
+  background: var(--surface-sunken);
+}
+
+.symbol {
+  font-weight: 600;
+}
+
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-1);
+}
+
+.segment.selected-buy {
+  background: var(--buy);
+  border-color: var(--buy);
+  color: #fff;
+}
+
+.segment.selected-sell {
+  background: var(--sell);
+  border-color: var(--sell);
+  color: #fff;
+}
+
+.balances {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+}
+
+.balances dt {
+  color: var(--muted);
+}
+
+.balances dd {
+  margin: 0;
+}
+
+.ticket-form,
+.ticket-form fieldset {
+  display: grid;
+  gap: var(--space-2);
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ticket select {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  padding: var(--space-2);
+}
+
+.hint {
+  margin: 0;
+  font-size: 12px;
+}
+
+.estimate {
+  margin: 0;
+}
+
+button.primary.buy {
+  background: var(--buy);
+  border-color: var(--buy);
+}
+
+button.primary.sell {
+  background: var(--sell);
+  border-color: var(--sell);
+}
+
+.outcome {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius);
+  background: var(--surface-sunken);
+}
+
+.outcome-rejected {
+  color: var(--sell);
+}
+
+.outcome-pending {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
