@@ -1,8 +1,11 @@
 import type {
+  Cancellation,
   CsrfToken,
   Identity,
   Instruments,
+  Order,
   OrderPage,
+  OrderRequest,
   OwnTradePage,
   Portfolio,
   Problem,
@@ -120,6 +123,16 @@ export const api = {
 
   ownTrades: (cursor?: string) =>
     request<OwnTradePage>('GET', `/api/v1/portfolio/trades${query({ cursor, limit: 50 })}`),
+
+  /** Committed when it returns; the same key with the same request returns the first answer again. */
+  placeOrder: (order: OrderRequest, idempotencyKey: string) =>
+    request<Order>('POST', '/api/v1/orders', { body: order, idempotencyKey }),
+
+  cancelOrder: (orderId: string, idempotencyKey: string) =>
+    request<Cancellation>('POST', `/api/v1/orders/${orderId}/cancel`, { idempotencyKey }),
+
+  /** The first committed answer for a key; a 404 means nothing committed, so retrying with that key is safe. */
+  placement: (idempotencyKey: string) => request<Order>('GET', `/api/v1/commands/${idempotencyKey}`),
 
   orders: (status: 'all' | 'active', cursor?: string) =>
     request<OrderPage>('GET', `/api/v1/orders${query({ status, cursor, limit: status === 'all' ? 50 : undefined })}`),
