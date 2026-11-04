@@ -1,0 +1,226 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
+import { beforeEach, describe, expect, it } from 'vitest';
+
+import { resetSession } from '../api/client';
+import { signedIn } from '../test/fakeServer';
+import { fakeStreams, frame } from '../test/fakeStream';
+import { StreamContext, TerminalPage } from './TerminalPage';
+
+const NOVA = '00000000-0000-0000-0000-000000000001';
+const ORBIT = '00000000-0000-0000-0000-000000000002';
+
+function instrument(instrumentId: string, symbol: string, lastPrice: string | null) {
+  return {
+    instrumentId,
+    symbol,
+    venueState: 'OPEN',
+    referencePrice: '100.00',
+    tick: '0.01',
+    lotSize: 1,
+    minQuantity: 1,
+    maxQuantity: 10000,
+    maxPrice: '1000000.00',
+    lastPrice,
+    bestBid: null,
+    bestAsk: null,
+    lastTradeSequence: '0',
+    sourceCommandSequence: '1',
+    generatedAt: '2026-11-04T12:00:00Z',
+  };
+}
+
+const PORTFOLIO = {
+  cash: { total: '10000.00', available: '9500.00', reserved: '500.00' },
+  holdings: [
+    {
+      instrumentId: NOVA,
+      symbol: 'NOVA',
+      total: 100,
+      available: 90,
+      reserved: 10,
+      mark: { price: '100.00', source: 'REFERENCE', at: null },
+      value: '10000.00',
+    },
+  ],
+  equity: '20000.00',
+  accountVersion: '1',
+  asOfCommandSequence: '1',
+};
+
+const OPEN_ORDER = {
+  orderId: '00000000-0000-0000-0000-0000000000cc',
+  instrumentId: NOVA,
+  symbol: 'NOVA',
+  side: 'SELL',
+  type: 'LIMIT',
+  timeInForce: 'GTC',
+  limitPrice: '105.00',
+  protectionPrice: null,
+  requestedQuantity: 10,
+  filledQuantity: 0,
+  workingQuantity: 10,
+  canceledQuantity: 0,
+  state: 'OPEN',
+  reason: null,
+  version: '1',
+  createdAt: '2026-11-04T12:00:00Z',
+  updatedAt: '2026-11-04T12:00:00Z',
+};
+
+function market() {
+  return signedIn()
+    .on('GET /api/v1/instruments', {
+      status: 200,
+      json: { instruments: [instrument(NOVA, 'NOVA', null), instrument(ORBIT, 'ORBIT', '40.00')], feed: { state: 'LIVE', lag: 0 } },
+    })
+    .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+    .on('GET /api/v1/orders', { status: 200, json: { orders: [OPEN_ORDER], nextCursor: null } });
+}
+
+function renderTerminal() {
+  const streams = fakeStreams();
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  render(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={['/terminal']}>
+        <StreamContext.Provider value={streams.create}>
+          <TerminalPage />
+        </StreamContext.Provider>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+  return streams;
+}
+
+describe('terminal', () => {
+  beforeEach(() => resetSession());
+
+  it('streams the first instrument and shows its book, tape and last price', async () => {
+    market();
+    const streams = renderTerminal();
+    await screen.findByRole('heading', { name: 'NOVA', level: 1 });
+    expect(streams.latest()?.url).toContain(NOVA);
+
+    act(() =>
+      streams.latest()?.emit(
+        'market',
+        frame(NOVA, '5', {
+          lastPrice: '100.25',
+          recentTrades: [
+            {
+              tradeId: '00000000-0000-0000-0000-0000000000d1',
+              tradeSequence: '1',
+              price: '100.25',
+              quantity: 3,
+              aggressorSide: 'SELL',
+              executedAt: '2026-11-04T12:00:05Z',
+            },
+          ],
+        }),
+      ),
+    );
+
+    expect(within(screen.getByRole('table', { name: 'Bids' })).getByText('99.50')).toBeInTheDocument();
+    expect(within(screen.getByRole('table', { name: 'Asks' })).getByText('100.50')).toBeInTheDocument();
+    expect(screen.getByText('Spread 1.00')).toBeInTheDocument();
+    expect(within(screen.getByRole('table', { name: 'Recent trades' })).getByText('Sell')).toBeInTheDocument();
+    expect(screen.getByText('Connected')).toBeInTheDocument();
+  });
+
+  it('switches the stream when another instrument is chosen', async () => {
+    market();
+    const streams = renderTerminal();
+    fireEvent.click(await screen.findByRole('button', { name: /^ORBIT/ }));
+
+    await screen.findByRole('heading', { name: 'ORBIT', level: 1 });
+    expect(streams.opened[0]?.closed).toBe(true);
+    expect(streams.latest()?.url).toContain(ORBIT);
+  });
+
+  it('shows the maximum spend beside the available balances, and sends the order with a key', async () => {
+    const server = market().on('POST /api/v1/orders', {
+      status: 201,
+      json: {
+        orderId: '00000000-0000-0000-0000-0000000000aa',
+        state: 'PARTIALLY_FILLED',
+        reason: null,
+        filledQuantity: 4,
+        workingQuantity: 6,
+        canceledQuantity: 0,
+        commandSequence: '9',
+      },
+    });
+    renderTerminal();
+    fireEvent.change(await screen.findByLabelText('Shares'), { target: { value: '10' } });
+    fireEvent.change(screen.getByLabelText('Limit price'), { target: { value: '100.25' } });
+
+    expect(await screen.findByText('9,500.00')).toBeInTheDocument();
+    expect(screen.getByText('90')).toBeInTheDocument();
+    expect(screen.getByText('1,002.50')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Buy NOVA' }));
+
+    expect(await screen.findByText('Partly filled: 4 filled, 6 still working.')).toBeInTheDocument();
+    const sent = server.requests.find((request) => request.method === 'POST' && request.url === '/api/v1/orders');
+    expect(sent?.body).toEqual({
+      instrumentId: NOVA,
+      side: 'BUY',
+      type: 'LIMIT',
+      timeInForce: 'GTC',
+      quantity: 10,
+      limitPrice: '100.25',
+    });
+    expect(sent?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
+    await waitFor(() =>
+      expect(server.requests.filter((request) => request.url === '/api/v1/portfolio').length).toBeGreaterThan(1),
+    );
+  });
+
+  it('shows a rejection inline and keeps what was typed', async () => {
+    market().on('POST /api/v1/orders', {
+      status: 422,
+      problem: { status: 422, code: 'INSUFFICIENT_CASH', orderId: '00000000-0000-0000-0000-0000000000ab', commandSequence: '4' },
+    });
+    renderTerminal();
+    fireEvent.change(await screen.findByLabelText('Shares'), { target: { value: '500' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Buy NOVA' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Not enough available cash');
+    expect(screen.getByLabelText('Shares')).toHaveValue('500');
+  });
+
+  it('offers to retry the very same order when the exchange is busy, and locks the fields', async () => {
+    market().on('POST /api/v1/orders', { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY' } });
+    renderTerminal();
+    fireEvent.click(await screen.findByRole('button', { name: 'Buy NOVA' }));
+
+    expect(await screen.findByRole('button', { name: 'Retry the same order' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Shares')).toBeDisabled();
+  });
+
+  it('labels a protected market order and shows no spend estimate for a sale', async () => {
+    market();
+    renderTerminal();
+    fireEvent.change(await screen.findByLabelText('Order type'), { target: { value: 'MARKET_PROTECTED' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sell' }));
+
+    expect(screen.getByLabelText('Protection price')).toBeInTheDocument();
+    expect(screen.queryByText(/Maximum spend/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Sell NOVA' })).toBeInTheDocument();
+  });
+
+  it('cancels an open order with a key, and says when it was already filled', async () => {
+    const server = market().on('POST /api/v1/orders/00000000-0000-0000-0000-0000000000cc/cancel', {
+      status: 409,
+      problem: { status: 409, code: 'ORDER_NOT_CANCELABLE' },
+    });
+    renderTerminal();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel sell NOVA at 105.00' }));
+
+    expect(await screen.findByText('That order was already filled.')).toBeInTheDocument();
+    const cancel = server.requests.find((request) => request.url.endsWith('/cancel'));
+    expect(cancel?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});

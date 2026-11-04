@@ -62,7 +62,7 @@ describe('signing in', () => {
     fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'secret' } });
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
 
-    expect(await screen.findByRole('heading', { name: 'Markets' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: 'NOVA', level: 1 })).toBeInTheDocument();
     expect(screen.getByText('Simulation · Virtual funds')).toBeInTheDocument();
     expect(screen.getByText('trader')).toBeInTheDocument();
   });
@@ -115,7 +115,7 @@ describe('signing in', () => {
   });
 });
 
-describe('markets', () => {
+describe('terminal at a glance', () => {
   beforeEach(() => resetSession());
 
   it('labels a price with no trades yet as the reference, and says the data is stale', async () => {
@@ -123,11 +123,9 @@ describe('markets', () => {
 
     openAt('/terminal');
 
-    const row = await screen.findByRole('row', { name: /NOVA/ });
-    expect(within(row).getByText('ref')).toBeInTheDocument();
-    expect(within(row).getByText('99.50')).toBeInTheDocument();
-    expect(within(row).getByText('—')).toBeInTheDocument();
-    expect(screen.getByRole('status')).toHaveTextContent('Market data: Stale · 4 behind');
+    const item = await screen.findByRole('button', { name: /^NOVA/ });
+    expect(within(item).getByText('ref')).toBeInTheDocument();
+    expect(screen.getByText('Market data: Stale · 4 behind')).toBeInTheDocument();
   });
 
   it('explains an empty market', async () => {
