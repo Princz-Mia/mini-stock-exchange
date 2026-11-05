@@ -190,6 +190,90 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/market": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * The authoritative trading phase. Public.
+         * @description Read from the committed market, so it is never behind the writer. A venue state shown by market data
+         *     can lag behind this.
+         */
+        readonly get: operations["getMarket"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/market/open": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Open the market for trading, once.
+         * @description Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
+         *     key returns the first answer, even a refusal. Allowed only from SETUP.
+         */
+        readonly post: operations["openMarket"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/market/halt": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Halt trading. New orders are rejected; cancels still work.
+         * @description Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
+         *     key returns the first answer, even a refusal. Allowed only from OPEN.
+         */
+        readonly post: operations["haltMarket"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/market/resume": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Resume trading. Resting orders keep their priority.
+         * @description Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
+         *     key returns the first answer, even a refusal. Allowed only from HALTED.
+         */
+        readonly post: operations["resumeMarket"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/instruments": {
         readonly parameters: {
             readonly query?: never;
@@ -434,6 +518,20 @@ export interface components {
             readonly status: "CANCELED" | "ALREADY_CANCELED";
             /** Format: int64 */
             readonly canceledQuantity: number;
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly MarketStatus: {
+            /** @enum {string} */
+            readonly state: "NOT_SET_UP" | "SETUP" | "OPEN" | "HALTED";
+            readonly simulationId: components["schemas"]["Uuid"] | null;
+            /** @description When the market first opened; null in SETUP. */
+            readonly openedAt: components["schemas"]["Timestamp"] | null;
+            /** @description The last committed command's sequence. */
+            readonly commandSequence: components["schemas"]["Sequence"] | null;
+        };
+        readonly MarketTransition: {
+            /** @enum {string} */
+            readonly state: "OPEN" | "HALTED";
             readonly commandSequence: components["schemas"]["Sequence"];
         };
         /** @description How current the data is. Show staleness to the user rather than presenting old data as live. */
@@ -996,6 +1094,182 @@ export interface operations {
                 content?: never;
             };
             readonly 403: components["responses"]["NotTrader"];
+        };
+    };
+    readonly getMarket: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The phase, or NOT_SET_UP with null fields before a market exists. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["MarketStatus"];
+                };
+            };
+        };
+    };
+    readonly openMarket: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Applied. The market is OPEN from this command's sequence on. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["MarketTransition"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /**
+             * @description MARKET_TRANSITION_NOT_ALLOWED (committed and audited, with the market's current state),
+             *     MARKET_NOT_SET_UP (nothing committed), or IDEMPOTENCY_CONFLICT.
+             */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly haltMarket: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Applied. The market is HALTED from this command's sequence on. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["MarketTransition"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /**
+             * @description MARKET_TRANSITION_NOT_ALLOWED (committed and audited, with the market's current state),
+             *     MARKET_NOT_SET_UP (nothing committed), or IDEMPOTENCY_CONFLICT.
+             */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly resumeMarket: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Applied. The market is OPEN from this command's sequence on. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["MarketTransition"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /**
+             * @description MARKET_TRANSITION_NOT_ALLOWED (committed and audited, with the market's current state),
+             *     MARKET_NOT_SET_UP (nothing committed), or IDEMPOTENCY_CONFLICT.
+             */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
         };
     };
     readonly listInstruments: {

@@ -106,6 +106,14 @@ public final class TradingEngine {
 		return writer.submit(() -> processCancel(key, command));
 	}
 
+	/**
+	 * Opens, halts or resumes the market. The new state takes effect at the command's sequence: every later command
+	 * reads it from the locked market row. Books are untouched, so resting orders keep their priority.
+	 */
+	public CompletableFuture<MarketTransition> control(CommandKey key, MarketControl command) {
+		return writer.submit(() -> processControl(key, command));
+	}
+
 	/** A snapshot of one side of a book, read on the writer thread so it never sees a half-applied plan. */
 	public CompletableFuture<List<DepthLevel>> depth(UUID instrumentId, Side side) {
 		return writer.submit(() -> books.get(instrumentId).depth(side, Integer.MAX_VALUE));
@@ -154,6 +162,47 @@ public final class TradingEngine {
 					new BookOutOfStepException(command.orderId()));
 		}
 		return outcome.result();
+	}
+
+	private MarketTransition processControl(CommandKey key, MarketControl command) {
+		if (simulationId == null) {
+			return MarketTransition.notSetUp();
+		}
+		try {
+			return transactions.inTransaction(() -> controlInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+	}
+
+	private MarketTransition controlInTransaction(CommandKey key, MarketControl command) {
+		Market market = store.lockMarket();
+		if (market.writerEpoch() != writerEpoch) {
+			throw new StaleWriterException();
+		}
+		Optional<TradingStore.StoredResult<MarketTransition>> prior = store.findResult(simulationId, key,
+				MarketTransition.class);
+		if (prior.isPresent()) {
+			return replay(key, prior.get());
+		}
+		long sequence = store.nextCommandSequence(simulationId);
+		MarketControl.Action action = command.action();
+		if (!action.from().equals(market.state())) {
+			store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "NOT_ALLOWED",
+					key.idempotencyKey(), sequence);
+			return remember(key, 409,
+					new MarketTransition(MarketTransition.Status.NOT_ALLOWED, market.state(), sequence));
+		}
+		store.updateMarketState(simulationId, action.to());
+		// Every instrument's public state carries the venue state, so each one gets a snapshot at this sequence.
+		Market changed = market.withState(action.to());
+		for (TradingStore.Instrument instrument : store.instruments(simulationId)) {
+			snapshot(changed, instrument.id(), books.get(instrument.id()), BookDelta.none(), sequence);
+		}
+		store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "APPLIED", key.idempotencyKey(),
+				sequence);
+		return remember(key, 200, new MarketTransition(MarketTransition.Status.APPLIED, action.to(), sequence));
 	}
 
 	private CancelOutcome cancelInTransaction(CommandKey key, CancelOrder command) {
@@ -314,8 +363,12 @@ public final class TradingEngine {
 
 	/** Stores the first committed result in the same transaction, so a retry with the same key gets it back. */
 	private <T> T remember(CommandKey key, int httpStatus, T result) {
-		long sequence = result instanceof PlacementResult placement ? placement.commandSequence()
-				: ((CancelResult) result).commandSequence();
+		long sequence = switch (result) {
+			case PlacementResult placement -> placement.commandSequence();
+			case CancelResult cancel -> cancel.commandSequence();
+			case MarketTransition transition -> transition.commandSequence();
+			default -> throw new IllegalArgumentException("Not a command result: " + result);
+		};
 		store.insertResult(simulationId, key, httpStatus, result, sequence);
 		return result;
 	}

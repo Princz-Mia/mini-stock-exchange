@@ -1,15 +1,8 @@
 package com.mia_princz.mse.execution.trading.adapter.web;
 
-import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
@@ -30,10 +23,6 @@ import com.mia_princz.mse.execution.outbox.OutboxAdmission;
 import com.mia_princz.mse.execution.trading.application.CancelOrder;
 import com.mia_princz.mse.execution.trading.application.CancelResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
-import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterBusyException;
-import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterHaltException;
-import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterStoppedException;
-import com.mia_princz.mse.execution.trading.application.IdempotencyConflictException;
 import com.mia_princz.mse.execution.trading.application.PlaceOrder;
 import com.mia_princz.mse.execution.trading.application.PlacementResult;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
@@ -80,7 +69,7 @@ class OrderController {
 	ResponseEntity<?> place(@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader,
 			@RequestBody OrderBody body, Authentication authentication) {
 		TradingQueries.Trader trader = trader(authentication);
-		UUID key = idempotencyKey(keyHeader);
+		UUID key = CommandCalls.idempotencyKey(keyHeader);
 		OrderBody.Valid order = body.validate();
 		if (!admission.admitsNewOrders()) {
 			// Not queued, like a full writer queue, so retrying with the same key later is safe.
@@ -92,16 +81,18 @@ class OrderController {
 		CommandKey commandKey = new CommandKey(trader.userId(), key, PLACE_ROUTE, order.hash());
 		PlaceOrder command = new PlaceOrder(UUID.randomUUID(), trader.accountId(), order.instrumentId(), order.side(),
 				order.type(), order.bound(), order.quantity());
-		return placement(await(key, () -> engine.place(commandKey, command)));
+		return placement(CommandCalls.await(key, timeout, () -> engine.place(commandKey, command)));
 	}
 
 	@PostMapping("/orders/{orderId}/cancel")
 	ResponseEntity<?> cancel(@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader,
 			@PathVariable UUID orderId, Authentication authentication) {
 		TradingQueries.Trader trader = trader(authentication);
-		UUID key = idempotencyKey(keyHeader);
-		CommandKey commandKey = new CommandKey(trader.userId(), key, CANCEL_ROUTE, sha256(orderId.toString()));
-		return cancellation(await(key, () -> engine.cancel(commandKey, new CancelOrder(orderId, trader.accountId()))));
+		UUID key = CommandCalls.idempotencyKey(keyHeader);
+		CommandKey commandKey = new CommandKey(trader.userId(), key, CANCEL_ROUTE,
+				CommandCalls.sha256(orderId.toString()));
+		return cancellation(CommandCalls.await(key, timeout,
+				() -> engine.cancel(commandKey, new CancelOrder(orderId, trader.accountId()))));
 	}
 
 	record OrderPage(List<TradingQueries.OrderView> orders, String nextCursor) {
@@ -166,77 +157,8 @@ class OrderController {
 		};
 	}
 
-	private interface Submission<T> {
-
-		CompletableFuture<T> submit();
-
-	}
-
-	/** Waits for the committed result. A timeout does not cancel the command; its outcome is recoverable by key. */
-	private <T> T await(UUID key, Submission<T> submission) {
-		CompletableFuture<T> future;
-		try {
-			future = submission.submit();
-		}
-		catch (WriterBusyException ex) {
-			throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "EXCHANGE_BUSY",
-					"The exchange is busy and did not accept the command; retry with the same key");
-		}
-		catch (WriterStoppedException ex) {
-			throw unavailable();
-		}
-		try {
-			return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-		}
-		catch (TimeoutException ex) {
-			throw new ApiException(HttpStatus.GATEWAY_TIMEOUT, "COMMAND_OUTCOME_UNKNOWN",
-					"The command may still complete; look it up by its key").with("commandKey", key.toString());
-		}
-		catch (InterruptedException ex) {
-			Thread.currentThread().interrupt();
-			throw unavailable();
-		}
-		catch (ExecutionException ex) {
-			Throwable cause = ex.getCause();
-			if (cause instanceof IdempotencyConflictException) {
-				throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT",
-						"This idempotency key was already used for a different request");
-			}
-			if (cause instanceof IllegalArgumentException) {
-				throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_INSTRUMENT", "No such instrument");
-			}
-			if (cause instanceof WriterHaltException || cause instanceof WriterStoppedException) {
-				throw unavailable();
-			}
-			throw new IllegalStateException("Command failed", cause);
-		}
-	}
-
-	private static ApiException unavailable() {
-		return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "TRADING_UNAVAILABLE", "Trading is unavailable");
-	}
-
 	private TradingQueries.Trader trader(Authentication authentication) {
 		return Pages.trader(queries, authentication);
-	}
-
-	private static UUID idempotencyKey(String header) {
-		try {
-			return UUID.fromString(header);
-		}
-		catch (IllegalArgumentException | NullPointerException ex) {
-			throw new ApiException(HttpStatus.BAD_REQUEST, "IDEMPOTENCY_KEY_REQUIRED",
-					"An Idempotency-Key header with a UUID is required");
-		}
-	}
-
-	private static byte[] sha256(String value) {
-		try {
-			return MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
-		}
-		catch (NoSuchAlgorithmException ex) {
-			throw new IllegalStateException(ex);
-		}
 	}
 
 }
