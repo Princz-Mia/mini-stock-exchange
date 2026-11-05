@@ -211,6 +211,27 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/instruments": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Add an instrument while the market is in SETUP. The first one creates the market.
+         * @description Operator only. Sequenced on the writer and audited, with an idempotency key: a retry with the same key and
+         *     body returns the first answer, even a refusal. Publishes the instrument's first market snapshot.
+         */
+        readonly post: operations["addInstrument"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/market/open": {
         readonly parameters: {
             readonly query?: never;
@@ -518,6 +539,16 @@ export interface components {
             readonly status: "CANCELED" | "ALREADY_CANCELED";
             /** Format: int64 */
             readonly canceledQuantity: number;
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly InstrumentRequest: {
+            readonly symbol: string;
+            readonly referencePrice: components["schemas"]["Price"];
+        };
+        readonly InstrumentCreated: {
+            readonly instrumentId: components["schemas"]["Uuid"];
+            readonly symbol: string;
+            readonly referencePrice: components["schemas"]["Price"];
             readonly commandSequence: components["schemas"]["Sequence"];
         };
         readonly MarketStatus: {
@@ -1114,6 +1145,59 @@ export interface operations {
                     readonly "application/json": components["schemas"]["MarketStatus"];
                 };
             };
+        };
+    };
+    readonly addInstrument: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["InstrumentRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Created. */
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["InstrumentCreated"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description MARKET_NOT_IN_SETUP or SYMBOL_TAKEN (both committed and audited), or IDEMPOTENCY_CONFLICT. */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
         };
     };
     readonly openMarket: {

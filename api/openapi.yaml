@@ -295,6 +295,43 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/MarketStatus' }
 
+  /api/v1/admin/instruments:
+    post:
+      tags: [execution]
+      operationId: addInstrument
+      summary: Add an instrument while the market is in SETUP. The first one creates the market.
+      description: |
+        Operator only. Sequenced on the writer and audited, with an idempotency key: a retry with the same key and
+        body returns the first answer, even a refusal. Publishes the instrument's first market snapshot.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/InstrumentRequest' }
+      responses:
+        '201':
+          description: Created.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/InstrumentCreated' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '409':
+          description: |
+            MARKET_NOT_IN_SETUP or SYMBOL_TAKEN (both committed and audited), or IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
   /api/v1/admin/market/open:
     post:
       tags: [execution]
@@ -765,6 +802,24 @@ components:
         orderId: { $ref: '#/components/schemas/Uuid' }
         status: { type: string, enum: [CANCELED, ALREADY_CANCELED] }
         canceledQuantity: { type: integer, format: int64 }
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+
+    InstrumentRequest:
+      type: object
+      additionalProperties: false
+      required: [symbol, referencePrice]
+      properties:
+        symbol: { type: string, pattern: '^[A-Z]{1,8}$' }
+        referencePrice: { $ref: '#/components/schemas/Price' }
+
+    InstrumentCreated:
+      type: object
+      additionalProperties: false
+      required: [instrumentId, symbol, referencePrice, commandSequence]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        symbol: { type: string }
+        referencePrice: { $ref: '#/components/schemas/Price' }
         commandSequence: { $ref: '#/components/schemas/Sequence' }
 
     MarketStatus:

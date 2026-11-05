@@ -156,6 +156,12 @@ class ApiContractIT {
 		check(trader.post(resume, "", "Idempotency-Key", UUID.randomUUID().toString()), "POST", resume, 403);
 		check(operator.post(resume, "", "Idempotency-Key", UUID.randomUUID().toString()), "POST", resume, 200);
 
+		String instruments = "/api/v1/admin/instruments";
+		check(operator.post(instruments, "{\"symbol\":\"late\",\"referencePrice\":\"1\"}", "Idempotency-Key",
+				UUID.randomUUID().toString()), "POST", instruments, 400);
+		check(operator.post(instruments, "{\"symbol\":\"LATE\",\"referencePrice\":\"1.00\"}", "Idempotency-Key",
+				UUID.randomUUID().toString()), "POST", instruments, 409);
+
 		trader.csrfToken = null;
 		check(trader.post("/api/v1/auth/logout", ""), "POST", "/api/v1/auth/logout", 403);
 		trader.fetchCsrfToken();
