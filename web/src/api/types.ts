@@ -31,3 +31,6 @@ export type AccountRequest = Schemas['AccountRequest'];
 export type AccountCreated = Schemas['AccountCreated'];
 export type AccountPage = Schemas['AccountPage'];
 export type AccountSummary = Schemas['AccountSummary'];
+export type BotsRequest = Schemas['BotsRequest'];
+export type BotsCreated = Schemas['BotsCreated'];
+export type BotPopulation = Schemas['BotPopulation'];

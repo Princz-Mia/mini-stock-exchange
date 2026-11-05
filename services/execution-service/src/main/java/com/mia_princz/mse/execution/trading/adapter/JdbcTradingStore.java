@@ -245,7 +245,10 @@ public final class JdbcTradingStore implements TradingStore {
 
 	@Override
 	public void insertBotAccount(UUID simulationId, UUID accountId, String displayName) {
-		expectOne(jdbc.sql("INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'BOT', ?)")
+		// clock_timestamp, not the transaction's now(): bots made by one command then list in the order they were made.
+		expectOne(jdbc.sql("""
+				INSERT INTO account (id, simulation_id, kind, display_name, created_at)
+				VALUES (?, ?, 'BOT', ?, clock_timestamp())""")
 			.params(accountId, simulationId, displayName)
 			.update(), "insert bot account");
 	}

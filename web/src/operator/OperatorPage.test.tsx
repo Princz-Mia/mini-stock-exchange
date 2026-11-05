@@ -38,11 +38,15 @@ function market(state: MarketStatus['state']): MarketStatus {
 
 /** A stateful stand-in: the market moves when a transition is accepted, so refetches show the new state. */
 function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
-  const state = { market: market(initial) };
+  const state = { market: market(initial), bots: 0 };
   const server = signedIn('operator', ['OPERATOR'])
     .on('GET /api/v1/market', () => ({ status: 200, json: state.market }))
     .on('GET /api/v1/instruments', { status: 200, json: { instruments, feed: { state: 'LIVE', lag: 0 } } })
-    .on('GET /api/v1/admin/accounts', { status: 200, json: { accounts: [], nextCursor: null } });
+    .on('GET /api/v1/admin/accounts', { status: 200, json: { accounts: [], nextCursor: null } })
+    .on('GET /api/v1/admin/bots', () => ({
+      status: 200,
+      json: { population: state.bots, maxPopulation: 1000, maxPerCommand: 100 },
+    }));
   return { server, state };
 }
 
@@ -195,6 +199,7 @@ describe('the operator screen', () => {
             cash: '100000.00',
             holdings: [{ instrumentId: NOVA.instrumentId, symbol: 'NOVA', quantity: 1000 }],
           },
+          { accountId: 'b', username: 'bot-0001', kind: 'BOT', cash: '5000.00', holdings: [] },
         ],
         nextCursor: null,
       },
@@ -204,7 +209,75 @@ describe('the operator screen', () => {
     const row = await screen.findByRole('row', { name: /trader/ });
     expect(row).toHaveTextContent('100,000.00');
     expect(row).toHaveTextContent('NOVA 1,000');
+    expect(within(row).queryByText('bot')).toBeNull();
+    const bot = screen.getByRole('row', { name: /bot-0001/ });
+    expect(within(bot).getByText('bot')).toHaveClass('tag');
     expect(screen.getByText(/Endowments are frozen once the market opens/)).toBeInTheDocument();
     expect(screen.queryByRole('form', { name: 'Fund a trader' })).toBeNull();
+  });
+
+  it('creates bots with the default endowment and shows the new population', async () => {
+    const { server, state } = exchange('SETUP');
+    server.on('POST /api/v1/admin/bots', () => {
+      state.bots = 10;
+      return {
+        status: 201,
+        json: { created: 10, firstBot: 'bot-0001', lastBot: 'bot-0010', population: 10, commandSequence: '9' },
+      };
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    expect(await screen.findByText('0 of 1,000 bots')).toBeInTheDocument();
+    expect(within(form).getByLabelText('Number of bots')).toHaveValue('10');
+    expect(await within(form).findByLabelText('NOVA shares')).toHaveValue('1000');
+    expect(within(form).getByText(/Up to 100 at a time, 1,000 more in all/)).toBeInTheDocument();
+    fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
+
+    expect(await screen.findByText('Created bot-0001 to bot-0010. 10 bots in all.')).toBeInTheDocument();
+    expect(await screen.findByText('10 of 1,000 bots')).toBeInTheDocument();
+    const sent = server.requests.find((request) => request.url === '/api/v1/admin/bots' && request.method === 'POST');
+    expect(sent?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(sent?.body).toEqual({
+      count: 10,
+      cash: '100000.00',
+      holdings: [{ instrumentId: NOVA.instrumentId, quantity: 1000 }],
+    });
+  });
+
+  it("shows a refused bot request in the exchange's words and keeps the input", async () => {
+    const { server } = exchange('SETUP');
+    server.on('POST /api/v1/admin/bots', {
+      status: 409,
+      problem: { status: 409, code: 'BOT_POPULATION_LIMIT', detail: 'At most 1000 bots; 990 exist' },
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '20' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
+
+    expect(await screen.findByText('At most 1000 bots; 990 exist')).toBeInTheDocument();
+    expect(within(form).getByLabelText('Number of bots')).toHaveValue('20');
+  });
+
+  it('cannot create bots once the population is full, and says why', async () => {
+    const { state } = exchange('SETUP');
+    state.bots = 1000;
+    renderPage();
+
+    const create = await button('Create bots');
+    await waitFor(() => expect(create).toBeDisabled());
+    expect(create).toHaveAccessibleDescription('The population is at its limit; no more bots can be created.');
+  });
+
+  it('fixes the bot population once the market opens', async () => {
+    const { state } = exchange('OPEN');
+    state.bots = 12;
+    renderPage();
+
+    expect(await screen.findByText('12 of 1,000 bots')).toBeInTheDocument();
+    expect(screen.getByText(/the population is fixed after that/)).toBeInTheDocument();
+    expect(screen.queryByRole('form', { name: 'Create bots' })).toBeNull();
   });
 });

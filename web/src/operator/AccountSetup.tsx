@@ -5,13 +5,10 @@ import { api } from '../api/client';
 import type { AccountRequest, Instrument } from '../api/types';
 import { groupDigits, groupInteger } from '../format';
 import { CommandStatus } from './CommandStatus';
+import { DEFAULT_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
 import { useCommand } from './useCommand';
 
-/** The default endowment: offered as the form's starting values, never applied without the operator. */
-export const DEFAULT_CASH = '100000.00';
-export const DEFAULT_SHARES = '1000';
-
-/** Funded accounts with what they started with and, during setup, a form to fund another trader. */
+/** Funded accounts, traders and bots, with what they started with and, during setup, a form to fund a trader. */
 export function AccountSetup({ instruments, editable }: { instruments: readonly Instrument[]; editable: boolean }) {
   const client = useQueryClient();
   const accounts = useInfiniteQuery({
@@ -22,7 +19,7 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
   });
   const [username, setUsername] = useState('');
   const [cash, setCash] = useState(DEFAULT_CASH);
-  const [shares, setShares] = useState<Record<string, string>>({});
+  const [shares, setShares] = useState<ShareInputs>({});
   const send = useCallback(async (request: AccountRequest, key: string) => {
     const created = await api.provisionAccount(request, key);
     setUsername('');
@@ -33,11 +30,7 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    const holdings = instruments
-      .map((instrument) => ({ instrumentId: instrument.instrumentId, text: shares[instrument.instrumentId] ?? DEFAULT_SHARES }))
-      .filter(({ text }) => text.trim() !== '' && text.trim() !== '0')
-      .map(({ instrumentId, text }) => ({ instrumentId, quantity: Number(text.trim()) }));
-    void command.run({ username: username.trim(), cash: cash.trim(), holdings });
+    void command.run({ username: username.trim(), cash: cash.trim(), holdings: holdingsFrom(instruments, shares) });
   };
 
   const rows = accounts.data?.pages.flatMap((page) => page.accounts) ?? [];
@@ -55,7 +48,7 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
         <table aria-label="Accounts">
           <thead>
             <tr>
-              <th scope="col">Trader</th>
+              <th scope="col">Account</th>
               <th scope="col" className="num">
                 Starting cash
               </th>
@@ -65,7 +58,9 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
           <tbody>
             {rows.map((account) => (
               <tr key={account.accountId}>
-                <th scope="row">{account.username}</th>
+                <th scope="row">
+                  {account.username} {account.kind === 'BOT' && <span className="tag">bot</span>}
+                </th>
                 <td className="num">{groupDigits(account.cash)}</td>
                 <td>
                   {account.holdings.length === 0
@@ -95,22 +90,7 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
                 <input value={cash} onChange={(event) => setCash(event.target.value)} inputMode="decimal" />
               </label>
             </div>
-            {instruments.length > 0 && (
-              <div className="field-row">
-                {instruments.map((instrument) => (
-                  <label key={instrument.instrumentId}>
-                    {instrument.symbol} shares
-                    <input
-                      value={shares[instrument.instrumentId] ?? DEFAULT_SHARES}
-                      onChange={(event) =>
-                        setShares((current) => ({ ...current, [instrument.instrumentId]: event.target.value }))
-                      }
-                      inputMode="numeric"
-                    />
-                  </label>
-                ))}
-              </div>
-            )}
+            <ShareFields instruments={instruments} shares={shares} onChange={setShares} />
             <p className="muted hint">
               Starts from the default endowment: 100,000.00 and 1,000 shares of each instrument. Set shares to 0 to
               leave an instrument out. Only existing traders can be funded, once each.

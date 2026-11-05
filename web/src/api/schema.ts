@@ -262,7 +262,8 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        readonly get?: never;
+        /** How many bots exist and the limits on making more. Operator only. */
+        readonly get: operations["getBotPopulation"];
         readonly put?: never;
         /**
          * Create funded bot accounts, each with its own API token, while the market is in SETUP.
@@ -618,6 +619,11 @@ export interface components {
             readonly count: number;
             readonly cash: components["schemas"]["Money"];
             readonly holdings?: readonly components["schemas"]["Endowment"][];
+        };
+        readonly BotPopulation: {
+            readonly population: number;
+            readonly maxPopulation: number;
+            readonly maxPerCommand: number;
         };
         readonly BotsCreated: {
             readonly created: number;
@@ -1399,6 +1405,40 @@ export interface operations {
             };
             readonly 503: components["responses"]["Unavailable"];
             readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly getBotPopulation: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The population and its limits. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BotPopulation"];
+                };
+            };
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     readonly provisionBots: {

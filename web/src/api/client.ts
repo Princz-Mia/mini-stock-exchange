@@ -2,6 +2,9 @@ import type {
   AccountCreated,
   AccountPage,
   AccountRequest,
+  BotPopulation,
+  BotsCreated,
+  BotsRequest,
   Cancellation,
   CsrfToken,
   Identity,
@@ -155,6 +158,11 @@ export const api = {
     request<AccountCreated>('POST', '/api/v1/admin/accounts', { body: account, idempotencyKey }),
 
   accounts: (cursor?: string) => request<AccountPage>('GET', `/api/v1/admin/accounts${query({ cursor, limit: 50 })}`),
+
+  botPopulation: () => request<BotPopulation>('GET', '/api/v1/admin/bots'),
+
+  provisionBots: (bots: BotsRequest, idempotencyKey: string) =>
+    request<BotsCreated>('POST', '/api/v1/admin/bots', { body: bots, idempotencyKey }),
 
   orders: (status: 'all' | 'active', cursor?: string) =>
     request<OrderPage>('GET', `/api/v1/orders${query({ status, cursor, limit: status === 'all' ? 50 : undefined })}`),

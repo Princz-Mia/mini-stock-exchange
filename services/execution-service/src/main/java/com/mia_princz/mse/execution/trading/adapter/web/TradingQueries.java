@@ -148,6 +148,10 @@ class TradingQueries {
 		}).toList();
 	}
 
+	int botCount() {
+		return jdbc.sql("SELECT count(*) FROM account WHERE kind = 'BOT'").query(Integer.class).single();
+	}
+
 	/** A user who may be given a trading account: one with the TRADER role. */
 	Optional<UUID> traderUserId(String username) {
 		return jdbc.sql("SELECT id FROM app_user WHERE username = ? AND role = 'TRADER'")
