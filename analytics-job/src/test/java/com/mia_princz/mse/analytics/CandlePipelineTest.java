@@ -37,24 +37,7 @@ class CandlePipelineTest {
 		List<byte[]> payloads = List.of(trade(simulationId, instrumentId, 1, 10_000, 3), trade(simulationId, instrumentId, 2, 10_000, 4),
 				trade(simulationId, instrumentId, 2, 10_000, 4), trade(simulationId, instrumentId, 3, 10_100, 3));
 
-		Configuration configuration = new Configuration();
-		configuration.set(PipelineOptions.GENERIC_TYPES, false);
-		StreamExecutionEnvironment env = StreamExecutionEnvironment.createLocalEnvironment(1, configuration);
-
-		TradeDeserializationSchema schema = new TradeDeserializationSchema();
-		List<TradeRecord> trades = new ArrayList<>();
-		for (byte[] payload : payloads) {
-			trades.add(schema.deserialize(payload));
-		}
-		DataStream<CandleRecord> candles = env.fromData(trades)
-			.assignTimestampsAndWatermarks(WatermarkStrategy.noWatermarks())
-			.keyBy(TradeRecord::key)
-			.process(new CandleAggregator());
-
-		List<CandleRecord> emitted = new ArrayList<>();
-		try (CloseableIterator<CandleRecord> results = candles.executeAndCollect()) {
-			results.forEachRemaining(emitted::add);
-		}
+		List<CandleRecord> emitted = run(payloads);
 
 		assertThat(emitted).as("one complete aggregate per unique trade").hasSize(3);
 		CandleRecord last = emitted.get(2);
@@ -67,6 +50,26 @@ class CandlePipelineTest {
 		assertThat(last.tradeCount).isEqualTo(3);
 		assertThat(last.notionalCents).isEqualTo(BigInteger.valueOf(100_300));
 		assertThat(last.sourceMaxTradeSequence).isEqualTo(3);
+	}
+
+	/** Keyed state isolates instruments: a gap stops only the instrument it happened on. */
+	@Test
+	void aGapStopsOnlyItsOwnInstrument() throws Exception {
+		UUID simulationId = UUID.randomUUID();
+		UUID broken = UUID.randomUUID();
+		UUID healthy = UUID.randomUUID();
+		List<byte[]> payloads = List.of(trade(simulationId, broken, 1, 10_000, 1), trade(simulationId, healthy, 1, 5_000, 1),
+				trade(simulationId, broken, 3, 10_000, 1), trade(simulationId, healthy, 2, 5_100, 2),
+				trade(simulationId, broken, 4, 10_000, 1), trade(simulationId, healthy, 3, 5_200, 3));
+
+		List<CandleRecord> emitted = run(payloads);
+
+		assertThat(emitted).filteredOn((candle) -> candle.instrumentId.equals(broken.toString()))
+			.extracting((candle) -> candle.sourceMaxTradeSequence)
+			.containsExactly(1L);
+		assertThat(emitted).filteredOn((candle) -> candle.instrumentId.equals(healthy.toString()))
+			.extracting((candle) -> candle.sourceMaxTradeSequence)
+			.containsExactly(1L, 2L, 3L);
 	}
 
 	@Test
@@ -88,6 +91,28 @@ class CandlePipelineTest {
 
 		assertThat(replay.getEventId()).isEqualTo(first.getEventId());
 		assertThat(first.getComputationEpoch()).isEqualTo(7);
+	}
+
+	private static List<CandleRecord> run(List<byte[]> payloads) throws Exception {
+		Configuration configuration = new Configuration();
+		configuration.set(PipelineOptions.GENERIC_TYPES, false);
+		StreamExecutionEnvironment env = StreamExecutionEnvironment.createLocalEnvironment(1, configuration);
+
+		TradeDeserializationSchema schema = new TradeDeserializationSchema();
+		List<TradeRecord> trades = new ArrayList<>();
+		for (byte[] payload : payloads) {
+			trades.add(schema.deserialize(payload));
+		}
+		DataStream<CandleRecord> candles = env.fromData(trades)
+			.assignTimestampsAndWatermarks(WatermarkStrategy.noWatermarks())
+			.keyBy(TradeRecord::key)
+			.process(new CandleAggregator());
+
+		List<CandleRecord> emitted = new ArrayList<>();
+		try (CloseableIterator<CandleRecord> results = candles.executeAndCollect()) {
+			results.forEachRemaining(emitted::add);
+		}
+		return emitted;
 	}
 
 	private static byte[] trade(UUID simulationId, UUID instrumentId, long sequence, long priceCents, long quantity)
