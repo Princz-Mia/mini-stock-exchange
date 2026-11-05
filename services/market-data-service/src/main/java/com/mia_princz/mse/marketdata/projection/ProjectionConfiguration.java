@@ -48,6 +48,11 @@ class ProjectionConfiguration {
 	}
 
 	@Bean
+	CandleProjection candleProjection(JdbcClient jdbcClient) {
+		return new CandleProjection(jdbcClient);
+	}
+
+	@Bean
 	Checkpoints checkpoints(JdbcClient jdbcClient) {
 		return new Checkpoints(jdbcClient);
 	}
@@ -109,6 +114,12 @@ class ProjectionConfiguration {
 	@ConditionalOnProperty(name = "mse.trade-feed.enabled", matchIfMissing = true)
 	MarketFeedConsumer tradeFeed(FeedFactory feeds, TradeProjection projection) {
 		return feeds.create(TradeProjection.TOPIC, (payload) -> projection.apply(WireEvents.decodeTrade(payload)));
+	}
+
+	@Bean(initMethod = "start", destroyMethod = "close")
+	@ConditionalOnProperty(name = "mse.candle-feed.enabled", matchIfMissing = true)
+	MarketFeedConsumer candleFeed(FeedFactory feeds, CandleProjection projection) {
+		return feeds.create(CandleProjection.TOPIC, (payload) -> projection.apply(WireEvents.decodeCandle(payload)));
 	}
 
 	/** One feed per topic, each with its own thread, health component and tagged metrics. */
