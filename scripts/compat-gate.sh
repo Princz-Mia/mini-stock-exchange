@@ -222,6 +222,13 @@ browser_flow() {
       E2E_BASE_URL="http://localhost:$web_port" E2E_TRADER_PASSWORD="$trader_password"         E2E_OPERATOR_PASSWORD="$operator_password" E2E_COUNTERPARTY_PASSWORD="$counterparty_password"         npm run e2e) >> "$log" 2>&1
 }
 
+bot_tokens() {
+  # The browser test's setup provisioned two bots; each token is a file only its owner can read.
+  assert_equal 'token directory' '700 mse' "$(compose exec -T execution-service stat -c '%a %U' /run/mse/bot-tokens)" &&
+    assert_match 'token files' '^ *2 600 mse$' \
+      "$(compose exec -T execution-service sh -c 'stat -c "%a %U" /run/mse/bot-tokens/*.token | uniq -c')"
+}
+
 independence() {
   compose stop market-data-service >> "$log" 2>&1 &&
     assert_match 'instruments with Market Data down' '^50[24]$' "$(http_status /api/v1/instruments)" &&
@@ -273,6 +280,7 @@ step 'Toolchain versions' toolchain &&
   step 'Login: session and CSRF through the proxy' login_flow &&
   step 'Independence: each service survives the other stopping' independence &&
   step 'Browser: trading, phone layout, halt and resume' browser_flow &&
+  step 'Bot tokens: one owner-only file per provisioned bot' bot_tokens &&
   step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' avro_pipeline &&
   step 'Outage isolation: services stay ready without Kafka' kafka_outage ||
   status=1

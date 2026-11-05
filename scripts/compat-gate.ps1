@@ -290,6 +290,12 @@ try {
         }
     }
 
+    Step 'Bot tokens: one owner-only file per provisioned bot' {
+        # The browser test's setup provisioned two bots; each token is a file only its owner can read.
+        Assert-Equal 'token directory' '700 mse' (Invoke-InContainer 'execution-service' @('stat', '-c', '%a %U', '/run/mse/bot-tokens'))
+        Assert-Match 'token files' '^\s*2 600 mse\s*$' (Invoke-InContainer 'execution-service' @('sh', '-c', 'stat -c "%a %U" /run/mse/bot-tokens/*.token | uniq -c'))
+    }
+
     Step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' {
         $simulationId = [guid]::NewGuid().ToString()
         Invoke-Smoke 'services/execution-service/pom.xml' 'TradePublishSmoke' $simulationId
