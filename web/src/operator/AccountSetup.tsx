@@ -7,7 +7,7 @@ import { groupDigits, groupInteger } from '../format';
 import { CommandStatus } from './CommandStatus';
 import { useCommand } from './useCommand';
 
-/** The spec's default endowment: offered as the form's starting values, never applied without the operator. */
+/** The default endowment: offered as the form's starting values, never applied without the operator. */
 export const DEFAULT_CASH = '100000.00';
 export const DEFAULT_SHARES = '1000';
 

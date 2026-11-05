@@ -45,8 +45,13 @@ final class TestBrowser {
 		csrfToken = matcher.group(1);
 	}
 
-	HttpResponse<String> get(String path) throws Exception {
-		return send(request(path).GET());
+	/** Extra headers come as name, value pairs. */
+	HttpResponse<String> get(String path, String... headers) throws Exception {
+		HttpRequest.Builder request = request(path).GET();
+		for (int i = 0; i < headers.length; i += 2) {
+			request.header(headers[i], headers[i + 1]);
+		}
+		return send(request);
 	}
 
 	/** Extra headers come as name, value pairs. */

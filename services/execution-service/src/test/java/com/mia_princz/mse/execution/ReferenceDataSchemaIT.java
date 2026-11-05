@@ -7,6 +7,7 @@ import static com.mia_princz.mse.execution.SchemaFixtures.UNIQUE_VIOLATION;
 import static com.mia_princz.mse.execution.SchemaFixtures.assertFails;
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.Arrays;
 import java.util.UUID;
 
 import org.junit.jupiter.api.BeforeEach;
@@ -144,6 +145,48 @@ class ReferenceDataSchemaIT {
 			f.jdbc.update("UPDATE account SET version = 1 WHERE id = ?", account);
 			assertThat(f.jdbc.queryForObject("SELECT state FROM simulation", String.class)).isEqualTo("OPEN");
 		});
+	}
+
+	@Test
+	void onlyBotAccountsHoldTokensAndOnlyAsHashes() {
+		db.inRolledBackTransaction((f) -> {
+			UUID bot = f.bot(f.simulation());
+			token(f, bot, "BOT", 32, 1);
+			assertFails(UNIQUE_VIOLATION, () -> token(f, bot, "BOT", 32, 1));
+		});
+		db.inRolledBackTransaction((f) -> assertFails(FOREIGN_KEY_VIOLATION,
+				() -> token(f, f.trader(f.simulation()), "BOT", 32, 1)));
+		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION,
+				() -> token(f, f.trader(f.simulation()), "TRADER", 32, 1)));
+		db.inRolledBackTransaction(
+				(f) -> assertFails(CHECK_VIOLATION, () -> token(f, f.bot(f.simulation()), "BOT", 31, 1)));
+	}
+
+	@Test
+	void aRevokedTokenStaysRevokedAndNothingElseChanges() {
+		db.inRolledBackTransaction((f) -> {
+			UUID token = token(f, f.bot(f.simulation()), "BOT", 32, 2);
+			assertThat(f.jdbc.update("UPDATE api_token SET revoked_at = now() WHERE id = ?", token)).isEqualTo(1);
+			assertFails(CHECK_VIOLATION, () -> f.jdbc.update("UPDATE api_token SET revoked_at = NULL WHERE id = ?", token));
+		});
+		db.inRolledBackTransaction((f) -> {
+			UUID token = token(f, f.bot(f.simulation()), "BOT", 32, 3);
+			assertFails(INSUFFICIENT_PRIVILEGE,
+					() -> f.jdbc.update("UPDATE api_token SET token_hash = ? WHERE id = ?", new byte[32], token));
+		});
+		db.inRolledBackTransaction((f) -> {
+			UUID token = token(f, f.bot(f.simulation()), "BOT", 32, 4);
+			assertFails(INSUFFICIENT_PRIVILEGE, () -> f.jdbc.update("DELETE FROM api_token WHERE id = ?", token));
+		});
+	}
+
+	private static UUID token(SchemaFixtures f, UUID account, String kind, int hashLength, int fill) {
+		UUID id = UUID.randomUUID();
+		byte[] hash = new byte[hashLength];
+		Arrays.fill(hash, (byte) fill);
+		f.jdbc.update("INSERT INTO api_token (id, account_id, account_kind, token_hash, scope) VALUES (?, ?, ?, ?, 'TRADE')",
+				id, account, kind, hash);
+		return id;
 	}
 
 }

@@ -13,6 +13,9 @@ info:
     - Errors are RFC 9457 problem details. Every error the application raises carries a stable `code`;
       errors produced by the framework for malformed requests may not.
     - Mutating requests need the session cookie and the CSRF token in the header named by GET /auth/csrf.
+    - Bots send `Authorization: Bearer <token>` instead, on the order, command and portfolio routes only. A
+      request with a bearer token is judged by that token alone: no session cookie and no CSRF token are used,
+      and an invalid token gets 401.
     - `x-may-be-empty: true` on a response means it can also come with no body, when the security layer
       refuses the request before the application sees it.
 
