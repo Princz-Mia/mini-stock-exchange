@@ -29,6 +29,7 @@ $passwords = @{
     postgres          = New-Secret
 }
 $traderPassword = New-Secret
+$operatorPassword = New-Secret
 $envLines = @(
     "POSTGRES_PASSWORD=$($passwords.postgres)"
     "EXECUTION_DB_OWNER_PASSWORD=$($passwords.execution_owner)"
@@ -36,7 +37,7 @@ $envLines = @(
     "MARKET_DATA_DB_OWNER_PASSWORD=$($passwords.market_data_owner)"
     "MARKET_DATA_DB_APP_PASSWORD=$($passwords.market_data_app)"
     "GRAFANA_ADMIN_PASSWORD=$(New-Secret)"
-    "DEV_OPERATOR_PASSWORD=$(New-Secret)"
+    "DEV_OPERATOR_PASSWORD=$operatorPassword"
     "DEV_TRADER_PASSWORD=$traderPassword"
     "WEB_HOST_PORT=$webPort"
     'POSTGRES_HOST_PORT=25432'
@@ -269,24 +270,22 @@ try {
     }
 
     Step 'Browser: sign in, partial fill, cancel, portfolio' {
-        # No operator setup command yet: seed one instrument and two funded traders, then restart Execution so it
-        # rebuilds its books from the database.
+        # Users have no API, so the counterparty's login is inserted; the test sets up the market as the operator.
         $counterpartyPassword = New-Secret
-        Invoke-Checked 'docker' ($compose + @('cp', 'web/e2e/seed-market.sql', 'postgres:/tmp/seed-market.sql'))
+        Invoke-Checked 'docker' ($compose + @('cp', 'web/e2e/seed-users.sql', 'postgres:/tmp/seed-users.sql'))
         Invoke-Checked 'docker' ($compose + @('exec', '-T', '-e', "PGPASSWORD=$($passwords.execution_owner)", 'postgres', 'psql', '-h', '127.0.0.1', '-q',
-            '-U', 'execution_owner', '-d', 'execution_db', '-v', "counterparty_password=$counterpartyPassword", '-f', '/tmp/seed-market.sql'))
-        Invoke-Checked 'docker' ($compose + @('restart', 'execution-service'))
-        Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '180', 'execution-service'))
+            '-U', 'execution_owner', '-d', 'execution_db', '-v', "counterparty_password=$counterpartyPassword", '-f', '/tmp/seed-users.sql'))
         Push-Location web
         try {
             Invoke-Checked 'npx.cmd' @('playwright', 'install', 'chromium')
             $env:E2E_BASE_URL = "http://localhost:$webPort"
             $env:E2E_TRADER_PASSWORD = $traderPassword
+            $env:E2E_OPERATOR_PASSWORD = $operatorPassword
             $env:E2E_COUNTERPARTY_PASSWORD = $counterpartyPassword
             Invoke-Checked 'npm.cmd' @('run', 'e2e')
         }
         finally {
-            Remove-Item Env:E2E_BASE_URL, Env:E2E_TRADER_PASSWORD, Env:E2E_COUNTERPARTY_PASSWORD -ErrorAction SilentlyContinue
+            Remove-Item Env:E2E_BASE_URL, Env:E2E_TRADER_PASSWORD, Env:E2E_OPERATOR_PASSWORD, Env:E2E_COUNTERPARTY_PASSWORD -ErrorAction SilentlyContinue
             Pop-Location
         }
     }

@@ -21,6 +21,7 @@ execution_app_password=$(secret)
 market_data_owner_password=$(secret)
 market_data_app_password=$(secret)
 trader_password=$(secret)
+operator_password=$(secret)
 umask 077
 cat > "$env_file" <<EOF
 POSTGRES_PASSWORD=$(secret)
@@ -29,7 +30,7 @@ EXECUTION_DB_APP_PASSWORD=$execution_app_password
 MARKET_DATA_DB_OWNER_PASSWORD=$market_data_owner_password
 MARKET_DATA_DB_APP_PASSWORD=$market_data_app_password
 GRAFANA_ADMIN_PASSWORD=$(secret)
-DEV_OPERATOR_PASSWORD=$(secret)
+DEV_OPERATOR_PASSWORD=$operator_password
 DEV_TRADER_PASSWORD=$trader_password
 WEB_HOST_PORT=$web_port
 POSTGRES_HOST_PORT=25432
@@ -212,16 +213,13 @@ login_flow() {
 }
 
 browser_flow() {
-  # No operator setup command yet: seed one instrument and two funded traders, then restart Execution so it
-  # rebuilds its books from the database.
+  # Users have no API, so the counterparty's login is inserted; the test sets up the market as the operator.
   local counterparty_password
   counterparty_password=$(secret)
-  compose cp web/e2e/seed-market.sql postgres:/tmp/seed-market.sql >> "$log" 2>&1 &&
-    compose exec -T -e PGPASSWORD="$execution_owner_password" postgres psql -h 127.0.0.1 -q -U execution_owner       -d execution_db -v counterparty_password="$counterparty_password" -f /tmp/seed-market.sql >> "$log" 2>&1 &&
-    compose restart execution-service >> "$log" 2>&1 &&
-    compose up -d --no-deps --wait --wait-timeout 180 execution-service >> "$log" 2>&1 &&
+  compose cp web/e2e/seed-users.sql postgres:/tmp/seed-users.sql >> "$log" 2>&1 &&
+    compose exec -T -e PGPASSWORD="$execution_owner_password" postgres psql -h 127.0.0.1 -q -U execution_owner       -d execution_db -v counterparty_password="$counterparty_password" -f /tmp/seed-users.sql >> "$log" 2>&1 &&
     (cd web && npx playwright install chromium &&
-      E2E_BASE_URL="http://localhost:$web_port" E2E_TRADER_PASSWORD="$trader_password"         E2E_COUNTERPARTY_PASSWORD="$counterparty_password" npm run e2e) >> "$log" 2>&1
+      E2E_BASE_URL="http://localhost:$web_port" E2E_TRADER_PASSWORD="$trader_password"         E2E_OPERATOR_PASSWORD="$operator_password" E2E_COUNTERPARTY_PASSWORD="$counterparty_password"         npm run e2e) >> "$log" 2>&1
 }
 
 independence() {

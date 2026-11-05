@@ -332,6 +332,51 @@ paths:
         '504':
           $ref: '#/components/responses/OutcomeUnknown'
 
+  /api/v1/admin/accounts:
+    post:
+      tags: [execution]
+      operationId: provisionAccount
+      summary: Give a trader their account and starting endowment while the market is in SETUP.
+      description: |
+        Operator only. Sequenced on the writer and audited, with an idempotency key: a retry with the same key and
+        body returns the first answer, even a refusal. The endowment comes from the issuance account in one balanced
+        genesis batch and is recorded as the account's initial allocation. Nothing is granted after opening.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AccountRequest' }
+      responses:
+        '201':
+          description: Created and funded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountCreated' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '409':
+          description: |
+            MARKET_NOT_IN_SETUP or ACCOUNT_EXISTS (both committed and audited), or IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: |
+            UNKNOWN_INSTRUMENT (committed and audited), or UNKNOWN_TRADER (no trader with that username; nothing
+            committed).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
   /api/v1/admin/market/open:
     post:
       tags: [execution]
@@ -820,6 +865,39 @@ components:
         instrumentId: { $ref: '#/components/schemas/Uuid' }
         symbol: { type: string }
         referencePrice: { $ref: '#/components/schemas/Price' }
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+
+    AccountRequest:
+      type: object
+      additionalProperties: false
+      required: [username, cash]
+      properties:
+        username: { type: string, minLength: 1 }
+        cash: { $ref: '#/components/schemas/Money' }
+        holdings:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/Endowment' }
+
+    Endowment:
+      type: object
+      additionalProperties: false
+      required: [instrumentId, quantity]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        quantity: { type: integer, format: int64, minimum: 1, maximum: 1000000 }
+
+    AccountCreated:
+      type: object
+      additionalProperties: false
+      required: [accountId, username, cash, holdings, commandSequence]
+      properties:
+        accountId: { $ref: '#/components/schemas/Uuid' }
+        username: { type: string }
+        cash: { $ref: '#/components/schemas/Money' }
+        holdings:
+          type: array
+          items: { $ref: '#/components/schemas/Endowment' }
         commandSequence: { $ref: '#/components/schemas/Sequence' }
 
     MarketStatus:

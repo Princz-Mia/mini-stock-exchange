@@ -89,6 +89,14 @@ class TradingQueries {
 		return jdbc.sql("SELECT id FROM app_user WHERE username = ?").param(username).query(UUID.class).optional();
 	}
 
+	/** A user who may be given a trading account: one with the TRADER role. */
+	Optional<UUID> traderUserId(String username) {
+		return jdbc.sql("SELECT id FROM app_user WHERE username = ? AND role = 'TRADER'")
+			.param(username)
+			.query(UUID.class)
+			.optional();
+	}
+
 	Optional<Trader> trader(String username) {
 		return jdbc.sql("""
 				SELECT u.id AS user_id, a.id AS account_id FROM app_user u

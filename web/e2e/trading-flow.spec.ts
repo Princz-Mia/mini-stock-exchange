@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 
-import { type APIRequestContext, type Page, expect, request, test } from '@playwright/test';
+import { type APIRequestContext, type APIResponse, type Page, expect, request, test } from '@playwright/test';
 
 import type { CsrfToken, OrderRequest } from '../src/api/types';
 
-// Runs against a freshly seeded stack (seed-market.sql): NOVA at 100.00, and the dev trader and a counterparty
-// with 100,000.00 and 500 shares each. The amounts below follow from that seed, so the test runs once per stack.
-const INSTRUMENT_ID = '10000000-0000-0000-0000-0000000000b1';
+// Runs against a fresh stack whose only addition is the counterparty's login (seed-users.sql). The operator sets up
+// the market through the API: NOVA at 100.00, and the dev trader and the counterparty with 100,000.00 and 500 shares
+// each. The amounts below follow from that, so the test runs once per stack.
 
 function required(name: string): string {
   const value = process.env[name];
@@ -16,18 +16,49 @@ function required(name: string): string {
   return value;
 }
 
-/** The counterparty trades through the API, as another user would, so the browser only drives the dev trader. */
-async function counterparty(baseURL: string): Promise<{ api: APIRequestContext; csrf: CsrfToken }> {
-  const api = await request.newContext({ baseURL });
+interface Session {
+  api: APIRequestContext;
+  /** A POST with the session's CSRF token and a fresh idempotency key, as the web client sends commands. */
+  command: (path: string, data?: unknown) => Promise<APIResponse>;
+}
+
+/** The operator and the counterparty act through the API, so the browser only drives the dev trader. */
+async function signedIn(username: string, password: string): Promise<Session> {
+  const api = await request.newContext({ baseURL: required('E2E_BASE_URL') });
   const before = (await (await api.get('/api/v1/auth/csrf')).json()) as CsrfToken;
   const login = await api.post('/api/v1/auth/login', {
     headers: { [before.headerName]: before.token },
-    data: { username: 'counterparty', password: required('E2E_COUNTERPARTY_PASSWORD') },
+    data: { username, password },
   });
-  expect(login.status(), 'counterparty login').toBe(200);
+  expect(login.status(), `${username} login`).toBe(200);
   // Login rotates the session's token.
   const csrf = (await (await api.get('/api/v1/auth/csrf')).json()) as CsrfToken;
-  return { api, csrf };
+  const command = (path: string, data?: unknown) =>
+    api.post(path, { headers: { [csrf.headerName]: csrf.token, 'Idempotency-Key': randomUUID() }, data });
+  return { api, command };
+}
+
+async function expectStatus(response: APIResponse, status: number, what: string): Promise<void> {
+  expect(response.status(), `${what}: ${await response.text()}`).toBe(status);
+}
+
+/** SETUP through the operator API: one instrument, two funded traders, then open. Returns the instrument's ID. */
+async function setUpMarket(): Promise<string> {
+  const operator = await signedIn('operator', required('E2E_OPERATOR_PASSWORD'));
+  const added = await operator.command('/api/v1/admin/instruments', { symbol: 'NOVA', referencePrice: '100.00' });
+  await expectStatus(added, 201, 'add NOVA');
+  const instrumentId = ((await added.json()) as { instrumentId: string }).instrumentId;
+  for (const username of ['trader', 'counterparty']) {
+    const funded = await operator.command('/api/v1/admin/accounts', {
+      username,
+      cash: '100000.00',
+      holdings: [{ instrumentId, quantity: 500 }],
+    });
+    await expectStatus(funded, 201, `fund ${username}`);
+  }
+  await expectStatus(await operator.command('/api/v1/admin/market/open'), 200, 'open the market');
+  await operator.api.dispose();
+  return instrumentId;
 }
 
 async function signIn(page: Page): Promise<void> {
@@ -41,21 +72,18 @@ async function signIn(page: Page): Promise<void> {
 
 test.describe.serial('trading through the browser', () => {
   test('sign in, buy into a partial fill, cancel the rest, and see it in the portfolio', async ({ page }) => {
-    const other = await counterparty(required('E2E_BASE_URL'));
+    const instrumentId = await setUpMarket();
+    const other = await signedIn('counterparty', required('E2E_COUNTERPARTY_PASSWORD'));
     const offer: OrderRequest = {
-      instrumentId: INSTRUMENT_ID,
+      instrumentId,
       side: 'SELL',
       type: 'LIMIT',
       timeInForce: 'GTC',
       quantity: 5,
       limitPrice: '101.00',
     };
-    const rested = await other.api.post('/api/v1/orders', {
-      headers: { [other.csrf.headerName]: other.csrf.token, 'Idempotency-Key': randomUUID() },
-      data: offer,
-    });
-    expect(rested.status(), `counterparty offer: ${await rested.text()}`).toBe(201);
-    // The first order's snapshot is what publishes the instrument to Market Data.
+    await expectStatus(await other.command('/api/v1/orders', offer), 201, 'counterparty offer');
+    // Market Data learns about the instrument from Kafka, a moment after it was added.
     await expect
       .poll(async () => JSON.stringify(await (await other.api.get('/api/v1/instruments')).json()), { timeout: 30_000 })
       .toContain('"symbol":"NOVA"');
@@ -67,7 +95,7 @@ test.describe.serial('trading through the browser', () => {
     const bids = page.getByRole('table', { name: 'Bids' });
     const availableCash = ticket.getByRole('definition').first();
 
-    // The live stream shows the counterparty's offer, and the ticket shows the seeded balances.
+    // The live stream shows the counterparty's offer, and the ticket shows the funded balances.
     await expect(page.getByRole('status').filter({ hasText: 'Connected' })).toBeVisible();
     await expect(asks.getByRole('row').filter({ hasText: '101.00' })).toContainText('5');
     await expect(availableCash).toHaveText('100,000.00');
