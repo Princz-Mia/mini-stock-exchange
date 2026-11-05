@@ -259,7 +259,7 @@ try {
         Assert-Equal '/deep/link (SPA fallback)' '200' (Get-Http '/deep/link')
         Assert-Equal '/api/v1/orders (Execution, denied)' '401' (Get-Http '/api/v1/orders')
         Assert-Match '/api/v1/instruments (Market Data, public)' '"instruments":\[' ((& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/instruments") | Out-String)
-        Assert-Equal '/api/v1/instruments/x/candles (Market Data, denied)' '403' (Get-Http '/api/v1/instruments/x/candles')
+        Assert-Equal '/api/v1/instruments/x/orders (Market Data, denied)' '403' (Get-Http '/api/v1/instruments/x/orders')
         Assert-Match '/api/v1/market-events, no market yet (Market Data)' '"code":"INSTRUMENT_NOT_FOUND"' ((& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/market-events?instrumentId=00000000-0000-0000-0000-000000000001") | Out-String)
         Assert-Equal '/api/v1/internal/x (blocked at proxy)' '404' (Get-Http '/api/v1/internal/x')
         $actuator = (& curl.exe -s "http://localhost:$webPort/actuator/health") | Out-String
@@ -383,7 +383,7 @@ try {
         Invoke-Smoke 'services/market-data-service/pom.xml' 'CandleConsumeSmoke' 'after-restart'
     }
 
-    Step 'Candles: Market Data stores what the job computed' {
+    Step 'Candles: Market Data stores and serves the bars' {
         # The restart step's smoke candle, as Market Data stored it: four trades, 15 shares, notional 1,513.00.
         $sql = "SELECT trade_count || ' ' || volume || ' ' || notional_cents || ' ' || source_max_trade_sequence FROM candle_1m WHERE simulation_id = '$($script:smokeSimulation)'"
         foreach ($attempt in 1..30) {
@@ -392,6 +392,10 @@ try {
             Start-Sleep -Seconds 2
         }
         Assert-Equal 'smoke candle in candle_1m: trades, volume, notional, sequence' '4 15 151300 4' $stored
+        # And through the proxy's public API, with the VWAP worked out: 1,513.00 / 15 = 100.8667, rounded to 100.87.
+        $instrument = (Invoke-Psql 'market_data_app' $passwords.market_data_app 'market_data_db' "SELECT instrument_id FROM candle_1m WHERE simulation_id = '$($script:smokeSimulation)'").Output
+        $bars = (& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/instruments/$instrument/candles?from=$($script:smokeMinute)" | Out-String)
+        Assert-Match 'smoke candle from the candles API' '"tradeCount":4,"notional":"1513\.00","vwap":"100\.87"' $bars
     }
 
     Step 'Outage isolation: services stay ready without Kafka' {

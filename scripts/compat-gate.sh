@@ -208,7 +208,7 @@ proxy_routes() {
     assert_equal '/deep/link (SPA fallback)' 200 "$(http_status /deep/link)" &&
     assert_equal '/api/v1/orders (Execution, denied)' 401 "$(http_status /api/v1/orders)" &&
     assert_match '/api/v1/instruments (Market Data, public)' '"instruments":\[' "$(curl -s -m 10 "http://localhost:$web_port/api/v1/instruments")" &&
-    assert_equal '/api/v1/instruments/x/candles (Market Data, denied)' 403 "$(http_status /api/v1/instruments/x/candles)" &&
+    assert_equal '/api/v1/instruments/x/orders (Market Data, denied)' 403 "$(http_status /api/v1/instruments/x/orders)" &&
     assert_match '/api/v1/market-events, no market yet (Market Data)' '"code":"INSTRUMENT_NOT_FOUND"' "$(curl -s -m 10 "http://localhost:$web_port/api/v1/market-events?instrumentId=00000000-0000-0000-0000-000000000001")" &&
     assert_equal '/api/v1/internal/x (blocked at proxy)' 404 "$(http_status /api/v1/internal/x)" &&
     assert_match '/actuator/health serves the SPA, not Actuator' '^<!doctype html>' "$(curl -s "http://localhost:$web_port/actuator/health")"
@@ -272,7 +272,13 @@ projected_candles() {
     [ "$stored" = '4 15 151300 4' ] && break
     sleep 2
   done
-  assert_equal 'smoke candle in candle_1m: trades, volume, notional, sequence' '4 15 151300 4' "$stored"
+  assert_equal 'smoke candle in candle_1m: trades, volume, notional, sequence' '4 15 151300 4' "$stored" || return 1
+  # And through the proxy's public API, with the VWAP worked out: 1,513.00 / 15 = 100.8667, rounded to 100.87.
+  local instrument
+  instrument=$(psql_as market_data_app market_data_db \
+    "SELECT instrument_id FROM candle_1m WHERE simulation_id = '$smoke_simulation'" | tr -d '\r')
+  assert_match 'smoke candle from the candles API' '"tradeCount":4,"notional":"1513.00","vwap":"100.87"' \
+    "$(curl -s -m 10 "http://localhost:$web_port/api/v1/instruments/$instrument/candles?from=$smoke_minute")"
 }
 
 independence() {
@@ -364,7 +370,7 @@ step 'Toolchain versions' toolchain &&
   step 'Bots: the simulator trades and the tape shows it' bot_trading &&
   step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' avro_pipeline &&
   step 'Analytics: a JobManager restart resumes from its checkpoint' flink_restart &&
-  step 'Candles: Market Data stores what the job computed' projected_candles &&
+  step 'Candles: Market Data stores and serves the bars' projected_candles &&
   step 'Outage isolation: services stay ready without Kafka' kafka_outage ||
   status=1
 
