@@ -81,6 +81,18 @@ public interface TradingStore {
 
 	boolean symbolTaken(UUID simulationId, String symbol);
 
+	/** Whether this user already has an account in the market. */
+	boolean hasAccount(UUID simulationId, UUID ownerUserId);
+
+	void insertTraderAccount(UUID simulationId, UUID accountId, UUID ownerUserId, String displayName);
+
+	/**
+	 * Funds a new account from the issuance account in one balanced GENESIS batch, creates its cash and position rows,
+	 * and records each amount as an initial allocation linked to that batch.
+	 */
+	void insertGenesis(UUID simulationId, UUID accountId, long commandSequence, long cashCents,
+			List<ProvisionAccount.Holding> holdings);
+
 	void insertInstrument(UUID simulationId, UUID instrumentId, String symbol, long referencePriceCents);
 
 	Available available(UUID accountId, UUID instrumentId);

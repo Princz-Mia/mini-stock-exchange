@@ -232,6 +232,28 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/accounts": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Give a trader their account and starting endowment while the market is in SETUP.
+         * @description Operator only. Sequenced on the writer and audited, with an idempotency key: a retry with the same key and
+         *     body returns the first answer, even a refusal. The endowment comes from the issuance account in one balanced
+         *     genesis batch and is recorded as the account's initial allocation. Nothing is granted after opening.
+         */
+        readonly post: operations["provisionAccount"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/market/open": {
         readonly parameters: {
             readonly query?: never;
@@ -549,6 +571,23 @@ export interface components {
             readonly instrumentId: components["schemas"]["Uuid"];
             readonly symbol: string;
             readonly referencePrice: components["schemas"]["Price"];
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly AccountRequest: {
+            readonly username: string;
+            readonly cash: components["schemas"]["Money"];
+            readonly holdings?: readonly components["schemas"]["Endowment"][];
+        };
+        readonly Endowment: {
+            readonly instrumentId: components["schemas"]["Uuid"];
+            /** Format: int64 */
+            readonly quantity: number;
+        };
+        readonly AccountCreated: {
+            readonly accountId: components["schemas"]["Uuid"];
+            readonly username: string;
+            readonly cash: components["schemas"]["Money"];
+            readonly holdings: readonly components["schemas"]["Endowment"][];
             readonly commandSequence: components["schemas"]["Sequence"];
         };
         readonly MarketStatus: {
@@ -1189,6 +1228,71 @@ export interface operations {
             };
             /** @description MARKET_NOT_IN_SETUP or SYMBOL_TAKEN (both committed and audited), or IDEMPOTENCY_CONFLICT. */
             readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly provisionAccount: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["AccountRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Created and funded. */
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AccountCreated"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description MARKET_NOT_IN_SETUP or ACCOUNT_EXISTS (both committed and audited), or IDEMPOTENCY_CONFLICT. */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /**
+             * @description UNKNOWN_INSTRUMENT (committed and audited), or UNKNOWN_TRADER (no trader with that username; nothing
+             *     committed).
+             */
+            readonly 422: {
                 headers: {
                     readonly [name: string]: unknown;
                 };

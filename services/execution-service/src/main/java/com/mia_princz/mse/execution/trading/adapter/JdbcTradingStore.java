@@ -23,6 +23,7 @@ import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.contracts.events.VenueState;
 import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
+import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
 import com.mia_princz.mse.execution.trading.application.TradingStore;
 import com.mia_princz.mse.execution.trading.domain.BookOrder;
 import com.mia_princz.mse.execution.trading.domain.DepthLevel;
@@ -216,6 +217,64 @@ public final class JdbcTradingStore implements TradingStore {
 			.params(simulationId, symbol)
 			.query(Boolean.class)
 			.single();
+	}
+
+	@Override
+	public boolean hasAccount(UUID simulationId, UUID ownerUserId) {
+		return jdbc.sql("SELECT EXISTS (SELECT 1 FROM account WHERE simulation_id = ? AND owner_user_id = ?)")
+			.params(simulationId, ownerUserId)
+			.query(Boolean.class)
+			.single();
+	}
+
+	@Override
+	public void insertTraderAccount(UUID simulationId, UUID accountId, UUID ownerUserId, String displayName) {
+		expectOne(jdbc.sql("""
+				INSERT INTO account (id, simulation_id, kind, owner_user_id, display_name) VALUES (?, ?, 'TRADER', ?, ?)""")
+			.params(accountId, simulationId, ownerUserId, displayName)
+			.update(), "insert trader account");
+	}
+
+	@Override
+	public void insertGenesis(UUID simulationId, UUID accountId, long commandSequence, long cashCents,
+			List<ProvisionAccount.Holding> holdings) {
+		UUID issuance = jdbc.sql("SELECT id FROM account WHERE simulation_id = ? AND kind = 'ISSUANCE'")
+			.param(simulationId)
+			.query(UUID.class)
+			.single();
+		UUID batch = UUID.randomUUID();
+		expectOne(jdbc.sql("""
+				INSERT INTO journal_batch (id, simulation_id, cause, command_sequence) VALUES (?, ?, 'GENESIS', ?)""")
+			.params(batch, simulationId, commandSequence)
+			.update(), "insert genesis batch");
+		if (cashCents > 0) {
+			allocate(batch, issuance, accountId, null, cashCents);
+		}
+		expectOne(jdbc.sql("""
+				INSERT INTO cash_balance (account_id, account_kind, total_cents, reserved_cents)
+				VALUES (?, 'TRADER', ?, 0)""")
+			.params(accountId, cashCents)
+			.update(), "insert cash balance");
+		for (ProvisionAccount.Holding holding : holdings) {
+			allocate(batch, issuance, accountId, holding.instrumentId(), holding.quantity());
+			expectOne(jdbc.sql("""
+					INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
+					VALUES (?, 'TRADER', ?, ?, 0)""")
+				.params(accountId, holding.instrumentId(), holding.quantity())
+				.update(), "insert position");
+		}
+	}
+
+	/** The issuance account gives, the new account receives, and the allocation points at the batch. */
+	private void allocate(UUID batch, UUID issuance, UUID accountId, UUID instrumentId, long amount) {
+		String posting = "INSERT INTO ledger_entry (batch_id, account_id, instrument_id, bucket, delta) "
+				+ "VALUES (?, ?, ?, 'AVAILABLE', ?)";
+		expectOne(jdbc.sql(posting).params(batch, issuance, instrumentId, -amount).update(), "insert issuance posting");
+		expectOne(jdbc.sql(posting).params(batch, accountId, instrumentId, amount).update(), "insert account posting");
+		expectOne(jdbc.sql("""
+				INSERT INTO initial_allocation (account_id, instrument_id, amount, journal_batch_id) VALUES (?, ?, ?, ?)""")
+			.params(accountId, instrumentId, amount, batch)
+			.update(), "insert initial allocation");
 	}
 
 	@Override

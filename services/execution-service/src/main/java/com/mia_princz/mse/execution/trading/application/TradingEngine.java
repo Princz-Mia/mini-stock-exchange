@@ -122,6 +122,11 @@ public final class TradingEngine {
 		return writer.submit(() -> processAddInstrument(key, command));
 	}
 
+	/** Gives a trader their account and starting endowment while the market is in SETUP. */
+	public CompletableFuture<AccountResult> provisionAccount(CommandKey key, ProvisionAccount command) {
+		return writer.submit(() -> processProvision(key, command));
+	}
+
 	/** A snapshot of one side of a book, read on the writer thread so it never sees a half-applied plan. */
 	public CompletableFuture<List<DepthLevel>> depth(UUID instrumentId, Side side) {
 		return writer.submit(() -> books.get(instrumentId).depth(side, Integer.MAX_VALUE));
@@ -234,6 +239,52 @@ public final class TradingEngine {
 		return new AddedInstrument(remember(key, 201, new InstrumentResult(InstrumentResult.Status.CREATED,
 				command.instrumentId(), command.symbol(), command.referencePrice().cents(), sequence)), true,
 				market.maxFillsPerCommand());
+	}
+
+	private AccountResult processProvision(CommandKey key, ProvisionAccount command) {
+		try {
+			ensureMarket();
+			return transactions.inTransaction(() -> provisionInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+	}
+
+	private AccountResult provisionInTransaction(CommandKey key, ProvisionAccount command) {
+		Market market = store.lockMarket();
+		if (market.writerEpoch() != writerEpoch) {
+			throw new StaleWriterException();
+		}
+		Optional<TradingStore.StoredResult<AccountResult>> prior = store.findResult(simulationId, key,
+				AccountResult.class);
+		if (prior.isPresent()) {
+			return replay(key, prior.get());
+		}
+		long sequence = store.nextCommandSequence(simulationId);
+		AccountResult.Status refusal = null;
+		if (!"SETUP".equals(market.state())) {
+			refusal = AccountResult.Status.NOT_IN_SETUP;
+		}
+		else if (store.hasAccount(simulationId, command.ownerUserId())) {
+			refusal = AccountResult.Status.ACCOUNT_EXISTS;
+		}
+		else if (!command.holdings().stream().allMatch((holding) -> books.containsKey(holding.instrumentId()))) {
+			refusal = AccountResult.Status.UNKNOWN_INSTRUMENT;
+		}
+		if (refusal != null) {
+			store.insertAudit(simulationId, command.actorUserId(), "ACCOUNT_PROVISION", "NOT_ALLOWED",
+					key.idempotencyKey(), sequence);
+			int status = refusal == AccountResult.Status.UNKNOWN_INSTRUMENT ? 422 : 409;
+			return remember(key, status, new AccountResult(refusal, null, command.username(), command.cashCents(),
+					command.holdings(), sequence));
+		}
+		store.insertTraderAccount(simulationId, command.accountId(), command.ownerUserId(), command.username());
+		store.insertGenesis(simulationId, command.accountId(), sequence, command.cashCents(), command.holdings());
+		store.insertAudit(simulationId, command.actorUserId(), "ACCOUNT_PROVISION", "APPLIED", key.idempotencyKey(),
+				sequence);
+		return remember(key, 201, new AccountResult(AccountResult.Status.CREATED, command.accountId(),
+				command.username(), command.cashCents(), command.holdings(), sequence));
 	}
 
 	private MarketTransition processControl(CommandKey key, MarketControl command) {
@@ -440,6 +491,7 @@ public final class TradingEngine {
 			case CancelResult cancel -> cancel.commandSequence();
 			case MarketTransition transition -> transition.commandSequence();
 			case InstrumentResult instrument -> instrument.commandSequence();
+			case AccountResult account -> account.commandSequence();
 			default -> throw new IllegalArgumentException("Not a command result: " + result);
 		};
 		store.insertResult(simulationId, key, httpStatus, result, sequence);
