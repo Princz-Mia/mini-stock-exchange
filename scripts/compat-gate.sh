@@ -229,6 +229,28 @@ bot_tokens() {
       "$(compose exec -T execution-service sh -c 'stat -c "%a %U" /run/mse/bot-tokens/*.token | uniq -c')"
 }
 
+bot_trading() {
+  # The bots provisioned for the browser test trade once the simulator has a rate, and their trades reach
+  # the public market data. The simulator goes back to idle afterwards.
+  local sequence=0 published=0 i
+  MSE_BOT_RATE=4 compose up -d --no-deps --wait --wait-timeout 120 simulator >> "$log" 2>&1 || return 1
+  for i in $(seq 1 60); do
+    sequence=$(psql_as execution_owner execution_db "SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id JOIN account s ON s.id = t.seller_account_id WHERE b.kind = 'BOT' OR s.kind = 'BOT'" | tr -d '\r')
+    [ "${sequence:-0}" -gt 0 ] 2>/dev/null && break
+    sleep 2
+  done
+  assert_match 'latest bot trade sequence' '^[1-9][0-9]*$' "$sequence" || return 1
+  for i in $(seq 1 30); do
+    published=$(curl -s -m 10 "http://localhost:$web_port/api/v1/instruments" |
+      grep -o '"lastTradeSequence":"[0-9]*"' | grep -o '[0-9]*' | sort -n | tail -1)
+    [ "${published:-0}" -ge "$sequence" ] && break
+    sleep 2
+  done
+  assert_match "public tape reached bot trade $sequence" '^[0-9]+$' "$published" &&
+    [ "$published" -ge "$sequence" ] || { fail "public tape at '$published', bot trade at $sequence"; return 1; }
+  compose up -d --no-deps --wait --wait-timeout 120 simulator >> "$log" 2>&1
+}
+
 independence() {
   compose stop market-data-service >> "$log" 2>&1 &&
     assert_match 'instruments with Market Data down' '^50[24]$' "$(http_status /api/v1/instruments)" &&
@@ -281,6 +303,7 @@ step 'Toolchain versions' toolchain &&
   step 'Independence: each service survives the other stopping' independence &&
   step 'Browser: trading, phone layout, halt and resume' browser_flow &&
   step 'Bot tokens: one owner-only file per provisioned bot' bot_tokens &&
+  step 'Bots: the simulator trades and the tape shows it' bot_trading &&
   step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' avro_pipeline &&
   step 'Outage isolation: services stay ready without Kafka' kafka_outage ||
   status=1

@@ -296,6 +296,34 @@ try {
         Assert-Match 'token files' '^\s*2 600 mse\s*$' (Invoke-InContainer 'execution-service' @('sh', '-c', 'stat -c "%a %U" /run/mse/bot-tokens/*.token | uniq -c'))
     }
 
+    Step 'Bots: the simulator trades and the tape shows it' {
+        # The bots provisioned for the browser test trade once the simulator has a rate, and their trades reach
+        # the public market data. The simulator goes back to idle afterwards.
+        $env:MSE_BOT_RATE = '4'
+        try {
+            Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '120', 'simulator'))
+        }
+        finally {
+            Remove-Item Env:MSE_BOT_RATE -ErrorAction SilentlyContinue
+        }
+        $sequence = 0
+        foreach ($attempt in 1..60) {
+            $result = Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' "SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id JOIN account s ON s.id = t.seller_account_id WHERE b.kind = 'BOT' OR s.kind = 'BOT'"
+            if ($result.Code -eq 0 -and [long]$result.Output -gt 0) { $sequence = [long]$result.Output; break }
+            Start-Sleep -Seconds 2
+        }
+        Assert-Match 'latest bot trade sequence' '^[1-9][0-9]*$' $sequence
+        $published = 0
+        foreach ($attempt in 1..30) {
+            $listing = (& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/instruments" | Out-String)
+            $published = ([regex]::Matches($listing, '"lastTradeSequence":"(\d+)"') | ForEach-Object { [long]$_.Groups[1].Value } | Measure-Object -Maximum).Maximum
+            if ($published -ge $sequence) { break }
+            Start-Sleep -Seconds 2
+        }
+        if (-not ($published -ge $sequence)) { throw "public tape at '$published', bot trade at $sequence" }
+        Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '120', 'simulator'))
+    }
+
     Step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' {
         $simulationId = [guid]::NewGuid().ToString()
         Invoke-Smoke 'services/execution-service/pom.xml' 'TradePublishSmoke' $simulationId
