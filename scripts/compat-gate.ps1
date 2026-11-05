@@ -268,6 +268,29 @@ try {
         Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '180', 'execution-service'))
     }
 
+    Step 'Browser: sign in, partial fill, cancel, portfolio' {
+        # No operator setup command yet: seed one instrument and two funded traders, then restart Execution so it
+        # rebuilds its books from the database.
+        $counterpartyPassword = New-Secret
+        Invoke-Checked 'docker' ($compose + @('cp', 'web/e2e/seed-market.sql', 'postgres:/tmp/seed-market.sql'))
+        Invoke-Checked 'docker' ($compose + @('exec', '-T', '-e', "PGPASSWORD=$($passwords.execution_owner)", 'postgres', 'psql', '-h', '127.0.0.1', '-q',
+            '-U', 'execution_owner', '-d', 'execution_db', '-v', "counterparty_password=$counterpartyPassword", '-f', '/tmp/seed-market.sql'))
+        Invoke-Checked 'docker' ($compose + @('restart', 'execution-service'))
+        Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '180', 'execution-service'))
+        Push-Location web
+        try {
+            Invoke-Checked 'npx.cmd' @('playwright', 'install', 'chromium')
+            $env:E2E_BASE_URL = "http://localhost:$webPort"
+            $env:E2E_TRADER_PASSWORD = $traderPassword
+            $env:E2E_COUNTERPARTY_PASSWORD = $counterpartyPassword
+            Invoke-Checked 'npm.cmd' @('run', 'e2e')
+        }
+        finally {
+            Remove-Item Env:E2E_BASE_URL, Env:E2E_TRADER_PASSWORD, Env:E2E_COUNTERPARTY_PASSWORD -ErrorAction SilentlyContinue
+            Pop-Location
+        }
+    }
+
     Step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' {
         $simulationId = [guid]::NewGuid().ToString()
         Invoke-Smoke 'services/execution-service/pom.xml' 'TradePublishSmoke' $simulationId

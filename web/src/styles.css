@@ -145,10 +145,12 @@ input[aria-invalid='true'] {
 
 .brand {
   font-weight: 700;
+  white-space: nowrap;
 }
 
 .context-badge {
   font-size: 12px;
+  white-space: nowrap;
   padding: 2px var(--space-2);
   border-radius: 999px;
   background: var(--surface-sunken);
@@ -196,6 +198,9 @@ input[aria-invalid='true'] {
   display: grid;
   gap: var(--space-3);
   align-content: start;
+  /* A wide table scrolls inside its panel instead of widening the page. */
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .panel-header {
@@ -331,6 +336,34 @@ tbody th {
   }
 }
 
+/* Phones: the brand and badge on one row, navigation and the account on the next, and 16px gutters. */
+@media (max-width: 640px) {
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+  }
+
+  .topbar nav {
+    order: 1;
+    flex-grow: 1;
+    margin-left: 0;
+  }
+
+  .topbar .user,
+  .topbar > button {
+    order: 2;
+  }
+
+  .brand {
+    flex-grow: 1;
+  }
+
+  .content {
+    padding: var(--space-4);
+  }
+}
+
 .market-header {
   display: flex;
   align-items: baseline;
@@ -360,12 +393,6 @@ tbody th {
 .chart {
   height: 280px;
   min-width: 0;
-}
-
-.terminal-market > .panel,
-.market-split > .panel {
-  min-width: 0;
-  overflow: hidden;
 }
 
 .market-split {

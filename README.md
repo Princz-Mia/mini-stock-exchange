@@ -87,6 +87,16 @@ cd simulator; uv sync --frozen; uv run --frozen ruff check .; uv run --frozen py
 
 On Linux or macOS, use `sh ./mvnw` and `bash scripts/compat-gate.sh`.
 
+### Browser tests
+
+`web/e2e/` holds Playwright tests that drive the real stack through the reverse proxy: sign in, buy into a partial fill, cancel the rest, check the portfolio, then check the layout at phone width. The compatibility gate runs them. It seeds a small market from `web/e2e/seed-market.sql` into its throwaway stack, restarts Execution so the books are rebuilt, then runs `npm run e2e` with these variables:
+
+- `E2E_BASE_URL`: the stack's address.
+- `E2E_TRADER_PASSWORD`: the dev trader's password.
+- `E2E_COUNTERPARTY_PASSWORD`: the seeded counterparty's password.
+
+The amounts the tests expect follow from the seed, so they pass once per freshly seeded stack. Install the browser once with `cd web; npx playwright install chromium`.
+
 ### The API contract
 
 `api/openapi.yaml` is the source of truth for the HTTP API. To change an endpoint, change the contract first, then the code:

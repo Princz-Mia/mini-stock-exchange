@@ -12,6 +12,7 @@
     "typecheck": "tsc -b --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
+    "e2e": "playwright test",
     "api:generate": "openapi-typescript ../api/openapi.yaml --output src/api/schema.ts --immutable",
     "api:check": "openapi-typescript ../api/openapi.yaml --output src/api/schema.ts --immutable --check"
   },
