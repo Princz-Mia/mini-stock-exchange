@@ -1,4 +1,4 @@
-"""Foundation worker: stays idle until the assignment API and strategies exist."""
+"""Worker entry point: the bot runner plus a heartbeat file for the container health check."""
 
 import asyncio
 import logging
@@ -7,25 +7,31 @@ import signal
 import httpx
 
 from mse_simulator.healthcheck import HEARTBEAT_FILE
+from mse_simulator.runner import Runner
 from mse_simulator.settings import Settings
 
 logger = logging.getLogger("mse_simulator")
 
 
+async def heartbeat(settings: Settings, stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        HEARTBEAT_FILE.touch()
+        try:
+            await asyncio.wait_for(stop.wait(), settings.heartbeat_seconds)
+        except TimeoutError:
+            continue
+
+
 async def run(settings: Settings, stop: asyncio.Event) -> None:
     limits = httpx.Limits(max_connections=settings.max_in_flight)
-    async with httpx.AsyncClient(limits=limits, timeout=5.0):
-        logger.info("simulator idle: no assignment source yet")
-        while not stop.is_set():
-            HEARTBEAT_FILE.touch()
-            try:
-                await asyncio.wait_for(stop.wait(), settings.heartbeat_seconds)
-            except TimeoutError:
-                continue
+    async with httpx.AsyncClient(limits=limits, timeout=10.0) as http:
+        await asyncio.gather(heartbeat(settings, stop), Runner(settings, http).run(stop))
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    # Request lines would include nothing secret, but per-request logs drown the activity summary.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     async def entrypoint() -> None:
         stop = asyncio.Event()
