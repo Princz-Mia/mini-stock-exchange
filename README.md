@@ -89,13 +89,16 @@ On Linux or macOS, use `sh ./mvnw` and `bash scripts/compat-gate.sh`.
 
 ### Browser tests
 
-`web/e2e/` holds Playwright tests that drive the real stack through the reverse proxy: sign in, buy into a partial fill, cancel the rest, check the portfolio, then check the layout at phone width. The compatibility gate runs them. It seeds a small market from `web/e2e/seed-market.sql` into its throwaway stack, restarts Execution so the books are rebuilt, then runs `npm run e2e` with these variables:
+`web/e2e/` holds Playwright tests that drive the real stack through the reverse proxy: sign in, buy into a partial fill, cancel the rest, check the portfolio, then check the layout at phone width. The tests set up their market through the operator API: an instrument, two funded traders, then opening.
+
+The compatibility gate runs them. It inserts the counterparty's login from `web/e2e/seed-users.sql` into its throwaway stack, because users have no API. It then runs `npm run e2e` with these variables:
 
 - `E2E_BASE_URL`: the stack's address.
 - `E2E_TRADER_PASSWORD`: the dev trader's password.
-- `E2E_COUNTERPARTY_PASSWORD`: the seeded counterparty's password.
+- `E2E_OPERATOR_PASSWORD`: the dev operator's password.
+- `E2E_COUNTERPARTY_PASSWORD`: the counterparty's password.
 
-The amounts the tests expect follow from the seed, so they pass once per freshly seeded stack. Install the browser once with `cd web; npx playwright install chromium`.
+The tests need a fresh stack, with no market set up yet. Install the browser once with `cd web; npx playwright install chromium`.
 
 ### The API contract
 
