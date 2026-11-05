@@ -1,6 +1,6 @@
 import { NavLink, Navigate, Outlet, useLocation } from 'react-router';
 
-import { isTrader, useLogout, useSession } from '../auth/session';
+import { isOperator, isTrader, useLogout, useSession } from '../auth/session';
 
 /** The frame around every signed-in page: the simulation context stays visible wherever the user goes. */
 export function AppShell() {
@@ -28,8 +28,13 @@ export function AppShell() {
         <span className="brand">Mini Stock Exchange</span>
         <span className="context-badge">Simulation · Virtual funds</span>
         <nav aria-label="Main">
-          <NavLink to="/terminal">Terminal</NavLink>
-          <NavLink to="/portfolio">Portfolio</NavLink>
+          {isTrader(session.data) && (
+            <>
+              <NavLink to="/terminal">Terminal</NavLink>
+              <NavLink to="/portfolio">Portfolio</NavLink>
+            </>
+          )}
+          {isOperator(session.data) && <NavLink to="/operator">Operator</NavLink>}
         </nav>
         <span className="user">{session.data.username}</span>
         <button type="button" className="quiet" onClick={() => logout.mutate()} disabled={logout.isPending}>
@@ -37,14 +42,31 @@ export function AppShell() {
         </button>
       </header>
       <main className="content">
-        {isTrader(session.data) ? (
-          <Outlet />
-        ) : (
-          <p role="alert" className="page-status">
-            This account has no trading access.
-          </p>
-        )}
+        <Outlet />
       </main>
     </div>
+  );
+}
+
+/**
+ * Pages for one role. Anyone else is sent to their own start page, so an operator who follows a terminal link lands
+ * on the operator screen; a user with neither role is told so. The server enforces the same split on every request.
+ */
+export function RequireRole({ role }: { role: 'TRADER' | 'OPERATOR' }) {
+  const session = useSession();
+  const roles = session.data?.roles ?? [];
+  if (roles.includes(role)) {
+    return <Outlet />;
+  }
+  if (roles.includes('OPERATOR')) {
+    return <Navigate to="/operator" replace />;
+  }
+  if (roles.includes('TRADER')) {
+    return <Navigate to="/terminal" replace />;
+  }
+  return (
+    <p role="alert" className="page-status">
+      This account has no access to the exchange.
+    </p>
   );
 }

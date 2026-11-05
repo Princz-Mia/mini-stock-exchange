@@ -239,7 +239,8 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        readonly get?: never;
+        /** Every trading account with what it started with, oldest first. Operator only. */
+        readonly get: operations["listAccounts"];
         readonly put?: never;
         /**
          * Give a trader their account and starting endowment while the market is in SETUP.
@@ -589,6 +590,27 @@ export interface components {
             readonly cash: components["schemas"]["Money"];
             readonly holdings: readonly components["schemas"]["Endowment"][];
             readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly AccountPage: {
+            readonly accounts: readonly components["schemas"]["AccountSummary"][];
+            /** @description Null on the last page. */
+            readonly nextCursor: string | null;
+        };
+        readonly AccountSummary: {
+            readonly accountId: components["schemas"]["Uuid"];
+            readonly username: string;
+            /** @enum {string} */
+            readonly kind: "TRADER" | "BOT";
+            /** @description The cash it started with. */
+            readonly cash: components["schemas"]["Money"];
+            /** @description The shares it started with. */
+            readonly holdings: readonly components["schemas"]["Allocation"][];
+        };
+        readonly Allocation: {
+            readonly instrumentId: components["schemas"]["Uuid"];
+            readonly symbol: string;
+            /** Format: int64 */
+            readonly quantity: number;
         };
         readonly MarketStatus: {
             /** @enum {string} */
@@ -1237,6 +1259,45 @@ export interface operations {
             };
             readonly 503: components["responses"]["Unavailable"];
             readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly listAccounts: {
+        readonly parameters: {
+            readonly query?: {
+                readonly limit?: components["parameters"]["Limit"];
+                /** @description The nextCursor of the previous page. Opaque. */
+                readonly cursor?: components["parameters"]["Cursor"];
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description One page. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["AccountPage"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     readonly provisionAccount: {

@@ -163,6 +163,8 @@ class ApiContractIT {
 				UUID.randomUUID().toString()), "POST", instruments, 409);
 
 		String accounts = "/api/v1/admin/accounts";
+		check(operator.get(accounts), "GET", accounts, 200);
+		check(operator.get(accounts + "?cursor=nope"), "GET", accounts, 400);
 		check(operator.post(accounts, "{\"username\":\"trader\",\"cash\":\"-1\"}", "Idempotency-Key",
 				UUID.randomUUID().toString()), "POST", accounts, 400);
 		check(operator.post(accounts, "{\"username\":\"nobody\",\"cash\":\"1.00\"}", "Idempotency-Key",

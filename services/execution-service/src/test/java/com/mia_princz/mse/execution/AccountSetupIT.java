@@ -120,6 +120,27 @@ class AccountSetupIT {
 		UUID otherKey = UUID.randomUUID();
 		assertThat(provision(operator, otherKey, "other", "50000.00", holding(nova, 100)).statusCode()).isEqualTo(201);
 
+		// The operator reads the accounts back with what they started with, oldest first, in pages.
+		HttpResponse<String> firstPage = operator.get(PROVISION + "?limit=1");
+		CONTRACT.assertResponse("GET", PROVISION, 200, firstPage.headers().firstValue("Content-Type").orElse(null),
+				firstPage.body());
+		JsonNode first = JSON.readTree(firstPage.body());
+		assertThat(first.get("accounts").size()).isEqualTo(1);
+		JsonNode listed = first.get("accounts").get(0);
+		assertThat(listed.get("username").asString()).isEqualTo("trader");
+		assertThat(listed.get("kind").asString()).isEqualTo("TRADER");
+		assertThat(listed.get("cash").asString()).isEqualTo("100000.00");
+		List<String> allocated = new ArrayList<>();
+		listed.get("holdings")
+			.forEach((held) -> allocated.add(held.get("symbol").asString() + " " + held.get("quantity").asLong()));
+		assertThat(allocated).containsExactly("NOVA 500", "ORBT 200");
+		JsonNode second = JSON.readTree(
+				operator.get(PROVISION + "?limit=1&cursor=" + first.get("nextCursor").asString()).body());
+		assertThat(second.get("accounts").get(0).get("username").asString()).isEqualTo("other");
+		assertThat(second.get("accounts").get(0).get("cash").asString()).isEqualTo("50000.00");
+		assertThat(second.get("nextCursor").isNull()).isTrue();
+		assertThat(trader.get(PROVISION).statusCode()).isEqualTo(403);
+
 		// A restart reconciles balances, positions and the journal, including the genesis batches.
 		engine.start();
 

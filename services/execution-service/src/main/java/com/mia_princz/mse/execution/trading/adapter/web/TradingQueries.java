@@ -4,6 +4,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -87,6 +88,64 @@ class TradingQueries {
 	/** Any signed-in user's ID, trading account or not; operators act as themselves. */
 	Optional<UUID> userId(String username) {
 		return jdbc.sql("SELECT id FROM app_user WHERE username = ?").param(username).query(UUID.class).optional();
+	}
+
+	/** An account and what it started with, for the operator. Cash is null if it started with shares only. */
+	record AccountSummary(UUID accountId, String username, String kind, Long cashCents, List<Allocation> holdings,
+			Instant createdAt) {
+	}
+
+	record Allocation(UUID instrumentId, String symbol, long quantity) {
+	}
+
+	/** Where a page of accounts ends: oldest first by creation, then by ID. */
+	record AccountPosition(Instant createdAt, UUID id) {
+	}
+
+	/** Every trading account with its initial allocation, oldest first, in keyset pages. */
+	List<AccountSummary> accounts(AccountPosition after, int limit) {
+		record Row(UUID id, String name, String kind, Instant createdAt) {
+		}
+		List<Row> rows = jdbc.sql("""
+				SELECT id, display_name, kind, created_at FROM account
+				WHERE kind <> 'ISSUANCE'
+				  AND (CAST(:afterAt AS timestamptz) IS NULL OR (created_at, id) > (:afterAt, :afterId))
+				ORDER BY created_at, id LIMIT :limit""")
+			.param("afterAt", after == null ? null : Timestamp.from(after.createdAt()))
+			.param("afterId", after == null ? null : after.id())
+			.param("limit", limit)
+			.query((row, index) -> new Row(row.getObject("id", UUID.class), row.getString("display_name"),
+					row.getString("kind"), row.getTimestamp("created_at").toInstant()))
+			.list();
+		if (rows.isEmpty()) {
+			return List.of();
+		}
+		record Allocated(UUID accountId, UUID instrumentId, String symbol, long amount) {
+		}
+		List<Allocated> allocations = jdbc.sql("""
+				SELECT a.account_id, a.instrument_id, i.symbol, a.amount FROM initial_allocation a
+				LEFT JOIN instrument i ON i.id = a.instrument_id
+				WHERE a.account_id IN (:ids) ORDER BY i.symbol NULLS FIRST""")
+			.param("ids", rows.stream().map(Row::id).toList())
+			.query((row, index) -> new Allocated(row.getObject("account_id", UUID.class),
+					row.getObject("instrument_id", UUID.class), row.getString("symbol"), row.getLong("amount")))
+			.list();
+		return rows.stream().map((row) -> {
+			Long cash = null;
+			List<Allocation> holdings = new ArrayList<>();
+			for (Allocated allocated : allocations) {
+				if (!allocated.accountId().equals(row.id())) {
+					continue;
+				}
+				if (allocated.instrumentId() == null) {
+					cash = allocated.amount();
+				}
+				else {
+					holdings.add(new Allocation(allocated.instrumentId(), allocated.symbol(), allocated.amount()));
+				}
+			}
+			return new AccountSummary(row.id(), row.name(), row.kind(), cash, holdings, row.createdAt());
+		}).toList();
 	}
 
 	/** A user who may be given a trading account: one with the TRADER role. */

@@ -1,8 +1,15 @@
 import type {
+  AccountCreated,
+  AccountPage,
+  AccountRequest,
   Cancellation,
   CsrfToken,
   Identity,
+  InstrumentCreated,
+  InstrumentRequest,
   Instruments,
+  MarketStatus,
+  MarketTransition,
   Order,
   OrderPage,
   OrderRequest,
@@ -133,6 +140,21 @@ export const api = {
 
   /** The first committed answer for a key; a 404 means nothing committed, so retrying with that key is safe. */
   placement: (idempotencyKey: string) => request<Order>('GET', `/api/v1/commands/${idempotencyKey}`),
+
+  /** The authoritative trading phase, readable by anyone. */
+  market: () => request<MarketStatus>('GET', '/api/v1/market'),
+
+  /** Operator commands: each is committed when it returns, and a retry with its key returns the first answer. */
+  controlMarket: (action: 'open' | 'halt' | 'resume', idempotencyKey: string) =>
+    request<MarketTransition>('POST', `/api/v1/admin/market/${action}`, { idempotencyKey }),
+
+  addInstrument: (instrument: InstrumentRequest, idempotencyKey: string) =>
+    request<InstrumentCreated>('POST', '/api/v1/admin/instruments', { body: instrument, idempotencyKey }),
+
+  provisionAccount: (account: AccountRequest, idempotencyKey: string) =>
+    request<AccountCreated>('POST', '/api/v1/admin/accounts', { body: account, idempotencyKey }),
+
+  accounts: (cursor?: string) => request<AccountPage>('GET', `/api/v1/admin/accounts${query({ cursor, limit: 50 })}`),
 
   orders: (status: 'all' | 'active', cursor?: string) =>
     request<OrderPage>('GET', `/api/v1/orders${query({ status, cursor, limit: status === 'all' ? 50 : undefined })}`),

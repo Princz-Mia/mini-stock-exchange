@@ -47,3 +47,7 @@ export function useLogout() {
 export function isTrader(identity: Identity | null | undefined): boolean {
   return identity?.roles.includes('TRADER') ?? false;
 }
+
+export function isOperator(identity: Identity | null | undefined): boolean {
+  return identity?.roles.includes('OPERATOR') ?? false;
+}
