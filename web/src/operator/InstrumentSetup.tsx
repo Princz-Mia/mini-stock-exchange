@@ -7,7 +7,7 @@ import { groupDigits } from '../format';
 import { CommandStatus } from './CommandStatus';
 import { useCommand } from './useCommand';
 
-/** The spec's starting scenario, offered as quick fills; the operator still adds each one. */
+/** The default starting scenario, offered as quick fills; the operator still adds each one. */
 export const DEFAULT_INSTRUMENTS: readonly InstrumentRequest[] = [
   { symbol: 'NOVA', referencePrice: '100.00' },
   { symbol: 'ORBT', referencePrice: '50.00' },
