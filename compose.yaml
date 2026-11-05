@@ -96,7 +96,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       MSE_BOT_TOKEN_DIRECTORY: /run/mse/bot-tokens
     volumes:
-      # Plaintext bot tokens, written once at provisioning; the simulator will mount it read-only.
+      # Plaintext bot tokens, written once at provisioning; the simulator mounts it read-only.
       - bot-tokens:/run/mse/bot-tokens
     mem_limit: 2g
     cpus: 2.0
@@ -196,6 +196,12 @@ services:
     environment:
       MSE_EXECUTION_URL: http://execution-service:8080
       MSE_MARKET_DATA_URL: http://market-data-service:8080
+      MSE_BOT_TOKEN_DIRECTORY: /run/mse/bot-tokens
+      # Trading commands per second across all bots; zero keeps them idle.
+      MSE_BOT_RATE: ${MSE_BOT_RATE:-0}
+      MSE_BOT_SEED: ${MSE_BOT_SEED:-1}
+    volumes:
+      - bot-tokens:/run/mse/bot-tokens:ro
     healthcheck:
       test: [CMD, python, -m, mse_simulator.healthcheck]
       interval: 10s
