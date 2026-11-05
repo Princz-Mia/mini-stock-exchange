@@ -272,7 +272,7 @@ step 'Toolchain versions' toolchain &&
   step 'Proxy: routes by path to the owning service' proxy_routes &&
   step 'Login: session and CSRF through the proxy' login_flow &&
   step 'Independence: each service survives the other stopping' independence &&
-  step 'Browser: sign in, partial fill, cancel, portfolio' browser_flow &&
+  step 'Browser: trading, phone layout, halt and resume' browser_flow &&
   step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' avro_pipeline &&
   step 'Outage isolation: services stay ready without Kafka' kafka_outage ||
   status=1
