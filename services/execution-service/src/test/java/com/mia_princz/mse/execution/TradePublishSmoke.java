@@ -2,6 +2,7 @@ package com.mia_princz.mse.execution;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Map;
@@ -21,16 +22,26 @@ import com.mia_princz.mse.contracts.events.WireEvents;
  * Compatibility gate, first half: publishes real Avro trades with Boot's Kafka client on JDK 25. The name is outside
  * the Failsafe includes, so it runs only when the gate selects it with {@code -Dit.test=TradePublishSmoke} and a
  * running stack; a missing property fails rather than skips.
+ * <p>
+ * {@code smoke.phase=first} publishes sequences 1 to 3 with a redelivery; {@code after-restart} publishes sequence 4
+ * for the same instrument and minute, so the candle continues across a Flink restart. The instrument comes from the
+ * simulation ID and the minute from {@code smoke.minute}, so both phases agree.
  */
 class TradePublishSmoke {
 
 	@Test
-	void publishesGoldenFillsAndOneRedelivery() throws Exception {
+	void publishesGoldenFillsAndRedeliveries() throws Exception {
 		assertThat(Runtime.version().feature()).isEqualTo(25);
 		String bootstrapServers = System.getProperty("smoke.kafka");
 		UUID simulationId = UUID.fromString(System.getProperty("smoke.simulationId"));
-		UUID instrumentId = UUID.randomUUID();
-		Instant minute = Instant.now().truncatedTo(ChronoUnit.MINUTES);
+		UUID instrumentId = instrumentOf(simulationId);
+		Instant minute = Instant.parse(System.getProperty("smoke.minute"));
+		assertThat(minute).isEqualTo(minute.truncatedTo(ChronoUnit.MINUTES));
+		long[][] fills = switch (System.getProperty("smoke.phase")) {
+			case "first" -> new long[][] { { 1, 10_000, 3 }, { 2, 10_000, 4 }, { 2, 10_000, 4 }, { 3, 10_100, 3 } };
+			case "after-restart" -> new long[][] { { 4, 10_200, 5 } };
+			default -> throw new IllegalArgumentException("smoke.phase must be first or after-restart");
+		};
 
 		Map<String, Object> config = Map.of(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers,
 				ProducerConfig.ACKS_CONFIG, "all", ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
@@ -38,7 +49,6 @@ class TradePublishSmoke {
 		try {
 			KafkaTemplate<String, byte[]> template = new KafkaTemplate<>(factory);
 			String key = simulationId + "|" + instrumentId;
-			long[][] fills = { { 1, 10_000, 3 }, { 2, 10_000, 4 }, { 2, 10_000, 4 }, { 3, 10_100, 3 } };
 			byte[] previous = null;
 			long previousSequence = 0;
 			for (long[] fill : fills) {
@@ -64,6 +74,11 @@ class TradePublishSmoke {
 		finally {
 			factory.destroy();
 		}
+	}
+
+	/** The smoke's one instrument, the same in both phases. */
+	static UUID instrumentOf(UUID simulationId) {
+		return UUID.nameUUIDFromBytes(("smoke-instrument|" + simulationId).getBytes(StandardCharsets.UTF_8));
 	}
 
 }

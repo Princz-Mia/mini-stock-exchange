@@ -86,9 +86,20 @@ class_version() { # classpath class major
   assert_match "$2 bytecode" "major version: $3" "$("$JAVA_HOME/bin/javap" -v -cp "$1" "$2" | grep 'major version')"
 }
 
-smoke() { # module test simulationId
+smoke() { # module test phase; the Avro step sets the simulation and minute both phases share
   mvnw -f "$1" test-compile failsafe:integration-test failsafe:verify \
-    "-Dit.test=$2" -Dfailsafe.failIfNoSpecifiedTests=true "-Dsmoke.kafka=localhost:$kafka_port" "-Dsmoke.simulationId=$3" >> "$log" 2>&1
+    "-Dit.test=$2" -Dfailsafe.failIfNoSpecifiedTests=true "-Dsmoke.kafka=localhost:$kafka_port" \
+    "-Dsmoke.simulationId=$smoke_simulation" "-Dsmoke.minute=$smoke_minute" "-Dsmoke.phase=$3" >> "$log" 2>&1
+}
+
+flink_rest() { # path
+  compose exec -T flink-jobmanager curl -fsS "http://localhost:8081$1" 2>/dev/null
+}
+
+flink_job() { flink_rest /jobs/overview | grep -o '"jid":"[0-9a-f]*","name":"mse-analytics"[^}]*"state":"RUNNING"' | cut -d'"' -f4; }
+
+flink_count() { # job counter: the first match is in the checkpoint counts
+  flink_rest "/jobs/$1/checkpoints" | grep -o "\"$2\":[0-9]*" | head -n 1 | cut -d: -f2
 }
 
 step() { # name function
@@ -267,11 +278,45 @@ independence() {
 }
 
 avro_pipeline() {
-  local simulation_id
-  simulation_id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r')
-  note "simulationId => $simulation_id"
-  smoke services/execution-service/pom.xml TradePublishSmoke "$simulation_id" &&
-    smoke services/market-data-service/pom.xml CandleConsumeSmoke "$simulation_id"
+  smoke_simulation=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r')
+  smoke_minute=$(date -u +%Y-%m-%dT%H:%M:00Z)
+  note "simulationId => $smoke_simulation, minute => $smoke_minute"
+  smoke services/execution-service/pom.xml TradePublishSmoke first &&
+    smoke services/market-data-service/pom.xml CandleConsumeSmoke first
+}
+
+flink_restart() {
+  # A checkpoint that holds the Avro step's trades, then a JobManager restart that must resume from the newest one:
+  # Flink records the restore and its path, and the next trade continues the same minute's candle exactly.
+  local job before latest restored i
+  job=$(flink_job)
+  before=$(flink_count "$job" completed)
+  # Two more completed checkpoints: the second was triggered after the trades were processed.
+  for i in $(seq 1 30); do
+    [ "$(flink_count "$job" completed)" -ge $((before + 2)) ] && break
+    sleep 2
+  done
+  latest=$(flink_rest "/jobs/$job/checkpoints" | grep -o '"latest":{"completed":{[^}]*' | grep -o '"id":[0-9]*' | cut -d: -f2)
+  note "job $job, newest completed checkpoint => $latest"
+  assert_match 'checkpoint after the trades' '^[0-9]+$' "$latest" || return 1
+  compose restart flink-jobmanager >> "$log" 2>&1 || return 1
+  for i in $(seq 1 60); do
+    restored=$(flink_job)
+    [ -n "$restored" ] && [ "$(flink_count "$restored" restored)" = 1 ] && break
+    sleep 2
+  done
+  # Restoring an older checkpoint would also give correct candles, after a longer replay, so the path is checked too.
+  assert_match "restored from job $job at checkpoint $latest or later" \
+    "\"external_path\":\"file:/opt/flink/checkpoints/$job/chk-[0-9]+\"" \
+    "$(flink_rest "/jobs/$restored/checkpoints" | grep -o '"restored":{[^}]*}')" &&
+    [ "$(flink_rest "/jobs/$restored/checkpoints" | grep -o '"restored":{"id":[0-9]*' | grep -o '[0-9]*$')" -ge "$latest" ] ||
+    { fail "the restore was not the newest checkpoint of job $job"; return 1; }
+  assert_match 'entry point' 'Resuming the analytics job from checkpoint /opt/flink/checkpoints/' \
+    "$(compose logs --no-log-prefix flink-jobmanager 2>&1 | grep 'the analytics job' | tail -n 1)" &&
+    assert_match 'checkpoint directories: the one resumed from and the running job' '^ *[12]$' \
+      "$(compose exec -T flink-jobmanager sh -c 'ls /opt/flink/checkpoints | wc -l')" &&
+    smoke services/execution-service/pom.xml TradePublishSmoke after-restart &&
+    smoke services/market-data-service/pom.xml CandleConsumeSmoke after-restart
 }
 
 kafka_outage() {
@@ -305,6 +350,7 @@ step 'Toolchain versions' toolchain &&
   step 'Bot tokens: one owner-only file per provisioned bot' bot_tokens &&
   step 'Bots: the simulator trades and the tape shows it' bot_trading &&
   step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' avro_pipeline &&
+  step 'Analytics: a JobManager restart resumes from its checkpoint' flink_restart &&
   step 'Outage isolation: services stay ready without Kafka' kafka_outage ||
   status=1
 
