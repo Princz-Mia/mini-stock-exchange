@@ -280,6 +280,120 @@ paths:
         '403':
           $ref: '#/components/responses/NotTrader'
 
+  /api/v1/market:
+    get:
+      tags: [execution]
+      operationId: getMarket
+      summary: The authoritative trading phase. Public.
+      description: |
+        Read from the committed market, so it is never behind the writer. A venue state shown by market data
+        can lag behind this.
+      responses:
+        '200':
+          description: The phase, or NOT_SET_UP with null fields before a market exists.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MarketStatus' }
+
+  /api/v1/admin/market/open:
+    post:
+      tags: [execution]
+      operationId: openMarket
+      summary: Open the market for trading, once.
+      description: |
+        Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
+        key returns the first answer, even a refusal. Allowed only from SETUP.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Applied. The market is OPEN from this command's sequence on.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MarketTransition' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '409':
+          description: |
+            MARKET_TRANSITION_NOT_ALLOWED (committed and audited, with the market's current state),
+            MARKET_NOT_SET_UP (nothing committed), or IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
+  /api/v1/admin/market/halt:
+    post:
+      tags: [execution]
+      operationId: haltMarket
+      summary: Halt trading. New orders are rejected; cancels still work.
+      description: |
+        Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
+        key returns the first answer, even a refusal. Allowed only from OPEN.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Applied. The market is HALTED from this command's sequence on.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MarketTransition' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '409':
+          description: |
+            MARKET_TRANSITION_NOT_ALLOWED (committed and audited, with the market's current state),
+            MARKET_NOT_SET_UP (nothing committed), or IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
+  /api/v1/admin/market/resume:
+    post:
+      tags: [execution]
+      operationId: resumeMarket
+      summary: Resume trading. Resting orders keep their priority.
+      description: |
+        Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
+        key returns the first answer, even a refusal. Allowed only from HALTED.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Applied. The market is OPEN from this command's sequence on.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MarketTransition' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '409':
+          description: |
+            MARKET_TRANSITION_NOT_ALLOWED (committed and audited, with the market's current state),
+            MARKET_NOT_SET_UP (nothing committed), or IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
   /api/v1/instruments:
     get:
       tags: [market-data]
@@ -651,6 +765,29 @@ components:
         orderId: { $ref: '#/components/schemas/Uuid' }
         status: { type: string, enum: [CANCELED, ALREADY_CANCELED] }
         canceledQuantity: { type: integer, format: int64 }
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+
+    MarketStatus:
+      type: object
+      additionalProperties: false
+      required: [state, simulationId, openedAt, commandSequence]
+      properties:
+        state: { type: string, enum: [NOT_SET_UP, SETUP, OPEN, HALTED] }
+        simulationId:
+          oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }]
+        openedAt:
+          oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: When the market first opened; null in SETUP.
+        commandSequence:
+          oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }]
+          description: The last committed command's sequence.
+
+    MarketTransition:
+      type: object
+      additionalProperties: false
+      required: [state, commandSequence]
+      properties:
+        state: { type: string, enum: [OPEN, HALTED] }
         commandSequence: { $ref: '#/components/schemas/Sequence' }
 
     Feed:

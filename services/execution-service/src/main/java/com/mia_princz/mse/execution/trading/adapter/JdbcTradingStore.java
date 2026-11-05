@@ -180,6 +180,23 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public void updateMarketState(UUID simulationId, String state) {
+		expectOne(jdbc.sql("UPDATE simulation SET state = ?, opened_at = COALESCE(opened_at, now()) WHERE id = ?")
+			.params(state, simulationId)
+			.update(), "update market state");
+	}
+
+	@Override
+	public void insertAudit(UUID simulationId, UUID actorUserId, String action, String outcome, UUID correlationId,
+			long commandSequence) {
+		expectOne(jdbc.sql("""
+				INSERT INTO audit_log (simulation_id, actor_user_id, action, outcome, correlation_id, command_sequence)
+				VALUES (?, ?, ?, ?, ?, ?)""")
+			.params(simulationId, actorUserId, action, outcome, correlationId, commandSequence)
+			.update(), "insert audit row");
+	}
+
+	@Override
 	public List<Instrument> instruments(UUID simulationId) {
 		return jdbc.sql("SELECT id, symbol FROM instrument WHERE simulation_id = ? ORDER BY symbol")
 			.param(simulationId)

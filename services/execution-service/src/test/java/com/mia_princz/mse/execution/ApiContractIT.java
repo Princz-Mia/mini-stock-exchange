@@ -74,10 +74,15 @@ class ApiContractIT {
 
 	@Test
 	void everyOperationAndProblemMatchesTheContract() throws Exception {
+		TestBrowser anonymous = new TestBrowser(port);
+		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
+		String open = "/api/v1/admin/market/open";
+		check(anonymous.get("/api/v1/market"), "GET", "/api/v1/market", 200);
+		check(operator.post(open, "", "Idempotency-Key", UUID.randomUUID().toString()), "POST", open, 409);
+
 		UUID instrument = new TransactionTemplate(transactionManager).execute((status) -> market());
 		engine.start();
 
-		TestBrowser anonymous = new TestBrowser(port);
 		check(anonymous.get("/api/v1/auth/csrf"), "GET", "/api/v1/auth/csrf", 200);
 		check(anonymous.get("/api/v1/me"), "GET", "/api/v1/me", 401);
 		check(anonymous.post("/api/v1/auth/login", login("trader")), "POST", "/api/v1/auth/login", 403);
@@ -137,11 +142,19 @@ class ApiContractIT {
 		check(trader.get("/api/v1/commands/" + cancelKey), "GET", command, 200);
 		check(trader.get("/api/v1/commands/" + UUID.randomUUID()), "GET", command, 404);
 
-		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
 		check(operator.get("/api/v1/orders/" + restingId), "GET", read, 403);
 		check(operator.get("/api/v1/portfolio"), "GET", "/api/v1/portfolio", 403);
 		check(operator.post(place, limit(instrument, "BUY", 1, "90.00"), "Idempotency-Key",
 				UUID.randomUUID().toString()), "POST", place, 403);
+
+		String halt = "/api/v1/admin/market/halt";
+		String resume = "/api/v1/admin/market/resume";
+		check(anonymous.get("/api/v1/market"), "GET", "/api/v1/market", 200);
+		check(operator.post(open, "", "Idempotency-Key", UUID.randomUUID().toString()), "POST", open, 409);
+		check(operator.post(halt, ""), "POST", halt, 400);
+		check(operator.post(halt, "", "Idempotency-Key", UUID.randomUUID().toString()), "POST", halt, 200);
+		check(trader.post(resume, "", "Idempotency-Key", UUID.randomUUID().toString()), "POST", resume, 403);
+		check(operator.post(resume, "", "Idempotency-Key", UUID.randomUUID().toString()), "POST", resume, 200);
 
 		trader.csrfToken = null;
 		check(trader.post("/api/v1/auth/logout", ""), "POST", "/api/v1/auth/logout", 403);

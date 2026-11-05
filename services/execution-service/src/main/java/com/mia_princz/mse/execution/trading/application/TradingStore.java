@@ -18,6 +18,13 @@ public interface TradingStore {
 
 	record Market(UUID simulationId, String state, long writerEpoch, int maxOpenOrdersPerAccount,
 			int maxOpenOrdersTotal, int maxFillsPerCommand) {
+
+		/** The same market once a transition has been applied in the current transaction. */
+		public Market withState(String newState) {
+			return new Market(simulationId, newState, writerEpoch, maxOpenOrdersPerAccount, maxOpenOrdersTotal,
+					maxFillsPerCommand);
+		}
+
 	}
 
 	record Instrument(UUID id, String symbol) {
@@ -59,6 +66,13 @@ public interface TradingStore {
 	List<String> reconciliationProblems(UUID simulationId);
 
 	long nextCommandSequence(UUID simulationId);
+
+	/** Moves the market to {@code state}; the first move to OPEN also records when the market opened. */
+	void updateMarketState(UUID simulationId, String state);
+
+	/** Records an operator action and its outcome. The correlation ID is the command's idempotency key. */
+	void insertAudit(UUID simulationId, UUID actorUserId, String action, String outcome, UUID correlationId,
+			long commandSequence);
 
 	List<Instrument> instruments(UUID simulationId);
 

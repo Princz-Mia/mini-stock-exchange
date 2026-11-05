@@ -70,6 +70,25 @@ class TradingQueries {
 		this.snapshot.setReadOnly(true);
 	}
 
+	/** The trading phase as the writer last committed it. Empty before a market has been set up. */
+	record MarketStatus(UUID simulationId, String state, Instant openedAt, long commandSequence) {
+	}
+
+	Optional<MarketStatus> market() {
+		return jdbc.sql("SELECT id, state, opened_at, last_command_sequence FROM simulation")
+			.query((row, index) -> {
+				Timestamp openedAt = row.getTimestamp("opened_at");
+				return new MarketStatus(row.getObject("id", UUID.class), row.getString("state"),
+						openedAt == null ? null : openedAt.toInstant(), row.getLong("last_command_sequence"));
+			})
+			.optional();
+	}
+
+	/** Any signed-in user's ID, trading account or not; operators act as themselves. */
+	Optional<UUID> userId(String username) {
+		return jdbc.sql("SELECT id FROM app_user WHERE username = ?").param(username).query(UUID.class).optional();
+	}
+
 	Optional<Trader> trader(String username) {
 		return jdbc.sql("""
 				SELECT u.id AS user_id, a.id AS account_id FROM app_user u

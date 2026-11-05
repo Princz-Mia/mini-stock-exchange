@@ -23,6 +23,11 @@ public final class BookDelta {
 	private BookDelta() {
 	}
 
+	/** No change to the book, for a command that changes only the market around it. */
+	public static BookDelta none() {
+		return new BookDelta();
+	}
+
 	/** The fills take from the makers' side; a resting remainder joins the taker's side at its limit. */
 	public static BookDelta of(MatchPlan plan) {
 		BookDelta delta = new BookDelta();

@@ -46,6 +46,11 @@ class SecurityConfiguration {
 				.permitAll()
 				.requestMatchers(HttpMethod.GET, "/api/v1/me")
 				.authenticated()
+				.requestMatchers(HttpMethod.GET, "/api/v1/market")
+				.permitAll()
+				.requestMatchers(HttpMethod.POST, "/api/v1/admin/market/open", "/api/v1/admin/market/halt",
+						"/api/v1/admin/market/resume")
+				.hasRole("OPERATOR")
 				.requestMatchers(HttpMethod.POST, "/api/v1/orders", "/api/v1/orders/*/cancel")
 				.hasRole("TRADER")
 				.requestMatchers(HttpMethod.GET, "/api/v1/orders", "/api/v1/orders/*", "/api/v1/commands/*",
