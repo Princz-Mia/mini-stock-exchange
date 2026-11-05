@@ -145,7 +145,7 @@ class MarketApiIT {
 					HttpResponse.BodyHandlers.ofString());
 			assertThat(post.statusCode()).isIn(401, 403);
 		}
-		assertThat(get("/api/v1/instruments/" + UUID.randomUUID() + "/candles").statusCode()).isIn(401, 403);
+		assertThat(get("/api/v1/instruments/" + UUID.randomUUID() + "/orders").statusCode()).isIn(401, 403);
 	}
 
 	private HttpResponse<String> get(String path) throws Exception {

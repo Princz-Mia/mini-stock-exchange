@@ -22,6 +22,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
 import com.mia_princz.mse.marketdata.projection.SnapshotProjection;
+import com.mia_princz.mse.marketdata.projection.CandleProjection;
 import com.mia_princz.mse.marketdata.projection.TradeProjection;
 
 /**
@@ -31,7 +32,7 @@ import com.mia_princz.mse.marketdata.projection.TradeProjection;
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT,
 		properties = { "mse.test.database=api-contract", "mse.market-feed.enabled=false",
-				"mse.trade-feed.enabled=false", "mse.market-events.heartbeat=300ms" })
+				"mse.trade-feed.enabled=false", "mse.candle-feed.enabled=false", "mse.market-events.heartbeat=300ms" })
 class ApiContractIT {
 
 	private static final OpenApiContract CONTRACT = OpenApiContract.get();
@@ -41,6 +42,9 @@ class ApiContractIT {
 
 	@Autowired
 	SnapshotProjection snapshots;
+
+	@Autowired
+	CandleProjection candles;
 
 	@Autowired
 	TradeProjection trades;
@@ -81,6 +85,13 @@ class ApiContractIT {
 		check(tape, path(tape, instrument) + "?limit=2", 200);
 		check(tape, path(tape, instrument) + "?cursor=nope", 400);
 		check(tape, path(tape, UUID.randomUUID()), 404);
+
+		String bars = "/api/v1/instruments/{instrumentId}/candles";
+		candles.apply(Candles.candle(1, instrument, Candles.MINUTE, 3));
+		check(bars, path(bars, instrument) + "?from=" + Candles.MINUTE + "&to=" + Candles.MINUTE.plusSeconds(60), 200);
+		check(bars, path(bars, instrument), 200);
+		check(bars, path(bars, instrument) + "?from=" + Candles.MINUTE + "&to=" + Candles.MINUTE.plusSeconds(86_460), 400);
+		check(bars, path(bars, UUID.randomUUID()), 404);
 	}
 
 	@Test

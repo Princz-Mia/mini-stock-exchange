@@ -609,6 +609,32 @@ paths:
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
 
+  /api/v1/instruments/{instrumentId}/candles:
+    get:
+      tags: [market-data]
+      operationId: listCandles
+      summary: One-minute bars for a time range, oldest first, with how current the analytics are.
+      description: |
+        Bars with from <= bucketStart < to, at most 1,440 minutes per request. Without from and to, the last two
+        hours. A minute without trades has no bar. Bars come from the computation epoch this instance serves.
+      parameters:
+        - $ref: '#/components/parameters/InstrumentId'
+        - name: from
+          in: query
+          schema: { $ref: '#/components/schemas/Timestamp' }
+        - name: to
+          in: query
+          description: Exclusive.
+          schema: { $ref: '#/components/schemas/Timestamp' }
+      responses:
+        '200':
+          description: The bars and their freshness.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Candles' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
   /api/v1/market-events:
     get:
       tags: [market-data]
@@ -1178,6 +1204,59 @@ components:
           description: Null on the last page.
         latestTradeSequence: { $ref: '#/components/schemas/Sequence' }
         feed: { $ref: '#/components/schemas/Feed' }
+    Candle:
+      type: object
+      additionalProperties: false
+      required: [bucketStart, open, high, low, close, volume, tradeCount, notional, vwap, sourceMaxTradeSequence]
+      properties:
+        bucketStart: { $ref: '#/components/schemas/Timestamp' }
+        open: { $ref: '#/components/schemas/Price' }
+        high: { $ref: '#/components/schemas/Price' }
+        low: { $ref: '#/components/schemas/Price' }
+        close: { $ref: '#/components/schemas/Price' }
+        volume: { type: integer, format: int64, minimum: 1 }
+        tradeCount: { type: integer, format: int64, minimum: 1 }
+        notional:
+          type: string
+          description: Price times quantity summed over the minute, exact, with two decimals; may exceed 64 bits.
+          pattern: '^(0|[1-9][0-9]*)\.[0-9]{2}$'
+        vwap:
+          $ref: '#/components/schemas/Price'
+          description: notional / volume, rounded half-even to the cent.
+        sourceMaxTradeSequence:
+          $ref: '#/components/schemas/Sequence'
+          description: The highest trade sequence this bar includes.
+    CandleFreshness:
+      type: object
+      additionalProperties: false
+      required: [feed, candlesThroughTradeSequence, latestTradeSequence, tradesBehind]
+      properties:
+        feed: { $ref: '#/components/schemas/Feed' }
+        candlesThroughTradeSequence:
+          oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }]
+          description: The highest trade sequence any bar includes; null before the first bar.
+        latestTradeSequence:
+          $ref: '#/components/schemas/Sequence'
+          description: The newest trade on the public tape.
+        tradesBehind:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Trades on the tape that no bar includes yet. Grows while analytics is down or stopped.
+    Candles:
+      type: object
+      additionalProperties: false
+      required: [instrumentId, computationEpoch, from, to, candles, freshness]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        computationEpoch: { type: integer, format: int64, minimum: 1 }
+        from: { $ref: '#/components/schemas/Timestamp' }
+        to: { $ref: '#/components/schemas/Timestamp' }
+        candles:
+          type: array
+          maxItems: 1440
+          items: { $ref: '#/components/schemas/Candle' }
+        freshness: { $ref: '#/components/schemas/CandleFreshness' }
     TapeTrade:
       type: object
       additionalProperties: false
