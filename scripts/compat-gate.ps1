@@ -263,6 +263,7 @@ try {
         Assert-Equal '/api/v1/instruments/x/orders (Market Data, denied)' '403' (Get-Http '/api/v1/instruments/x/orders')
         Assert-Match '/api/v1/market-events, no market yet (Market Data)' '"code":"INSTRUMENT_NOT_FOUND"' ((& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/market-events?instrumentId=00000000-0000-0000-0000-000000000001") | Out-String)
         Assert-Equal '/api/v1/internal/x (blocked at proxy)' '404' (Get-Http '/api/v1/internal/x')
+        Assert-Match '/internal/exports/trades serves the SPA, not the export' '^<!doctype html>' ((& curl.exe -s "http://localhost:$webPort/internal/exports/trades?instrumentId=00000000-0000-0000-0000-000000000001") | Out-String)
         $actuator = (& curl.exe -s "http://localhost:$webPort/actuator/health") | Out-String
         Assert-Match '/actuator/health serves the SPA, not Actuator' '^\s*<!doctype html>' $actuator
     }

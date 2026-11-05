@@ -212,6 +212,8 @@ proxy_routes() {
     assert_equal '/api/v1/instruments/x/orders (Market Data, denied)' 403 "$(http_status /api/v1/instruments/x/orders)" &&
     assert_match '/api/v1/market-events, no market yet (Market Data)' '"code":"INSTRUMENT_NOT_FOUND"' "$(curl -s -m 10 "http://localhost:$web_port/api/v1/market-events?instrumentId=00000000-0000-0000-0000-000000000001")" &&
     assert_equal '/api/v1/internal/x (blocked at proxy)' 404 "$(http_status /api/v1/internal/x)" &&
+    assert_match '/internal/exports/trades serves the SPA, not the export' '^<!doctype html>' \
+      "$(curl -s "http://localhost:$web_port/internal/exports/trades?instrumentId=00000000-0000-0000-0000-000000000001")" &&
     assert_match '/actuator/health serves the SPA, not Actuator' '^<!doctype html>' "$(curl -s "http://localhost:$web_port/actuator/health")"
 }
 
