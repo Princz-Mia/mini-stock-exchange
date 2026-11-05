@@ -399,6 +399,20 @@ paths:
           $ref: '#/components/responses/OutcomeUnknown'
 
   /api/v1/admin/bots:
+    get:
+      tags: [execution]
+      operationId: getBotPopulation
+      summary: How many bots exist and the limits on making more. Operator only.
+      responses:
+        '200':
+          description: The population and its limits.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotPopulation' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator. No body.
     post:
       tags: [execution]
       operationId: provisionBots
@@ -976,6 +990,15 @@ components:
           type: array
           maxItems: 50
           items: { $ref: '#/components/schemas/Endowment' }
+
+    BotPopulation:
+      type: object
+      additionalProperties: false
+      required: [population, maxPopulation, maxPerCommand]
+      properties:
+        population: { type: integer, minimum: 0 }
+        maxPopulation: { type: integer }
+        maxPerCommand: { type: integer }
 
     BotsCreated:
       type: object

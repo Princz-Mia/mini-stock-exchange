@@ -67,6 +67,9 @@ class SetupController {
 	record BotsResponse(int created, String firstBot, String lastBot, int population, String commandSequence) {
 	}
 
+	record BotPopulation(int population, int maxPopulation, int maxPerCommand) {
+	}
+
 	record AllocationView(String instrumentId, String symbol, long quantity) {
 	}
 
@@ -97,6 +100,12 @@ class SetupController {
 		TradingQueries.AccountSummary last = page.get(limit - 1);
 		return new AccountPage(views,
 				Cursors.accounts(new TradingQueries.AccountPosition(last.createdAt(), last.accountId())));
+	}
+
+	/** How many bots exist, and how many more may be made, so the screen can say so before trying. */
+	@GetMapping("/bots")
+	BotPopulation bots() {
+		return new BotPopulation(queries.botCount(), ProvisionBots.MAX_POPULATION, ProvisionBots.MAX_PER_COMMAND);
 	}
 
 	@PostMapping("/instruments")

@@ -73,6 +73,7 @@ class BotProvisioningIT {
 	@Test
 	void botsAreFundedInSetupAndTradeWithTheTokenTheyWereGiven() throws Exception {
 		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
+		assertThat(population(operator)).isEqualTo("0 of 1000, 100 at a time");
 		String nova = instrument(operator, "NOVA", "100.00");
 
 		// Three bots, each funded from issuance in its own genesis batch, each with a token file and only its hash.
@@ -131,6 +132,13 @@ class BotProvisioningIT {
 		assertThat(code(bots(operator, unknownKey, 1, "1.00", holding(UUID.randomUUID().toString(), 1)), 422))
 			.isEqualTo("UNKNOWN_INSTRUMENT");
 		assertThat(botCount()).isEqualTo(5);
+		assertThat(population(operator)).isEqualTo("5 of 1000, 100 at a time");
+		List<String> listed = new ArrayList<>();
+		JSON.readTree(operator.get("/api/v1/admin/accounts").body())
+			.get("accounts")
+			.forEach((account) -> listed.add(account.get("username").asString()));
+		assertThat(listed).as("the order they were made").containsExactly("bot-0001", "bot-0002", "bot-0003", "bot-0004",
+				"bot-0005");
 
 		// Invalid requests are refused before the writer, with every problem listed.
 		assertThat(fields(bots(operator, UUID.randomUUID(), 0, "-1.00"))).containsExactlyInAnyOrder("count", "cash");
@@ -138,6 +146,7 @@ class BotProvisioningIT {
 		assertThat(fields(bots(operator, UUID.randomUUID(), 1, "0.00"))).containsExactly("cash");
 		TestBrowser trader = TestBrowser.loggedIn(port, "trader", PASSWORD);
 		assertThat(bots(trader, UUID.randomUUID(), 1, "1.00").statusCode()).isEqualTo(403);
+		assertThat(trader.get(BOTS).statusCode()).isEqualTo(403);
 
 		// If a token can't be handed over, nothing commits, and the same key succeeds once it can.
 		Path moved = TOKENS.resolveSibling("moved");
@@ -189,6 +198,14 @@ class BotProvisioningIT {
 			assertThat(listed).allSatisfy((file) -> assertThat(file.getFileName().toString()).endsWith(".token"));
 			return listed;
 		}
+	}
+
+	private static String population(TestBrowser operator) throws Exception {
+		HttpResponse<String> read = operator.get(BOTS);
+		CONTRACT.assertResponse("GET", BOTS, 200, read.headers().firstValue("Content-Type").orElse(null), read.body());
+		JsonNode body = JSON.readTree(read.body());
+		return body.get("population").asInt() + " of " + body.get("maxPopulation").asInt() + ", "
+				+ body.get("maxPerCommand").asInt() + " at a time";
 	}
 
 	private long botCount() {
