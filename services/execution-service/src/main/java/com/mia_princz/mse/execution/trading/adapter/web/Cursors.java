@@ -32,6 +32,15 @@ final class Cursors {
 		}
 	}
 
+	static String accounts(TradingQueries.AccountPosition position) {
+		return encode("v1:" + position.createdAt() + "|" + position.id());
+	}
+
+	static TradingQueries.AccountPosition accounts(String cursor) {
+		TradingQueries.OrderPosition position = orders(cursor);
+		return new TradingQueries.AccountPosition(position.createdAt(), position.id());
+	}
+
 	static String trades(TradingQueries.TradePosition position) {
 		return encode("v1:" + position.commandSequence() + "|" + position.tradeSequence());
 	}

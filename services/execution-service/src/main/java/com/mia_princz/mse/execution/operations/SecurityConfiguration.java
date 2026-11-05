@@ -48,6 +48,8 @@ class SecurityConfiguration {
 				.authenticated()
 				.requestMatchers(HttpMethod.GET, "/api/v1/market")
 				.permitAll()
+				.requestMatchers(HttpMethod.GET, "/api/v1/admin/accounts")
+				.hasRole("OPERATOR")
 				.requestMatchers(HttpMethod.POST, "/api/v1/admin/market/open", "/api/v1/admin/market/halt",
 						"/api/v1/admin/market/resume", "/api/v1/admin/instruments",
 						"/api/v1/admin/accounts")

@@ -8,10 +8,12 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.mia_princz.mse.execution.trading.application.AccountResult;
@@ -56,6 +58,38 @@ class SetupController {
 
 	record AccountResponse(String accountId, String username, String cash, List<HoldingResponse> holdings,
 			String commandSequence) {
+	}
+
+	record AllocationView(String instrumentId, String symbol, long quantity) {
+	}
+
+	record AccountView(String accountId, String username, String kind, String cash, List<AllocationView> holdings) {
+	}
+
+	record AccountPage(List<AccountView> accounts, String nextCursor) {
+	}
+
+	/** Every account with what it started with, oldest first, in pages. */
+	@GetMapping("/accounts")
+	AccountPage accounts(@RequestParam(required = false) String cursor, @RequestParam(defaultValue = "50") int limit) {
+		Pages.checkLimit(limit);
+		TradingQueries.AccountPosition after = cursor == null ? null : Cursors.accounts(cursor);
+		List<TradingQueries.AccountSummary> page = queries.accounts(after, limit + 1);
+		List<AccountView> views = page.stream()
+			.limit(limit)
+			.map((account) -> new AccountView(account.accountId().toString(), account.username(), account.kind(),
+					new Money(account.cashCents() == null ? 0 : account.cashCents()).format(),
+					account.holdings()
+						.stream()
+						.map((held) -> new AllocationView(held.instrumentId().toString(), held.symbol(), held.quantity()))
+						.toList()))
+			.toList();
+		if (page.size() <= limit) {
+			return new AccountPage(views, null);
+		}
+		TradingQueries.AccountSummary last = page.get(limit - 1);
+		return new AccountPage(views,
+				Cursors.accounts(new TradingQueries.AccountPosition(last.createdAt(), last.accountId())));
 	}
 
 	@PostMapping("/instruments")

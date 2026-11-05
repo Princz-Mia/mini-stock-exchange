@@ -333,6 +333,24 @@ paths:
           $ref: '#/components/responses/OutcomeUnknown'
 
   /api/v1/admin/accounts:
+    get:
+      tags: [execution]
+      operationId: listAccounts
+      summary: Every trading account with what it started with, oldest first. Operator only.
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: One page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountPage' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator. No body.
     post:
       tags: [execution]
       operationId: provisionAccount
@@ -899,6 +917,44 @@ components:
           type: array
           items: { $ref: '#/components/schemas/Endowment' }
         commandSequence: { $ref: '#/components/schemas/Sequence' }
+
+    AccountPage:
+      type: object
+      additionalProperties: false
+      required: [accounts, nextCursor]
+      properties:
+        accounts:
+          type: array
+          maxItems: 200
+          items: { $ref: '#/components/schemas/AccountSummary' }
+        nextCursor:
+          type: [string, 'null']
+          description: Null on the last page.
+
+    AccountSummary:
+      type: object
+      additionalProperties: false
+      required: [accountId, username, kind, cash, holdings]
+      properties:
+        accountId: { $ref: '#/components/schemas/Uuid' }
+        username: { type: string }
+        kind: { type: string, enum: [TRADER, BOT] }
+        cash:
+          $ref: '#/components/schemas/Money'
+          description: The cash it started with.
+        holdings:
+          type: array
+          description: The shares it started with.
+          items: { $ref: '#/components/schemas/Allocation' }
+
+    Allocation:
+      type: object
+      additionalProperties: false
+      required: [instrumentId, symbol, quantity]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        symbol: { type: string }
+        quantity: { type: integer, format: int64 }
 
     MarketStatus:
       type: object
