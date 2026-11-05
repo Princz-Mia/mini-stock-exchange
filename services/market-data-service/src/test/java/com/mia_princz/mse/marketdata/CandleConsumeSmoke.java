@@ -24,6 +24,7 @@ import com.mia_princz.mse.contracts.events.WireEvents;
 /**
  * Compatibility gate, second half: reads the Avro candles Flink produced from the trades of {@code TradePublishSmoke},
  * with Boot's Kafka client on JDK 25. Selected explicitly by the gate; a missing property fails rather than skips.
+ * {@code smoke.phase} names which trades to expect: the first three, or those plus the one sent after a restart.
  */
 class CandleConsumeSmoke {
 
@@ -34,6 +35,12 @@ class CandleConsumeSmoke {
 		assertThat(Runtime.version().feature()).isEqualTo(25);
 		String bootstrapServers = System.getProperty("smoke.kafka");
 		UUID simulationId = UUID.fromString(System.getProperty("smoke.simulationId"));
+		boolean afterRestart = switch (System.getProperty("smoke.phase")) {
+			case "first" -> false;
+			case "after-restart" -> true;
+			default -> throw new IllegalArgumentException("smoke.phase must be first or after-restart");
+		};
+		long lastSequence = afterRestart ? 4 : 3;
 
 		Map<String, Object> config = Map.of(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers,
 				ConsumerConfig.GROUP_ID_CONFIG, "compat-gate-" + simulationId, ConsumerConfig.AUTO_OFFSET_RESET_CONFIG,
@@ -55,7 +62,7 @@ class CandleConsumeSmoke {
 					}
 					assertThat(record.key()).startsWith(simulationId + "|");
 					candles.put(candle.getEventId(), candle);
-					if (candle.getSourceMaxTradeSequence() == 3) {
+					if (candle.getSourceMaxTradeSequence() == lastSequence) {
 						last = candle;
 					}
 				}
@@ -63,15 +70,26 @@ class CandleConsumeSmoke {
 		}
 
 		assertThat(last).as("candle for simulation %s within %s", simulationId, TIMEOUT).isNotNull();
-		assertThat(candles).as("the redelivered trade produced no extra aggregate").hasSize(3);
+		assertThat(candles).as("one aggregate per unique trade, redeliveries and replays included").hasSize(
+				(int) lastSequence);
 		assertThat(last.getSymbol()).isEqualTo("NOVA");
 		assertThat(last.getOpenCents()).isEqualTo(10_000);
-		assertThat(last.getHighCents()).isEqualTo(10_100);
 		assertThat(last.getLowCents()).isEqualTo(10_000);
-		assertThat(last.getCloseCents()).isEqualTo(10_100);
-		assertThat(last.getVolume()).isEqualTo(10);
-		assertThat(last.getTradeCount()).isEqualTo(3);
-		assertThat(last.getNotionalCents()).isEqualByComparingTo(new BigDecimal(100_300));
+		if (afterRestart) {
+			// The same minute's candle, continued from restored state: nothing counted twice, nothing lost.
+			assertThat(last.getHighCents()).isEqualTo(10_200);
+			assertThat(last.getCloseCents()).isEqualTo(10_200);
+			assertThat(last.getVolume()).isEqualTo(15);
+			assertThat(last.getTradeCount()).isEqualTo(4);
+			assertThat(last.getNotionalCents()).isEqualByComparingTo(new BigDecimal(151_300));
+		}
+		else {
+			assertThat(last.getHighCents()).isEqualTo(10_100);
+			assertThat(last.getCloseCents()).isEqualTo(10_100);
+			assertThat(last.getVolume()).isEqualTo(10);
+			assertThat(last.getTradeCount()).isEqualTo(3);
+			assertThat(last.getNotionalCents()).isEqualByComparingTo(new BigDecimal(100_300));
+		}
 	}
 
 }

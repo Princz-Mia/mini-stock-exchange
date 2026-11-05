@@ -125,9 +125,31 @@ function Invoke-InContainer {
 }
 
 function Invoke-Smoke {
-    param([string]$Module, [string]$TestClass, [string]$SimulationId)
+    # The Avro step sets the simulation and minute that both phases share.
+    param([string]$Module, [string]$TestClass, [string]$Phase)
     Invoke-Checked '.\mvnw.cmd' @('-B', '-ntp', '-f', $Module, 'test-compile', 'failsafe:integration-test', 'failsafe:verify',
-        "-Dit.test=$TestClass", '-Dfailsafe.failIfNoSpecifiedTests=true', "-Dsmoke.kafka=localhost:$kafkaPort", "-Dsmoke.simulationId=$SimulationId")
+        "-Dit.test=$TestClass", '-Dfailsafe.failIfNoSpecifiedTests=true', "-Dsmoke.kafka=localhost:$kafkaPort",
+        "-Dsmoke.simulationId=$script:smokeSimulation", "-Dsmoke.minute=$script:smokeMinute", "-Dsmoke.phase=$Phase")
+}
+
+function Get-FlinkJson {
+    param([string]$Path)
+    $arguments = $compose + @('exec', '-T', 'flink-jobmanager', 'curl', '-fsS', "http://localhost:8081$Path")
+    return (& docker @arguments 2>$null | Out-String)
+}
+
+function Get-FlinkJob {
+    $match = [regex]::Match((Get-FlinkJson '/jobs/overview'), '"jid":"([0-9a-f]+)","name":"mse-analytics"[^}]*"state":"RUNNING"')
+    if ($match.Success) { return $match.Groups[1].Value }
+    return ''
+}
+
+function Get-FlinkCount {
+    # The first match is in the checkpoint counts.
+    param([string]$Job, [string]$Counter)
+    $match = [regex]::Match((Get-FlinkJson "/jobs/$Job/checkpoints"), """$Counter"":(\d+)")
+    if ($match.Success) { return [long]$match.Groups[1].Value }
+    return -1
 }
 
 function Assert-ClassVersion {
@@ -325,9 +347,40 @@ try {
     }
 
     Step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' {
-        $simulationId = [guid]::NewGuid().ToString()
-        Invoke-Smoke 'services/execution-service/pom.xml' 'TradePublishSmoke' $simulationId
-        Invoke-Smoke 'services/market-data-service/pom.xml' 'CandleConsumeSmoke' $simulationId
+        $script:smokeSimulation = [guid]::NewGuid().ToString()
+        $script:smokeMinute = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:00Z')
+        Invoke-Smoke 'services/execution-service/pom.xml' 'TradePublishSmoke' 'first'
+        Invoke-Smoke 'services/market-data-service/pom.xml' 'CandleConsumeSmoke' 'first'
+    }
+
+    Step 'Analytics: a JobManager restart resumes from its checkpoint' {
+        # A checkpoint that holds the Avro step's trades, then a JobManager restart that must resume from the newest
+        # one: Flink records the restore and its path, and the next trade continues the same minute's candle exactly.
+        $job = Get-FlinkJob
+        $completed = Get-FlinkCount $job 'completed'
+        # Two more completed checkpoints: the second was triggered after the trades were processed.
+        foreach ($attempt in 1..30) {
+            if ((Get-FlinkCount $job 'completed') -ge $completed + 2) { break }
+            Start-Sleep -Seconds 2
+        }
+        $latest = [regex]::Match((Get-FlinkJson "/jobs/$job/checkpoints"), '"latest":\{"completed":\{[^}]*?"id":(\d+)')
+        if (-not $latest.Success) { throw 'no completed checkpoint after the trades' }
+        Invoke-Checked 'docker' ($compose + @('restart', 'flink-jobmanager'))
+        foreach ($attempt in 1..60) {
+            $restored = Get-FlinkJob
+            if ($restored -ne '' -and (Get-FlinkCount $restored 'restored') -eq 1) { break }
+            Start-Sleep -Seconds 2
+        }
+        # Restoring an older checkpoint would also give correct candles, after a longer replay, so the path is checked too.
+        $restore = [regex]::Match((Get-FlinkJson "/jobs/$restored/checkpoints"), '"restored":\{"id":(\d+)[^}]*"external_path":"file:/opt/flink/checkpoints/([0-9a-f]+)/chk-')
+        if (-not $restore.Success -or $restore.Groups[2].Value -ne $job -or [long]$restore.Groups[1].Value -lt [long]$latest.Groups[1].Value) {
+            throw "the restore was not the newest checkpoint of job $job"
+        }
+        $entry = (& docker @($compose + @('logs', '--no-log-prefix', 'flink-jobmanager')) 2>&1 | Select-String 'the analytics job' | Select-Object -Last 1)
+        Assert-Match 'entry point' 'Resuming the analytics job from checkpoint /opt/flink/checkpoints/' "$entry"
+        Assert-Match 'checkpoint directories: the one resumed from and the running job' '^\s*[12]\s*$' (Invoke-InContainer 'flink-jobmanager' @('sh', '-c', 'ls /opt/flink/checkpoints | wc -l'))
+        Invoke-Smoke 'services/execution-service/pom.xml' 'TradePublishSmoke' 'after-restart'
+        Invoke-Smoke 'services/market-data-service/pom.xml' 'CandleConsumeSmoke' 'after-restart'
     }
 
     Step 'Outage isolation: services stay ready without Kafka' {
