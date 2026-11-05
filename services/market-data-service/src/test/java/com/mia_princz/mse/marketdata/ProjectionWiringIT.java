@@ -43,6 +43,10 @@ class ProjectionWiringIT {
 	@Qualifier("tradeFeed")
 	MarketFeedConsumer tradeFeed;
 
+	@Autowired
+	@Qualifier("candleFeed")
+	MarketFeedConsumer candleFeed;
+
 	@Test
 	void eachTopicReachesItsProjection() throws Exception {
 		UUID instrument = UUID.randomUUID();
@@ -54,18 +58,22 @@ class ProjectionWiringIT {
 				new StringSerializer(), new ByteArraySerializer())) {
 			producer.send(new ProducerRecord<>("mse.market.v1", key, WireEvents.encode(snapshot))).get();
 			producer.send(new ProducerRecord<>("mse.trades.v1", key, WireEvents.encode(trade))).get();
+			producer.send(new ProducerRecord<>("mse.candles.v1", key,
+					WireEvents.encode(Candles.candle(1, instrument, Candles.MINUTE, 3)))).get();
 		}
 
 		long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
-		while ((count("market_snapshot", instrument) == 0 || count("public_trade", instrument) == 0)
-				&& System.nanoTime() < deadline) {
+		while ((count("market_snapshot", instrument) == 0 || count("public_trade", instrument) == 0
+				|| count("candle_1m", instrument) == 0) && System.nanoTime() < deadline) {
 			Thread.sleep(100);
 		}
 
 		assertThat(count("market_snapshot", instrument)).isEqualTo(1);
 		assertThat(count("public_trade", instrument)).isEqualTo(1);
+		assertThat(count("candle_1m", instrument)).isEqualTo(1);
 		assertThat(marketFeed.health().getDetails()).doesNotContainKey("pausedAt");
 		assertThat(tradeFeed.health().getDetails()).doesNotContainKey("pausedAt");
+		assertThat(candleFeed.health().getDetails()).doesNotContainKey("pausedAt");
 	}
 
 	private long count(String table, UUID instrument) {

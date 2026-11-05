@@ -41,6 +41,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
+import com.mia_princz.mse.contracts.events.CandleUpdated;
 import com.mia_princz.mse.contracts.events.MarketSnapshot;
 import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.contracts.events.WireEvents;
@@ -48,6 +49,7 @@ import com.mia_princz.mse.marketdata.projection.Checkpoints;
 import com.mia_princz.mse.marketdata.projection.MarketFeedConsumer;
 import com.mia_princz.mse.marketdata.projection.MarketFeedConsumer.State;
 import com.mia_princz.mse.marketdata.projection.SnapshotProjection;
+import com.mia_princz.mse.marketdata.projection.CandleProjection;
 import com.mia_princz.mse.marketdata.projection.TradeProjection;
 
 /**
@@ -78,6 +80,9 @@ class MarketFeedConsumerIT {
 
 	@Autowired
 	TradeProjection tradeProjection;
+
+	@Autowired
+	CandleProjection candleProjection;
 
 	@Autowired
 	Checkpoints checkpoints;
@@ -222,7 +227,8 @@ class MarketFeedConsumerIT {
 	void contradictoryTradePausesTheFeed() throws Exception {
 		UUID instrument = UUID.randomUUID();
 		publishTrade(Trades.trade(instrument, 1));
-		publishTrade(Trades.trade(instrument, 1));
+		TradeExecuted contradiction = Trades.trade(instrument, 1);
+		publishTrade(contradiction);
 		publishTrade(Trades.trade(instrument, 2));
 		MarketFeedConsumer feed = feed(Map.of(), tradeHandler());
 
@@ -232,6 +238,32 @@ class MarketFeedConsumerIT {
 		assertThat(feed.health().getDetails().get("error").toString()).contains("another trade already has");
 		assertThat(jdbc.queryForList("SELECT trade_sequence FROM public_trade WHERE instrument_id = ?", Long.class,
 				instrument)).as("nothing after the contradiction").containsExactly(1L);
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM processed_event WHERE event_id = ?", Long.class,
+				contradiction.getEventId()))
+			.as("not marked as seen, so it is read again after a fix instead of skipped")
+			.isZero();
+	}
+
+	/** A candle the database refuses is unusable too: the feed pauses at it instead of retrying it forever. */
+	@Test
+	void aCandleTheDatabaseRefusesPausesTheFeed() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		CandleUpdated good = Candles.candle(1, instrument, Candles.MINUTE, 1);
+		CandleUpdated impossible = CandleUpdated.newBuilder(Candles.candle(1, instrument, Candles.MINUTE.plusSeconds(60), 2))
+			.setLowCents(20_000)
+			.build();
+		int partition = send(Snapshots.SIMULATION + "|" + instrument, WireEvents.encode(good));
+		send(Snapshots.SIMULATION + "|" + instrument, WireEvents.encode(impossible));
+		MarketFeedConsumer feed = feed(Map.of(), (payload) -> candleProjection.apply(WireEvents.decodeCandle(payload)));
+
+		feed.start();
+
+		waitUntil(() -> feed.state() == State.PAUSED);
+		assertThat(feed.health().getDetails().get("pausedAt").toString()).startsWith(topic + "/" + partition + "@");
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM candle_1m WHERE instrument_id = ?", Long.class,
+				instrument)).as("the good candle before it committed").isEqualTo(1);
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM processed_event WHERE event_id = ?", Long.class,
+				impossible.getEventId())).isZero();
 	}
 
 	/** Retention deleted records past the checkpoint: the feed says which ones, then carries on from what is left. */
