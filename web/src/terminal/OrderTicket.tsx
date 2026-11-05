@@ -98,7 +98,16 @@ function OutcomeMessage({ outcome }: { outcome: Outcome }) {
   }
 }
 
-export function OrderTicket({ instrument, portfolio }: { instrument: Instrument; portfolio: Portfolio | undefined }) {
+export function OrderTicket({
+  instrument,
+  portfolio,
+  paused = null,
+}: {
+  instrument: Instrument;
+  portfolio: Portfolio | undefined;
+  /** Why new orders cannot be placed now, or null while the market is open. An unresolved order can still be retried. */
+  paused?: string | null;
+}) {
   const client = useQueryClient();
   const intent = useOrderIntent();
   const unresolved = isUnresolved(intent.outcome);
@@ -190,9 +199,21 @@ export function OrderTicket({ instrument, portfolio }: { instrument: Instrument;
             Retry the same order
           </button>
         ) : (
-          <button type="submit" className={side === 'BUY' ? 'primary buy' : 'primary sell'} disabled={sending}>
-            {sending ? 'Sending…' : `${side === 'BUY' ? 'Buy' : 'Sell'} ${instrument.symbol}`}
-          </button>
+          <>
+            {paused !== null && (
+              <p id="ticket-paused" className="outcome outcome-pending">
+                {paused}
+              </p>
+            )}
+            <button
+              type="submit"
+              className={side === 'BUY' ? 'primary buy' : 'primary sell'}
+              disabled={sending || paused !== null}
+              aria-describedby={paused === null ? undefined : 'ticket-paused'}
+            >
+              {sending ? 'Sending…' : `${side === 'BUY' ? 'Buy' : 'Sell'} ${instrument.symbol}`}
+            </button>
+          </>
         )}
       </form>
       <OutcomeMessage outcome={intent.outcome} />

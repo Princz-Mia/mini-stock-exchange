@@ -156,4 +156,40 @@ test.describe.serial('trading through the browser', () => {
     await expect(page.getByRole('table', { name: 'Orders' })).toBeVisible();
     expect(await pageWidth(), 'portfolio width').toBeLessThanOrEqual(width);
   });
+
+  test('the operator halts and resumes trading, and the trader sees it', async ({ page, browser }) => {
+    await signIn(page);
+    const buy = page.getByRole('region', { name: 'Order · NOVA' }).getByRole('button', { name: 'Buy NOVA' });
+    await expect(buy).toBeEnabled();
+
+    // The operator works in a separate browser session, through the operator screen.
+    const operatorContext = await browser.newContext();
+    const operator = await operatorContext.newPage();
+    await operator.goto('/');
+    await operator.getByLabel('Username').fill('operator');
+    await operator.getByLabel('Password').fill(required('E2E_OPERATOR_PASSWORD'));
+    await operator.getByRole('button', { name: 'Sign in' }).click();
+    await expect(operator.getByRole('heading', { name: 'Market' })).toBeVisible();
+    await expect(operator.getByRole('button', { name: 'Open market' })).toHaveAccessibleDescription(
+      'The market has already opened. It opens only once.',
+    );
+    await expect(operator.getByRole('button', { name: 'Resume trading' })).toBeDisabled();
+
+    await operator.getByRole('button', { name: 'Halt trading' }).click();
+    await expect(operator.getByText('Trading is halted. Cancels still work.')).toBeVisible();
+    await expect(operator.getByRole('button', { name: 'Halt trading' })).toBeDisabled();
+
+    // The trader's terminal follows the committed phase within its refresh interval.
+    await expect(page.getByText('Trading halted')).toBeVisible({ timeout: 10_000 });
+    await expect(buy).toBeDisabled();
+    await expect(buy).toHaveAccessibleDescription(
+      'Trading is halted. New orders are paused; you can still cancel open orders.',
+    );
+
+    await operator.getByRole('button', { name: 'Resume trading' }).click();
+    await expect(operator.getByText('Trading has resumed.')).toBeVisible();
+    await expect(page.getByText('Trading halted')).toBeHidden({ timeout: 10_000 });
+    await expect(buy).toBeEnabled();
+    await operatorContext.close();
+  });
 });

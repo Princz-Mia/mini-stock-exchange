@@ -3,6 +3,7 @@ import { createContext, useContext } from 'react';
 import { useSearchParams } from 'react-router';
 
 import { api, pollEvery } from '../api/client';
+import type { MarketStatus } from '../api/types';
 import { FeedStatus } from '../app/FeedStatus';
 import { groupDigits } from '../format';
 import { OrderBook } from './OrderBook';
@@ -18,6 +19,13 @@ export const StreamContext = createContext<StreamFactory | undefined>(undefined)
 
 const TRANSPORT_LABELS = { connecting: 'Connecting…', open: 'Connected', stale: 'No updates for 15 s' } as const;
 
+/** Why new orders cannot be placed right now. Cancels are never paused. */
+const PAUSED: Record<Exclude<MarketStatus['state'], 'OPEN'>, { badge: string; reason: string }> = {
+  HALTED: { badge: 'Trading halted', reason: 'Trading is halted. New orders are paused; you can still cancel open orders.' },
+  SETUP: { badge: 'Not open yet', reason: 'The market has not opened yet.' },
+  NOT_SET_UP: { badge: 'Not set up', reason: 'The market has not been set up yet.' },
+};
+
 /**
  * The trading terminal: the selected instrument's live book, tape and chart from the market stream, the order
  * ticket beside them, and the trader's open orders. Public market data and private balances are separate sources
@@ -28,6 +36,10 @@ export function TerminalPage() {
   const create = useContext(StreamContext);
   const instruments = useQuery({ queryKey: ['instruments'], queryFn: api.instruments, refetchInterval: pollEvery(5_000) });
   const portfolio = useQuery({ queryKey: ['portfolio'], queryFn: api.portfolio, refetchInterval: pollEvery(5_000) });
+  // The authoritative phase. The venue state in market data can lag; if this cannot be read, nothing is paused here
+  // and the exchange still decides.
+  const market = useQuery({ queryKey: ['market'], queryFn: api.market, refetchInterval: pollEvery(5_000) });
+  const paused = market.data === undefined || market.data.state === 'OPEN' ? null : PAUSED[market.data.state];
   const orders = useQuery({
     queryKey: ['orders', 'active'],
     queryFn: () => api.orders('active'),
@@ -68,6 +80,7 @@ export function TerminalPage() {
               <span className="last-price num">
                 {frame?.lastPrice != null ? groupDigits(frame.lastPrice) : `${groupDigits(selected.referencePrice)} ref`}
               </span>
+              {paused !== null && <span className="state-badge state-halted">{paused.badge}</span>}
               <FeedStatus feed={stream.feed ?? instruments.data.feed} />
               <span className={`transport transport-${stream.transport}`} role="status">
                 {TRANSPORT_LABELS[stream.transport]}
@@ -79,7 +92,12 @@ export function TerminalPage() {
               <Tape trades={frame?.recentTrades ?? []} />
             </div>
           </div>
-          <OrderTicket key={selected.instrumentId} instrument={selected} portfolio={portfolio.data} />
+          <OrderTicket
+            key={selected.instrumentId}
+            instrument={selected}
+            portfolio={portfolio.data}
+            paused={paused?.reason ?? null}
+          />
         </>
       )}
       <div className="terminal-orders">

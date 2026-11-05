@@ -97,6 +97,36 @@ function renderTerminal() {
 describe('terminal', () => {
   beforeEach(() => resetSession());
 
+  it('pauses new orders while the market is halted, but still lets the trader cancel', async () => {
+    const server = market().on('GET /api/v1/market', {
+      status: 200,
+      json: { state: 'HALTED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '9' },
+    });
+    renderTerminal();
+
+    const ticket = await screen.findByRole('region', { name: 'Order · NOVA' });
+    const buy = within(ticket).getByRole('button', { name: 'Buy NOVA' });
+    await waitFor(() => expect(buy).toBeDisabled());
+    expect(buy).toHaveAccessibleDescription(
+      'Trading is halted. New orders are paused; you can still cancel open orders.',
+    );
+    expect(screen.getByText('Trading halted')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Cancel sell NOVA at 105.00' })).toBeEnabled();
+    expect(server.requests.some((request) => request.method === 'POST')).toBe(false);
+  });
+
+  it('takes orders once the market is open', async () => {
+    market().on('GET /api/v1/market', {
+      status: 200,
+      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '9' },
+    });
+    renderTerminal();
+
+    const ticket = await screen.findByRole('region', { name: 'Order · NOVA' });
+    await waitFor(() => expect(screen.queryByText('Trading halted')).toBeNull());
+    expect(within(ticket).getByRole('button', { name: 'Buy NOVA' })).toBeEnabled();
+  });
+
   it('streams the first instrument and shows its book, tape and last price', async () => {
     market();
     const streams = renderTerminal();
