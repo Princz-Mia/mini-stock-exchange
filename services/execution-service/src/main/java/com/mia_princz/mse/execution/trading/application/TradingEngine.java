@@ -114,6 +114,14 @@ public final class TradingEngine {
 		return writer.submit(() -> processControl(key, command));
 	}
 
+	/**
+	 * Adds an instrument while the market is in SETUP. The first one creates the market. The new instrument's empty
+	 * book joins the engine only after the command has committed.
+	 */
+	public CompletableFuture<InstrumentResult> addInstrument(CommandKey key, AddInstrument command) {
+		return writer.submit(() -> processAddInstrument(key, command));
+	}
+
 	/** A snapshot of one side of a book, read on the writer thread so it never sees a half-applied plan. */
 	public CompletableFuture<List<DepthLevel>> depth(UUID instrumentId, Side side) {
 		return writer.submit(() -> books.get(instrumentId).depth(side, Integer.MAX_VALUE));
@@ -162,6 +170,70 @@ public final class TradingEngine {
 					new BookOutOfStepException(command.orderId()));
 		}
 		return outcome.result();
+	}
+
+	private record AddedInstrument(InstrumentResult result, boolean fresh, int maxFillsPerCommand) {
+	}
+
+	private InstrumentResult processAddInstrument(CommandKey key, AddInstrument command) {
+		AddedInstrument added;
+		try {
+			ensureMarket();
+			added = transactions.inTransaction(() -> addInstrumentInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+		if (added.fresh()) {
+			// Never replace a book that exists: it may hold resting orders.
+			books.putIfAbsent(command.instrumentId(), new OrderBook(added.maxFillsPerCommand()));
+			symbols.putIfAbsent(command.instrumentId(), command.symbol());
+		}
+		return added.result();
+	}
+
+	/**
+	 * Creates the market, in SETUP with its issuance account, the first time something is set up. This commits on
+	 * its own: an empty market in SETUP is a valid state, and the command that needed it then runs normally.
+	 */
+	private void ensureMarket() {
+		if (simulationId != null) {
+			return;
+		}
+		UUID simulation = UUID.randomUUID();
+		long epoch = transactions.inTransaction(() -> store.createMarket(simulation, UUID.randomUUID()));
+		simulationId = simulation;
+		writerEpoch = epoch;
+	}
+
+	private AddedInstrument addInstrumentInTransaction(CommandKey key, AddInstrument command) {
+		Market market = store.lockMarket();
+		if (market.writerEpoch() != writerEpoch) {
+			throw new StaleWriterException();
+		}
+		Optional<TradingStore.StoredResult<InstrumentResult>> prior = store.findResult(simulationId, key,
+				InstrumentResult.class);
+		if (prior.isPresent()) {
+			return new AddedInstrument(replay(key, prior.get()), false, market.maxFillsPerCommand());
+		}
+		long sequence = store.nextCommandSequence(simulationId);
+		InstrumentResult.Status refusal = !"SETUP".equals(market.state()) ? InstrumentResult.Status.NOT_IN_SETUP
+				: store.symbolTaken(simulationId, command.symbol()) ? InstrumentResult.Status.SYMBOL_TAKEN : null;
+		if (refusal != null) {
+			store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_ADD", "NOT_ALLOWED", key.idempotencyKey(),
+					sequence);
+			return new AddedInstrument(remember(key, 409, new InstrumentResult(refusal, null, command.symbol(),
+					command.referencePrice().cents(), sequence)), false, market.maxFillsPerCommand());
+		}
+		store.insertInstrument(simulationId, command.instrumentId(), command.symbol(), command.referencePrice().cents());
+		// The catalogue changed, so the new instrument's public state is published at this sequence.
+		snapshot(market, command.instrumentId(), new OrderBook(market.maxFillsPerCommand()), BookDelta.none(),
+				sequence);
+		store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_ADD", "APPLIED", key.idempotencyKey(),
+				sequence);
+		return new AddedInstrument(remember(key, 201, new InstrumentResult(InstrumentResult.Status.CREATED,
+				command.instrumentId(), command.symbol(), command.referencePrice().cents(), sequence)), true,
+				market.maxFillsPerCommand());
 	}
 
 	private MarketTransition processControl(CommandKey key, MarketControl command) {
@@ -367,6 +439,7 @@ public final class TradingEngine {
 			case PlacementResult placement -> placement.commandSequence();
 			case CancelResult cancel -> cancel.commandSequence();
 			case MarketTransition transition -> transition.commandSequence();
+			case InstrumentResult instrument -> instrument.commandSequence();
 			default -> throw new IllegalArgumentException("Not a command result: " + result);
 		};
 		store.insertResult(simulationId, key, httpStatus, result, sequence);

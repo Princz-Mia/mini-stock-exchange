@@ -72,6 +72,20 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public long createMarket(UUID simulationId, UUID issuanceAccountId) {
+		long epoch = jdbc
+			.sql("INSERT INTO simulation (id, state, writer_epoch) VALUES (?, 'SETUP', 1) RETURNING writer_epoch")
+			.param(simulationId)
+			.query(Long.class)
+			.single();
+		expectOne(jdbc.sql("""
+				INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'ISSUANCE', 'Issuance')""")
+			.params(issuanceAccountId, simulationId)
+			.update(), "insert issuance account");
+		return epoch;
+	}
+
+	@Override
 	public Market lockMarket() {
 		return jdbc.sql("""
 				SELECT id, state, writer_epoch, max_open_orders_per_account, max_open_orders_total, max_fills_per_command
@@ -194,6 +208,22 @@ public final class JdbcTradingStore implements TradingStore {
 				VALUES (?, ?, ?, ?, ?, ?)""")
 			.params(simulationId, actorUserId, action, outcome, correlationId, commandSequence)
 			.update(), "insert audit row");
+	}
+
+	@Override
+	public boolean symbolTaken(UUID simulationId, String symbol) {
+		return jdbc.sql("SELECT EXISTS (SELECT 1 FROM instrument WHERE simulation_id = ? AND symbol = ?)")
+			.params(simulationId, symbol)
+			.query(Boolean.class)
+			.single();
+	}
+
+	@Override
+	public void insertInstrument(UUID simulationId, UUID instrumentId, String symbol, long referencePriceCents) {
+		expectOne(jdbc.sql("""
+				INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, ?, ?)""")
+			.params(instrumentId, simulationId, symbol, referencePriceCents)
+			.update(), "insert instrument");
 	}
 
 	@Override

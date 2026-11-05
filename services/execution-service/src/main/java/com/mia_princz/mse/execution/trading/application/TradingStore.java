@@ -53,6 +53,9 @@ public interface TradingStore {
 	/** Whether a market has been set up yet. Before that there is nothing to trade or rebuild. */
 	boolean hasSimulation();
 
+	/** Creates the market in SETUP with its issuance account, already claimed by this writer. Returns the epoch. */
+	long createMarket(UUID simulationId, UUID issuanceAccountId);
+
 	/** Locks the market row for the rest of the transaction; every trading command starts here. */
 	Market lockMarket();
 
@@ -75,6 +78,10 @@ public interface TradingStore {
 			long commandSequence);
 
 	List<Instrument> instruments(UUID simulationId);
+
+	boolean symbolTaken(UUID simulationId, String symbol);
+
+	void insertInstrument(UUID simulationId, UUID instrumentId, String symbol, long referencePriceCents);
 
 	Available available(UUID accountId, UUID instrumentId);
 
