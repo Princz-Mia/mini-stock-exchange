@@ -10,6 +10,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 
 import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterBusyException;
@@ -19,6 +21,8 @@ import com.mia_princz.mse.execution.trading.application.IdempotencyConflictExcep
 
 /** How every command endpoint submits to the writer and answers: keys, admission, timeouts and failures. */
 final class CommandCalls {
+
+	private static final Logger LOG = LoggerFactory.getLogger(CommandCalls.class);
 
 	private CommandCalls() {
 	}
@@ -65,7 +69,11 @@ final class CommandCalls {
 			if (cause instanceof WriterHaltException || cause instanceof WriterStoppedException) {
 				throw unavailable();
 			}
-			throw new IllegalStateException("Command failed", cause);
+			// Anything else failed inside the command's transaction, which rolled back. Answered here, because an error
+			// dispatch would be refused by the deny-by-default rules and look like a 403.
+			LOG.error("Command {} failed and was not applied", key, cause);
+			throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "COMMAND_FAILED",
+					"The command failed and nothing was applied; retrying the same key is safe");
 		}
 	}
 

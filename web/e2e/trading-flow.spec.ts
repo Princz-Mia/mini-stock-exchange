@@ -6,7 +6,8 @@ import type { CsrfToken, OrderRequest } from '../src/api/types';
 
 // Runs against a fresh stack whose only addition is the counterparty's login (seed-users.sql). The operator sets up
 // the market through the API: NOVA at 100.00, and the dev trader and the counterparty with 100,000.00 and 500 shares
-// each. The amounts below follow from that, so the test runs once per stack.
+// each. The amounts below follow from that, so the test runs once per stack. Two bots are provisioned too, for the
+// gate to check their token files; they don't trade here.
 
 function required(name: string): string {
   const value = process.env[name];
@@ -42,7 +43,7 @@ async function expectStatus(response: APIResponse, status: number, what: string)
   expect(response.status(), `${what}: ${await response.text()}`).toBe(status);
 }
 
-/** SETUP through the operator API: one instrument, two funded traders, then open. Returns the instrument's ID. */
+/** SETUP through the operator API: one instrument, two funded traders, two bots, then open. Returns NOVA's ID. */
 async function setUpMarket(): Promise<string> {
   const operator = await signedIn('operator', required('E2E_OPERATOR_PASSWORD'));
   const added = await operator.command('/api/v1/admin/instruments', { symbol: 'NOVA', referencePrice: '100.00' });
@@ -56,6 +57,12 @@ async function setUpMarket(): Promise<string> {
     });
     await expectStatus(funded, 201, `fund ${username}`);
   }
+  const bots = await operator.command('/api/v1/admin/bots', {
+    count: 2,
+    cash: '10000.00',
+    holdings: [{ instrumentId, quantity: 100 }],
+  });
+  await expectStatus(bots, 201, 'provision two bots');
   await expectStatus(await operator.command('/api/v1/admin/market/open'), 200, 'open the market');
   await operator.api.dispose();
   return instrumentId;

@@ -14,6 +14,8 @@ RUN --mount=type=cache,target=/root/.m2 sh -c '\
 
 FROM container-registry.oracle.com/java/jdk-no-fee-term:25.0.5@sha256:283d01db5d749b005826ad311af50a78cc40969548abb63d4b57063a6d611960
 RUN groupadd --system --gid 10001 mse && useradd --system --uid 10001 --gid mse --no-create-home mse
+# Owner-only, so a fresh named volume mounted here starts out owned by mse. The simulator runs as the same user.
+RUN mkdir -p /run/mse/bot-tokens && chown mse:mse /run/mse/bot-tokens && chmod 700 /run/mse/bot-tokens
 WORKDIR /app
 COPY --from=build /out/dependencies/ ./
 COPY --from=build /out/spring-boot-loader/ ./

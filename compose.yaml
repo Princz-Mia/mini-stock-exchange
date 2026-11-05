@@ -94,6 +94,10 @@ services:
       DEV_OPERATOR_PASSWORD: ${DEV_OPERATOR_PASSWORD:?run scripts/init-env first}
       DEV_TRADER_PASSWORD: ${DEV_TRADER_PASSWORD:?run scripts/init-env first}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      MSE_BOT_TOKEN_DIRECTORY: /run/mse/bot-tokens
+    volumes:
+      # Plaintext bot tokens, written once at provisioning; the simulator will mount it read-only.
+      - bot-tokens:/run/mse/bot-tokens
     mem_limit: 2g
     cpus: 2.0
 
@@ -240,6 +244,7 @@ services:
     cpus: 0.5
 
 volumes:
+  bot-tokens:
   postgres-data:
   kafka-data:
   flink-checkpoints:

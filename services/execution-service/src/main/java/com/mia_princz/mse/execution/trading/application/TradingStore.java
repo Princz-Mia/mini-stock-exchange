@@ -86,11 +86,18 @@ public interface TradingStore {
 
 	void insertTraderAccount(UUID simulationId, UUID accountId, UUID ownerUserId, String displayName);
 
+	int botCount(UUID simulationId);
+
+	void insertBotAccount(UUID simulationId, UUID accountId, String displayName);
+
+	/** Stores a bot's token hash; the token itself is never stored. */
+	void insertApiToken(UUID tokenId, UUID accountId, byte[] tokenHash);
+
 	/**
 	 * Funds a new account from the issuance account in one balanced GENESIS batch, creates its cash and position rows,
 	 * and records each amount as an initial allocation linked to that batch.
 	 */
-	void insertGenesis(UUID simulationId, UUID accountId, long commandSequence, long cashCents,
+	void insertGenesis(UUID simulationId, UUID accountId, String accountKind, long commandSequence, long cashCents,
 			List<ProvisionAccount.Holding> holdings);
 
 	void insertInstrument(UUID simulationId, UUID instrumentId, String symbol, long referencePriceCents);

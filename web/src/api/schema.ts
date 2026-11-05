@@ -255,6 +255,29 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/bots": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Create funded bot accounts, each with its own API token, while the market is in SETUP.
+         * @description Operator only. Sequenced on the writer and audited, with an idempotency key: a retry with the same key and
+         *     body returns the first answer, even a refusal. Bots are named bot-0001, bot-0002 and so on, in the order
+         *     they are created, and each gets the same endowment in its own genesis batch. Each token is written once to
+         *     the simulator's secret directory; no response ever contains a token.
+         */
+        readonly post: operations["provisionBots"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/market/open": {
         readonly parameters: {
             readonly query?: never;
@@ -589,6 +612,19 @@ export interface components {
             readonly username: string;
             readonly cash: components["schemas"]["Money"];
             readonly holdings: readonly components["schemas"]["Endowment"][];
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly BotsRequest: {
+            readonly count: number;
+            readonly cash: components["schemas"]["Money"];
+            readonly holdings?: readonly components["schemas"]["Endowment"][];
+        };
+        readonly BotsCreated: {
+            readonly created: number;
+            readonly firstBot: string;
+            readonly lastBot: string;
+            /** @description Bots in the market after this command. */
+            readonly population: number;
             readonly commandSequence: components["schemas"]["Sequence"];
         };
         readonly AccountPage: {
@@ -1353,6 +1389,68 @@ export interface operations {
              * @description UNKNOWN_INSTRUMENT (committed and audited), or UNKNOWN_TRADER (no trader with that username; nothing
              *     committed).
              */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly provisionBots: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["BotsRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Created and funded. */
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BotsCreated"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description MARKET_NOT_IN_SETUP or BOT_POPULATION_LIMIT (both committed and audited), or IDEMPOTENCY_CONFLICT. */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description UNKNOWN_INSTRUMENT (committed and audited). */
             readonly 422: {
                 headers: {
                     readonly [name: string]: unknown;

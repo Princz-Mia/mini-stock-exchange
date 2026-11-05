@@ -47,6 +47,8 @@ public final class TradingEngine {
 
 	private final Clock clock;
 
+	private final BotCredentials botCredentials;
+
 	private final Map<UUID, OrderBook> books = new HashMap<>();
 
 	private final Map<UUID, String> symbols = new HashMap<>();
@@ -55,11 +57,13 @@ public final class TradingEngine {
 
 	private long writerEpoch;
 
-	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock) {
+	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
+			BotCredentials botCredentials) {
 		this.store = store;
 		this.transactions = transactions;
 		this.writer = writer;
 		this.clock = clock;
+		this.botCredentials = botCredentials;
 	}
 
 	/**
@@ -125,6 +129,11 @@ public final class TradingEngine {
 	/** Gives a trader their account and starting endowment while the market is in SETUP. */
 	public CompletableFuture<AccountResult> provisionAccount(CommandKey key, ProvisionAccount command) {
 		return writer.submit(() -> processProvision(key, command));
+	}
+
+	/** Creates funded bot accounts, each with its own API token, while the market is in SETUP. */
+	public CompletableFuture<BotsResult> provisionBots(CommandKey key, ProvisionBots command) {
+		return writer.submit(() -> processBots(key, command));
 	}
 
 	/** A snapshot of one side of a book, read on the writer thread so it never sees a half-applied plan. */
@@ -280,11 +289,66 @@ public final class TradingEngine {
 					command.holdings(), sequence));
 		}
 		store.insertTraderAccount(simulationId, command.accountId(), command.ownerUserId(), command.username());
-		store.insertGenesis(simulationId, command.accountId(), sequence, command.cashCents(), command.holdings());
+		store.insertGenesis(simulationId, command.accountId(), "TRADER", sequence, command.cashCents(),
+				command.holdings());
 		store.insertAudit(simulationId, command.actorUserId(), "ACCOUNT_PROVISION", "APPLIED", key.idempotencyKey(),
 				sequence);
 		return remember(key, 201, new AccountResult(AccountResult.Status.CREATED, command.accountId(),
 				command.username(), command.cashCents(), command.holdings(), sequence));
+	}
+
+	private BotsResult processBots(CommandKey key, ProvisionBots command) {
+		try {
+			ensureMarket();
+			return transactions.inTransaction(() -> botsInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+	}
+
+	/**
+	 * Each bot gets its own genesis batch and token. Tokens are handed over before commit; if the transaction then
+	 * fails, the stray tokens belong to accounts that never existed, so they authenticate nothing.
+	 */
+	private BotsResult botsInTransaction(CommandKey key, ProvisionBots command) {
+		Market market = store.lockMarket();
+		if (market.writerEpoch() != writerEpoch) {
+			throw new StaleWriterException();
+		}
+		Optional<TradingStore.StoredResult<BotsResult>> prior = store.findResult(simulationId, key, BotsResult.class);
+		if (prior.isPresent()) {
+			return replay(key, prior.get());
+		}
+		long sequence = store.nextCommandSequence(simulationId);
+		int population = store.botCount(simulationId);
+		BotsResult.Status refusal = null;
+		if (!"SETUP".equals(market.state())) {
+			refusal = BotsResult.Status.NOT_IN_SETUP;
+		}
+		else if (population + command.count() > ProvisionBots.MAX_POPULATION) {
+			refusal = BotsResult.Status.POPULATION_LIMIT;
+		}
+		else if (!command.holdings().stream().allMatch((holding) -> books.containsKey(holding.instrumentId()))) {
+			refusal = BotsResult.Status.UNKNOWN_INSTRUMENT;
+		}
+		if (refusal != null) {
+			store.insertAudit(simulationId, command.actorUserId(), "BOT_PROVISION", "NOT_ALLOWED", key.idempotencyKey(),
+					sequence);
+			int status = refusal == BotsResult.Status.UNKNOWN_INSTRUMENT ? 422 : 409;
+			return remember(key, status, new BotsResult(refusal, 0, null, null, population, sequence));
+		}
+		for (int number = population + 1; number <= population + command.count(); number++) {
+			UUID account = UUID.randomUUID();
+			store.insertBotAccount(simulationId, account, ProvisionBots.name(number));
+			store.insertGenesis(simulationId, account, "BOT", sequence, command.cashCents(), command.holdings());
+			store.insertApiToken(UUID.randomUUID(), account, botCredentials.issue(account));
+		}
+		store.insertAudit(simulationId, command.actorUserId(), "BOT_PROVISION", "APPLIED", key.idempotencyKey(),
+				sequence);
+		return remember(key, 201, new BotsResult(BotsResult.Status.CREATED, command.count(),
+				ProvisionBots.name(population + 1), ProvisionBots.name(population + command.count()),
+				population + command.count(), sequence));
 	}
 
 	private MarketTransition processControl(CommandKey key, MarketControl command) {
@@ -492,6 +556,7 @@ public final class TradingEngine {
 			case MarketTransition transition -> transition.commandSequence();
 			case InstrumentResult instrument -> instrument.commandSequence();
 			case AccountResult account -> account.commandSequence();
+			case BotsResult bots -> bots.commandSequence();
 			default -> throw new IllegalArgumentException("Not a command result: " + result);
 		};
 		store.insertResult(simulationId, key, httpStatus, result, sequence);

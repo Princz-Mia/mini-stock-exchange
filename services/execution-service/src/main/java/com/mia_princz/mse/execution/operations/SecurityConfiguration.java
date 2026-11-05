@@ -96,7 +96,7 @@ class SecurityConfiguration {
 				.hasRole("OPERATOR")
 				.requestMatchers(HttpMethod.POST, "/api/v1/admin/market/open", "/api/v1/admin/market/halt",
 						"/api/v1/admin/market/resume", "/api/v1/admin/instruments",
-						"/api/v1/admin/accounts")
+						"/api/v1/admin/accounts", "/api/v1/admin/bots")
 				.hasRole("OPERATOR")
 				.requestMatchers(HttpMethod.POST, TRADING_COMMANDS)
 				.hasRole("TRADER")
