@@ -16,4 +16,6 @@ FROM flink:2.2.1-java17@sha256:c95f48391db3e191345549b4d06406c08616fe8f99ee57fa4
 # Application mode loads the job from usrlib; a named volume inherits this directory's ownership.
 COPY --from=build --chown=flink:flink /src/analytics-job/target/analytics-job.jar /opt/flink/usrlib/analytics-job.jar
 RUN mkdir -p /opt/flink/checkpoints && chown flink:flink /opt/flink/checkpoints
+# The JobManager's entry point: resumes from the newest completed checkpoint.
+COPY --chmod=0755 analytics-job/docker/jobmanager.sh /opt/flink/bin/mse-jobmanager.sh
 USER flink
