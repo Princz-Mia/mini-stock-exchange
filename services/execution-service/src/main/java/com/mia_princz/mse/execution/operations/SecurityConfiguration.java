@@ -4,6 +4,7 @@ import java.util.List;
 
 import jakarta.servlet.http.HttpServletResponse;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
@@ -35,10 +36,11 @@ import org.springframework.security.web.csrf.CsrfTokenRepository;
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 
 import com.mia_princz.mse.execution.identity.adapter.BotTokenFilter;
+import com.mia_princz.mse.execution.identity.adapter.ServiceTokenFilter;
 
 /**
- * Two chains, both deny by default: bots by bearer token, people by session. Routes open only as their slices arrive.
- * Actuator stays off the reverse proxy.
+ * Three chains, each deny by default: other services by a service token, bots by bearer token, people by session.
+ * Routes open only as their slices arrive. Actuator stays off the reverse proxy.
  */
 @Configuration(proxyBeanMethods = false)
 class SecurityConfiguration {
@@ -47,6 +49,30 @@ class SecurityConfiguration {
 
 	private static final String[] TRADING_READS = { "/api/v1/orders", "/api/v1/orders/*", "/api/v1/commands/*",
 			"/api/v1/portfolio", "/api/v1/portfolio/trades" };
+
+	/**
+	 * Other services, on internal routes the proxy never forwards: stateless, by one shared service token from
+	 * configuration, read-only. It runs first, so no session, bot token or trader credential reaches these routes.
+	 */
+	@Bean
+	@Order(0)
+	SecurityFilterChain serviceChain(HttpSecurity http, @Value("${mse.exports.token:}") String exportToken)
+			throws Exception {
+		return http.securityMatcher("/internal/**")
+			.authorizeHttpRequests((requests) -> requests.requestMatchers(HttpMethod.GET, "/internal/exports/trades")
+				.hasRole("EXPORT")
+				.anyRequest()
+				.denyAll())
+			.addFilterAt(new ServiceTokenFilter(exportToken, "EXPORT"), BasicAuthenticationFilter.class)
+			.csrf(AbstractHttpConfigurer::disable)
+			.sessionManagement((sessions) -> sessions.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+			.securityContext((context) -> context.securityContextRepository(new RequestAttributeSecurityContextRepository()))
+			.requestCache(AbstractHttpConfigurer::disable)
+			.logout(AbstractHttpConfigurer::disable)
+			.exceptionHandling((errors) -> errors
+				.accessDeniedHandler((request, response, denied) -> response.setStatus(HttpServletResponse.SC_FORBIDDEN)))
+			.build();
+	}
 
 	/**
 	 * Bots: stateless, by bearer token only, and only the trading routes. It takes every request that offers a bearer

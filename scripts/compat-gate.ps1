@@ -39,6 +39,7 @@ $envLines = @(
     "GRAFANA_ADMIN_PASSWORD=$(New-Secret)"
     "DEV_OPERATOR_PASSWORD=$operatorPassword"
     "DEV_TRADER_PASSWORD=$traderPassword"
+    "MSE_EXPORT_TOKEN=$(New-Secret)"
     "WEB_HOST_PORT=$webPort"
     'POSTGRES_HOST_PORT=25432'
     "KAFKA_HOST_PORT=$kafkaPort"

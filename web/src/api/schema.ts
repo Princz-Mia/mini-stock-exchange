@@ -342,6 +342,28 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/internal/exports/trades": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Every trade of one instrument in sequence order, for rebuilding and checking projections.
+         * @description Internal: the proxy never forwards it. Needs the service token as a bearer credential; no session, bot token
+         *     or CSRF token is accepted. The first page captures the instrument's newest trade sequence as throughSequence;
+         *     pass it back with each cursor to page through that fixed set. No order, account or owner appears.
+         */
+        readonly get: operations["exportTrades"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/instruments": {
         readonly parameters: {
             readonly query?: never;
@@ -796,6 +818,25 @@ export interface components {
             readonly to: components["schemas"]["Timestamp"];
             readonly candles: readonly components["schemas"]["Candle"][];
             readonly freshness: components["schemas"]["CandleFreshness"];
+        };
+        readonly ExportedTrade: {
+            readonly tradeId: components["schemas"]["Uuid"];
+            readonly tradeSequence: components["schemas"]["Sequence"];
+            /** Format: int64 */
+            readonly priceCents: number;
+            /** Format: int64 */
+            readonly quantity: number;
+            readonly executedAt: components["schemas"]["Timestamp"];
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly TradeExport: {
+            readonly instrumentId: components["schemas"]["Uuid"];
+            readonly symbol: string;
+            /** @description The newest trade sequence this export covers. */
+            readonly throughSequence: components["schemas"]["Sequence"];
+            readonly trades: readonly components["schemas"]["ExportedTrade"][];
+            /** @description Null on the last page. */
+            readonly nextCursor: string | null;
         };
         readonly TapeTrade: {
             readonly tradeId: components["schemas"]["Uuid"];
@@ -1716,6 +1757,41 @@ export interface operations {
             };
             readonly 503: components["responses"]["Unavailable"];
             readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly exportTrades: {
+        readonly parameters: {
+            readonly query: {
+                readonly instrumentId: components["schemas"]["Uuid"];
+                readonly throughSequence?: number;
+                /** @description The nextCursor of the previous page. Opaque. */
+                readonly cursor?: string;
+                readonly limit?: number;
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description One page. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["TradeExport"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No valid service token. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            readonly 404: components["responses"]["Problem"];
         };
     };
     readonly listInstruments: {

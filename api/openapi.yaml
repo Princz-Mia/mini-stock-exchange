@@ -555,6 +555,41 @@ paths:
         '504':
           $ref: '#/components/responses/OutcomeUnknown'
 
+  /internal/exports/trades:
+    get:
+      tags: [execution]
+      operationId: exportTrades
+      summary: Every trade of one instrument in sequence order, for rebuilding and checking projections.
+      description: |
+        Internal: the proxy never forwards it. Needs the service token as a bearer credential; no session, bot token
+        or CSRF token is accepted. The first page captures the instrument's newest trade sequence as throughSequence;
+        pass it back with each cursor to page through that fixed set. No order, account or owner appears.
+      parameters:
+        - name: instrumentId
+          in: query
+          required: true
+          schema: { $ref: '#/components/schemas/Uuid' }
+        - name: throughSequence
+          in: query
+          schema: { type: integer, format: int64, minimum: 0 }
+        - name: cursor
+          in: query
+          description: The nextCursor of the previous page. Opaque.
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 500 }
+      responses:
+        '200':
+          description: One page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TradeExport' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No valid service token. No body.
+        '404': { $ref: '#/components/responses/Problem' }
+
   /api/v1/instruments:
     get:
       tags: [market-data]
@@ -1257,6 +1292,34 @@ components:
           maxItems: 1440
           items: { $ref: '#/components/schemas/Candle' }
         freshness: { $ref: '#/components/schemas/CandleFreshness' }
+    ExportedTrade:
+      type: object
+      additionalProperties: false
+      required: [tradeId, tradeSequence, priceCents, quantity, executedAt, commandSequence]
+      properties:
+        tradeId: { $ref: '#/components/schemas/Uuid' }
+        tradeSequence: { $ref: '#/components/schemas/Sequence' }
+        priceCents: { type: integer, format: int64, minimum: 1 }
+        quantity: { type: integer, format: int64, minimum: 1 }
+        executedAt: { $ref: '#/components/schemas/Timestamp' }
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+    TradeExport:
+      type: object
+      additionalProperties: false
+      required: [instrumentId, symbol, throughSequence, trades, nextCursor]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        symbol: { type: string }
+        throughSequence:
+          $ref: '#/components/schemas/Sequence'
+          description: The newest trade sequence this export covers.
+        trades:
+          type: array
+          maxItems: 1000
+          items: { $ref: '#/components/schemas/ExportedTrade' }
+        nextCursor:
+          type: [string, 'null']
+          description: Null on the last page.
     TapeTrade:
       type: object
       additionalProperties: false

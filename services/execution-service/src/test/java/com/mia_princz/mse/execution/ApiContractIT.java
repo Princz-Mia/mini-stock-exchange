@@ -65,7 +65,7 @@ class ApiContractIT {
 		mappings.getHandlerMethods().keySet().forEach((info) -> info.getPathPatternsCondition().getPatterns()
 			.stream()
 			.map((pattern) -> pattern.getPatternString())
-			.filter((path) -> path.startsWith("/api/"))
+			.filter((path) -> path.startsWith("/api/") || path.startsWith("/internal/"))
 			.forEach((path) -> info.getMethodsCondition().getMethods()
 				.forEach((method) -> served.add(method.name() + " " + OpenApiContract.blankVariables(path)))));
 

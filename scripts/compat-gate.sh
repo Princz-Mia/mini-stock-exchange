@@ -32,6 +32,7 @@ MARKET_DATA_DB_APP_PASSWORD=$market_data_app_password
 GRAFANA_ADMIN_PASSWORD=$(secret)
 DEV_OPERATOR_PASSWORD=$operator_password
 DEV_TRADER_PASSWORD=$trader_password
+MSE_EXPORT_TOKEN=$(secret)
 WEB_HOST_PORT=$web_port
 POSTGRES_HOST_PORT=25432
 KAFKA_HOST_PORT=$kafka_port
