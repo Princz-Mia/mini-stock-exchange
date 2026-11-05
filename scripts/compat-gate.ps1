@@ -383,6 +383,17 @@ try {
         Invoke-Smoke 'services/market-data-service/pom.xml' 'CandleConsumeSmoke' 'after-restart'
     }
 
+    Step 'Candles: Market Data stores what the job computed' {
+        # The restart step's smoke candle, as Market Data stored it: four trades, 15 shares, notional 1,513.00.
+        $sql = "SELECT trade_count || ' ' || volume || ' ' || notional_cents || ' ' || source_max_trade_sequence FROM candle_1m WHERE simulation_id = '$($script:smokeSimulation)'"
+        foreach ($attempt in 1..30) {
+            $stored = (Invoke-Psql 'market_data_app' $passwords.market_data_app 'market_data_db' $sql).Output
+            if ($stored -eq '4 15 151300 4') { break }
+            Start-Sleep -Seconds 2
+        }
+        Assert-Equal 'smoke candle in candle_1m: trades, volume, notional, sequence' '4 15 151300 4' $stored
+    }
+
     Step 'Outage isolation: services stay ready without Kafka' {
         Invoke-Checked 'docker' ($compose + @('stop', 'kafka'))
         Assert-Match 'Execution readiness' '"status":"UP"' (Get-Readiness 'execution-service')

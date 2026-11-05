@@ -262,6 +262,19 @@ bot_trading() {
   compose up -d --no-deps --wait --wait-timeout 120 simulator >> "$log" 2>&1
 }
 
+projected_candles() {
+  # The restart step's smoke candle, as Market Data stored it: four trades, 15 shares, notional 1,513.00.
+  local sql stored i
+  sql="SELECT trade_count || ' ' || volume || ' ' || notional_cents || ' ' || source_max_trade_sequence
+    FROM candle_1m WHERE simulation_id = '$smoke_simulation'"
+  for i in $(seq 1 30); do
+    stored=$(psql_as market_data_app market_data_db "$sql" | tr -d '\r')
+    [ "$stored" = '4 15 151300 4' ] && break
+    sleep 2
+  done
+  assert_equal 'smoke candle in candle_1m: trades, volume, notional, sequence' '4 15 151300 4' "$stored"
+}
+
 independence() {
   compose stop market-data-service >> "$log" 2>&1 &&
     assert_match 'instruments with Market Data down' '^50[24]$' "$(http_status /api/v1/instruments)" &&
@@ -351,6 +364,7 @@ step 'Toolchain versions' toolchain &&
   step 'Bots: the simulator trades and the tape shows it' bot_trading &&
   step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' avro_pipeline &&
   step 'Analytics: a JobManager restart resumes from its checkpoint' flink_restart &&
+  step 'Candles: Market Data stores what the job computed' projected_candles &&
   step 'Outage isolation: services stay ready without Kafka' kafka_outage ||
   status=1
 
