@@ -393,6 +393,27 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/instruments/{instrumentId}/candles": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * One-minute bars for a time range, oldest first, with how current the analytics are.
+         * @description Bars with from <= bucketStart < to, at most 1,440 minutes per request. Without from and to, the last two
+         *     hours. A minute without trades has no bar. Bars come from the computation epoch this instance serves.
+         */
+        readonly get: operations["listCandles"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/market-events": {
         readonly parameters: {
             readonly query?: never;
@@ -737,6 +758,44 @@ export interface components {
             readonly nextCursor: string | null;
             readonly latestTradeSequence: components["schemas"]["Sequence"];
             readonly feed: components["schemas"]["Feed"];
+        };
+        readonly Candle: {
+            readonly bucketStart: components["schemas"]["Timestamp"];
+            readonly open: components["schemas"]["Price"];
+            readonly high: components["schemas"]["Price"];
+            readonly low: components["schemas"]["Price"];
+            readonly close: components["schemas"]["Price"];
+            /** Format: int64 */
+            readonly volume: number;
+            /** Format: int64 */
+            readonly tradeCount: number;
+            /** @description Price times quantity summed over the minute, exact, with two decimals; may exceed 64 bits. */
+            readonly notional: string;
+            /** @description notional / volume, rounded half-even to the cent. */
+            readonly vwap: components["schemas"]["Price"];
+            /** @description The highest trade sequence this bar includes. */
+            readonly sourceMaxTradeSequence: components["schemas"]["Sequence"];
+        };
+        readonly CandleFreshness: {
+            readonly feed: components["schemas"]["Feed"];
+            /** @description The highest trade sequence any bar includes; null before the first bar. */
+            readonly candlesThroughTradeSequence: components["schemas"]["Sequence"] | null;
+            /** @description The newest trade on the public tape. */
+            readonly latestTradeSequence: components["schemas"]["Sequence"];
+            /**
+             * Format: int64
+             * @description Trades on the tape that no bar includes yet. Grows while analytics is down or stopped.
+             */
+            readonly tradesBehind: number;
+        };
+        readonly Candles: {
+            readonly instrumentId: components["schemas"]["Uuid"];
+            /** Format: int64 */
+            readonly computationEpoch: number;
+            readonly from: components["schemas"]["Timestamp"];
+            readonly to: components["schemas"]["Timestamp"];
+            readonly candles: readonly components["schemas"]["Candle"][];
+            readonly freshness: components["schemas"]["CandleFreshness"];
         };
         readonly TapeTrade: {
             readonly tradeId: components["schemas"]["Uuid"];
@@ -1727,6 +1786,34 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["Trades"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            readonly 404: components["responses"]["Problem"];
+        };
+    };
+    readonly listCandles: {
+        readonly parameters: {
+            readonly query?: {
+                readonly from?: components["schemas"]["Timestamp"];
+                /** @description Exclusive. */
+                readonly to?: components["schemas"]["Timestamp"];
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly instrumentId: components["parameters"]["InstrumentId"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The bars and their freshness. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["Candles"];
                 };
             };
             readonly 400: components["responses"]["Problem"];

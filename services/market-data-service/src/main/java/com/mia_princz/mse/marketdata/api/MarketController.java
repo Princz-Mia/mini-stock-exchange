@@ -1,14 +1,20 @@
 package com.mia_princz.mse.marketdata.api;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -37,17 +43,33 @@ class MarketController {
 
 	static final int MAX_LIMIT = 200;
 
+	/** One bar per minute, so at most a day per request. */
+	static final int MAX_CANDLE_MINUTES = 1_440;
+
+	static final Duration DEFAULT_CANDLE_RANGE = Duration.ofHours(2);
+
 	private final MarketQueries queries;
 
 	private final ObjectProvider<MarketFeedConsumer> marketFeed;
 
 	private final ObjectProvider<MarketFeedConsumer> tradeFeed;
 
+	private final ObjectProvider<MarketFeedConsumer> candleFeed;
+
+	private final long servedEpoch;
+
+	private final Clock clock;
+
 	MarketController(MarketQueries queries, @Qualifier("marketFeed") ObjectProvider<MarketFeedConsumer> marketFeed,
-			@Qualifier("tradeFeed") ObjectProvider<MarketFeedConsumer> tradeFeed) {
+			@Qualifier("tradeFeed") ObjectProvider<MarketFeedConsumer> tradeFeed,
+			@Qualifier("candleFeed") ObjectProvider<MarketFeedConsumer> candleFeed,
+			@Value("${mse.candles.served-epoch:1}") long servedEpoch, Clock clock) {
 		this.queries = queries;
 		this.marketFeed = marketFeed;
 		this.tradeFeed = tradeFeed;
+		this.candleFeed = candleFeed;
+		this.servedEpoch = servedEpoch;
+		this.clock = clock;
 	}
 
 	/** {@code state} is the feed's state, or {@code DISABLED} when this instance runs without it. */
@@ -76,6 +98,54 @@ class MarketController {
 	/** {@code nextCursor} is null on the last page. */
 	record Trades(String instrumentId, List<TradeView> trades, String nextCursor, String latestTradeSequence,
 			Feed feed) {
+	}
+
+	/** {@code vwap} is notional / volume rounded half-even to the cent; notional and volume are exact. */
+	record CandleView(Instant bucketStart, String open, String high, String low, String close, long volume,
+			long tradeCount, String notional, String vwap, String sourceMaxTradeSequence) {
+	}
+
+	/**
+	 * How far the candles have got: the highest trade sequence they include against the newest trade on the tape.
+	 * {@code tradesBehind} grows while the analytics job is down or an instrument is stopped by a sequence gap.
+	 */
+	record CandleFreshness(Feed feed, String candlesThroughTradeSequence, String latestTradeSequence,
+			long tradesBehind) {
+	}
+
+	record Candles(String instrumentId, long computationEpoch, Instant from, Instant to, List<CandleView> candles,
+			CandleFreshness freshness) {
+	}
+
+	/**
+	 * One-minute bars with {@code from <= bucket < to}, oldest first, from the served computation epoch. Minutes
+	 * without trades have no bar: a chart shows the gap rather than an invented candle.
+	 */
+	@GetMapping("/{instrumentId}/candles")
+	Candles candles(@PathVariable UUID instrumentId, @RequestParam(required = false) String from,
+			@RequestParam(required = false) String to) {
+		Instant end = to == null ? clock.instant().truncatedTo(ChronoUnit.MINUTES).plus(1, ChronoUnit.MINUTES)
+				: instant("to", to);
+		Instant start = from == null ? end.minus(DEFAULT_CANDLE_RANGE) : instant("from", from);
+		if (!start.isBefore(end)) {
+			throw ApiException.invalid("from", "INVALID_RANGE", "from must be before to");
+		}
+		if (Duration.between(start, end).compareTo(Duration.ofMinutes(MAX_CANDLE_MINUTES)) > 0) {
+			throw ApiException.invalid("to", "RANGE_TOO_LARGE",
+					"at most " + MAX_CANDLE_MINUTES + " minutes of one-minute bars per request");
+		}
+		if (!queries.isKnown(instrumentId)) {
+			throw notFound();
+		}
+		List<CandleView> bars = queries.candles(instrumentId, servedEpoch, start, end)
+			.stream()
+			.map(MarketController::candle)
+			.toList();
+		Long through = queries.candlesThroughTradeSequence(instrumentId, servedEpoch);
+		long latest = queries.latestTradeSequence(instrumentId);
+		CandleFreshness freshness = new CandleFreshness(feed(candleFeed), through == null ? null : Long.toString(through),
+				Long.toString(latest), Math.max(0, latest - (through == null ? 0 : through)));
+		return new Candles(instrumentId.toString(), servedEpoch, start, end, bars, freshness);
 	}
 
 	@GetMapping
@@ -134,6 +204,23 @@ class MarketController {
 				quote(instrument.bestBid()), quote(instrument.bestAsk()),
 				Long.toString(instrument.lastTradeSequence()), Long.toString(instrument.sourceCommandSequence()),
 				instrument.generatedAt());
+	}
+
+	private static CandleView candle(MarketQueries.Candle candle) {
+		BigDecimal vwapCents = candle.notionalCents().divide(BigDecimal.valueOf(candle.volume()), 0, RoundingMode.HALF_EVEN);
+		return new CandleView(candle.bucketStart(), price(candle.openCents()), price(candle.highCents()),
+				price(candle.lowCents()), price(candle.closeCents()), candle.volume(), candle.tradeCount(),
+				candle.notionalCents().movePointLeft(2).setScale(2).toPlainString(),
+				vwapCents.movePointLeft(2).setScale(2).toPlainString(), Long.toString(candle.sourceMaxTradeSequence()));
+	}
+
+	private static Instant instant(String name, String value) {
+		try {
+			return Instant.parse(value);
+		}
+		catch (DateTimeParseException ex) {
+			throw ApiException.invalid(name, "INVALID_VALUE", name + " must be a UTC time such as 2026-11-05T10:15:00Z");
+		}
 	}
 
 	private static List<Quote> quotes(List<MarketQueries.Level> levels) {

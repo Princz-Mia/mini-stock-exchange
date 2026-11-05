@@ -1,5 +1,7 @@
 package com.mia_princz.mse.marketdata.api;
 
+import java.math.BigDecimal;
+import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -98,11 +100,12 @@ class MarketQueries {
 			.optional();
 	}
 
-	/** Known if either feed has seen it: a trade may arrive before its instrument's first snapshot. */
+	/** Known if any feed has seen it: trades and candles may arrive before the instrument's first snapshot. */
 	boolean isKnown(UUID instrumentId) {
 		return jdbc.sql("""
 				SELECT EXISTS (SELECT 1 FROM instrument_projection WHERE instrument_id = :id)
-				    OR EXISTS (SELECT 1 FROM public_trade WHERE instrument_id = :id)""")
+				    OR EXISTS (SELECT 1 FROM public_trade WHERE instrument_id = :id)
+				    OR EXISTS (SELECT 1 FROM candle_1m WHERE instrument_id = :id)""")
 			.param("id", instrumentId)
 			.query(Boolean.class)
 			.single();
@@ -123,6 +126,37 @@ class MarketQueries {
 	}
 
 	/** The highest trade sequence projected for the instrument, or 0. */
+	/** A stored one-minute candle; the notional is exact. */
+	record Candle(Instant bucketStart, long openCents, long highCents, long lowCents, long closeCents, long volume,
+			long tradeCount, BigDecimal notionalCents, long sourceMaxTradeSequence) {
+	}
+
+	/** One epoch's candles for an instrument with {@code from <= bucket < to}, oldest first. */
+	List<Candle> candles(UUID instrumentId, long epoch, Instant from, Instant to) {
+		return jdbc.sql("""
+				SELECT bucket_start, open_cents, high_cents, low_cents, close_cents, volume, trade_count,
+				    notional_cents, source_max_trade_sequence
+				FROM candle_1m
+				WHERE computation_epoch = ? AND instrument_id = ? AND bucket_start >= ? AND bucket_start < ?
+				ORDER BY bucket_start""")
+			.params(epoch, instrumentId, Timestamp.from(from), Timestamp.from(to))
+			.query((row, index) -> new Candle(row.getTimestamp("bucket_start").toInstant(), row.getLong("open_cents"),
+					row.getLong("high_cents"), row.getLong("low_cents"), row.getLong("close_cents"),
+					row.getLong("volume"), row.getLong("trade_count"), row.getBigDecimal("notional_cents"),
+					row.getLong("source_max_trade_sequence")))
+			.list();
+	}
+
+	/** The highest trade sequence any of the epoch's candles for the instrument include, or null before the first. */
+	Long candlesThroughTradeSequence(UUID instrumentId, long epoch) {
+		return jdbc.sql("""
+				SELECT max(source_max_trade_sequence) FROM candle_1m WHERE computation_epoch = ? AND instrument_id = ?""")
+			.params(epoch, instrumentId)
+			.query(Long.class)
+			.optional()
+			.orElse(null);
+	}
+
 	long latestTradeSequence(UUID instrumentId) {
 		return jdbc.sql("SELECT coalesce(max(trade_sequence), 0) FROM public_trade WHERE instrument_id = ?")
 			.param(instrumentId)
