@@ -1,0 +1,18 @@
+{
+  "type": "record",
+  "name": "TradeExecuted",
+  "namespace": "com.mia_princz.mse.contracts.events",
+  "doc": "Public execution fact on topic mse.trades.v1. Contains no private identities.",
+  "fields": [
+    {"name": "eventId", "type": {"type": "string", "logicalType": "uuid"}},
+    {"name": "simulationId", "type": {"type": "string", "logicalType": "uuid"}},
+    {"name": "instrumentId", "type": {"type": "string", "logicalType": "uuid"}},
+    {"name": "symbol", "type": "string"},
+    {"name": "tradeId", "type": {"type": "string", "logicalType": "uuid"}},
+    {"name": "tradeSequence", "type": "long", "doc": "Instrument-local, monotonic."},
+    {"name": "commandSequence", "type": "long"},
+    {"name": "executedAt", "type": {"type": "long", "logicalType": "timestamp-micros"}},
+    {"name": "priceCents", "type": "long"},
+    {"name": "quantity", "type": "long"}
+  ]
+}

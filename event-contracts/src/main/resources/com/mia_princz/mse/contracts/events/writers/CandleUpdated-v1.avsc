@@ -1,0 +1,23 @@
+{
+  "type": "record",
+  "name": "CandleUpdated",
+  "namespace": "com.mia_princz.mse.contracts.events",
+  "doc": "Complete one-minute aggregate on topic mse.candles.v1, re-emitted per unique trade.",
+  "fields": [
+    {"name": "eventId", "type": {"type": "string", "logicalType": "uuid"}, "doc": "Stable: derived from epoch/simulation/instrument/bucket/source maximum sequence."},
+    {"name": "computationEpoch", "type": "long"},
+    {"name": "simulationId", "type": {"type": "string", "logicalType": "uuid"}},
+    {"name": "instrumentId", "type": {"type": "string", "logicalType": "uuid"}},
+    {"name": "symbol", "type": "string"},
+    {"name": "bucketStart", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "UTC minute."},
+    {"name": "openCents", "type": "long"},
+    {"name": "highCents", "type": "long"},
+    {"name": "lowCents", "type": "long"},
+    {"name": "closeCents", "type": "long"},
+    {"name": "volume", "type": "long"},
+    {"name": "tradeCount", "type": "long"},
+    {"name": "notionalCents", "type": {"type": "bytes", "logicalType": "decimal", "precision": 38, "scale": 0}},
+    {"name": "sourceMaxTradeSequence", "type": "long"},
+    {"name": "generatedAt", "type": {"type": "long", "logicalType": "timestamp-micros"}}
+  ]
+}

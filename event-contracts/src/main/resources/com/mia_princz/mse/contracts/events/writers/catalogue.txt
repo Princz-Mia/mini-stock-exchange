@@ -1,0 +1,6 @@
+# Every writer schema ever published, by event type, oldest first. Each line names the file <type>-v<version>.avsc
+# and the schema's fingerprint: CRC-64-AVRO of its parsing canonical form, which single-object encoding puts in every
+# payload. Never edit or remove a line or a file once published; a changed schema is added as the next version.
+TradeExecuted 1 2724d10c6d9e42ab
+CandleUpdated 1 59661622b31f660f
+MarketSnapshot 1 f95ced2d707d4ea2
