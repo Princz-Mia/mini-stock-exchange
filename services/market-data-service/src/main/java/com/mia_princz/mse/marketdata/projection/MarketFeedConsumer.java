@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.boot.health.contributor.Health;
 import org.springframework.boot.health.contributor.HealthIndicator;
 import org.springframework.boot.health.contributor.Status;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
@@ -72,8 +73,9 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 	public interface Handler {
 
 		/**
-		 * @throws IOException or {@link AvroRuntimeException} when the record cannot be read, or
-		 * {@link UnusableRecordException} when it contradicts the projection; the feed pauses either way
+		 * @throws IOException or {@link AvroRuntimeException} when the record cannot be read,
+		 * {@link UnusableRecordException} when it contradicts the projection, or a {@code DataIntegrityViolationException}
+		 * when the database refuses it; the feed pauses in each case
 		 */
 		boolean apply(byte[] payload) throws IOException;
 
@@ -210,15 +212,23 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 		}
 	}
 
-	/** Applies records in order and saves their checkpoints in one transaction; false if one could not be read. */
+	/**
+	 * Applies records in order and saves their checkpoints in one transaction; false if one could not be used. That
+	 * record's own writes, such as its processed-event mark, are rolled back to a savepoint while the records before
+	 * it commit, so once the cause is fixed it is read again instead of being skipped as already seen.
+	 */
 	private boolean applyBatch(ConsumerRecords<String, byte[]> records) {
 		Boolean complete = transactions.execute((status) -> {
 			for (ConsumerRecord<String, byte[]> record : records) {
 				boolean changed;
+				Object savepoint = status.createSavepoint();
 				try {
 					changed = handler.apply(record.value());
+					status.releaseSavepoint(savepoint);
 				}
-				catch (IOException | AvroRuntimeException | UnusableRecordException ex) {
+				catch (IOException | AvroRuntimeException | UnusableRecordException
+						| DataIntegrityViolationException ex) {
+					status.rollbackToSavepoint(savepoint);
 					pausedAt = record.topic() + "/" + record.partition() + "@" + record.offset();
 					error = "Unusable record at " + pausedAt + ": " + ex.getMessage();
 					log.error("Feed paused: {}", error);
