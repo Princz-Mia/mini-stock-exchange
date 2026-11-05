@@ -119,7 +119,9 @@ class TradingEngineIT {
 		store = new JdbcTradingStore(JdbcClient.create(dataSource), JsonMapper.builder().build());
 		writer = new CommandWriter("test-writer", 1_000);
 		engine = new TradingEngine(failingBeforeCommit(store), new SpringTransactionRunner(transactionManager), writer,
-				Clock.systemUTC());
+				Clock.systemUTC(), (account) -> {
+					throw new UnsupportedOperationException("no bots in these tests");
+				});
 		engine.start();
 	}
 
@@ -686,7 +688,9 @@ class TradingEngineIT {
 		writer.close(Duration.ofSeconds(5));
 		writer = new CommandWriter("test-writer", 1_000);
 		engine = new TradingEngine(failingBeforeCommit(store), new SpringTransactionRunner(transactionManager), writer,
-				Clock.systemUTC());
+				Clock.systemUTC(), (account) -> {
+					throw new UnsupportedOperationException("no bots in these tests");
+				});
 		engine.start();
 	}
 

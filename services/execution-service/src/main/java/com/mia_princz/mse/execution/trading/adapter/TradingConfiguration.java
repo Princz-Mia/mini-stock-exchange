@@ -1,5 +1,6 @@
 package com.mia_princz.mse.execution.trading.adapter;
 
+import java.nio.file.Path;
 import java.time.Clock;
 
 import javax.sql.DataSource;
@@ -12,6 +13,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 
 import tools.jackson.databind.json.JsonMapper;
 
+import com.mia_princz.mse.execution.trading.application.BotCredentials;
 import com.mia_princz.mse.execution.trading.application.CommandWriter;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
 import com.mia_princz.mse.execution.trading.application.TradingStore;
@@ -35,10 +37,16 @@ class TradingConfiguration {
 		return new CommandWriter("trading-writer", capacity);
 	}
 
+	/** Plaintext bot tokens go to the simulator's secret directory, once, and nowhere else. */
+	@Bean
+	BotCredentials botCredentials(@Value("${mse.bots.token-directory}") Path directory) {
+		return new FileBotCredentials(directory);
+	}
+
 	@Bean
 	TradingEngine tradingEngine(TradingStore store, PlatformTransactionManager transactionManager, CommandWriter writer,
-			Clock clock) {
-		return new TradingEngine(store, new SpringTransactionRunner(transactionManager), writer, clock);
+			Clock clock, BotCredentials botCredentials) {
+		return new TradingEngine(store, new SpringTransactionRunner(transactionManager), writer, clock, botCredentials);
 	}
 
 	@Bean(destroyMethod = "close")

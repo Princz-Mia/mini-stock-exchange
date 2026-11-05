@@ -398,6 +398,50 @@ paths:
         '504':
           $ref: '#/components/responses/OutcomeUnknown'
 
+  /api/v1/admin/bots:
+    post:
+      tags: [execution]
+      operationId: provisionBots
+      summary: Create funded bot accounts, each with its own API token, while the market is in SETUP.
+      description: |
+        Operator only. Sequenced on the writer and audited, with an idempotency key: a retry with the same key and
+        body returns the first answer, even a refusal. Bots are named bot-0001, bot-0002 and so on, in the order
+        they are created, and each gets the same endowment in its own genesis batch. Each token is written once to
+        the simulator's secret directory; no response ever contains a token.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BotsRequest' }
+      responses:
+        '201':
+          description: Created and funded.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotsCreated' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '409':
+          description: |
+            MARKET_NOT_IN_SETUP or BOT_POPULATION_LIMIT (both committed and audited), or IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: UNKNOWN_INSTRUMENT (committed and audited).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
   /api/v1/admin/market/open:
     post:
       tags: [execution]
@@ -919,6 +963,32 @@ components:
         holdings:
           type: array
           items: { $ref: '#/components/schemas/Endowment' }
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+
+    BotsRequest:
+      type: object
+      additionalProperties: false
+      required: [count, cash]
+      properties:
+        count: { type: integer, minimum: 1, maximum: 100 }
+        cash: { $ref: '#/components/schemas/Money' }
+        holdings:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/Endowment' }
+
+    BotsCreated:
+      type: object
+      additionalProperties: false
+      required: [created, firstBot, lastBot, population, commandSequence]
+      properties:
+        created: { type: integer, minimum: 1 }
+        firstBot: { type: string }
+        lastBot: { type: string }
+        population:
+          type: integer
+          maximum: 1000
+          description: Bots in the market after this command.
         commandSequence: { $ref: '#/components/schemas/Sequence' }
 
     AccountPage:

@@ -18,9 +18,11 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.mia_princz.mse.execution.trading.application.AccountResult;
 import com.mia_princz.mse.execution.trading.application.AddInstrument;
+import com.mia_princz.mse.execution.trading.application.BotsResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.InstrumentResult;
 import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
+import com.mia_princz.mse.execution.trading.application.ProvisionBots;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
 import com.mia_princz.mse.execution.trading.domain.Money;
 import com.mia_princz.mse.execution.trading.domain.Price;
@@ -36,6 +38,8 @@ class SetupController {
 	static final String INSTRUMENT_ROUTE = "POST /api/v1/admin/instruments";
 
 	static final String ACCOUNT_ROUTE = "POST /api/v1/admin/accounts";
+
+	static final String BOTS_ROUTE = "POST /api/v1/admin/bots";
 
 	private final TradingEngine engine;
 
@@ -58,6 +62,9 @@ class SetupController {
 
 	record AccountResponse(String accountId, String username, String cash, List<HoldingResponse> holdings,
 			String commandSequence) {
+	}
+
+	record BotsResponse(int created, String firstBot, String lastBot, int population, String commandSequence) {
 	}
 
 	record AllocationView(String instrumentId, String symbol, long quantity) {
@@ -146,6 +153,37 @@ class SetupController {
 				.with("commandSequence", sequence);
 			case ACCOUNT_EXISTS -> throw new ApiException(HttpStatus.CONFLICT, "ACCOUNT_EXISTS",
 					result.username() + " already has an account")
+				.with("commandSequence", sequence);
+			case UNKNOWN_INSTRUMENT -> throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_INSTRUMENT",
+					"A holding names an instrument this market does not have")
+				.with("commandSequence", sequence);
+		};
+	}
+
+	/**
+	 * Funded bot accounts, each with its own token. The tokens go to the simulator's secret directory and never into
+	 * this response or the stored result.
+	 */
+	@PostMapping("/bots")
+	ResponseEntity<BotsResponse> provisionBots(
+			@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader, @RequestBody BotsBody body,
+			Authentication authentication) {
+		UUID key = CommandCalls.idempotencyKey(keyHeader);
+		BotsBody.Valid bots = body.validate();
+		UUID operator = queries.userId(authentication.getName()).orElseThrow();
+		CommandKey commandKey = new CommandKey(operator, key, BOTS_ROUTE, bots.hash());
+		ProvisionBots command = new ProvisionBots(bots.count(), bots.cashCents(), bots.holdings(), operator);
+		BotsResult result = CommandCalls.await(key, timeout, () -> engine.provisionBots(commandKey, command));
+		String sequence = Long.toString(result.commandSequence());
+		return switch (result.status()) {
+			case CREATED -> ResponseEntity.status(HttpStatus.CREATED)
+				.body(new BotsResponse(result.created(), result.firstBot(), result.lastBot(), result.population(),
+						sequence));
+			case NOT_IN_SETUP -> throw new ApiException(HttpStatus.CONFLICT, "MARKET_NOT_IN_SETUP",
+					"Bots can only be provisioned before the market opens")
+				.with("commandSequence", sequence);
+			case POPULATION_LIMIT -> throw new ApiException(HttpStatus.CONFLICT, "BOT_POPULATION_LIMIT",
+					"At most " + ProvisionBots.MAX_POPULATION + " bots; " + result.population() + " exist")
 				.with("commandSequence", sequence);
 			case UNKNOWN_INSTRUMENT -> throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_INSTRUMENT",
 					"A holding names an instrument this market does not have")

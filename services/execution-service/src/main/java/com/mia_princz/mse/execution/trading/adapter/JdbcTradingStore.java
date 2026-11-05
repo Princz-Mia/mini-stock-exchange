@@ -236,8 +236,31 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void insertGenesis(UUID simulationId, UUID accountId, long commandSequence, long cashCents,
-			List<ProvisionAccount.Holding> holdings) {
+	public int botCount(UUID simulationId) {
+		return jdbc.sql("SELECT count(*) FROM account WHERE simulation_id = ? AND kind = 'BOT'")
+			.param(simulationId)
+			.query(Integer.class)
+			.single();
+	}
+
+	@Override
+	public void insertBotAccount(UUID simulationId, UUID accountId, String displayName) {
+		expectOne(jdbc.sql("INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'BOT', ?)")
+			.params(accountId, simulationId, displayName)
+			.update(), "insert bot account");
+	}
+
+	@Override
+	public void insertApiToken(UUID tokenId, UUID accountId, byte[] tokenHash) {
+		expectOne(jdbc.sql("""
+				INSERT INTO api_token (id, account_id, account_kind, token_hash, scope) VALUES (?, ?, 'BOT', ?, 'TRADE')""")
+			.params(tokenId, accountId, tokenHash)
+			.update(), "insert api token");
+	}
+
+	@Override
+	public void insertGenesis(UUID simulationId, UUID accountId, String accountKind, long commandSequence,
+			long cashCents, List<ProvisionAccount.Holding> holdings) {
 		UUID issuance = jdbc.sql("SELECT id FROM account WHERE simulation_id = ? AND kind = 'ISSUANCE'")
 			.param(simulationId)
 			.query(UUID.class)
@@ -252,15 +275,15 @@ public final class JdbcTradingStore implements TradingStore {
 		}
 		expectOne(jdbc.sql("""
 				INSERT INTO cash_balance (account_id, account_kind, total_cents, reserved_cents)
-				VALUES (?, 'TRADER', ?, 0)""")
-			.params(accountId, cashCents)
+				VALUES (?, ?, ?, 0)""")
+			.params(accountId, accountKind, cashCents)
 			.update(), "insert cash balance");
 		for (ProvisionAccount.Holding holding : holdings) {
 			allocate(batch, issuance, accountId, holding.instrumentId(), holding.quantity());
 			expectOne(jdbc.sql("""
 					INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
-					VALUES (?, 'TRADER', ?, ?, 0)""")
-				.params(accountId, holding.instrumentId(), holding.quantity())
+					VALUES (?, ?, ?, ?, 0)""")
+				.params(accountId, accountKind, holding.instrumentId(), holding.quantity())
 				.update(), "insert position");
 		}
 	}
