@@ -3,8 +3,9 @@ import { useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 
 import { isRefusal } from './api/client';
-import { AppShell } from './app/AppShell';
+import { AppShell, RequireRole } from './app/AppShell';
 import { LoginPage } from './auth/LoginPage';
+import { OperatorPage } from './operator/OperatorPage';
 import { PortfolioPage } from './portfolio/PortfolioPage';
 import { TerminalPage } from './terminal/TerminalPage';
 
@@ -26,8 +27,13 @@ export function App() {
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route element={<AppShell />}>
-            <Route path="/terminal" element={<TerminalPage />} />
-            <Route path="/portfolio" element={<PortfolioPage />} />
+            <Route element={<RequireRole role="TRADER" />}>
+              <Route path="/terminal" element={<TerminalPage />} />
+              <Route path="/portfolio" element={<PortfolioPage />} />
+            </Route>
+            <Route element={<RequireRole role="OPERATOR" />}>
+              <Route path="/operator" element={<OperatorPage />} />
+            </Route>
           </Route>
           <Route path="*" element={<Navigate to="/terminal" replace />} />
         </Routes>

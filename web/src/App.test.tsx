@@ -95,12 +95,29 @@ describe('signing in', () => {
     expect(server.requests.some((request) => request.method === 'POST')).toBe(false);
   });
 
-  it('tells an operator there is no trading access', async () => {
-    signedIn('operator', ['OPERATOR']);
+  it('takes an operator who opens a trader page to the operator screen', async () => {
+    signedIn('operator', ['OPERATOR'])
+      .on('GET /api/v1/market', {
+        status: 200,
+        json: { state: 'NOT_SET_UP', simulationId: null, openedAt: null, commandSequence: null },
+      })
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+      .on('GET /api/v1/admin/accounts', { status: 200, json: { accounts: [], nextCursor: null } });
 
     openAt('/terminal');
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('no trading access');
+    expect(await screen.findByRole('heading', { name: 'Market' })).toBeInTheDocument();
+    const nav = screen.getByRole('navigation', { name: 'Main' });
+    expect(within(nav).getByRole('link', { name: 'Operator' })).toBeInTheDocument();
+    expect(within(nav).queryByRole('link', { name: 'Terminal' })).toBeNull();
+  });
+
+  it('tells a user with no role that there is no access', async () => {
+    signedIn('nobody', []);
+
+    openAt('/terminal');
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('no access to the exchange');
   });
 
   it('logs out back to the sign-in page', async () => {

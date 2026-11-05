@@ -96,6 +96,14 @@ button.primary {
   color: var(--accent-text);
 }
 
+/* A disabled action must not look like a faded live one: neutral, whatever its colour when enabled. */
+button.primary:disabled {
+  background: var(--surface-sunken);
+  border-color: var(--line);
+  color: var(--muted);
+  opacity: 1;
+}
+
 button.quiet {
   background: transparent;
 }
@@ -329,10 +337,108 @@ tbody th {
   grid-area: orders;
 }
 
+/* Operator: the market card beside the setup editor; stacked on narrow screens. */
+.operator {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) 1fr;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.operator-setup {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.state-badge {
+  font-weight: 600;
+  padding: 2px var(--space-3);
+  border-radius: 999px;
+  background: var(--surface-sunken);
+  color: var(--muted);
+}
+
+.state-open {
+  background: var(--secondary);
+  color: var(--accent-text);
+}
+
+.state-halted {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+
+.control-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.control-list li {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.control-list .muted {
+  font-size: 12px;
+}
+
+button.primary.danger:enabled {
+  background: var(--sell);
+  border-color: var(--sell);
+}
+
+.setup-form button[type='submit'] {
+  justify-self: start;
+}
+
+.setup-form,
+.setup-form fieldset {
+  display: grid;
+  gap: var(--space-3);
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+.field-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: end;
+}
+
+.field-row label {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 120px;
+}
+
+.suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  margin: 0;
+}
+
+button.chip {
+  font-size: 12px;
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+}
+
 @media (max-width: 1100px) {
   .terminal {
     grid-template-columns: 1fr;
     grid-template-areas: 'ticket' 'market' 'watchlist' 'orders';
+  }
+
+  .operator {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -491,12 +597,12 @@ tbody th {
   margin: 0;
 }
 
-button.primary.buy {
+button.primary.buy:enabled {
   background: var(--buy);
   border-color: var(--buy);
 }
 
-button.primary.sell {
+button.primary.sell:enabled {
   background: var(--sell);
   border-color: var(--sell);
 }
