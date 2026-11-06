@@ -32,6 +32,7 @@ MARKET_DATA_DB_APP_PASSWORD=$market_data_app_password
 GRAFANA_ADMIN_PASSWORD=$(secret)
 DEV_OPERATOR_PASSWORD=$operator_password
 DEV_TRADER_PASSWORD=$trader_password
+MSE_EXPORT_TOKEN=$(secret)
 WEB_HOST_PORT=$web_port
 POSTGRES_HOST_PORT=25432
 KAFKA_HOST_PORT=$kafka_port
@@ -211,6 +212,8 @@ proxy_routes() {
     assert_equal '/api/v1/instruments/x/orders (Market Data, denied)' 403 "$(http_status /api/v1/instruments/x/orders)" &&
     assert_match '/api/v1/market-events, no market yet (Market Data)' '"code":"INSTRUMENT_NOT_FOUND"' "$(curl -s -m 10 "http://localhost:$web_port/api/v1/market-events?instrumentId=00000000-0000-0000-0000-000000000001")" &&
     assert_equal '/api/v1/internal/x (blocked at proxy)' 404 "$(http_status /api/v1/internal/x)" &&
+    assert_match '/internal/exports/trades serves the SPA, not the export' '^<!doctype html>' \
+      "$(curl -s "http://localhost:$web_port/internal/exports/trades?instrumentId=00000000-0000-0000-0000-000000000001")" &&
     assert_match '/actuator/health serves the SPA, not Actuator' '^<!doctype html>' "$(curl -s "http://localhost:$web_port/actuator/health")"
 }
 

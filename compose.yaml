@@ -95,6 +95,8 @@ services:
       DEV_TRADER_PASSWORD: ${DEV_TRADER_PASSWORD:?run scripts/init-env first}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       MSE_BOT_TOKEN_DIRECTORY: /run/mse/bot-tokens
+      # Optional, so an older .env still starts; without it the internal trade export refuses every request.
+      MSE_EXPORT_TOKEN: ${MSE_EXPORT_TOKEN:-}
     volumes:
       # Plaintext bot tokens, written once at provisioning; the simulator mounts it read-only.
       - bot-tokens:/run/mse/bot-tokens
