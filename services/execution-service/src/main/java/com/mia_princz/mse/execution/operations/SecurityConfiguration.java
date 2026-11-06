@@ -1,6 +1,7 @@
 package com.mia_princz.mse.execution.operations;
 
 import java.util.List;
+import java.util.Map;
 
 import jakarta.servlet.http.HttpServletResponse;
 
@@ -51,19 +52,25 @@ class SecurityConfiguration {
 			"/api/v1/portfolio", "/api/v1/portfolio/trades" };
 
 	/**
-	 * Other services, on internal routes the proxy never forwards: stateless, by one shared service token from
-	 * configuration, read-only. It runs first, so no session, bot token or trader credential reaches these routes.
+	 * Other services, on internal routes the proxy never forwards: stateless, by a token per service from
+	 * configuration. Market Data reads the trade export; the simulator reads its assignment and reports its heartbeat,
+	 * and can't trade. It runs first, so no session, bot token or trader credential reaches these routes.
 	 */
 	@Bean
 	@Order(0)
-	SecurityFilterChain serviceChain(HttpSecurity http, @Value("${mse.exports.token:}") String exportToken)
-			throws Exception {
+	SecurityFilterChain serviceChain(HttpSecurity http, @Value("${mse.exports.token:}") String exportToken,
+			@Value("${mse.simulator.token:}") String simulatorToken) throws Exception {
 		return http.securityMatcher("/internal/**")
 			.authorizeHttpRequests((requests) -> requests.requestMatchers(HttpMethod.GET, "/internal/exports/trades")
 				.hasRole("EXPORT")
+				.requestMatchers(HttpMethod.GET, "/internal/simulator/assignment")
+				.hasRole("SIMULATOR")
+				.requestMatchers(HttpMethod.POST, "/internal/simulator/heartbeat")
+				.hasRole("SIMULATOR")
 				.anyRequest()
 				.denyAll())
-			.addFilterAt(new ServiceTokenFilter(exportToken, "EXPORT"), BasicAuthenticationFilter.class)
+			.addFilterAt(new ServiceTokenFilter(Map.of("EXPORT", exportToken, "SIMULATOR", simulatorToken)),
+					BasicAuthenticationFilter.class)
 			.csrf(AbstractHttpConfigurer::disable)
 			.sessionManagement((sessions) -> sessions.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 			.securityContext((context) -> context.securityContextRepository(new RequestAttributeSecurityContextRepository()))

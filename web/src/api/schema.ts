@@ -408,6 +408,50 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/internal/simulator/assignment": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * The bot run the simulator should work on, with its bots and instruments.
+         * @description Internal: the proxy never forwards it. Needs the simulator token, which can't trade. A run a worker left
+         *     without confirming its stop comes first, then the run that should be running; run is null when there is
+         *     neither. Bots name their credential file in the simulator's token directory, never a token.
+         */
+        readonly get: operations["simulatorAssignment"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/internal/simulator/heartbeat": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Take or renew a run's worker lease, report cumulative totals, or confirm a stop.
+         * @description Internal, with the simulator token. One worker holds a run at a time; the lease is taken when free, its own
+         *     or lapsed. Totals are cumulative for the run, so a retry changes nothing. Once desiredState is STOPPED, the
+         *     worker settles what is in flight, cancels its quotes, and confirms with stopped, which releases the lease.
+         */
+        readonly post: operations["simulatorHeartbeat"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/instruments": {
         readonly parameters: {
             readonly query?: never;
@@ -815,6 +859,73 @@ export interface components {
                 readonly inFlight: number;
                 readonly stopFailures: number;
             };
+        };
+        readonly SimulatorAssignment: {
+            readonly run: null | {
+                readonly runId: components["schemas"]["Uuid"];
+                /**
+                 * @description STOPPED once the run is stopped or its time is up.
+                 * @enum {string}
+                 */
+                readonly desiredState: "RUNNING" | "STOPPED";
+                readonly seed: components["schemas"]["Sequence"];
+                readonly commandsPerSecond: string;
+                readonly maxOrderQuantity: number;
+                readonly maxPosition: number;
+                readonly endsAt: components["schemas"]["Timestamp"] | null;
+                readonly leaseSeconds: number;
+                readonly instruments: readonly {
+                    readonly instrumentId: components["schemas"]["Uuid"];
+                    readonly symbol: string;
+                }[];
+                readonly bots: readonly {
+                    readonly accountId: components["schemas"]["Uuid"];
+                    /** @enum {string} */
+                    readonly strategy: "MARKET_MAKER" | "NOISE" | "MOMENTUM";
+                    /** @description The file in the simulator's token directory holding this bot's token. */
+                    readonly credentialRef: string;
+                }[];
+                readonly worker: {
+                    readonly workerId: string | null;
+                    readonly leaseExpiresAt: components["schemas"]["Timestamp"] | null;
+                };
+                readonly totals: {
+                    /** Format: int64 */
+                    readonly placed: number;
+                    /** Format: int64 */
+                    readonly canceled: number;
+                    /** Format: int64 */
+                    readonly rejected: number;
+                    /** Format: int64 */
+                    readonly errors: number;
+                };
+            };
+        };
+        readonly SimulatorHeartbeatRequest: {
+            readonly runId: components["schemas"]["Uuid"];
+            readonly workerId: string;
+            /** Format: int64 */
+            readonly placed: number;
+            /** Format: int64 */
+            readonly canceled: number;
+            /** Format: int64 */
+            readonly rejected: number;
+            /** Format: int64 */
+            readonly errors: number;
+            readonly inFlight: number;
+            readonly stopFailures: number;
+            /**
+             * @description Confirms the stop; only with inFlight 0, once desiredState is STOPPED.
+             * @default false
+             */
+            readonly stopped: boolean;
+        };
+        readonly SimulatorHeartbeat: {
+            readonly runId: components["schemas"]["Uuid"];
+            /** @enum {string} */
+            readonly desiredState: "RUNNING" | "STOPPED";
+            readonly leaseExpiresAt: components["schemas"]["Timestamp"];
+            readonly stopped: boolean;
         };
         readonly AccountPage: {
             readonly accounts: readonly components["schemas"]["AccountSummary"][];
@@ -2111,6 +2222,97 @@ export interface operations {
                 content?: never;
             };
             readonly 404: components["responses"]["Problem"];
+        };
+    };
+    readonly simulatorAssignment: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The assignment. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SimulatorAssignment"];
+                };
+            };
+            /** @description No valid simulator token. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Another service's token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly simulatorHeartbeat: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["SimulatorHeartbeatRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Lease held, or stop confirmed. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SimulatorHeartbeat"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No valid simulator token. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Another service's token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description RUN_NOT_FOUND. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description LEASE_HELD by another worker, RUN_FINISHED, or RUN_NOT_STOPPING for a stop the run hasn't been asked for. */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
         };
     };
     readonly listInstruments: {
