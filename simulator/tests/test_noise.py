@@ -3,7 +3,15 @@ from uuid import UUID, uuid4
 import numpy as np
 
 from mse_simulator.market import Instrument, MarketView
-from mse_simulator.noise import Cancel, Holdings, NoiseBot, NoiseConfig, OpenOrder, Place
+from mse_simulator.noise import (
+    Cancel,
+    Holdings,
+    NoiseBot,
+    NoiseConfig,
+    OpenOrder,
+    Place,
+    Positions,
+)
 
 CONFIG = NoiseConfig(max_quantity=10, spread_ticks=5, max_open_orders=3, quote_lifetime=10.0)
 
@@ -92,3 +100,51 @@ def test_a_bot_with_nothing_to_trade_stays_quiet() -> None:
     quoted = instrument()
     empty = Holdings(cash=0, shares={UUID(int=0): 5})
     assert all(bot(seed).decide(view(quoted), True, empty, [], 0.0) is None for seed in range(50))
+
+
+def test_a_position_moves_at_most_the_run_limit_from_where_it_started() -> None:
+    nova = instrument()
+    other = instrument()
+    instruments = (nova, other)
+    i = nova.instrument_id
+
+    def holdings(owned: int) -> Holdings:
+        return Holdings(cash=10**9, shares={i: owned}, positions={i: owned})
+
+    def order(side: str, working: int, on=None) -> OpenOrder:
+        return OpenOrder("o", 0.0, on or i, side, working)
+
+    positions = Positions(3)
+    assert positions.room(i, "BUY", holdings(10), [], instruments) == 3
+    assert positions.room(i, "SELL", holdings(10), [], instruments) == 3
+    # The start stays where it was first seen; open orders count as if they filled.
+    assert positions.room(i, "BUY", holdings(12), [order("BUY", 1)], instruments) == 0
+    assert positions.room(i, "BUY", holdings(11), [order("SELL", 4)], instruments) == 2
+    assert positions.room(i, "SELL", holdings(8), [order("SELL", 1)], instruments) == 0
+    assert (
+        positions.room(i, "SELL", holdings(9), [order("SELL", 1, other.instrument_id)], instruments)
+        == 2
+    )
+    assert positions.room(other.instrument_id, "BUY", holdings(9), [], instruments) == 3
+
+
+def test_noise_orders_stay_within_the_position_limit() -> None:
+    market = view(instrument(bid=9_990, ask=10_010))
+    i = market.instruments[0].instrument_id
+    config = NoiseConfig(
+        max_quantity=50, spread_ticks=5, max_open_orders=3, quote_lifetime=10.0, max_position=4
+    )
+    sizes = set()
+    for seed in range(200):
+        strategy = NoiseBot(np.random.default_rng([seed, 99]), config)
+        holdings = Holdings(cash=10**9, shares={i: 20}, positions={i: 20})
+        strategy.decide(market, True, holdings, [], 0.0)  # the first look fixes the start at 20
+        later = Holdings(cash=10**9, shares={i: 22}, positions={i: 22})
+        intent = strategy.decide(market, True, later, [], 0.0)
+        if isinstance(intent, Place):
+            limit = 2 if intent.side == "BUY" else 6
+            assert intent.quantity <= limit, (seed, intent)
+            sizes.add((intent.side, intent.quantity))
+    assert ("BUY", 2) in sizes and ("SELL", 6) in sizes, (
+        "the limits are reached, not just respected"
+    )

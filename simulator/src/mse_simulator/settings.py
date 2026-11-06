@@ -1,9 +1,10 @@
 """Validated runtime configuration."""
 
 import os
+import socket
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr
 
 
 class Settings(BaseModel):
@@ -15,10 +16,11 @@ class Settings(BaseModel):
     heartbeat_seconds: float = Field(default=5.0, gt=0)
     # One <accountId>.token file per bot, written once by the exchange at provisioning.
     token_directory: Path = Path("/run/mse/bot-tokens")
-    # Trading commands per second across all bots. Zero keeps the worker idle.
-    rate: float = Field(default=0.0, ge=0, le=500)
-    seed: int = Field(default=1, ge=0)
-    max_order_quantity: int = Field(default=10, ge=1, le=1_000)
+    # The control credential for the assignment and heartbeat. Without it the bots stay idle.
+    simulator_token: SecretStr | None = None
+    # Names this worker in its lease; a restarted worker with the same name takes its run back.
+    worker_id: str = Field(default_factory=socket.gethostname, pattern=r"^[A-Za-z0-9._:-]{1,100}$")
+    control_poll_seconds: float = Field(default=2.0, gt=0)
     # How many ticks either side of the anchor price a noise bot may quote.
     spread_ticks: int = Field(default=5, ge=0, le=1_000)
     max_open_orders: int = Field(default=5, ge=1, le=20)
@@ -36,8 +38,8 @@ class Settings(BaseModel):
         }
         optional = {
             "token_directory": "MSE_BOT_TOKEN_DIRECTORY",
-            "rate": "MSE_BOT_RATE",
-            "seed": "MSE_BOT_SEED",
+            "simulator_token": "MSE_SIMULATOR_TOKEN",
+            "worker_id": "MSE_WORKER_ID",
         }
         for field, variable in optional.items():
             if os.environ.get(variable):

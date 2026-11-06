@@ -10,27 +10,22 @@ SUFFIX = ".token"
 PREFIX = "mse_bot_"
 
 
-def load_tokens(directory: Path) -> dict[UUID, str]:
-    """Account ID to token, one ``<accountId>.token`` file per bot.
+def load_token(directory: Path, credential_ref: str) -> str | None:
+    """One bot's token, by the file name its assignment gives.
 
-    Anything else in the directory is skipped. A missing directory means no bots yet. Tokens are
-    never logged.
+    Only a bare ``<accountId>.token`` name is accepted, so a reference can't reach outside the
+    directory. None if the file is missing or malformed. Tokens are never logged.
     """
-    tokens: dict[UUID, str] = {}
+    path = Path(credential_ref)
+    if path.name != credential_ref or path.suffix != SUFFIX:
+        logger.warning("ignoring a credential reference that isn't a token file name")
+        return None
     try:
-        files = sorted(directory.iterdir())
-    except FileNotFoundError:
-        return tokens
-    for file in files:
-        if file.suffix != SUFFIX:
-            continue
-        try:
-            account = UUID(file.stem)
-        except ValueError:
-            continue
-        token = file.read_text(encoding="ascii").strip()
-        if not token.startswith(PREFIX):
-            logger.warning("skipping a malformed token file for account %s", account)
-            continue
-        tokens[account] = token
-    return tokens
+        UUID(path.stem)
+        token = (directory / path.name).read_text(encoding="ascii").strip()
+    except ValueError, OSError:
+        return None
+    if not token.startswith(PREFIX):
+        logger.warning("skipping a malformed token file")
+        return None
+    return token

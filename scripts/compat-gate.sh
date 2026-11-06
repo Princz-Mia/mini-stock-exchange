@@ -251,11 +251,21 @@ internal_status() { # the variable holding the token, read inside the container 
   compose exec -T execution-service sh -c "curl -s -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$$1\" http://localhost:8080/internal/simulator/assignment"
 }
 
+uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r'; }
+
 bot_trading() {
-  # The bots provisioned for the browser test trade once the simulator has a rate, and their trades reach
-  # the public market data. The simulator goes back to idle afterwards.
+  # The operator starts a run for the bots the browser test provisioned. The simulator follows it, their trades
+  # reach the public market data, and a stop ends with the stop confirmed and no bot order left open.
+  local base="http://localhost:$web_port/api/v1" jar="$run_dir/operator-cookies.txt" run status open
   local sequence=0 published=0 i
-  MSE_BOT_RATE=4 compose up -d --no-deps --wait --wait-timeout 120 simulator >> "$log" 2>&1 || return 1
+  csrf() { curl -s -b "$jar" -c "$jar" "$base/auth/csrf" | sed -E 's/.*"token":"([^"]+)".*/\1/'; }
+  curl -s -b "$jar" -c "$jar" -H "X-CSRF-TOKEN: $(csrf)" -H 'Content-Type: application/json' \
+    -d "{\"username\":\"operator\",\"password\":\"$operator_password\"}" "$base/auth/login" >> "$log" 2>&1
+  run=$(curl -s -b "$jar" -H "X-CSRF-TOKEN: $(csrf)" -H 'Content-Type: application/json' -H "Idempotency-Key: $(uuid)" \
+    -d '{"noise":2,"seed":7,"commandsPerSecond":"4.00"}' "$base/admin/bot-runs")
+  note "start: $run"
+  run=$(printf '%s' "$run" | sed -nE 's/.*"runId":"([0-9a-f-]{36})".*/\1/p')
+  assert_match 'bot run started' '^[0-9a-f-]{36}$' "$run" || return 1
   for i in $(seq 1 60); do
     sequence=$(psql_as execution_owner execution_db "SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id JOIN account s ON s.id = t.seller_account_id WHERE b.kind = 'BOT' OR s.kind = 'BOT'" | tr -d '\r')
     [ "${sequence:-0}" -gt 0 ] 2>/dev/null && break
@@ -270,7 +280,19 @@ bot_trading() {
   done
   assert_match "public tape reached bot trade $sequence" '^[0-9]+$' "$published" &&
     [ "$published" -ge "$sequence" ] || { fail "public tape at '$published', bot trade at $sequence"; return 1; }
-  compose up -d --no-deps --wait --wait-timeout 120 simulator >> "$log" 2>&1
+  curl -s -b "$jar" -H "X-CSRF-TOKEN: $(csrf)" -H "Idempotency-Key: $(uuid)" -X POST \
+    "$base/admin/bot-runs/$run/stop" >> "$log" 2>&1
+  for i in $(seq 1 30); do
+    status=$(curl -s -b "$jar" "$base/admin/bot-runs?limit=1" | grep -o '"status":"[A-Z]*"' | head -1)
+    [ "$status" = '"status":"STOPPED"' ] && break
+    sleep 2
+  done
+  open="SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id
+    WHERE a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')"
+  assert_equal 'run status after the stop' '"status":"STOPPED"' "$status" &&
+    assert_equal 'the worker confirmed it, after placing orders' 't' \
+      "$(psql_as execution_owner execution_db "SELECT stopped_at IS NOT NULL AND placed > 0 FROM bot_run WHERE id = '$run'" | tr -d '\r')" &&
+    assert_equal 'bot orders left open' 0 "$(psql_as execution_owner execution_db "$open" | tr -d '\r')"
 }
 
 projected_candles() {

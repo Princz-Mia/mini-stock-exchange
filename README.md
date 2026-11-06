@@ -69,7 +69,7 @@ On Linux or macOS, run `./scripts/init-env.sh` instead of the first command. The
 | `docker compose --profile observability up -d --wait` | The base stack, plus Prometheus and Grafana |
 | `docker compose down` | Stops everything; add `-v` to delete the data too |
 
-The simulator's bots stay idle until given a rate. Provision bots as the operator during setup, open the market, then set `MSE_BOT_RATE` (trading commands per second across all bots) in `.env` and rerun the `full` command. `MSE_BOT_SEED` changes their random choices.
+The simulator's bots trade only during a bot run. Provision bots as the operator during setup and open the market, then start a run with `POST /api/v1/admin/bot-runs`. The run sets how many bots follow each strategy, the seed, the command rate across all its bots, order and position limits, the instruments and an optional duration. `POST /api/v1/admin/bot-runs/{runId}/stop` ends it: the bots stop trading, their open orders are cancelled, and the run shows `STOPPED` once the simulator confirms. One run runs at a time.
 
 ## Develop
 
