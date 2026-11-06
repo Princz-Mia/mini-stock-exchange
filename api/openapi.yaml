@@ -456,6 +456,107 @@ paths:
         '504':
           $ref: '#/components/responses/OutcomeUnknown'
 
+  /api/v1/admin/bot-runs:
+    get:
+      tags: [execution]
+      operationId: listBotRuns
+      summary: The newest bot runs with their configuration, worker and activity. Operator only.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+      responses:
+        '200':
+          description: The runs, newest first.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotRunList' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator. No body.
+    post:
+      tags: [execution]
+      operationId: startBotRun
+      summary: Start a bot run while the market is open or halted. One run runs at a time.
+      description: |
+        Operator only, with an idempotency key; sequenced on the writer and audited. Bot accounts are assigned in
+        creation order: market makers first, then noise, then momentum. Without a seed one is chosen; without
+        instrumentIds the bots trade every listed instrument; without durationMinutes the run lasts until stopped.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BotRunRequest' }
+      responses:
+        '201':
+          description: Started.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotRunStarted' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '409':
+          description: MARKET_NOT_OPEN or RUN_ACTIVE (committed and audited once a market exists), or IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: NOT_ENOUGH_BOTS or UNKNOWN_INSTRUMENT (committed and audited).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
+  /api/v1/admin/bot-runs/{runId}/stop:
+    post:
+      tags: [execution]
+      operationId: stopBotRun
+      summary: Ask a running bot run to stop.
+      description: |
+        Operator only, with an idempotency key; sequenced and audited. The worker stops placing orders, settles
+        what is in flight and cancels its quotes, then confirms; until then the run shows STOPPING.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Uuid' }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Stop requested.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotRunStopping' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '404':
+          description: RUN_NOT_FOUND (committed and audited).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: RUN_NOT_RUNNING or MARKET_NOT_OPEN, or IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
   /api/v1/admin/market/open:
     post:
       tags: [execution]
@@ -1104,6 +1205,113 @@ components:
           maximum: 1000
           description: Bots in the market after this command.
         commandSequence: { $ref: '#/components/schemas/Sequence' }
+
+    BotRunRequest:
+      type: object
+      additionalProperties: false
+      required: [commandsPerSecond]
+      properties:
+        marketMakers: { type: integer, minimum: 0, maximum: 1000 }
+        noise: { type: integer, minimum: 0, maximum: 1000 }
+        momentum: { type: integer, minimum: 0, maximum: 1000 }
+        seed: { type: integer, format: int64, minimum: 0 }
+        commandsPerSecond:
+          type: string
+          description: Trading commands per second across all the run's bots, from 0.01 to 200.00.
+          pattern: '^(0|[1-9][0-9]{0,2})\.[0-9]{2}$'
+        maxOrderQuantity: { type: integer, minimum: 1, maximum: 10000, default: 10 }
+        maxPosition: { type: integer, minimum: 1, maximum: 1000000, default: 100 }
+        durationMinutes: { type: integer, minimum: 1, maximum: 1440 }
+        instrumentIds:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/Uuid' }
+    BotRunStarted:
+      type: object
+      additionalProperties: false
+      required: [runId, bots, commandSequence]
+      properties:
+        runId: { $ref: '#/components/schemas/Uuid' }
+        bots: { type: integer, minimum: 1 }
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+    BotRunStopping:
+      type: object
+      additionalProperties: false
+      required: [runId, commandSequence]
+      properties:
+        runId: { $ref: '#/components/schemas/Uuid' }
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+    BotRunList:
+      type: object
+      additionalProperties: false
+      required: [runs]
+      properties:
+        runs:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/BotRun' }
+    BotRun:
+      type: object
+      additionalProperties: false
+      required: [runId, status, desiredState, startedAt, endsAt, stopRequestedAt, stoppedAt, config, worker, activity]
+      properties:
+        runId: { $ref: '#/components/schemas/Uuid' }
+        status:
+          type: string
+          enum: [STARTING, RUNNING, STALE, STOPPING, STOPPED]
+          description: |
+            STARTING before a worker has taken it; RUNNING while a worker holds a live lease; STALE when the lease
+            ran out while it should run; STOPPING until the worker confirms; then STOPPED.
+        desiredState: { type: string, enum: [RUNNING, STOPPED] }
+        startedAt: { $ref: '#/components/schemas/Timestamp' }
+        endsAt: { oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+        stopRequestedAt: { oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+        stoppedAt: { oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+        config:
+          type: object
+          additionalProperties: false
+          required: [seed, commandsPerSecond, maxOrderQuantity, maxPosition, instruments, strategies]
+          properties:
+            seed: { $ref: '#/components/schemas/Sequence' }
+            commandsPerSecond: { type: string }
+            maxOrderQuantity: { type: integer }
+            maxPosition: { type: integer }
+            instruments:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [instrumentId, symbol]
+                properties:
+                  instrumentId: { $ref: '#/components/schemas/Uuid' }
+                  symbol: { type: string }
+            strategies:
+              type: object
+              additionalProperties: false
+              required: [marketMakers, noise, momentum]
+              properties:
+                marketMakers: { type: integer, minimum: 0 }
+                noise: { type: integer, minimum: 0 }
+                momentum: { type: integer, minimum: 0 }
+        worker:
+          type: object
+          additionalProperties: false
+          required: [workerId, heartbeatAt, leaseExpiresAt]
+          properties:
+            workerId: { type: [string, 'null'] }
+            heartbeatAt: { oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+            leaseExpiresAt: { oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+        activity:
+          type: object
+          additionalProperties: false
+          required: [placed, canceled, rejected, errors, inFlight, stopFailures]
+          properties:
+            placed: { type: integer, format: int64, minimum: 0 }
+            canceled: { type: integer, format: int64, minimum: 0 }
+            rejected: { type: integer, format: int64, minimum: 0 }
+            errors: { type: integer, format: int64, minimum: 0 }
+            inFlight: { type: integer, minimum: 0 }
+            stopFailures: { type: integer, minimum: 0 }
 
     AccountPage:
       type: object
