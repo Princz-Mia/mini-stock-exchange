@@ -20,8 +20,11 @@ from mse_simulator.client import TraderClient
 from mse_simulator.control import STOPPED, Assignment, Beat, ControlClient, Totals
 from mse_simulator.credentials import load_token
 from mse_simulator.market import CLOSED, MarketView
-from mse_simulator.noise import Cancel, Holdings, NoiseBot, NoiseConfig, OpenOrder, Place
+from mse_simulator.market_maker import MarketMaker, MarketMakerConfig
+from mse_simulator.momentum import MomentumBot, MomentumConfig, PriceSignal
+from mse_simulator.noise import NoiseBot, NoiseConfig
 from mse_simulator.settings import Settings
+from mse_simulator.strategy import Cancel, Holdings, OpenOrder, Place, Strategy
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +32,16 @@ logger = logging.getLogger(__name__)
 # take the run.
 LEASE_MARGIN = 0.8
 
+# Liquidity first: market makers take the first turns of a run, then directional bots.
+TURN_ORDER = {"MARKET_MAKER": 0, "MOMENTUM": 1, "NOISE": 1}
+
 
 @dataclass
 class Bot:
     client: TraderClient
-    # None while the bot's strategy isn't available: it trades nothing, but a stop still cancels
-    # its quotes.
-    strategy: NoiseBot | None
+    # None for a strategy this worker doesn't know: it trades nothing, but a stop still cancels its
+    # quotes.
+    strategy: Strategy | None
     busy: bool = False
 
 
@@ -78,6 +84,7 @@ class Runner:
         self._order: list[UUID] = []
         self._next = 0
         self._market: MarketView = CLOSED
+        self._signal = self._new_signal()
         self._tasks: set[asyncio.Task[None]] = set()
         self._stopping = False
         self._lost = False
@@ -89,8 +96,51 @@ class Runner:
     def execution_url(self) -> str:
         return str(self._settings.execution_url).rstrip("/")
 
+    def _new_signal(self) -> PriceSignal:
+        return PriceSignal(self._settings.momentum_short_polls, self._settings.momentum_long_polls)
+
+    def _strategy(self, name: str, rng: np.random.Generator, run: Assignment) -> Strategy | None:
+        settings = self._settings
+        if name == "NOISE":
+            return NoiseBot(
+                rng,
+                NoiseConfig(
+                    max_quantity=run.max_order_quantity,
+                    spread_ticks=settings.spread_ticks,
+                    max_open_orders=settings.max_open_orders,
+                    quote_lifetime=settings.quote_lifetime_seconds,
+                    max_position=run.max_position,
+                ),
+            )
+        if name == "MOMENTUM":
+            return MomentumBot(
+                rng,
+                MomentumConfig(
+                    max_quantity=run.max_order_quantity,
+                    max_position=run.max_position,
+                    threshold=settings.momentum_threshold,
+                    cooldown=settings.momentum_cooldown_seconds,
+                    order_lifetime=settings.quote_lifetime_seconds,
+                ),
+                self._signal,
+            )
+        if name == "MARKET_MAKER":
+            return MarketMaker(
+                rng,
+                MarketMakerConfig(
+                    quote_size=run.max_order_quantity,
+                    max_position=run.max_position,
+                    half_spread_ticks=settings.maker_half_spread_ticks,
+                    skew_ticks=settings.maker_skew_ticks,
+                    requote_ticks=settings.maker_requote_ticks,
+                    quote_lifetime=settings.maker_quote_lifetime_seconds,
+                ),
+            )
+        return None
+
     def start_run(self, run: Assignment) -> None:
-        """The run's bots, each with its own generators seeded by the run and its account."""
+        """The run's bots, each with its own generators seeded by the run and its account, market
+        makers first."""
         self._run = run
         self._bots.clear()
         self._order.clear()
@@ -99,15 +149,10 @@ class Runner:
         self._lost = False
         self._lease_until = float("-inf")
         self.activity = Activity(**asdict(run.totals))
-        config = NoiseConfig(
-            max_quantity=run.max_order_quantity,
-            spread_ticks=self._settings.spread_ticks,
-            max_open_orders=self._settings.max_open_orders,
-            quote_lifetime=self._settings.quote_lifetime_seconds,
-            max_position=run.max_position,
-        )
-        missing = waiting = 0
-        for assigned in run.bots:
+        self._signal = self._new_signal()
+        missing = unknown = 0
+        bots = sorted(run.bots, key=lambda bot: TURN_ORDER.get(bot.strategy, 2))
+        for assigned in bots:
             token = load_token(self._settings.token_directory, assigned.credential_ref)
             if token is None:
                 missing += 1
@@ -122,19 +167,18 @@ class Runner:
                 random.Random(account.int ^ run.seed),
                 self._sleep,
             )
-            strategy = None
-            if assigned.strategy == "NOISE":
-                strategy = NoiseBot(np.random.default_rng([run.seed, account.int]), config)
-            else:
-                waiting += 1
+            rng = np.random.default_rng([run.seed, account.int])
+            strategy = self._strategy(assigned.strategy, rng, run)
+            if strategy is None:
+                unknown += 1
             self._bots[account] = Bot(client, strategy)
             self._order.append(account)
         logger.info(
-            "run %s: %d bots, %d without a token file, %d whose strategy isn't available yet",
+            "run %s: %d bots, %d without a token file, %d with an unknown strategy",
             run.run_id,
             len(self._bots),
             missing,
-            waiting,
+            unknown,
         )
 
     async def refresh_market(self) -> None:
@@ -148,6 +192,10 @@ class Runner:
         except (httpx.HTTPError, KeyError, ValueError) as error:
             # The old view ages out, which pauses new exposure on its own.
             logger.info("market data unavailable: %s", type(error).__name__)
+            return
+        if self._run is not None:
+            # One sample per poll for every momentum bot, not one per bot.
+            self._signal.observe(self._market.only(self._run.instrument_ids))
 
     def tick(self) -> bool:
         """Starts one step for the next idle bot with a strategy, round robin. False if there is
@@ -164,7 +212,7 @@ class Runner:
                 return True
         return False
 
-    async def _step(self, bot: Bot, strategy: NoiseBot) -> None:
+    async def _step(self, bot: Bot, strategy: Strategy) -> None:
         assert self._run is not None
         try:
             now = self._clock()
@@ -217,6 +265,7 @@ class Runner:
                 UUID(order["instrumentId"]),
                 order["side"],
                 order["workingQuantity"],
+                None if order.get("limitPrice") is None else market.cents(order["limitPrice"]),
             )
             for order in active
         ]

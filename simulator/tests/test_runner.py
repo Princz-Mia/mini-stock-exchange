@@ -9,9 +9,9 @@ import pytest
 from mse_simulator.control import Assignment
 from mse_simulator.credentials import load_token
 from mse_simulator.market import fetch
-from mse_simulator.noise import Holdings
 from mse_simulator.runner import Runner
 from mse_simulator.settings import Settings
+from mse_simulator.strategy import Holdings
 
 INSTRUMENT = str(uuid4())
 OTHER = str(uuid4())
@@ -69,13 +69,13 @@ def run_body(accounts: dict, strategies: list[str], **overrides) -> dict:
     return body | overrides
 
 
-def quote(instrument: str) -> dict:
+def quote(instrument: str, last: str | None = None) -> dict:
     return {
         "instrumentId": instrument,
         "symbol": "NOVA" if instrument == INSTRUMENT else "ZETA",
         "tick": "0.01",
         "referencePrice": "100.00",
-        "lastPrice": None,
+        "lastPrice": last,
         "bestBid": {"price": "99.50", "quantity": 3, "orderCount": 1},
         "bestAsk": None,
         "maxPrice": "1000000.00",
@@ -86,7 +86,9 @@ def quote(instrument: str) -> dict:
 
 class Exchange:
     """A fake exchange: an open, live market with two instruments, every bot well funded, and the
-    control plane. Heartbeats answer with ``desired`` until ``refuse`` names a refusal code."""
+    control plane. Heartbeats answer with ``desired`` until ``refuse`` names a refusal code. With
+    ``rest``, placed orders stay active; with ``trend``, the last price moves that many cents per
+    poll."""
 
     def __init__(self) -> None:
         self.run: dict | None = None
@@ -100,15 +102,21 @@ class Exchange:
         self.refuse: str | None = None
         self.active: dict[str, list[dict]] = {}
         self.uncancelable: set[str] = set()
+        self.rest = False
+        self.trend: int | None = None
+        self.polls = 0
 
-    def open_order(self, bot_token: str, instrument: str = INSTRUMENT) -> str:
+    def open_order(
+        self, bot_token: str, instrument: str = INSTRUMENT, side: str = "BUY", limit="99.00"
+    ) -> str:
         order_id = str(uuid4())
         self.active.setdefault(bot_token, []).append(
             {
                 "orderId": order_id,
                 "instrumentId": instrument,
-                "side": "BUY",
+                "side": side,
                 "workingQuantity": 1,
+                "limitPrice": limit,
                 "createdAt": datetime.now(UTC).isoformat(),
             }
         )
@@ -138,11 +146,16 @@ class Exchange:
         if path == "/api/v1/market":
             return httpx.Response(200, json={"state": "OPEN"})
         if path == "/api/v1/instruments":
+            self.polls += 1
+            last = None
+            if self.trend is not None:
+                cents = 10_000 + self.trend * self.polls
+                last = f"{cents // 100}.{cents % 100:02d}"
             return httpx.Response(
                 200,
                 json={
                     "feed": {"state": self.live, "lag": 0},
-                    "instruments": [quote(INSTRUMENT), quote(OTHER)],
+                    "instruments": [quote(INSTRUMENT, last), quote(OTHER, last)],
                 },
             )
         if path == "/api/v1/portfolio":
@@ -163,6 +176,9 @@ class Exchange:
         if path == "/api/v1/orders":
             self.placed.append(request)
             await self.release.wait()
+            if self.rest:
+                order = json.loads(request.content)
+                self.open_order(bearer, order["instrumentId"], order["side"], order["limitPrice"])
             return httpx.Response(201, json={"orderId": str(uuid4()), "state": "OPEN"})
         if path.endswith("/cancel"):
             order_id = path.split("/")[-2]
@@ -239,7 +255,7 @@ def test_a_run_trades_its_instruments_until_stopped_then_cancels_quotes_and_conf
     exchange = Exchange()
     exchange.run = run_body(
         accounts,
-        ["NOISE", "NOISE", "MOMENTUM"],
+        ["NOISE", "NOISE", "ARBITRAGE"],
         totals={"placed": 5, "canceled": 1, "rejected": 0, "errors": 0},
     )
     tokens = list(accounts.values())
@@ -268,7 +284,7 @@ def test_a_run_trades_its_instruments_until_stopped_then_cancels_quotes_and_conf
     assert placed_instruments(exchange) == {INSTRUMENT}, "only the run's instruments"
     traders = {request.headers["Authorization"] for request in exchange.placed}
     assert f"Bearer {tokens[2]}" not in traders, (
-        "a strategy that isn't available yet trades nothing"
+        "a strategy this worker doesn't know trades nothing"
     )
     assert set(old) <= set(exchange.canceled), "every bot's quotes go, whatever its strategy"
     final = exchange.beats[-1]
@@ -457,3 +473,97 @@ def test_each_bot_draws_from_its_own_generator_seeded_by_the_run(tmp_path) -> No
     assert first != second, "two bots with one run seed must not trade in lockstep"
     assert asyncio.run(decisions("7")) == [first, second], "the same seed repeats them"
     assert asyncio.run(decisions("8")) != [first, second]
+
+
+def test_market_makers_take_the_first_turns_and_quote_both_sides(tmp_path) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 3)
+    exchange = Exchange()
+    exchange.rest = True
+    # The maker is assigned last here; it still trades first.
+    exchange.run = run_body(accounts, ["NOISE", "NOISE", "MARKET_MAKER"])
+    maker = f"Bearer {list(accounts.values())[2]}"
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            await follow_until(
+                runner,
+                exchange,
+                # Both quotes, then long enough for the maker to look at them many times over.
+                lambda: (
+                    sum(r.headers["Authorization"] == maker for r in exchange.placed) >= 2
+                    and len(exchange.beats) >= 4
+                ),
+                lambda: setattr(exchange, "desired", "STOPPED"),
+            )
+
+    asyncio.run(scenario())
+    assert exchange.placed[0].headers["Authorization"] == maker, "liquidity goes first"
+    quotes = [json.loads(r.content) for r in exchange.placed if r.headers["Authorization"] == maker]
+    sides = {quote["side"]: quote["limitPrice"] for quote in quotes[:2]}
+    # Reference 100.00 with no trade or ask yet: two ticks either side.
+    assert sides == {"BUY": "99.98", "SELL": "100.02"}
+    assert len(quotes) == 2, "resting quotes on target aren't replaced"
+
+
+def test_momentum_bots_trade_on_the_signal_the_market_polls_feed(tmp_path) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 1)
+    exchange = Exchange()
+    exchange.rest = True
+    exchange.trend = 10
+    exchange.run = run_body(accounts, ["MOMENTUM"])
+    quick = settings(
+        tmp_path / "tokens",
+        market_poll_seconds=0.01,
+        momentum_short_polls=1,
+        momentum_long_polls=3,
+        momentum_threshold=0.0001,
+        momentum_cooldown_seconds=0.0,
+    )
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            await follow_until(
+                Runner(quick, http),
+                exchange,
+                lambda: len(exchange.placed) >= 1,
+                lambda: setattr(exchange, "desired", "STOPPED"),
+            )
+
+    asyncio.run(scenario())
+    order = json.loads(exchange.placed[0].content)
+    assert exchange.polls >= 3, "no order before the long window fills"
+    assert order["side"] == "BUY", "a rising market draws buys"
+    assert order["instrumentId"] == INSTRUMENT
+
+
+@pytest.mark.parametrize("strategy", ["MARKET_MAKER", "MOMENTUM", "NOISE"])
+def test_every_strategy_is_seeded_by_the_run(tmp_path, strategy) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 2)
+    exchange = Exchange()
+    quick = settings(tmp_path / "tokens", momentum_short_polls=1, momentum_long_polls=2)
+
+    async def decisions(seed: str):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(quick, http)
+            body = run_body(accounts, [strategy, strategy], seed=seed)
+            body["instruments"].append({"instrumentId": OTHER, "symbol": "ZETA"})
+            runner.start_run(Assignment.parse(body))
+            # The same observations every time: the price climbs from the same start.
+            exchange.trend, exchange.polls = 30, 0
+            for _ in range(2):
+                await runner.refresh_market()
+            holdings = Holdings(cash=10**9, shares={UUID(INSTRUMENT): 10**6, UUID(OTHER): 10**6})
+            return [
+                [
+                    bot.strategy.decide(runner._market, True, holdings, [], float(step * 10))
+                    for step in range(20)
+                ]
+                for bot in runner._bots.values()
+            ]
+
+    first = asyncio.run(decisions("7"))
+    assert all(any(intent is not None for intent in bot) for bot in first), "every bot trades"
+    assert asyncio.run(decisions("7")) == first, "the same seed repeats every decision"
+    others = [asyncio.run(decisions(str(seed))) for seed in range(8, 14)]
+    assert any(other != first for other in others), "another seed changes them"

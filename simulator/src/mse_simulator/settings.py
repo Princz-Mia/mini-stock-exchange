@@ -4,7 +4,7 @@ import os
 import socket
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
 
 class Settings(BaseModel):
@@ -25,10 +25,28 @@ class Settings(BaseModel):
     spread_ticks: int = Field(default=5, ge=0, le=1_000)
     max_open_orders: int = Field(default=5, ge=1, le=20)
     quote_lifetime_seconds: float = Field(default=10.0, gt=0)
+    # Momentum: moving averages over this many market polls; a trend must move the short one at
+    # least this fraction from the long one; and a bot waits this long after each order.
+    momentum_short_polls: int = Field(default=5, ge=1, le=1_000)
+    momentum_long_polls: int = Field(default=20, ge=2, le=10_000)
+    momentum_threshold: float = Field(default=0.001, gt=0, lt=1)
+    momentum_cooldown_seconds: float = Field(default=5.0, ge=0)
+    # Market maker: ticks from the reservation price to each quote; ticks the reservation leans per
+    # quote size of inventory; ticks a quote may drift before it is replaced; and quote lifetime.
+    maker_half_spread_ticks: int = Field(default=2, ge=1, le=1_000)
+    maker_skew_ticks: int = Field(default=1, ge=0, le=1_000)
+    maker_requote_ticks: int = Field(default=2, ge=1, le=1_000)
+    maker_quote_lifetime_seconds: float = Field(default=30.0, gt=0)
     market_poll_seconds: float = Field(default=1.0, gt=0)
     # New exposure pauses when market data is older than this or not live.
     max_data_age_seconds: float = Field(default=2.0, gt=0)
     token_rescan_seconds: float = Field(default=10.0, gt=0)
+
+    @model_validator(mode="after")
+    def _windows(self) -> Settings:
+        if self.momentum_short_polls >= self.momentum_long_polls:
+            raise ValueError("momentum_short_polls must be below momentum_long_polls")
+        return self
 
     @classmethod
     def from_env(cls) -> Settings:

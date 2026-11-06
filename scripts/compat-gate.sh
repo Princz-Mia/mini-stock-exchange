@@ -254,15 +254,16 @@ internal_status() { # the variable holding the token, read inside the container 
 uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r'; }
 
 bot_trading() {
-  # The operator starts a run for the bots the browser test provisioned. The simulator follows it, their trades
-  # reach the public market data, and a stop ends with the stop confirmed and no bot order left open.
+  # The operator starts a run for the two bots the browser test provisioned: a market maker and a noise bot.
+  # The simulator follows it, their trades reach the public market data, and a stop ends with the stop confirmed
+  # and no bot order left open: the maker's resting quotes are cancelled.
   local base="http://localhost:$web_port/api/v1" jar="$run_dir/operator-cookies.txt" run status open
   local sequence=0 published=0 i
   csrf() { curl -s -b "$jar" -c "$jar" "$base/auth/csrf" | sed -E 's/.*"token":"([^"]+)".*/\1/'; }
   curl -s -b "$jar" -c "$jar" -H "X-CSRF-TOKEN: $(csrf)" -H 'Content-Type: application/json' \
     -d "{\"username\":\"operator\",\"password\":\"$operator_password\"}" "$base/auth/login" >> "$log" 2>&1
   run=$(curl -s -b "$jar" -H "X-CSRF-TOKEN: $(csrf)" -H 'Content-Type: application/json' -H "Idempotency-Key: $(uuid)" \
-    -d '{"noise":2,"seed":7,"commandsPerSecond":"4.00"}' "$base/admin/bot-runs")
+    -d '{"marketMakers":1,"noise":1,"seed":7,"commandsPerSecond":"4.00"}' "$base/admin/bot-runs")
   note "start: $run"
   run=$(printf '%s' "$run" | sed -nE 's/.*"runId":"([0-9a-f-]{36})".*/\1/p')
   assert_match 'bot run started' '^[0-9a-f-]{36}$' "$run" || return 1
