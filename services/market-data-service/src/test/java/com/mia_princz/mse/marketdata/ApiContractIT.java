@@ -59,7 +59,7 @@ class ApiContractIT {
 		mappings.getHandlerMethods().keySet().forEach((info) -> info.getPathPatternsCondition().getPatterns()
 			.stream()
 			.map((pattern) -> pattern.getPatternString())
-			.filter((path) -> path.startsWith("/api/"))
+			.filter((path) -> path.startsWith("/api/") || path.startsWith("/internal/"))
 			.forEach((path) -> info.getMethodsCondition().getMethods()
 				.forEach((method) -> served.add(method.name() + " " + OpenApiContract.blankVariables(path)))));
 
@@ -92,6 +92,8 @@ class ApiContractIT {
 		check(bars, path(bars, instrument), 200);
 		check(bars, path(bars, instrument) + "?from=" + Candles.MINUTE + "&to=" + Candles.MINUTE.plusSeconds(86_460), 400);
 		check(bars, path(bars, UUID.randomUUID()), 404);
+		// No export token in this context, so reconciliation says the export is unavailable.
+		check("/internal/reconciliation/candles", "/internal/reconciliation/candles", 503);
 	}
 
 	@Test

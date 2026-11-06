@@ -116,6 +116,9 @@ services:
       MARKET_DATA_DB_APP_PASSWORD: ${MARKET_DATA_DB_APP_PASSWORD:?run scripts/init-env first}
       MARKET_DATA_DB_OWNER_PASSWORD: ${MARKET_DATA_DB_OWNER_PASSWORD:?run scripts/init-env first}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      # For reconciling candles against Execution's trade export; optional, like Execution's side of it.
+      EXECUTION_URL: http://execution-service:8080
+      MSE_EXPORT_TOKEN: ${MSE_EXPORT_TOKEN:-}
     mem_limit: 1536m
     cpus: 1.5
 
