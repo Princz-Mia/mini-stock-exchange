@@ -3,11 +3,10 @@ from uuid import UUID, uuid4
 import numpy as np
 
 from mse_simulator.market import Instrument, MarketView
-from mse_simulator.noise import (
+from mse_simulator.noise import NoiseBot, NoiseConfig
+from mse_simulator.strategy import (
     Cancel,
     Holdings,
-    NoiseBot,
-    NoiseConfig,
     OpenOrder,
     Place,
     Positions,

@@ -327,15 +327,16 @@ try {
     }
 
     Step 'Bots: the simulator trades and the tape shows it' {
-        # The operator starts a run for the bots the browser test provisioned. The simulator follows it, their trades
-        # reach the public market data, and a stop ends with the stop confirmed and no bot order left open.
+        # The operator starts a run for the two bots the browser test provisioned: a market maker and a noise bot.
+        # The simulator follows it, their trades reach the public market data, and a stop ends with the stop confirmed
+        # and no bot order left open: the maker's resting quotes are cancelled.
         $base = "http://localhost:$webPort/api/v1"
         $csrf = Invoke-RestMethod "$base/auth/csrf" -SessionVariable operator
         $body = @{ username = 'operator'; password = $operatorPassword } | ConvertTo-Json
         [void](Invoke-RestMethod "$base/auth/login" -Method Post -WebSession $operator -ContentType 'application/json' -Body $body -Headers @{ $csrf.headerName = $csrf.token })
         $csrf = Invoke-RestMethod "$base/auth/csrf" -WebSession $operator
         $headers = @{ $csrf.headerName = $csrf.token; 'Idempotency-Key' = [guid]::NewGuid().ToString() }
-        $started = Invoke-RestMethod "$base/admin/bot-runs" -Method Post -WebSession $operator -ContentType 'application/json' -Headers $headers -Body '{"noise":2,"seed":7,"commandsPerSecond":"4.00"}'
+        $started = Invoke-RestMethod "$base/admin/bot-runs" -Method Post -WebSession $operator -ContentType 'application/json' -Headers $headers -Body '{"marketMakers":1,"noise":1,"seed":7,"commandsPerSecond":"4.00"}'
         Assert-Match 'bot run started' '^[0-9a-f-]{36}$' $started.runId
         $sequence = 0
         foreach ($attempt in 1..60) {
