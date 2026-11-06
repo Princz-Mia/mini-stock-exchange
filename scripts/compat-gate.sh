@@ -284,6 +284,16 @@ projected_candles() {
     "$(curl -s -m 10 "http://localhost:$web_port/api/v1/instruments/$instrument/candles?from=$smoke_minute")"
 }
 
+reconciled_candles() {
+  # Every instrument Execution has, its candles checked against the trade export: the trades from the browser test
+  # and the bots, computed by the job across its restart. Exact, or the step fails with the mismatches.
+  local report
+  report=$(compose exec -T market-data-service curl -fsS http://localhost:8080/internal/reconciliation/candles 2>&1)
+  note "reconciliation => $report"
+  assert_match 'candles reconcile with the trade export' '"reconciled":true' "$report" &&
+    assert_match 'candles were checked' '"candlesChecked":[1-9]' "$report"
+}
+
 independence() {
   compose stop market-data-service >> "$log" 2>&1 &&
     assert_match 'instruments with Market Data down' '^50[24]$' "$(http_status /api/v1/instruments)" &&
@@ -374,6 +384,7 @@ step 'Toolchain versions' toolchain &&
   step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' avro_pipeline &&
   step 'Analytics: a JobManager restart resumes from its checkpoint' flink_restart &&
   step 'Candles: Market Data stores and serves the bars' projected_candles &&
+  step 'Reconciliation: candles match the trade export exactly' reconciled_candles &&
   step 'Outage isolation: services stay ready without Kafka' kafka_outage ||
   status=1
 
