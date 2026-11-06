@@ -670,6 +670,36 @@ paths:
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
 
+  /internal/reconciliation/candles:
+    get:
+      tags: [market-data]
+      operationId: reconcileCandles
+      summary: Checks one epoch's stored candles against Execution's trade export, exactly.
+      description: |
+        Internal: the proxy never forwards it. For every instrument with a snapshot, or one, each candle is
+        recomputed from the exported trades up to its own source trade sequence and compared field by field.
+        Candles that are behind still reconcile; what they cover must match.
+      parameters:
+        - name: instrumentId
+          in: query
+          schema: { $ref: '#/components/schemas/Uuid' }
+        - name: epoch
+          in: query
+          description: The computation epoch to check; the served one by default.
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        '200':
+          description: The result for each instrument.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CandleReconciliation' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '503':
+          description: EXPORT_UNAVAILABLE. The export is not configured or cannot be read.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
   /api/v1/market-events:
     get:
       tags: [market-data]
@@ -1320,6 +1350,37 @@ components:
         nextCursor:
           type: [string, 'null']
           description: Null on the last page.
+    CandleReconciliation:
+      type: object
+      additionalProperties: false
+      required: [computationEpoch, reconciled, instruments]
+      properties:
+        computationEpoch: { type: integer, format: int64 }
+        reconciled: { type: boolean, description: True when every instrument reconciles. }
+        instruments:
+          type: array
+          items: { $ref: '#/components/schemas/InstrumentReconciliation' }
+    InstrumentReconciliation:
+      type: object
+      additionalProperties: false
+      required: [instrumentId, candlesThroughTradeSequence, exportedThroughTradeSequence, candlesChecked, reconciled,
+        mismatches]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        candlesThroughTradeSequence: { $ref: '#/components/schemas/Sequence' }
+        exportedThroughTradeSequence: { $ref: '#/components/schemas/Sequence' }
+        candlesChecked: { type: integer, minimum: 0 }
+        reconciled: { type: boolean }
+        mismatches:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [bucketStart, problem, detail]
+            properties:
+              bucketStart: { $ref: '#/components/schemas/Timestamp' }
+              problem: { type: string, enum: [MISSING, EXTRA, DIFFERENT] }
+              detail: { type: string }
     TapeTrade:
       type: object
       additionalProperties: false

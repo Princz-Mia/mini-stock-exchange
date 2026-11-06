@@ -436,6 +436,28 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/internal/reconciliation/candles": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * Checks one epoch's stored candles against Execution's trade export, exactly.
+         * @description Internal: the proxy never forwards it. For every instrument with a snapshot, or one, each candle is
+         *     recomputed from the exported trades up to its own source trade sequence and compared field by field.
+         *     Candles that are behind still reconcile; what they cover must match.
+         */
+        readonly get: operations["reconcileCandles"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/market-events": {
         readonly parameters: {
             readonly query?: never;
@@ -837,6 +859,26 @@ export interface components {
             readonly trades: readonly components["schemas"]["ExportedTrade"][];
             /** @description Null on the last page. */
             readonly nextCursor: string | null;
+        };
+        readonly CandleReconciliation: {
+            /** Format: int64 */
+            readonly computationEpoch: number;
+            /** @description True when every instrument reconciles. */
+            readonly reconciled: boolean;
+            readonly instruments: readonly components["schemas"]["InstrumentReconciliation"][];
+        };
+        readonly InstrumentReconciliation: {
+            readonly instrumentId: components["schemas"]["Uuid"];
+            readonly candlesThroughTradeSequence: components["schemas"]["Sequence"];
+            readonly exportedThroughTradeSequence: components["schemas"]["Sequence"];
+            readonly candlesChecked: number;
+            readonly reconciled: boolean;
+            readonly mismatches: readonly {
+                readonly bucketStart: components["schemas"]["Timestamp"];
+                /** @enum {string} */
+                readonly problem: "MISSING" | "EXTRA" | "DIFFERENT";
+                readonly detail: string;
+            }[];
         };
         readonly TapeTrade: {
             readonly tradeId: components["schemas"]["Uuid"];
@@ -1894,6 +1936,40 @@ export interface operations {
             };
             readonly 400: components["responses"]["Problem"];
             readonly 404: components["responses"]["Problem"];
+        };
+    };
+    readonly reconcileCandles: {
+        readonly parameters: {
+            readonly query?: {
+                readonly instrumentId?: components["schemas"]["Uuid"];
+                /** @description The computation epoch to check; the served one by default. */
+                readonly epoch?: number;
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The result for each instrument. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["CandleReconciliation"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description EXPORT_UNAVAILABLE. The export is not configured or cannot be read. */
+            readonly 503: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
         };
     };
     readonly streamMarket: {

@@ -400,6 +400,14 @@ try {
         Assert-Match 'smoke candle from the candles API' '"tradeCount":4,"notional":"1513\.00","vwap":"100\.87"' $bars
     }
 
+    Step 'Reconciliation: candles match the trade export exactly' {
+        # Every instrument Execution has, its candles checked against the trade export: the trades from the browser
+        # test and the bots, computed by the job across its restart. Exact, or the step fails with the mismatches.
+        $report = Invoke-InContainer 'market-data-service' @('curl', '-fsS', 'http://localhost:8080/internal/reconciliation/candles')
+        Assert-Match 'candles reconcile with the trade export' '"reconciled":true' $report
+        Assert-Match 'candles were checked' '"candlesChecked":[1-9]' $report
+    }
+
     Step 'Outage isolation: services stay ready without Kafka' {
         Invoke-Checked 'docker' ($compose + @('stop', 'kafka'))
         Assert-Match 'Execution readiness' '"status":"UP"' (Get-Readiness 'execution-service')

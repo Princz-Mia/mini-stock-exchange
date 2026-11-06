@@ -18,6 +18,9 @@ class SecurityConfiguration {
 			.authorizeHttpRequests((requests) -> requests
 				.requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/prometheus")
 				.permitAll()
+				// Internal and read-only; the proxy never forwards /internal, so only the private network reaches it.
+				.requestMatchers(HttpMethod.GET, "/internal/reconciliation/candles")
+				.permitAll()
 				// Public market data: anyone may read it, nobody may change it here.
 				.requestMatchers(HttpMethod.GET, "/api/v1/instruments", "/api/v1/instruments/*/book",
 						"/api/v1/instruments/*/trades", "/api/v1/instruments/*/candles", "/api/v1/market-events")
