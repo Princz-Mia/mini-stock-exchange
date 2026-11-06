@@ -295,7 +295,7 @@ try {
         Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '180', 'execution-service'))
     }
 
-    Step 'Browser: trading, phone layout, halt and resume' {
+    Step 'Browser: trading, phone layout, halt, resume and bot runs' {
         # Users have no API, so the counterparty's login is inserted; the test sets up the market as the operator.
         $counterpartyPassword = New-Secret
         Invoke-Checked 'docker' ($compose + @('cp', 'web/e2e/seed-users.sql', 'postgres:/tmp/seed-users.sql'))

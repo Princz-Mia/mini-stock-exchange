@@ -3,6 +3,10 @@ import type {
   AccountPage,
   AccountRequest,
   BotPopulation,
+  BotRunList,
+  BotRunRequest,
+  BotRunStarted,
+  BotRunStopping,
   BotsCreated,
   BotsRequest,
   Cancellation,
@@ -163,6 +167,15 @@ export const api = {
 
   provisionBots: (bots: BotsRequest, idempotencyKey: string) =>
     request<BotsCreated>('POST', '/api/v1/admin/bots', { body: bots, idempotencyKey }),
+
+  /** The newest runs first, with what their workers last reported. */
+  botRuns: () => request<BotRunList>('GET', `/api/v1/admin/bot-runs${query({ limit: 10 })}`),
+
+  startBotRun: (run: BotRunRequest, idempotencyKey: string) =>
+    request<BotRunStarted>('POST', '/api/v1/admin/bot-runs', { body: run, idempotencyKey }),
+
+  stopBotRun: (runId: string, idempotencyKey: string) =>
+    request<BotRunStopping>('POST', `/api/v1/admin/bot-runs/${runId}/stop`, { idempotencyKey }),
 
   orders: (status: 'all' | 'active', cursor?: string) =>
     request<OrderPage>('GET', `/api/v1/orders${query({ status, cursor, limit: status === 'all' ? 50 : undefined })}`),
