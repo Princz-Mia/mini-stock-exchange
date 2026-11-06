@@ -369,6 +369,50 @@ tbody th {
   color: var(--warn-text);
 }
 
+/* Bot runs: the current run's counters in a wrapping grid, and the instrument choices in a row. */
+.run {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.counters {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.counters dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.counters dd {
+  margin: 0;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+.choices legend {
+  padding: 0;
+  margin-bottom: var(--space-1);
+}
+
+.choices label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
 .control-list {
   list-style: none;
   margin: 0;

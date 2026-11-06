@@ -6,8 +6,8 @@ import type { CsrfToken, OrderRequest } from '../src/api/types';
 
 // Runs against a fresh stack whose only addition is the counterparty's login (seed-users.sql). The operator sets up
 // the market through the API: NOVA at 100.00, and the dev trader and the counterparty with 100,000.00 and 500 shares
-// each. The amounts below follow from that, so the test runs once per stack. Two bots are provisioned too, for the
-// gate to check their token files; they don't trade here.
+// each. The amounts below follow from that, so the test runs once per stack. Two bots are provisioned too: the last
+// test runs them from the operator screen, after the trader's amounts are checked.
 
 function required(name: string): string {
   const value = process.env[name];
@@ -198,5 +198,40 @@ test.describe.serial('trading through the browser', () => {
     await expect(page.getByText('Trading halted')).toBeHidden({ timeout: 10_000 });
     await expect(buy).toBeEnabled();
     await operatorContext.close();
+  });
+
+  test('the operator starts a bot run, watches it trade, and stops it', async ({ page }) => {
+    await page.goto('/');
+    await page.getByLabel('Username').fill('operator');
+    await page.getByLabel('Password').fill(required('E2E_OPERATOR_PASSWORD'));
+    await page.getByRole('button', { name: 'Sign in' }).click();
+    const runs = page.getByRole('region', { name: 'Bot runs' });
+    const form = runs.getByRole('form', { name: 'Start a bot run' });
+
+    // The two bots from setup: one market maker to quote, one noise bot to trade against it.
+    await form.getByLabel('Market makers').fill('1');
+    await form.getByLabel('Noise').fill('1');
+    await form.getByLabel('Momentum').fill('0');
+    await form.getByLabel('Seed').fill('11');
+    await form.getByRole('button', { name: 'Start run' }).click();
+
+    // The simulator takes the run within its poll interval, and its counts arrive with each heartbeat.
+    await expect(runs.getByRole('status', { name: 'Run status: Running' })).toBeVisible({ timeout: 30_000 });
+    const current = runs.getByRole('group', { name: 'Current run' });
+    await expect(current).toContainText('1 market maker, 1 noise');
+    await expect(current).toContainText(/Placed[1-9]/, { timeout: 30_000 });
+
+    // Nothing on the operator screen scrolls sideways on a phone either.
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    await page.setViewportSize({ width: 1280, height: 800 });
+
+    // A stop drains, cancels the maker's quotes and is confirmed; then the form is back and the run is history.
+    await current.getByRole('button', { name: 'Stop run' }).click();
+    await expect(form).toBeVisible({ timeout: 30_000 });
+    const last = runs.getByRole('table', { name: 'Recent runs' }).getByRole('row').nth(1);
+    await expect(last).toContainText('1 market maker, 1 noise');
+    await expect(last).toContainText(/\d{2}:\d{2}:\d{2} UTC$/);
+    await expect(last).not.toContainText('not canceled');
   });
 });

@@ -2,13 +2,14 @@ import { useQuery } from '@tanstack/react-query';
 
 import { api, pollEvery } from '../api/client';
 import { AccountSetup } from './AccountSetup';
+import { BotRuns } from './BotRuns';
 import { BotSetup } from './BotSetup';
 import { InstrumentSetup } from './InstrumentSetup';
 import { MarketControl } from './MarketControl';
 
 /**
- * The operator's screen: the authoritative trading phase with its controls, and the SETUP editor for instruments,
- * bots and endowments. Everything shown is what the exchange committed, refetched after each command and every five
+ * The operator's screen: the authoritative trading phase with its controls, bot runs, and the SETUP editor for
+ * instruments, bots and endowments. Once the market opens, bot runs come first. Everything shown is what the exchange committed, refetched after each command and every five
  * seconds.
  */
 export function OperatorPage() {
@@ -41,9 +42,11 @@ export function OperatorPage() {
             Market data is not reachable, so the instrument list may be incomplete.
           </p>
         )}
+        {!editable && <BotRuns market={market.data.state} instruments={listed} />}
         <InstrumentSetup instruments={listed} editable={editable} />
         <BotSetup instruments={listed} editable={editable} />
         <AccountSetup instruments={listed} editable={editable} />
+        {editable && <BotRuns market={market.data.state} instruments={listed} />}
       </div>
     </div>
   );

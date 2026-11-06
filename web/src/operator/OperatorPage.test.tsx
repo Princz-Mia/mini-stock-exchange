@@ -3,7 +3,8 @@ import { fireEvent, render, screen, waitFor, within } from '@testing-library/rea
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { resetSession } from '../api/client';
-import type { MarketStatus } from '../api/types';
+import type { BotRun, MarketStatus } from '../api/types';
+import { botRun } from '../test/botRun';
 import { signedIn } from '../test/fakeServer';
 import { OperatorPage } from './OperatorPage';
 
@@ -38,7 +39,7 @@ function market(state: MarketStatus['state']): MarketStatus {
 
 /** A stateful stand-in: the market moves when a transition is accepted, so refetches show the new state. */
 function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
-  const state = { market: market(initial), bots: 0 };
+  const state = { market: market(initial), bots: 0, runs: [] as BotRun[] };
   const server = signedIn('operator', ['OPERATOR'])
     .on('GET /api/v1/market', () => ({ status: 200, json: state.market }))
     .on('GET /api/v1/instruments', { status: 200, json: { instruments, feed: { state: 'LIVE', lag: 0 } } })
@@ -46,7 +47,8 @@ function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
     .on('GET /api/v1/admin/bots', () => ({
       status: 200,
       json: { population: state.bots, maxPopulation: 1000, maxPerCommand: 100 },
-    }));
+    }))
+    .on('GET /api/v1/admin/bot-runs', () => ({ status: 200, json: { runs: state.runs } }));
   return { server, state };
 }
 
@@ -279,5 +281,195 @@ describe('the operator screen', () => {
     expect(await screen.findByText('12 of 1,000 bots')).toBeInTheDocument();
     expect(screen.getByText(/the population is fixed after that/)).toBeInTheDocument();
     expect(screen.queryByRole('form', { name: 'Create bots' })).toBeNull();
+  });
+});
+
+describe('bot runs on the operator screen', () => {
+  beforeEach(() => resetSession());
+
+  const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
+  const runs = () => screen.findByRole('region', { name: 'Bot runs' });
+
+  it('starts a run with the suggested split, sending only what the exchange needs', async () => {
+    const { server, state } = exchange('OPEN', [NOVA, ORBT]);
+    state.bots = 10;
+    server.on('POST /api/v1/admin/bot-runs', () => {
+      state.runs = [botRun({ status: 'STARTING', worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null } })];
+      return { status: 201, json: { runId: botRun().runId, bots: 10, commandSequence: '9' } };
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    await waitFor(() => expect(within(form).getByLabelText('Market makers')).toHaveValue('2'));
+    expect(within(form).getByLabelText('Noise')).toHaveValue('6');
+    expect(within(form).getByLabelText('Momentum')).toHaveValue('2');
+    expect(within(form).getByRole('checkbox', { name: 'ORBT' })).toBeChecked();
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+
+    expect(await screen.findByRole('status', { name: 'Run status: Starting' })).toBeInTheDocument();
+    expect(screen.getByText('Waiting for a simulator worker to take the run.')).toBeInTheDocument();
+    const sent = server.requests.find((request) => request.url === '/api/v1/admin/bot-runs' && request.method === 'POST');
+    expect(sent?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(sent?.body).toEqual({
+      marketMakers: 2,
+      noise: 6,
+      momentum: 2,
+      commandsPerSecond: '4.00',
+      maxOrderQuantity: 10,
+      maxPosition: 100,
+    });
+  });
+
+  it('starts on the chosen instruments only, and never sends an empty choice', async () => {
+    const { server, state } = exchange('OPEN', [NOVA, ORBT]);
+    state.bots = 3;
+    server.on('POST /api/v1/admin/bot-runs', {
+      status: 422,
+      problem: { status: 422, code: 'NOT_ENOUGH_BOTS', detail: 'The run needs 5 bots; 3 exist' },
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    fireEvent.click(within(form).getByRole('checkbox', { name: 'ORBT' }));
+    fireEvent.click(within(form).getByRole('checkbox', { name: 'NOVA' }));
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    expect(await within(form).findByText('Choose at least one instrument.')).toBeInTheDocument();
+    expect(server.requests.some((request) => request.method === 'POST')).toBe(false);
+
+    fireEvent.click(within(form).getByRole('checkbox', { name: 'NOVA' }));
+    fireEvent.change(within(form).getByLabelText('Noise'), { target: { value: '5' } });
+    fireEvent.change(within(form).getByLabelText('Seed'), { target: { value: '42' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+
+    expect(await within(form).findByText('The run needs 5 bots; 3 exist')).toBeInTheDocument();
+    expect(within(form).queryByText('Choose at least one instrument.')).toBeNull();
+    const sent = server.requests.find((request) => request.method === 'POST' && request.url.endsWith('/bot-runs'));
+    expect(sent?.body).toMatchObject({ noise: 5, seed: 42, instrumentIds: [NOVA.instrumentId] });
+    expect(within(form).getByLabelText('Noise')).toHaveValue('5');
+  });
+
+  it('cannot start before the market opens, and says why', async () => {
+    exchange('SETUP');
+    renderPage();
+    expect(await button('Start run')).toBeDisabled();
+    expect(await button('Start run')).toHaveAccessibleDescription('Bots trade only once the market has opened.');
+  });
+
+  it('cannot start without bots once open, and says why', async () => {
+    exchange('HALTED');
+    renderPage();
+    const start = await button('Start run');
+    await waitFor(() => expect(start).toHaveAccessibleDescription('There are no bots; they are created during setup.'));
+    expect(start).toBeDisabled();
+  });
+
+  it('shows the running run with its worker and activity instead of the form', async () => {
+    const { state } = exchange('OPEN');
+    state.bots = 3;
+    state.runs = [botRun()];
+    renderPage();
+
+    const panel = await runs();
+    expect(await within(panel).findByRole('status', { name: 'Run status: Running' })).toHaveClass('state-open');
+    expect(within(panel).queryByRole('form', { name: 'Start a bot run' })).toBeNull();
+    expect(within(panel).getByText('sim-1 holds the run.')).toBeInTheDocument();
+    expect(within(panel).getByText('1 market maker, 2 noise')).toBeInTheDocument();
+    const counters = within(panel).getByRole('group', { name: 'Current run' });
+    expect(counters).toHaveTextContent('Placed150');
+    expect(counters).toHaveTextContent('In flight1');
+    expect(counters).toHaveTextContent('Per second2.50 of 4.00');
+    expect(within(panel).queryByRole('table', { name: 'Recent runs' })).toBeNull();
+    expect(within(panel).getByRole('button', { name: 'Stop run' })).toBeEnabled();
+  });
+
+  it('stops a run under one key, even after a busy answer, then waits for the worker', async () => {
+    const { server, state } = exchange('OPEN');
+    state.runs = [botRun()];
+    let calls = 0;
+    server.on(`POST /api/v1/admin/bot-runs/${botRun().runId}/stop`, () => {
+      calls += 1;
+      if (calls === 1) {
+        return { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY', detail: 'busy' } };
+      }
+      state.runs = [botRun({ status: 'STOPPING', desiredState: 'STOPPED', stopRequestedAt: '2026-11-06T10:01:00Z' })];
+      return { status: 200, json: { runId: botRun().runId, commandSequence: '12' } };
+    });
+    renderPage();
+
+    fireEvent.click(await button('Stop run'));
+    expect(await screen.findByText(/Not confirmed/)).toBeInTheDocument();
+    expect(await button('Stop run')).toBeDisabled();
+    fireEvent.click(await button('Retry'));
+
+    expect(await screen.findByRole('status', { name: 'Run status: Stopping' })).toBeInTheDocument();
+    expect(await button('Stop run')).toBeDisabled();
+    expect(await button('Stop run')).toHaveAccessibleDescription(
+      'A stop was asked for at 10:01:00 UTC; the run shows Stopped once the worker confirms.',
+    );
+    const keys = server.requests
+      .filter((request) => request.url.endsWith('/stop'))
+      .map((request) => request.headers['Idempotency-Key']);
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it('warns about a lost worker and about orders a stop could not cancel', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [botRun({ status: 'STALE' })];
+    const view = renderPage();
+    expect(await screen.findByRole('status', { name: 'Run status: Worker lost' })).toHaveClass('state-halted');
+    expect(screen.getByText(/No heartbeat from sim-1 since 10:01:20 UTC/)).toHaveClass('form-error');
+    view.unmount();
+
+    state.runs = [
+      botRun({
+        status: 'STOPPING',
+        desiredState: 'STOPPED',
+        stopRequestedAt: '2026-11-06T10:01:00Z',
+        activity: { ...botRun().activity, stopFailures: 2 },
+      }),
+    ];
+    renderPage();
+    expect(await screen.findByText('2 orders could not be canceled while stopping.')).toBeInTheDocument();
+  });
+
+  it('lists recent runs, and offers the form again once the last one stopped', async () => {
+    const { state } = exchange('OPEN');
+    state.bots = 3;
+    state.runs = [
+      botRun({ runId: 'b', status: 'STOPPED', desiredState: 'STOPPED', stoppedAt: '2026-11-06T10:05:00Z' }),
+      botRun({
+        runId: 'a',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        startedAt: '2026-11-06T09:00:00Z',
+        stoppedAt: null,
+        activity: { ...botRun().activity, stopFailures: 1 },
+      }),
+    ];
+    renderPage();
+
+    expect(await screen.findByRole('form', { name: 'Start a bot run' })).toBeInTheDocument();
+    const recent = screen.getByRole('table', { name: 'Recent runs' });
+    expect(within(recent).getAllByRole('row')).toHaveLength(3);
+    expect(within(recent).getByRole('row', { name: /10:00:00 UTC/ })).toHaveTextContent('10:05:00 UTC');
+    expect(within(recent).getByRole('row', { name: /09:00:00 UTC/ })).toHaveTextContent(
+      'Not confirmed · 1 not canceled',
+    );
+  });
+
+  it('puts bot runs first once the market is open, and after the setup editor before', async () => {
+    exchange('OPEN');
+    const open = renderPage();
+    await runs();
+    const openOrder = screen.getAllByRole('region').map((region) => region.getAttribute('aria-labelledby'));
+    expect(openOrder.indexOf('runs-title')).toBeLessThan(openOrder.indexOf('instruments-title'));
+    open.unmount();
+
+    exchange('SETUP');
+    renderPage();
+    await runs();
+    const setupOrder = screen.getAllByRole('region').map((region) => region.getAttribute('aria-labelledby'));
+    expect(setupOrder.indexOf('runs-title')).toBeGreaterThan(setupOrder.indexOf('accounts-title'));
   });
 });
