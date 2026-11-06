@@ -33,6 +33,7 @@ GRAFANA_ADMIN_PASSWORD=$(secret)
 DEV_OPERATOR_PASSWORD=$operator_password
 DEV_TRADER_PASSWORD=$trader_password
 MSE_EXPORT_TOKEN=$(secret)
+MSE_SIMULATOR_TOKEN=$(secret)
 WEB_HOST_PORT=$web_port
 POSTGRES_HOST_PORT=25432
 KAFKA_HOST_PORT=$kafka_port
@@ -214,6 +215,7 @@ proxy_routes() {
     assert_equal '/api/v1/internal/x (blocked at proxy)' 404 "$(http_status /api/v1/internal/x)" &&
     assert_match '/internal/exports/trades serves the SPA, not the export' '^<!doctype html>' \
       "$(curl -s "http://localhost:$web_port/internal/exports/trades?instrumentId=00000000-0000-0000-0000-000000000001")" &&
+    assert_match '/internal/simulator/assignment serves the SPA, not the assignment' '^<!doctype html>'       "$(curl -s "http://localhost:$web_port/internal/simulator/assignment")" &&
     assert_match '/actuator/health serves the SPA, not Actuator' '^<!doctype html>' "$(curl -s "http://localhost:$web_port/actuator/health")"
 }
 
@@ -240,7 +242,13 @@ bot_tokens() {
   # The browser test's setup provisioned two bots; each token is a file only its owner can read.
   assert_equal 'token directory' '700 mse' "$(compose exec -T execution-service stat -c '%a %U' /run/mse/bot-tokens)" &&
     assert_match 'token files' '^ *2 600 mse$' \
-      "$(compose exec -T execution-service sh -c 'stat -c "%a %U" /run/mse/bot-tokens/*.token | uniq -c')"
+      "$(compose exec -T execution-service sh -c 'stat -c "%a %U" /run/mse/bot-tokens/*.token | uniq -c')" &&
+    assert_equal 'the simulator token opens its assignment' 200 "$(internal_status MSE_SIMULATOR_TOKEN)" &&
+    assert_equal 'the export token does not' 403 "$(internal_status MSE_EXPORT_TOKEN)"
+}
+
+internal_status() { # the variable holding the token, read inside the container so it never reaches this shell
+  compose exec -T execution-service sh -c "curl -s -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$$1\" http://localhost:8080/internal/simulator/assignment"
 }
 
 bot_trading() {
@@ -379,7 +387,7 @@ step 'Toolchain versions' toolchain &&
   step 'Login: session and CSRF through the proxy' login_flow &&
   step 'Independence: each service survives the other stopping' independence &&
   step 'Browser: trading, phone layout, halt and resume' browser_flow &&
-  step 'Bot tokens: one owner-only file per provisioned bot' bot_tokens &&
+  step 'Bot tokens: owner-only files, and the simulator control token' bot_tokens &&
   step 'Bots: the simulator trades and the tape shows it' bot_trading &&
   step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' avro_pipeline &&
   step 'Analytics: a JobManager restart resumes from its checkpoint' flink_restart &&

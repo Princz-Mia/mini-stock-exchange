@@ -40,6 +40,7 @@ $envLines = @(
     "DEV_OPERATOR_PASSWORD=$operatorPassword"
     "DEV_TRADER_PASSWORD=$traderPassword"
     "MSE_EXPORT_TOKEN=$(New-Secret)"
+    "MSE_SIMULATOR_TOKEN=$(New-Secret)"
     "WEB_HOST_PORT=$webPort"
     'POSTGRES_HOST_PORT=25432'
     "KAFKA_HOST_PORT=$kafkaPort"
@@ -264,6 +265,7 @@ try {
         Assert-Match '/api/v1/market-events, no market yet (Market Data)' '"code":"INSTRUMENT_NOT_FOUND"' ((& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/market-events?instrumentId=00000000-0000-0000-0000-000000000001") | Out-String)
         Assert-Equal '/api/v1/internal/x (blocked at proxy)' '404' (Get-Http '/api/v1/internal/x')
         Assert-Match '/internal/exports/trades serves the SPA, not the export' '^<!doctype html>' ((& curl.exe -s "http://localhost:$webPort/internal/exports/trades?instrumentId=00000000-0000-0000-0000-000000000001") | Out-String)
+        Assert-Match '/internal/simulator/assignment serves the SPA, not the assignment' '^<!doctype html>' ((& curl.exe -s "http://localhost:$webPort/internal/simulator/assignment") | Out-String)
         $actuator = (& curl.exe -s "http://localhost:$webPort/actuator/health") | Out-String
         Assert-Match '/actuator/health serves the SPA, not Actuator' '^\s*<!doctype html>' $actuator
     }
@@ -314,10 +316,14 @@ try {
         }
     }
 
-    Step 'Bot tokens: one owner-only file per provisioned bot' {
+    Step 'Bot tokens: owner-only files, and the simulator control token' {
         # The browser test's setup provisioned two bots; each token is a file only its owner can read.
         Assert-Equal 'token directory' '700 mse' (Invoke-InContainer 'execution-service' @('stat', '-c', '%a %U', '/run/mse/bot-tokens'))
         Assert-Match 'token files' '^\s*2 600 mse\s*$' (Invoke-InContainer 'execution-service' @('sh', '-c', 'stat -c "%a %U" /run/mse/bot-tokens/*.token | uniq -c'))
+        # Tokens are read inside the container, so they never reach this shell.
+        $assignment = { param($variable) 'curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $' + $variable + '" http://localhost:8080/internal/simulator/assignment' }
+        Assert-Equal 'the simulator token opens its assignment' '200' (Invoke-InContainer 'execution-service' @('sh', '-c', (& $assignment 'MSE_SIMULATOR_TOKEN')))
+        Assert-Equal 'the export token does not' '403' (Invoke-InContainer 'execution-service' @('sh', '-c', (& $assignment 'MSE_EXPORT_TOKEN')))
     }
 
     Step 'Bots: the simulator trades and the tape shows it' {

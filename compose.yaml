@@ -97,6 +97,8 @@ services:
       MSE_BOT_TOKEN_DIRECTORY: /run/mse/bot-tokens
       # Optional, so an older .env still starts; without it the internal trade export refuses every request.
       MSE_EXPORT_TOKEN: ${MSE_EXPORT_TOKEN:-}
+      # Optional too; without it the simulator's control routes refuse every request.
+      MSE_SIMULATOR_TOKEN: ${MSE_SIMULATOR_TOKEN:-}
     volumes:
       # Plaintext bot tokens, written once at provisioning; the simulator mounts it read-only.
       - bot-tokens:/run/mse/bot-tokens

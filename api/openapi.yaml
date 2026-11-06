@@ -691,6 +691,62 @@ paths:
           description: No valid service token. No body.
         '404': { $ref: '#/components/responses/Problem' }
 
+  /internal/simulator/assignment:
+    get:
+      tags: [execution]
+      operationId: simulatorAssignment
+      summary: The bot run the simulator should work on, with its bots and instruments.
+      description: |
+        Internal: the proxy never forwards it. Needs the simulator token, which can't trade. A run a worker left
+        without confirming its stop comes first, then the run that should be running; run is null when there is
+        neither. Bots name their credential file in the simulator's token directory, never a token.
+      responses:
+        '200':
+          description: The assignment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SimulatorAssignment' }
+        '401':
+          description: No valid simulator token. No body.
+        '403':
+          description: Another service's token. No body.
+
+  /internal/simulator/heartbeat:
+    post:
+      tags: [execution]
+      operationId: simulatorHeartbeat
+      summary: Take or renew a run's worker lease, report cumulative totals, or confirm a stop.
+      description: |
+        Internal, with the simulator token. One worker holds a run at a time; the lease is taken when free, its own
+        or lapsed. Totals are cumulative for the run, so a retry changes nothing. Once desiredState is STOPPED, the
+        worker settles what is in flight, cancels its quotes, and confirms with stopped, which releases the lease.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SimulatorHeartbeatRequest' }
+      responses:
+        '200':
+          description: Lease held, or stop confirmed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SimulatorHeartbeat' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No valid simulator token. No body.
+        '403':
+          description: Another service's token. No body.
+        '404':
+          description: RUN_NOT_FOUND.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: LEASE_HELD by another worker, RUN_FINISHED, or RUN_NOT_STOPPING for a stop the run hasn't been asked for.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
   /api/v1/instruments:
     get:
       tags: [market-data]
@@ -1312,6 +1368,94 @@ components:
             errors: { type: integer, format: int64, minimum: 0 }
             inFlight: { type: integer, minimum: 0 }
             stopFailures: { type: integer, minimum: 0 }
+
+    SimulatorAssignment:
+      type: object
+      additionalProperties: false
+      required: [run]
+      properties:
+        run:
+          oneOf:
+            - type: 'null'
+            - type: object
+              additionalProperties: false
+              required: [runId, desiredState, seed, commandsPerSecond, maxOrderQuantity, maxPosition, endsAt,
+                leaseSeconds, instruments, bots, worker, totals]
+              properties:
+                runId: { $ref: '#/components/schemas/Uuid' }
+                desiredState:
+                  type: string
+                  enum: [RUNNING, STOPPED]
+                  description: STOPPED once the run is stopped or its time is up.
+                seed: { $ref: '#/components/schemas/Sequence' }
+                commandsPerSecond: { type: string }
+                maxOrderQuantity: { type: integer }
+                maxPosition: { type: integer }
+                endsAt: { oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+                leaseSeconds: { type: integer, minimum: 1 }
+                instruments:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [instrumentId, symbol]
+                    properties:
+                      instrumentId: { $ref: '#/components/schemas/Uuid' }
+                      symbol: { type: string }
+                bots:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [accountId, strategy, credentialRef]
+                    properties:
+                      accountId: { $ref: '#/components/schemas/Uuid' }
+                      strategy: { type: string, enum: [MARKET_MAKER, NOISE, MOMENTUM] }
+                      credentialRef:
+                        type: string
+                        description: The file in the simulator's token directory holding this bot's token.
+                worker:
+                  type: object
+                  additionalProperties: false
+                  required: [workerId, leaseExpiresAt]
+                  properties:
+                    workerId: { type: [string, 'null'] }
+                    leaseExpiresAt: { oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }] }
+                totals:
+                  type: object
+                  additionalProperties: false
+                  required: [placed, canceled, rejected, errors]
+                  properties:
+                    placed: { type: integer, format: int64, minimum: 0 }
+                    canceled: { type: integer, format: int64, minimum: 0 }
+                    rejected: { type: integer, format: int64, minimum: 0 }
+                    errors: { type: integer, format: int64, minimum: 0 }
+    SimulatorHeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required: [runId, workerId, placed, canceled, rejected, errors, inFlight, stopFailures]
+      properties:
+        runId: { $ref: '#/components/schemas/Uuid' }
+        workerId: { type: string, pattern: '^[A-Za-z0-9._:-]{1,100}$' }
+        placed: { type: integer, format: int64, minimum: 0 }
+        canceled: { type: integer, format: int64, minimum: 0 }
+        rejected: { type: integer, format: int64, minimum: 0 }
+        errors: { type: integer, format: int64, minimum: 0 }
+        inFlight: { type: integer, minimum: 0 }
+        stopFailures: { type: integer, minimum: 0 }
+        stopped:
+          type: boolean
+          default: false
+          description: Confirms the stop; only with inFlight 0, once desiredState is STOPPED.
+    SimulatorHeartbeat:
+      type: object
+      additionalProperties: false
+      required: [runId, desiredState, leaseExpiresAt, stopped]
+      properties:
+        runId: { $ref: '#/components/schemas/Uuid' }
+        desiredState: { type: string, enum: [RUNNING, STOPPED] }
+        leaseExpiresAt: { $ref: '#/components/schemas/Timestamp' }
+        stopped: { type: boolean }
 
     AccountPage:
       type: object
