@@ -88,6 +88,30 @@ public interface TradingStore {
 
 	int botCount(UUID simulationId);
 
+	/** Every bot account, oldest first. */
+	List<UUID> botAccountIds(UUID simulationId);
+
+	/** The run whose desired state is RUNNING, if any; {@code endsAt} is null for a run without a time limit. */
+	record RunningBotRun(UUID id, Instant endsAt) {
+	}
+
+	Optional<RunningBotRun> runningBotRun(UUID simulationId);
+
+	/** A run's desired state, or empty if the simulation has no such run. */
+	Optional<String> botRunState(UUID simulationId, UUID runId);
+
+	record NewBotRun(UUID id, UUID simulationId, long seed, long commandsPerSecondHundredths, int maxOrderQuantity,
+			int maxPosition, UUID startedBy, Instant startedAt, long startSequence, Instant endsAt) {
+	}
+
+	void insertBotRun(NewBotRun run);
+
+	void insertBotRunInstrument(UUID runId, UUID simulationId, UUID instrumentId);
+
+	void insertBotAssignment(UUID runId, UUID accountId, String strategy);
+
+	void requestBotRunStop(UUID runId, Instant at);
+
 	void insertBotAccount(UUID simulationId, UUID accountId, String displayName);
 
 	/** Stores a bot's token hash; the token itself is never stored. */

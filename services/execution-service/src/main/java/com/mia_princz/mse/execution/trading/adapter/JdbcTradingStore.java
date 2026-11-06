@@ -2,6 +2,7 @@ package com.mia_princz.mse.execution.trading.adapter;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -241,6 +242,69 @@ public final class JdbcTradingStore implements TradingStore {
 			.param(simulationId)
 			.query(Integer.class)
 			.single();
+	}
+
+	@Override
+	public List<UUID> botAccountIds(UUID simulationId) {
+		return jdbc.sql("SELECT id FROM account WHERE simulation_id = ? AND kind = 'BOT' ORDER BY created_at, id")
+			.param(simulationId)
+			.query(UUID.class)
+			.list();
+	}
+
+	@Override
+	public Optional<RunningBotRun> runningBotRun(UUID simulationId) {
+		return jdbc.sql("SELECT id, ends_at FROM bot_run WHERE simulation_id = ? AND desired_state = 'RUNNING'")
+			.param(simulationId)
+			.query((row, index) -> {
+				Timestamp endsAt = row.getTimestamp("ends_at");
+				return new RunningBotRun(row.getObject("id", UUID.class), endsAt == null ? null : endsAt.toInstant());
+			})
+			.optional();
+	}
+
+	@Override
+	public Optional<String> botRunState(UUID simulationId, UUID runId) {
+		return jdbc.sql("SELECT desired_state FROM bot_run WHERE simulation_id = ? AND id = ?")
+			.params(simulationId, runId)
+			.query(String.class)
+			.optional();
+	}
+
+	@Override
+	public void insertBotRun(NewBotRun run) {
+		expectOne(jdbc.sql("""
+				INSERT INTO bot_run (id, simulation_id, desired_state, seed, commands_per_second, max_order_quantity,
+				    max_position, started_by, started_at, start_sequence, ends_at)
+				VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?, ?)""")
+			.params(run.id(), run.simulationId(), run.seed(), BigDecimal.valueOf(run.commandsPerSecondHundredths(), 2),
+					run.maxOrderQuantity(), run.maxPosition(), run.startedBy(), Timestamp.from(run.startedAt()),
+					run.startSequence(), run.endsAt() == null ? null : Timestamp.from(run.endsAt()))
+			.update(), "insert bot run");
+	}
+
+	@Override
+	public void insertBotRunInstrument(UUID runId, UUID simulationId, UUID instrumentId) {
+		expectOne(jdbc.sql("INSERT INTO bot_run_instrument (run_id, simulation_id, instrument_id) VALUES (?, ?, ?)")
+			.params(runId, simulationId, instrumentId)
+			.update(), "insert bot run instrument");
+	}
+
+	@Override
+	public void insertBotAssignment(UUID runId, UUID accountId, String strategy) {
+		expectOne(jdbc.sql("""
+				INSERT INTO bot_assignment (run_id, account_id, account_kind, strategy) VALUES (?, ?, 'BOT', ?)""")
+			.params(runId, accountId, strategy)
+			.update(), "insert bot assignment");
+	}
+
+	@Override
+	public void requestBotRunStop(UUID runId, Instant at) {
+		expectOne(jdbc.sql("""
+				UPDATE bot_run SET desired_state = 'STOPPED', stop_requested_at = ?
+				WHERE id = ? AND desired_state = 'RUNNING'""")
+			.params(Timestamp.from(at), runId)
+			.update(), "request bot run stop");
 	}
 
 	@Override

@@ -136,6 +136,16 @@ public final class TradingEngine {
 		return writer.submit(() -> processBots(key, command));
 	}
 
+	/** Starts a bot run while the market is open or halted; one run runs at a time. */
+	public CompletableFuture<BotRunResult> startBotRun(CommandKey key, StartBotRun command) {
+		return writer.submit(() -> processStartRun(key, command));
+	}
+
+	/** Asks a running bot run to stop. */
+	public CompletableFuture<BotRunResult> stopBotRun(CommandKey key, StopBotRun command) {
+		return writer.submit(() -> processStopRun(key, command));
+	}
+
 	/** A snapshot of one side of a book, read on the writer thread so it never sees a half-applied plan. */
 	public CompletableFuture<List<DepthLevel>> depth(UUID instrumentId, Side side) {
 		return writer.submit(() -> books.get(instrumentId).depth(side, Integer.MAX_VALUE));
@@ -351,6 +361,116 @@ public final class TradingEngine {
 				population + command.count(), sequence));
 	}
 
+	private BotRunResult processStartRun(CommandKey key, StartBotRun command) {
+		if (simulationId == null) {
+			return new BotRunResult(BotRunResult.Status.NO_MARKET, null, 0, 0);
+		}
+		try {
+			return transactions.inTransaction(() -> startRunInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+	}
+
+	/**
+	 * A run whose time is up still reads as running until something replaces it; starting the next one records it as
+	 * stopped at its end. Bots are assigned in creation order, liquidity providers first.
+	 */
+	private BotRunResult startRunInTransaction(CommandKey key, StartBotRun command) {
+		Market market = store.lockMarket();
+		if (market.writerEpoch() != writerEpoch) {
+			throw new StaleWriterException();
+		}
+		Optional<TradingStore.StoredResult<BotRunResult>> prior = store.findResult(simulationId, key,
+				BotRunResult.class);
+		if (prior.isPresent()) {
+			return replay(key, prior.get());
+		}
+		long sequence = store.nextCommandSequence(simulationId);
+		Instant now = clock.instant();
+		BotRunResult.Status refusal = null;
+		Optional<TradingStore.RunningBotRun> running = store.runningBotRun(simulationId);
+		List<UUID> bots = store.botAccountIds(simulationId);
+		List<UUID> instruments = command.instrumentIds().isEmpty()
+				? store.instruments(simulationId).stream().map(TradingStore.Instrument::id).toList()
+				: command.instrumentIds();
+		if (!"OPEN".equals(market.state()) && !"HALTED".equals(market.state())) {
+			refusal = BotRunResult.Status.NOT_OPEN;
+		}
+		else if (running.isPresent() && (running.get().endsAt() == null || running.get().endsAt().isAfter(now))) {
+			refusal = BotRunResult.Status.RUN_ACTIVE;
+		}
+		else if (command.bots() > bots.size()) {
+			refusal = BotRunResult.Status.NOT_ENOUGH_BOTS;
+		}
+		else if (instruments.isEmpty() || !instruments.stream().allMatch(books::containsKey)) {
+			refusal = BotRunResult.Status.UNKNOWN_INSTRUMENT;
+		}
+		if (refusal != null) {
+			store.insertAudit(simulationId, command.actorUserId(), "BOT_RUN_START", "NOT_ALLOWED", key.idempotencyKey(),
+					sequence);
+			BotRunResult refused = new BotRunResult(refusal, null, 0, sequence);
+			return remember(key, refused.httpStatus(), refused);
+		}
+		running.ifPresent((expired) -> store.requestBotRunStop(expired.id(), expired.endsAt()));
+		store.insertBotRun(new TradingStore.NewBotRun(command.runId(), simulationId, command.seed(),
+				command.commandsPerSecondHundredths(), command.maxOrderQuantity(), command.maxPosition(),
+				command.actorUserId(), now, sequence, command.duration() == null ? null : now.plus(command.duration())));
+		for (UUID instrument : instruments) {
+			store.insertBotRunInstrument(command.runId(), simulationId, instrument);
+		}
+		int next = 0;
+		for (int i = 0; i < command.marketMakers(); i++) {
+			store.insertBotAssignment(command.runId(), bots.get(next++), "MARKET_MAKER");
+		}
+		for (int i = 0; i < command.noise(); i++) {
+			store.insertBotAssignment(command.runId(), bots.get(next++), "NOISE");
+		}
+		for (int i = 0; i < command.momentum(); i++) {
+			store.insertBotAssignment(command.runId(), bots.get(next++), "MOMENTUM");
+		}
+		store.insertAudit(simulationId, command.actorUserId(), "BOT_RUN_START", "APPLIED", key.idempotencyKey(),
+				sequence);
+		BotRunResult started = new BotRunResult(BotRunResult.Status.STARTED, command.runId(), command.bots(), sequence);
+		return remember(key, started.httpStatus(), started);
+	}
+
+	private BotRunResult processStopRun(CommandKey key, StopBotRun command) {
+		if (simulationId == null) {
+			return new BotRunResult(BotRunResult.Status.NO_MARKET, null, 0, 0);
+		}
+		try {
+			return transactions.inTransaction(() -> stopRunInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+	}
+
+	private BotRunResult stopRunInTransaction(CommandKey key, StopBotRun command) {
+		Market market = store.lockMarket();
+		if (market.writerEpoch() != writerEpoch) {
+			throw new StaleWriterException();
+		}
+		Optional<TradingStore.StoredResult<BotRunResult>> prior = store.findResult(simulationId, key,
+				BotRunResult.class);
+		if (prior.isPresent()) {
+			return replay(key, prior.get());
+		}
+		long sequence = store.nextCommandSequence(simulationId);
+		Optional<String> state = store.botRunState(simulationId, command.runId());
+		BotRunResult.Status status = state.isEmpty() ? BotRunResult.Status.NOT_FOUND
+				: "RUNNING".equals(state.get()) ? BotRunResult.Status.STOPPED : BotRunResult.Status.NOT_RUNNING;
+		if (status == BotRunResult.Status.STOPPED) {
+			store.requestBotRunStop(command.runId(), clock.instant());
+		}
+		store.insertAudit(simulationId, command.actorUserId(), "BOT_RUN_STOP",
+				status == BotRunResult.Status.STOPPED ? "APPLIED" : "NOT_ALLOWED", key.idempotencyKey(), sequence);
+		BotRunResult result = new BotRunResult(status, command.runId(), 0, sequence);
+		return remember(key, result.httpStatus(), result);
+	}
+
 	private MarketTransition processControl(CommandKey key, MarketControl command) {
 		if (simulationId == null) {
 			return MarketTransition.notSetUp();
@@ -557,6 +677,7 @@ public final class TradingEngine {
 			case InstrumentResult instrument -> instrument.commandSequence();
 			case AccountResult account -> account.commandSequence();
 			case BotsResult bots -> bots.commandSequence();
+			case BotRunResult run -> run.commandSequence();
 			default -> throw new IllegalArgumentException("Not a command result: " + result);
 		};
 		store.insertResult(simulationId, key, httpStatus, result, sequence);

@@ -279,6 +279,50 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/bot-runs": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** The newest bot runs with their configuration, worker and activity. Operator only. */
+        readonly get: operations["listBotRuns"];
+        readonly put?: never;
+        /**
+         * Start a bot run while the market is open or halted. One run runs at a time.
+         * @description Operator only, with an idempotency key; sequenced on the writer and audited. Bot accounts are assigned in
+         *     creation order: market makers first, then noise, then momentum. Without a seed one is chosen; without
+         *     instrumentIds the bots trade every listed instrument; without durationMinutes the run lasts until stopped.
+         */
+        readonly post: operations["startBotRun"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/bot-runs/{runId}/stop": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Ask a running bot run to stop.
+         * @description Operator only, with an idempotency key; sequenced and audited. The worker stops placing orders, settles
+         *     what is in flight and cancels its quotes, then confirms; until then the run shows STOPPING.
+         */
+        readonly post: operations["stopBotRun"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/market/open": {
         readonly parameters: {
             readonly query?: never;
@@ -697,6 +741,80 @@ export interface components {
             /** @description Bots in the market after this command. */
             readonly population: number;
             readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly BotRunRequest: {
+            readonly marketMakers?: number;
+            readonly noise?: number;
+            readonly momentum?: number;
+            /** Format: int64 */
+            readonly seed?: number;
+            /** @description Trading commands per second across all the run's bots, from 0.01 to 200.00. */
+            readonly commandsPerSecond: string;
+            /** @default 10 */
+            readonly maxOrderQuantity: number;
+            /** @default 100 */
+            readonly maxPosition: number;
+            readonly durationMinutes?: number;
+            readonly instrumentIds?: readonly components["schemas"]["Uuid"][];
+        };
+        readonly BotRunStarted: {
+            readonly runId: components["schemas"]["Uuid"];
+            readonly bots: number;
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly BotRunStopping: {
+            readonly runId: components["schemas"]["Uuid"];
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly BotRunList: {
+            readonly runs: readonly components["schemas"]["BotRun"][];
+        };
+        readonly BotRun: {
+            readonly runId: components["schemas"]["Uuid"];
+            /**
+             * @description STARTING before a worker has taken it; RUNNING while a worker holds a live lease; STALE when the lease
+             *     ran out while it should run; STOPPING until the worker confirms; then STOPPED.
+             * @enum {string}
+             */
+            readonly status: "STARTING" | "RUNNING" | "STALE" | "STOPPING" | "STOPPED";
+            /** @enum {string} */
+            readonly desiredState: "RUNNING" | "STOPPED";
+            readonly startedAt: components["schemas"]["Timestamp"];
+            readonly endsAt: components["schemas"]["Timestamp"] | null;
+            readonly stopRequestedAt: components["schemas"]["Timestamp"] | null;
+            readonly stoppedAt: components["schemas"]["Timestamp"] | null;
+            readonly config: {
+                readonly seed: components["schemas"]["Sequence"];
+                readonly commandsPerSecond: string;
+                readonly maxOrderQuantity: number;
+                readonly maxPosition: number;
+                readonly instruments: readonly {
+                    readonly instrumentId: components["schemas"]["Uuid"];
+                    readonly symbol: string;
+                }[];
+                readonly strategies: {
+                    readonly marketMakers: number;
+                    readonly noise: number;
+                    readonly momentum: number;
+                };
+            };
+            readonly worker: {
+                readonly workerId: string | null;
+                readonly heartbeatAt: components["schemas"]["Timestamp"] | null;
+                readonly leaseExpiresAt: components["schemas"]["Timestamp"] | null;
+            };
+            readonly activity: {
+                /** Format: int64 */
+                readonly placed: number;
+                /** Format: int64 */
+                readonly canceled: number;
+                /** Format: int64 */
+                readonly rejected: number;
+                /** Format: int64 */
+                readonly errors: number;
+                readonly inFlight: number;
+                readonly stopFailures: number;
+            };
         };
         readonly AccountPage: {
             readonly accounts: readonly components["schemas"]["AccountSummary"][];
@@ -1634,6 +1752,165 @@ export interface operations {
             };
             /** @description UNKNOWN_INSTRUMENT (committed and audited). */
             readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly listBotRuns: {
+        readonly parameters: {
+            readonly query?: {
+                readonly limit?: number;
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The runs, newest first. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BotRunList"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly startBotRun: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["BotRunRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Started. */
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BotRunStarted"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description MARKET_NOT_OPEN or RUN_ACTIVE (committed and audited once a market exists), or IDEMPOTENCY_CONFLICT. */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description NOT_ENOUGH_BOTS or UNKNOWN_INSTRUMENT (committed and audited). */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly stopBotRun: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path: {
+                readonly runId: components["schemas"]["Uuid"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Stop requested. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BotRunStopping"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description RUN_NOT_FOUND (committed and audited). */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description RUN_NOT_RUNNING or MARKET_NOT_OPEN, or IDEMPOTENCY_CONFLICT. */
+            readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;
                 };
