@@ -1,6 +1,6 @@
 """One shared view of the public market, polled once per interval for every bot."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from uuid import UUID
 
@@ -50,6 +50,15 @@ class MarketView:
         """New exposure only while the market is open and the data is live and recent."""
         return (
             self.open and self.live and bool(self.instruments) and now - self.fetched_at <= max_age
+        )
+
+    def only(self, instrument_ids: frozenset[UUID]) -> MarketView:
+        """The same view, limited to a run's instruments."""
+        return replace(
+            self,
+            instruments=tuple(
+                item for item in self.instruments if item.instrument_id in instrument_ids
+            ),
         )
 
 

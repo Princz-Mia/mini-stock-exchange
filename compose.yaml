@@ -209,9 +209,8 @@ services:
       MSE_EXECUTION_URL: http://execution-service:8080
       MSE_MARKET_DATA_URL: http://market-data-service:8080
       MSE_BOT_TOKEN_DIRECTORY: /run/mse/bot-tokens
-      # Trading commands per second across all bots; zero keeps them idle.
-      MSE_BOT_RATE: ${MSE_BOT_RATE:-0}
-      MSE_BOT_SEED: ${MSE_BOT_SEED:-1}
+      # The control credential for following bot runs; without it the bots stay idle.
+      MSE_SIMULATOR_TOKEN: ${MSE_SIMULATOR_TOKEN:-}
     volumes:
       - bot-tokens:/run/mse/bot-tokens:ro
     healthcheck:

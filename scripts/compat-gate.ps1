@@ -327,15 +327,16 @@ try {
     }
 
     Step 'Bots: the simulator trades and the tape shows it' {
-        # The bots provisioned for the browser test trade once the simulator has a rate, and their trades reach
-        # the public market data. The simulator goes back to idle afterwards.
-        $env:MSE_BOT_RATE = '4'
-        try {
-            Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '120', 'simulator'))
-        }
-        finally {
-            Remove-Item Env:MSE_BOT_RATE -ErrorAction SilentlyContinue
-        }
+        # The operator starts a run for the bots the browser test provisioned. The simulator follows it, their trades
+        # reach the public market data, and a stop ends with the stop confirmed and no bot order left open.
+        $base = "http://localhost:$webPort/api/v1"
+        $csrf = Invoke-RestMethod "$base/auth/csrf" -SessionVariable operator
+        $body = @{ username = 'operator'; password = $operatorPassword } | ConvertTo-Json
+        [void](Invoke-RestMethod "$base/auth/login" -Method Post -WebSession $operator -ContentType 'application/json' -Body $body -Headers @{ $csrf.headerName = $csrf.token })
+        $csrf = Invoke-RestMethod "$base/auth/csrf" -WebSession $operator
+        $headers = @{ $csrf.headerName = $csrf.token; 'Idempotency-Key' = [guid]::NewGuid().ToString() }
+        $started = Invoke-RestMethod "$base/admin/bot-runs" -Method Post -WebSession $operator -ContentType 'application/json' -Headers $headers -Body '{"noise":2,"seed":7,"commandsPerSecond":"4.00"}'
+        Assert-Match 'bot run started' '^[0-9a-f-]{36}$' $started.runId
         $sequence = 0
         foreach ($attempt in 1..60) {
             $result = Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' "SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id JOIN account s ON s.id = t.seller_account_id WHERE b.kind = 'BOT' OR s.kind = 'BOT'"
@@ -351,7 +352,19 @@ try {
             Start-Sleep -Seconds 2
         }
         if (-not ($published -ge $sequence)) { throw "public tape at '$published', bot trade at $sequence" }
-        Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '120', 'simulator'))
+        $headers = @{ $csrf.headerName = $csrf.token; 'Idempotency-Key' = [guid]::NewGuid().ToString() }
+        [void](Invoke-RestMethod "$base/admin/bot-runs/$($started.runId)/stop" -Method Post -WebSession $operator -Headers $headers)
+        $status = ''
+        foreach ($attempt in 1..30) {
+            $status = (Invoke-RestMethod "$base/admin/bot-runs?limit=1" -WebSession $operator).runs[0].status
+            if ($status -eq 'STOPPED') { break }
+            Start-Sleep -Seconds 2
+        }
+        Assert-Equal 'run status after the stop' 'STOPPED' $status
+        $confirmed = Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' "SELECT stopped_at IS NOT NULL AND placed > 0 FROM bot_run WHERE id = '$($started.runId)'"
+        Assert-Equal 'the worker confirmed it, after placing orders' 't' $confirmed.Output
+        $open = Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' "SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id WHERE a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')"
+        Assert-Equal 'bot orders left open' '0' $open.Output
     }
 
     Step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' {
