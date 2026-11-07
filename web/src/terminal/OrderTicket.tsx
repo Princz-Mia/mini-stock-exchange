@@ -81,6 +81,12 @@ function OutcomeMessage({ outcome }: { outcome: Outcome }) {
           The exchange is busy and did not take the order. Retry sends the same order once.
         </p>
       );
+    case 'limited':
+      return (
+        <p role="alert" className="outcome outcome-pending">
+          Too many orders in a moment, so this one was not placed. Wait a second; Retry sends the same order once.
+        </p>
+      );
     case 'unknown':
       return (
         <p role="alert" className="outcome outcome-pending">

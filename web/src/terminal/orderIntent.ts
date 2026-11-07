@@ -5,7 +5,7 @@ import type { FieldError, Order, OrderRequest } from '../api/types';
 
 /**
  * What became of one order the user meant to place. Only `accepted` and `rejected` are committed facts; `busy`,
- * `unknown` and `notCommitted` are unresolved, and the next attempt reuses the same key and the same request.
+ * `limited`, `unknown` and `notCommitted` are unresolved, and the next attempt reuses the same key and the same request.
  */
 export type Outcome =
   | { kind: 'idle' }
@@ -14,11 +14,14 @@ export type Outcome =
   | { kind: 'rejected'; code: string }
   | { kind: 'invalid'; errors: readonly FieldError[]; code: string }
   | { kind: 'busy' }
+  | { kind: 'limited' }
   | { kind: 'unknown' }
   | { kind: 'notCommitted' };
 
 export function isUnresolved(outcome: Outcome): boolean {
-  return outcome.kind === 'busy' || outcome.kind === 'unknown' || outcome.kind === 'notCommitted';
+  return (
+    outcome.kind === 'busy' || outcome.kind === 'limited' || outcome.kind === 'unknown' || outcome.kind === 'notCommitted'
+  );
 }
 
 interface Pending {
@@ -97,6 +100,8 @@ export function useOrderIntent(options: { lookupDelay?: number; newKey?: () => s
           settle({ kind: 'invalid', errors: error.problem?.errors ?? [], code: error.code ?? 'VALIDATION_FAILED' });
         } else if (error.status === 503 && error.code === 'EXCHANGE_BUSY') {
           settle({ kind: 'busy' });
+        } else if (error.status === 429) {
+          settle({ kind: 'limited' });
         } else if (error.status === 504) {
           await resolveByKey(attempt.key);
         } else {

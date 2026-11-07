@@ -29,8 +29,8 @@ import com.mia_princz.mse.execution.trading.application.TradingEngine;
 
 /**
  * Order commands and reads for the logged-in trader. The account always comes from the session, never from the
- * request. A first answer and every replay of the same key map to the same status and body. A bot's commands meet
- * its rate limit first, before anything else is checked or queued.
+ * request. A first answer and every replay of the same key map to the same status and body. Once the account is
+ * known, a command meets its rate limit before anything else is checked or queued.
  */
 @RestController
 @RequestMapping("/api/v1")
@@ -49,11 +49,11 @@ class OrderController {
 
 	private final OutboxAdmission admission;
 
-	private final BotRateLimit rateLimit;
+	private final AccountRateLimit rateLimit;
 
 	private final Duration timeout;
 
-	OrderController(TradingEngine engine, TradingQueries queries, OutboxAdmission admission, BotRateLimit rateLimit,
+	OrderController(TradingEngine engine, TradingQueries queries, OutboxAdmission admission, AccountRateLimit rateLimit,
 			@Value("${mse.trading.command-timeout:5s}") Duration timeout) {
 		this.engine = engine;
 		this.queries = queries;
@@ -72,8 +72,8 @@ class OrderController {
 	@PostMapping("/orders")
 	ResponseEntity<?> place(@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader,
 			@RequestBody OrderBody body, Authentication authentication) {
-		rateLimit.check(authentication);
 		TradingQueries.Trader trader = trader(authentication);
+		rateLimit.check(authentication, trader.accountId());
 		UUID key = CommandCalls.idempotencyKey(keyHeader);
 		OrderBody.Valid order = body.validate();
 		if (!admission.admitsNewOrders()) {
@@ -92,8 +92,8 @@ class OrderController {
 	@PostMapping("/orders/{orderId}/cancel")
 	ResponseEntity<?> cancel(@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader,
 			@PathVariable UUID orderId, Authentication authentication) {
-		rateLimit.check(authentication);
 		TradingQueries.Trader trader = trader(authentication);
+		rateLimit.check(authentication, trader.accountId());
 		UUID key = CommandCalls.idempotencyKey(keyHeader);
 		CommandKey commandKey = new CommandKey(trader.userId(), key, CANCEL_ROUTE,
 				CommandCalls.sha256(orderId.toString()));

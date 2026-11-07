@@ -71,7 +71,7 @@ On Linux or macOS, run `./scripts/init-env.sh` instead of the first command. The
 
 The simulator's bots trade only during a bot run. Provision bots as the operator during setup and open the market, then start a run with `POST /api/v1/admin/bot-runs`. The run sets how many bots follow each strategy, the seed, the command rate across all its bots, order and position limits, the instruments and an optional duration. `POST /api/v1/admin/bot-runs/{runId}/stop` ends it: the bots stop trading, their open orders are cancelled, and the run shows `STOPPED` once the simulator confirms. One run runs at a time.
 
-Each bot account may send two trading commands (places and cancels) a second, with up to two at once; set `mse.trading.bot-commands-per-second` to change it. A command over the limit is answered `429 RATE_LIMITED` with `Retry-After` before it is queued, so sending it again under the same key is safe.
+Each trader's account may send ten trading commands (places and cancels) a second, and each bot account two, with up to that many at once; `mse.trading.human-commands-per-second` and `mse.trading.bot-commands-per-second` change them. A command over the limit is answered `429 RATE_LIMITED` with `Retry-After` before it is queued, so sending it again under the same key is safe.
 
 ## Develop
 

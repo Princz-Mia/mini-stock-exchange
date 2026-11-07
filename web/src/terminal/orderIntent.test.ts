@@ -91,6 +91,29 @@ describe('order intent', () => {
     expect(result.current.outcome.kind).toBe('accepted');
   });
 
+  it('retries a rate-limited refusal with the same key and the same request', async () => {
+    let limited = true;
+    const fake = server().on('POST /api/v1/orders', () =>
+      limited ? { status: 429, problem: { status: 429, code: 'RATE_LIMITED' } } : { status: 201, json: ORDER },
+    );
+    const newKey = keys();
+    const { result } = renderHook(() => useOrderIntent({ newKey }));
+
+    await act(() => result.current.submit(BUY));
+    expect(result.current.outcome.kind).toBe('limited');
+    expect(result.current.pendingRequest()).toEqual(BUY);
+    limited = false;
+    await act(() => result.current.submit({ ...BUY, quantity: 99 }));
+
+    const sent = placements(fake.requests);
+    expect(sent.map((request) => request.headers['Idempotency-Key'])).toEqual([
+      '00000000-0000-0000-0000-000000000001',
+      '00000000-0000-0000-0000-000000000001',
+    ]);
+    expect(sent[1]?.body).toEqual(BUY);
+    expect(result.current.outcome.kind).toBe('accepted');
+  });
+
   it('resolves a timeout by looking the key up, without sending the order again', async () => {
     const fake = server()
       .on('POST /api/v1/orders', { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN' } })

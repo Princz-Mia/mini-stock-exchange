@@ -45,7 +45,9 @@ import com.mia_princz.mse.execution.trading.application.TradingEngine;
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT,
 		properties = { "mse.test.database=order-api", "mse.dev-users.trader-password=" + OrderApiIT.PASSWORD,
-				"mse.dev-users.operator-password=" + OrderApiIT.OPERATOR_PASSWORD })
+				"mse.dev-users.operator-password=" + OrderApiIT.OPERATOR_PASSWORD,
+				// These tests share one trader and send commands back to back. AccountRateLimitIT covers pacing.
+				"mse.trading.human-commands-per-second=1000" })
 class OrderApiIT {
 
 	static final String PASSWORD = "test-trader-password";
