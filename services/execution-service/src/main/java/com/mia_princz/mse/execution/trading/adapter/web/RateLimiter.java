@@ -36,9 +36,10 @@ final class RateLimiter {
 
 	/** Takes one command for the key: zero if it may go now, otherwise the nanoseconds until it may. */
 	long acquire(UUID key) {
-		long now = nanoTime.getAsLong();
 		long[] wait = { 0 };
 		due.compute(key, (k, next) -> {
+			// Read inside the update: a time read before it could be older than the one another command just used.
+			long now = nanoTime.getAsLong();
 			long start = (next == null || next - now < 0) ? now : next;
 			if (start - now > tolerance) {
 				wait[0] = start - tolerance - now;
