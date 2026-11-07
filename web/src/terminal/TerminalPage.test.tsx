@@ -229,6 +229,16 @@ describe('terminal', () => {
     expect(screen.getByLabelText('Shares')).toBeDisabled();
   });
 
+  it('says when orders come too fast, and offers to retry the very same order', async () => {
+    market().on('POST /api/v1/orders', { status: 429, problem: { status: 429, code: 'RATE_LIMITED' } });
+    renderTerminal();
+    fireEvent.click(await screen.findByRole('button', { name: 'Buy NOVA' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Too many orders in a moment');
+    expect(screen.getByRole('button', { name: 'Retry the same order' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Shares')).toBeDisabled();
+  });
+
   it('labels a protected market order and shows no spend estimate for a sale', async () => {
     market();
     renderTerminal();
@@ -252,5 +262,32 @@ describe('terminal', () => {
     expect(await screen.findByText('That order was already filled.')).toBeInTheDocument();
     const cancel = server.requests.find((request) => request.url.endsWith('/cancel'));
     expect(cancel?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('after too many commands, sends the same cancel again under the same key', async () => {
+    let limited = true;
+    const server = market().on('POST /api/v1/orders/00000000-0000-0000-0000-0000000000cc/cancel', () =>
+      limited
+        ? { status: 429, problem: { status: 429, code: 'RATE_LIMITED' } }
+        : {
+            status: 200,
+            json: {
+              orderId: '00000000-0000-0000-0000-0000000000cc',
+              status: 'CANCELED',
+              canceledQuantity: 2,
+              commandSequence: '12',
+            },
+          },
+    );
+    renderTerminal();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Cancel sell NOVA at 105.00' }));
+    expect(await screen.findByText(/Too many orders and cancels in a moment/)).toBeInTheDocument();
+    limited = false;
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel sell NOVA at 105.00' }));
+
+    await waitFor(() => expect(server.requests.filter((request) => request.url.endsWith('/cancel'))).toHaveLength(2));
+    const [first, second] = server.requests.filter((request) => request.url.endsWith('/cancel'));
+    expect(second?.headers['Idempotency-Key']).toBe(first?.headers['Idempotency-Key']);
   });
 });

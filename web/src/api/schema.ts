@@ -1160,8 +1160,8 @@ export interface components {
             };
         };
         /**
-         * @description RATE_LIMITED: a bot account sent more trading commands per second than it may. Nothing was queued, so the
-         *     same key is safe to send again after Retry-After.
+         * @description RATE_LIMITED: the account sent more trading commands per second than it may (10 for a person, 2 for a
+         *     bot, by default). Nothing was queued, so the same key is safe to send again after Retry-After.
          */
         readonly RateLimited: {
             headers: {

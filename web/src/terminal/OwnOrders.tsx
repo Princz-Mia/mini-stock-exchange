@@ -22,7 +22,8 @@ export function OwnOrders({ orders }: { orders: readonly OrderDetail[] }) {
       return api.cancelOrder(orderId, key);
     },
     onSettled: (_data, error, orderId) => {
-      const answered = error === null || (error instanceof ApiError && error.status !== 503 && error.status !== 504);
+      // A 429, 503 or 504 settled nothing, so the next press resends the same cancel under the same key.
+      const answered = error === null || (error instanceof ApiError && ![429, 503, 504].includes(error.status));
       if (answered) {
         keys.current.delete(orderId);
       }
@@ -38,7 +39,9 @@ export function OwnOrders({ orders }: { orders: readonly OrderDetail[] }) {
         <p role="alert" className="form-error">
           {cancel.error instanceof ApiError && cancel.error.code === 'ORDER_NOT_CANCELABLE'
             ? 'That order was already filled.'
-            : 'The cancel did not go through. Try again; it will not cancel twice.'}
+            : cancel.error instanceof ApiError && cancel.error.status === 429
+              ? 'Too many orders and cancels in a moment. Wait a second and try again; it will not cancel twice.'
+              : 'The cancel did not go through. Try again; it will not cancel twice.'}
         </p>
       )}
       {orders.length === 0 ? (

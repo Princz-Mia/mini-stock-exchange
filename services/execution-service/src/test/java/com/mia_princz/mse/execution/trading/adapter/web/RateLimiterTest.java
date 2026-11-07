@@ -3,12 +3,15 @@ package com.mia_princz.mse.execution.trading.adapter.web;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
 
@@ -75,6 +78,38 @@ class RateLimiterTest {
 		assertThat(clock.now).isNegative();
 		assertThat(limiter.acquire(bot)).isZero();
 		assertThat(limiter.acquire(bot)).isEqualTo(400 * MILLI);
+	}
+
+	/**
+	 * Two commands at once, where the first reads the clock and the second then runs in full before the first goes on.
+	 * The first must not be refused because the second's later time was used first. Correct code reads the clock while
+	 * holding the key, so there the second waits instead, and the hand-off below gives up after a moment.
+	 */
+	@Test
+	void aCommandThatReadTheClockFirstIsNotRefusedForIt() throws Exception {
+		AtomicLong ticks = new AtomicLong();
+		UUID key = UUID.randomUUID();
+		Thread first = Thread.currentThread();
+		AtomicReference<RateLimiter> limiter = new AtomicReference<>();
+		AtomicReference<Thread> second = new AtomicReference<>();
+		AtomicLong secondWait = new AtomicLong(-1);
+		limiter.set(new RateLimiter(2, () -> {
+			long now = ticks.incrementAndGet();
+			if (Thread.currentThread() == first && second.get() == null) {
+				second.set(Thread.ofPlatform().start(() -> secondWait.set(limiter.get().acquire(key))));
+				try {
+					second.get().join(Duration.ofMillis(300));
+				}
+				catch (InterruptedException ex) {
+					Thread.currentThread().interrupt();
+				}
+			}
+			return now;
+		}));
+
+		assertThat(limiter.get().acquire(key)).as("the first").isZero();
+		second.get().join();
+		assertThat(secondWait.get()).as("the second").isZero();
 	}
 
 	@Test

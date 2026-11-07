@@ -33,7 +33,7 @@ import com.mia_princz.mse.execution.trading.application.TradingEngine;
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT,
 		properties = { "mse.test.database=bot-token", "mse.dev-users.trader-password=" + BotTokenIT.PASSWORD,
 				"mse.dev-users.operator-password=" + BotTokenIT.PASSWORD,
-				// These tests are about credentials; one bot sends commands back to back. BotRateLimitIT covers pacing.
+				// These tests are about credentials; one bot sends commands back to back. AccountRateLimitIT covers pacing.
 				"mse.trading.bot-commands-per-second=1000" })
 class BotTokenIT {
 
