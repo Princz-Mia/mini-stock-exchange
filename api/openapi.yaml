@@ -155,6 +155,8 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '503':
           $ref: '#/components/responses/Unavailable'
         '504':
@@ -209,6 +211,8 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '429':
+          $ref: '#/components/responses/RateLimited'
         '503':
           $ref: '#/components/responses/Unavailable'
         '504':
@@ -922,6 +926,16 @@ components:
           schema: { $ref: '#/components/schemas/Problem' }
     Problem:
       description: A problem, with its code.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    RateLimited:
+      description: |
+        RATE_LIMITED: a bot account sent more trading commands per second than it may. Nothing was queued, so the
+        same key is safe to send again after Retry-After.
+      headers:
+        Retry-After:
+          schema: { type: integer }
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }

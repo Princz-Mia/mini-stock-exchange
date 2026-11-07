@@ -1159,6 +1159,19 @@ export interface components {
                 readonly "application/problem+json": components["schemas"]["Problem"];
             };
         };
+        /**
+         * @description RATE_LIMITED: a bot account sent more trading commands per second than it may. Nothing was queued, so the
+         *     same key is safe to send again after Retry-After.
+         */
+        readonly RateLimited: {
+            headers: {
+                readonly "Retry-After"?: number;
+                readonly [name: string]: unknown;
+            };
+            content: {
+                readonly "application/problem+json": components["schemas"]["Problem"];
+            };
+        };
         /** @description EXCHANGE_BUSY (not queued; retry with the same key), or TRADING_UNAVAILABLE. Has Retry-After. */
         readonly Unavailable: {
             headers: {
@@ -1397,6 +1410,7 @@ export interface operations {
                     readonly "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            readonly 429: components["responses"]["RateLimited"];
             readonly 503: components["responses"]["Unavailable"];
             readonly 504: components["responses"]["OutcomeUnknown"];
         };
@@ -1488,6 +1502,7 @@ export interface operations {
                     readonly "application/problem+json": components["schemas"]["Problem"];
                 };
             };
+            readonly 429: components["responses"]["RateLimited"];
             readonly 503: components["responses"]["Unavailable"];
             readonly 504: components["responses"]["OutcomeUnknown"];
         };

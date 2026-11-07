@@ -41,7 +41,7 @@ final class ApiException extends RuntimeException {
 		return this;
 	}
 
-	/** How long a client should wait before retrying; sent as {@code Retry-After} with a 503. */
+	/** How long a client should wait before retrying; sent as {@code Retry-After} with a 429 or 503. */
 	ApiException retryAfter(int seconds) {
 		this.retryAfterSeconds = seconds;
 		return this;
