@@ -258,21 +258,26 @@ bot_trading() {
   # The simulator follows it, their trades reach the public market data, and a stop ends with the stop confirmed
   # and no bot order left open: the maker's resting quotes are cancelled.
   local base="http://localhost:$web_port/api/v1" jar="$run_dir/operator-cookies.txt" run status open
-  local sequence=0 published=0 i
+  local sequence=0 published=0 before i
+  local bot_trades="SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id JOIN account s ON s.id = t.seller_account_id WHERE b.kind = 'BOT' OR s.kind = 'BOT'"
   csrf() { curl -s -b "$jar" -c "$jar" "$base/auth/csrf" | sed -E 's/.*"token":"([^"]+)".*/\1/'; }
   curl -s -b "$jar" -c "$jar" -H "X-CSRF-TOKEN: $(csrf)" -H 'Content-Type: application/json' \
     -d "{\"username\":\"operator\",\"password\":\"$operator_password\"}" "$base/auth/login" >> "$log" 2>&1
+  # The browser test's run left bot trades behind; only a newer one shows this run trading.
+  before=$(psql_as execution_owner execution_db "$bot_trades" | tr -d '\r')
+  assert_match 'bot trades before the run' '^[0-9]+$' "$before" || return 1
   run=$(curl -s -b "$jar" -H "X-CSRF-TOKEN: $(csrf)" -H 'Content-Type: application/json' -H "Idempotency-Key: $(uuid)" \
     -d '{"marketMakers":1,"noise":1,"seed":7,"commandsPerSecond":"4.00"}' "$base/admin/bot-runs")
   note "start: $run"
   run=$(printf '%s' "$run" | sed -nE 's/.*"runId":"([0-9a-f-]{36})".*/\1/p')
   assert_match 'bot run started' '^[0-9a-f-]{36}$' "$run" || return 1
   for i in $(seq 1 60); do
-    sequence=$(psql_as execution_owner execution_db "SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id JOIN account s ON s.id = t.seller_account_id WHERE b.kind = 'BOT' OR s.kind = 'BOT'" | tr -d '\r')
-    [ "${sequence:-0}" -gt 0 ] 2>/dev/null && break
+    sequence=$(psql_as execution_owner execution_db "$bot_trades" | tr -d '\r')
+    [ "${sequence:-0}" -gt "$before" ] 2>/dev/null && break
     sleep 2
   done
-  assert_match 'latest bot trade sequence' '^[1-9][0-9]*$' "$sequence" || return 1
+  assert_match 'latest bot trade sequence' '^[1-9][0-9]*$' "$sequence" &&
+    [ "$sequence" -gt "$before" ] || { fail "no bot trade after $before; latest $sequence"; return 1; }
   for i in $(seq 1 30); do
     published=$(curl -s -m 10 "http://localhost:$web_port/api/v1/instruments" |
       grep -o '"lastTradeSequence":"[0-9]*"' | grep -o '[0-9]*' | sort -n | tail -1)
