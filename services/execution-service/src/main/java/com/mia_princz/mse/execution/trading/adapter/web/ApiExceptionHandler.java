@@ -14,7 +14,7 @@ class ApiExceptionHandler {
 	@ExceptionHandler(ApiException.class)
 	ResponseEntity<ProblemDetail> problem(ApiException ex) {
 		ResponseEntity.BodyBuilder response = ResponseEntity.status(ex.status());
-		if (ex.status() == HttpStatus.SERVICE_UNAVAILABLE) {
+		if (ex.status() == HttpStatus.SERVICE_UNAVAILABLE || ex.status() == HttpStatus.TOO_MANY_REQUESTS) {
 			response.header("Retry-After", Integer.toString(ex.retryAfterSeconds()));
 		}
 		return response.body(ex.toProblem());

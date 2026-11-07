@@ -26,7 +26,7 @@ same public and authenticated API as people use.
   answer, every open order of the run's bots is cancelled (each one that can't be is reported), and the
   worker confirms the stop. A worker that stops without that leaves the run to the next one.
 - **Safety:** a command keeps its idempotency key until the exchange answers it finally, so a retry after a busy,
-  timed-out or lost answer can't apply twice. New orders pause while the market isn't open or market data
+  timed-out, rate-limited or lost answer can't apply twice. New orders pause while the market isn't open or market data
   isn't live and recent.
 
 ```powershell
