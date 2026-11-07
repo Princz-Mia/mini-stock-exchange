@@ -295,7 +295,7 @@ try {
         Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '180', 'execution-service'))
     }
 
-    Step 'Browser: trading, phone layout, halt and resume' {
+    Step 'Browser: trading, phone layout, halt, resume and bot runs' {
         # Users have no API, so the counterparty's login is inserted; the test sets up the market as the operator.
         $counterpartyPassword = New-Secret
         Invoke-Checked 'docker' ($compose + @('cp', 'web/e2e/seed-users.sql', 'postgres:/tmp/seed-users.sql'))
@@ -335,16 +335,22 @@ try {
         $body = @{ username = 'operator'; password = $operatorPassword } | ConvertTo-Json
         [void](Invoke-RestMethod "$base/auth/login" -Method Post -WebSession $operator -ContentType 'application/json' -Body $body -Headers @{ $csrf.headerName = $csrf.token })
         $csrf = Invoke-RestMethod "$base/auth/csrf" -WebSession $operator
+        # The browser test's run left bot trades behind; only a newer one shows this run trading.
+        $botTrades = "SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id JOIN account s ON s.id = t.seller_account_id WHERE b.kind = 'BOT' OR s.kind = 'BOT'"
+        $before = Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' $botTrades
+        Assert-Match 'bot trades before the run' '^[0-9]+$' $before.Output
+        $before = [long]$before.Output
         $headers = @{ $csrf.headerName = $csrf.token; 'Idempotency-Key' = [guid]::NewGuid().ToString() }
         $started = Invoke-RestMethod "$base/admin/bot-runs" -Method Post -WebSession $operator -ContentType 'application/json' -Headers $headers -Body '{"marketMakers":1,"noise":1,"seed":7,"commandsPerSecond":"4.00"}'
         Assert-Match 'bot run started' '^[0-9a-f-]{36}$' $started.runId
         $sequence = 0
         foreach ($attempt in 1..60) {
-            $result = Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' "SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id JOIN account s ON s.id = t.seller_account_id WHERE b.kind = 'BOT' OR s.kind = 'BOT'"
-            if ($result.Code -eq 0 -and [long]$result.Output -gt 0) { $sequence = [long]$result.Output; break }
+            $result = Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' $botTrades
+            if ($result.Code -eq 0 -and [long]$result.Output -gt $before) { $sequence = [long]$result.Output; break }
             Start-Sleep -Seconds 2
         }
         Assert-Match 'latest bot trade sequence' '^[1-9][0-9]*$' $sequence
+        if (-not ($sequence -gt $before)) { throw "no bot trade after $before; latest $sequence" }
         $published = 0
         foreach ($attempt in 1..30) {
             $listing = (& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/instruments" | Out-String)
