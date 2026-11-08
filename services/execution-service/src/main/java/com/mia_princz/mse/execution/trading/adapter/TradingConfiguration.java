@@ -5,6 +5,8 @@ import java.time.Clock;
 
 import javax.sql.DataSource;
 
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -33,8 +35,16 @@ class TradingConfiguration {
 	}
 
 	@Bean(destroyMethod = "close")
-	CommandWriter commandWriter(@Value("${mse.trading.queue-capacity:256}") int capacity) {
-		return new CommandWriter("trading-writer", capacity);
+	CommandWriter commandWriter(@Value("${mse.trading.queue-capacity:256}") int capacity, MeterRegistry meters) {
+		CommandWriter writer = new CommandWriter("trading-writer", capacity);
+		// Admitted commands not yet taken by the writer; growing under steady load means the writer is falling behind.
+		Gauge.builder("mse.writer.queue.depth", writer, CommandWriter::queueDepth)
+			.description("Commands admitted and waiting for the writer")
+			.register(meters);
+		Gauge.builder("mse.writer.queue.capacity", () -> capacity)
+			.description("Commands the writer queue holds before refusing more")
+			.register(meters);
+		return writer;
 	}
 
 	/** Plaintext bot tokens go to the simulator's secret directory, once, and nowhere else. */

@@ -51,14 +51,17 @@ class OrderController {
 
 	private final AccountRateLimit rateLimit;
 
+	private final CommandMetrics metrics;
+
 	private final Duration timeout;
 
 	OrderController(TradingEngine engine, TradingQueries queries, OutboxAdmission admission, AccountRateLimit rateLimit,
-			@Value("${mse.trading.command-timeout:5s}") Duration timeout) {
+			CommandMetrics metrics, @Value("${mse.trading.command-timeout:5s}") Duration timeout) {
 		this.engine = engine;
 		this.queries = queries;
 		this.admission = admission;
 		this.rateLimit = rateLimit;
+		this.metrics = metrics;
 		this.timeout = timeout;
 	}
 
@@ -77,6 +80,7 @@ class OrderController {
 		UUID key = CommandCalls.idempotencyKey(keyHeader);
 		OrderBody.Valid order = body.validate();
 		if (!admission.admitsNewOrders()) {
+			metrics.refused("place", "backlog");
 			// Not queued, like a full writer queue, so retrying with the same key later is safe.
 			throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "EXCHANGE_BUSY",
 					"New orders are paused until market data publication catches up; cancels still work")
@@ -86,7 +90,8 @@ class OrderController {
 		CommandKey commandKey = new CommandKey(trader.userId(), key, PLACE_ROUTE, order.hash());
 		PlaceOrder command = new PlaceOrder(UUID.randomUUID(), trader.accountId(), order.instrumentId(), order.side(),
 				order.type(), order.bound(), order.quantity());
-		return placement(CommandCalls.await(key, timeout, () -> engine.place(commandKey, command)));
+		return placement(
+				CommandCalls.await(key, timeout, metrics.timed("place", () -> engine.place(commandKey, command))));
 	}
 
 	@PostMapping("/orders/{orderId}/cancel")
@@ -97,8 +102,8 @@ class OrderController {
 		UUID key = CommandCalls.idempotencyKey(keyHeader);
 		CommandKey commandKey = new CommandKey(trader.userId(), key, CANCEL_ROUTE,
 				CommandCalls.sha256(orderId.toString()));
-		return cancellation(CommandCalls.await(key, timeout,
-				() -> engine.cancel(commandKey, new CancelOrder(orderId, trader.accountId()))));
+		return cancellation(CommandCalls.await(key, timeout, metrics.timed("cancel",
+				() -> engine.cancel(commandKey, new CancelOrder(orderId, trader.accountId())))));
 	}
 
 	record OrderPage(List<TradingQueries.OrderView> orders, String nextCursor) {

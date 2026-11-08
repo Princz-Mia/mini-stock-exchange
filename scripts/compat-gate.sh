@@ -384,7 +384,14 @@ bot_trading() {
   assert_equal 'run status after the stop' '"status":"STOPPED"' "$status" &&
     assert_equal 'the worker confirmed it, after placing orders' 't' \
       "$(psql_as execution_owner execution_db "SELECT stopped_at IS NOT NULL AND placed > 0 FROM bot_run WHERE id = '$run'" | tr -d '\r')" &&
-    assert_equal 'bot orders left open' 0 "$(psql_as execution_owner execution_db "$open" | tr -d '\r')"
+    assert_equal 'bot orders left open' 0 "$(psql_as execution_owner execution_db "$open" | tr -d '\r')" || return 1
+  # The bots' commands were timed: Prometheus has a bucket edge at each latency budget, and the queue's size.
+  local scrape
+  scrape=$(compose exec -T execution-service curl -fsS http://localhost:8080/actuator/prometheus 2>&1 |
+    grep -E '^mse_(commands_seconds_bucket\{command="place",outcome="committed",le="0\.(15|5)"\}|writer_queue_capacity) ')
+  assert_match 'place latency bucket at 150 ms' 'le="0\.15"\} [1-9]' "$scrape" &&
+    assert_match 'place latency bucket at 500 ms' 'le="0\.5"\} [1-9]' "$scrape" &&
+    assert_match 'writer queue capacity' 'mse_writer_queue_capacity 256' "$scrape"
 }
 
 projected_candles() {

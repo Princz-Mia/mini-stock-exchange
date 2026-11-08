@@ -14,6 +14,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
@@ -83,6 +85,9 @@ class OrderApiIT {
 	@Autowired
 	KafkaConnectionDetails kafka;
 
+	@Autowired
+	MeterRegistry meters;
+
 	private UUID instrument;
 
 	private TestBrowser trader;
@@ -97,6 +102,26 @@ class OrderApiIT {
 		}
 		instrument = instruments.get(nextInstrument.getAndIncrement());
 		trader = TestBrowser.loggedIn(port, "trader", PASSWORD);
+	}
+
+	/** Each command is timed from admission to its result, and the writer's queue is measured. */
+	@Test
+	void commandsAreTimedAndTheQueueMeasured() throws Exception {
+		long places = committed("place");
+		long cancels = committed("cancel");
+		String orderId = orderId(place(trader, UUID.randomUUID(), limit("BUY", 1, "90.00")));
+		assertThat(cancel(trader, UUID.randomUUID(), orderId).statusCode()).isEqualTo(200);
+
+		// The timer records when the result completes, which can be a moment after the caller is released.
+		long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+		while ((committed("place") < places + 1 || committed("cancel") < cancels + 1) && System.nanoTime() < deadline) {
+			Thread.sleep(10);
+		}
+		assertThat(committed("place")).isEqualTo(places + 1);
+		assertThat(committed("cancel")).isEqualTo(cancels + 1);
+		// Prometheus export is off in tests; the gate reads the real scrape and its bucket edges.
+		assertThat(meters.get("mse.writer.queue.depth").gauge().value()).isZero();
+		assertThat(meters.get("mse.writer.queue.capacity").gauge().value()).isEqualTo(256);
 	}
 
 	@Test
@@ -403,6 +428,11 @@ class OrderApiIT {
 		return """
 				{"instrumentId":"%s","side":"%s","type":"LIMIT","timeInForce":"GTC","quantity":%d,"limitPrice":"%s"}"""
 			.formatted(instrument, side, quantity, price);
+	}
+
+	private long committed(String command) {
+		Timer timer = meters.find("mse.commands").tag("command", command).tag("outcome", "committed").timer();
+		return timer == null ? 0 : timer.count();
 	}
 
 	private static HttpResponse<String> place(TestBrowser browser, UUID key, String body) throws Exception {

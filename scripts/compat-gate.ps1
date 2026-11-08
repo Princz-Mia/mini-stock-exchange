@@ -490,6 +490,13 @@ try {
         Assert-Equal 'the worker confirmed it, after placing orders' 't' $confirmed.Output
         $open = Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' "SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id WHERE a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')"
         Assert-Equal 'bot orders left open' '0' $open.Output
+        # The bots' commands were timed: Prometheus has a bucket edge at each latency budget, and the queue's size.
+        $scrape = (Invoke-InContainer 'execution-service' @('curl', '-fsS', 'http://localhost:8080/actuator/prometheus')) -split "`n" |
+            Where-Object { $_ -match '^mse_(commands_seconds_bucket\{command="place",outcome="committed",le="0\.(15|5)"\}|writer_queue_capacity) ' }
+        $scrape = $scrape -join "`n"
+        Assert-Match 'place latency bucket at 150 ms' 'le="0\.15"\} [1-9]' $scrape
+        Assert-Match 'place latency bucket at 500 ms' 'le="0\.5"\} [1-9]' $scrape
+        Assert-Match 'writer queue capacity' 'mse_writer_queue_capacity 256' $scrape
     }
 
     Step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' {

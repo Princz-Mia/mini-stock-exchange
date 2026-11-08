@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.net.http.HttpResponse;
 import java.util.UUID;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -47,6 +48,9 @@ class BacklogAdmissionIT {
 	@Autowired
 	TradingEngine engine;
 
+	@Autowired
+	MeterRegistry meters;
+
 	@Test
 	void ordersStopAtTheLimitWhileCancelsContinue() throws Exception {
 		UUID instrument = new TransactionTemplate(transactionManager).execute((status) -> market());
@@ -65,6 +69,8 @@ class BacklogAdmissionIT {
 		assertThat(problem.get("code").asString()).isEqualTo("EXCHANGE_BUSY");
 		assertThat(problem.get("reason").asString()).isEqualTo("PUBLICATION_BACKLOG");
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM orders", Long.class)).as("never queued").isEqualTo(1);
+		assertThat(meters.get("mse.commands.refused").tag("command", "place").tag("reason", "backlog").counter().count())
+			.isEqualTo(1);
 
 		String orderId = JSON.readTree(resting.body()).get("orderId").asString();
 		HttpResponse<String> cancel = trader.post("/api/v1/orders/" + orderId + "/cancel", "", "Idempotency-Key",
