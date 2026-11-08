@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 
 import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterHaltException;
@@ -64,6 +65,13 @@ public final class TradingEngine {
 
 	private long writerEpoch;
 
+	/**
+	 * Set once startup has finished: the books rebuilt and reconciled, or no market to rebuild. The web server takes
+	 * requests before that, and a command run on an engine that hasn't started would see no epoch, no books and no
+	 * market, so until then none is admitted.
+	 */
+	private volatile boolean started;
+
 	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
 			BotCredentials botCredentials) {
 		this.store = store;
@@ -108,16 +116,22 @@ public final class TradingEngine {
 			tapes.putAll(rebuiltTapes);
 			return null;
 		});
+		started = true;
+	}
+
+	/** Starts with no market to rebuild: commands are admitted, and the first setup command creates the market. */
+	public void startEmpty() {
+		started = true;
 	}
 
 	/** Places an order. A repeat of the same key and request returns the first committed result unchanged. */
 	public CompletableFuture<PlacementResult> place(CommandKey key, PlaceOrder command) {
-		return writer.submit(() -> process(key, command));
+		return submit(() -> process(key, command));
 	}
 
 	/** Cancels a resting order; allowed while the market is open or halted. */
 	public CompletableFuture<CancelResult> cancel(CommandKey key, CancelOrder command) {
-		return writer.submit(() -> processCancel(key, command));
+		return submit(() -> processCancel(key, command));
 	}
 
 	/**
@@ -125,7 +139,7 @@ public final class TradingEngine {
 	 * reads it from the locked market row. Books are untouched, so resting orders keep their priority.
 	 */
 	public CompletableFuture<MarketTransition> control(CommandKey key, MarketControl command) {
-		return writer.submit(() -> processControl(key, command));
+		return submit(() -> processControl(key, command));
 	}
 
 	/**
@@ -133,32 +147,32 @@ public final class TradingEngine {
 	 * book joins the engine only after the command has committed.
 	 */
 	public CompletableFuture<InstrumentResult> addInstrument(CommandKey key, AddInstrument command) {
-		return writer.submit(() -> processAddInstrument(key, command));
+		return submit(() -> processAddInstrument(key, command));
 	}
 
 	/** Gives a trader their account and starting endowment while the market is in SETUP. */
 	public CompletableFuture<AccountResult> provisionAccount(CommandKey key, ProvisionAccount command) {
-		return writer.submit(() -> processProvision(key, command));
+		return submit(() -> processProvision(key, command));
 	}
 
 	/** Creates funded bot accounts, each with its own API token, while the market is in SETUP. */
 	public CompletableFuture<BotsResult> provisionBots(CommandKey key, ProvisionBots command) {
-		return writer.submit(() -> processBots(key, command));
+		return submit(() -> processBots(key, command));
 	}
 
 	/** Starts a bot run while the market is open or halted; one run runs at a time. */
 	public CompletableFuture<BotRunResult> startBotRun(CommandKey key, StartBotRun command) {
-		return writer.submit(() -> processStartRun(key, command));
+		return submit(() -> processStartRun(key, command));
 	}
 
 	/** Asks a running bot run to stop. */
 	public CompletableFuture<BotRunResult> stopBotRun(CommandKey key, StopBotRun command) {
-		return writer.submit(() -> processStopRun(key, command));
+		return submit(() -> processStopRun(key, command));
 	}
 
 	/** A snapshot of one side of a book, read on the writer thread so it never sees a half-applied plan. */
 	public CompletableFuture<List<DepthLevel>> depth(UUID instrumentId, Side side) {
-		return writer.submit(() -> books.get(instrumentId).depth(side, Integer.MAX_VALUE));
+		return submit(() -> books.get(instrumentId).depth(side, Integer.MAX_VALUE));
 	}
 
 	/** {@code trades} are the command's new trades, oldest first, for the tape once it commits. */
@@ -232,6 +246,14 @@ public final class TradingEngine {
 			tapes.putIfAbsent(command.instrumentId(), new Tape(TAPE_TRADES, List.of()));
 		}
 		return added.result();
+	}
+
+	/** Refused, not queued, until startup has finished, so the caller can retry the same key. */
+	private <T> CompletableFuture<T> submit(Callable<T> command) {
+		if (!started) {
+			throw new CommandWriter.WriterStoppedException("Trading has not started");
+		}
+		return writer.submit(command);
 	}
 
 	/**

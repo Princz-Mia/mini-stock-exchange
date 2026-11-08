@@ -514,6 +514,81 @@ dashboard() {
     http://localhost:29090 http://localhost:23000 >> "$log" 2>&1
 }
 
+# Recovery steps: every projection table Market Data derives (service_identity is configuration, not derived).
+projections="instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, candle_1m"
+feeds_live() { # all three Market Data feeds caught up and in contact with Kafka
+  [ "$(compose exec -T market-data-service curl -fsS http://localhost:8080/actuator/prometheus 2>/dev/null |
+    grep -c '^mse_feed_live{.*} 1')" = 3 ]
+}
+public_behind() { # Market Data's public trades are short of Execution's
+  [ "$(market_data_sql "SELECT count(*) FROM public_trade WHERE instrument_id = '$(nova)'")" -lt \
+    "$(execution_sql "SELECT count(*) FROM trades WHERE instrument_id = '$(nova)'")" ] 2>/dev/null
+}
+caught_up() { # nothing waiting in the outbox, every trade public with the same totals, candles current
+  retry 60 outbox_drained || { fail "outbox still holds $(outbox_pending) events"; return 1; }
+  retry 60 totals_match || { fail "public trades differ from Execution's"; return 1; }
+  assert_equal "NOVA's public trades: count, shares, notional, last sequence" \
+    "$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")" \
+    "$(market_data_sql "$totals FROM public_trade WHERE instrument_id = '$(nova)'")" || return 1
+  retry 120 candles_current "$(nova)" ||
+    { fail "candles still '$(trades_behind "$(nova)")' trades behind"; return 1; }
+  reconciled
+}
+
+crash_recovery() {
+  # Execution is killed (SIGKILL) during a bot run, cutting off whatever was in flight. It must start again with its
+  # startup reconciliation passing (it refuses to start on any mismatch), the bots must carry on, and their retries must
+  # apply nothing twice. Once the run is stopped, every trade is public with the same totals and the candles reconcile.
+  local operator="$run_dir/crash-operator.txt" run before
+  api_login "$operator" operator "$operator_password" || return 1
+  before=$(latest_bot_trade)
+  run=$(start_bot_run "$operator" 17) || return 1
+  retry 60 bot_trade_after "$before" || { fail "no bot trade after $before"; return 1; }
+  compose kill -s SIGKILL execution-service >> "$log" 2>&1 || return 1
+  note "killed after bot trade $(latest_bot_trade)"
+  compose up -d --no-deps --wait --wait-timeout 240 execution-service >> "$log" 2>&1 ||
+    { fail 'Execution did not become ready again: its startup reconciliation refused, or it never started'; return 1; }
+  before=$(latest_bot_trade)
+  retry 60 bot_trade_after "$before" || { fail "the bots did not trade again after the restart"; return 1; }
+  api_login "$operator" operator "$operator_password" && stop_bot_run "$operator" "$run" && caught_up
+}
+
+projection_rebuild() {
+  # Everything Market Data derived is deleted while it is stopped: instruments, books, tape, candles, the events it saw
+  # and its checkpoints. Started again, it must rebuild all of it from Kafka's retained topics until every feed is live,
+  # with the same trade totals as Execution and candles that reconcile exactly.
+  compose stop market-data-service >> "$log" 2>&1 || return 1
+  psql_as market_data_owner market_data_db "TRUNCATE $projections" >> "$log" 2>&1 || { fail 'truncate failed'; return 1; }
+  assert_equal 'public trades after the wipe' 0 "$(market_data_sql 'SELECT count(*) FROM public_trade')" || return 1
+  compose start market-data-service >> "$log" 2>&1 &&
+    compose up -d --no-deps --wait --wait-timeout 180 market-data-service >> "$log" 2>&1 || return 1
+  retry 60 feeds_live || { fail 'the feeds did not all become live after the rebuild'; return 1; }
+  caught_up
+}
+
+projection_retry() {
+  # The trade projection's writes are refused for a while (INSERT revoked from Market Data's runtime role) while people
+  # trade. The feed must keep retrying the same records, neither skipping them nor pausing for good; the public trades
+  # stay behind meanwhile. Once the grant is back, every trade is public exactly once.
+  local trader="$run_dir/retry-trader.txt" counterparty="$run_dir/retry-counterparty.txt" bought
+  api_login "$trader" trader "$trader_password" &&
+    api_login "$counterparty" counterparty "$counterparty_password" || return 1
+  psql_as market_data_owner market_data_db 'REVOKE INSERT ON public_trade FROM market_data_app' >> "$log" 2>&1 ||
+    { fail 'revoke failed'; return 1; }
+  assert_equal 'the counterparty offers one share' 201 \
+    "$(status_of "$(api_command "$counterparty" /orders "$(limit_order "$(nova)" SELL 87.70)")")" || return 1
+  bought=$(api_command "$trader" /orders "$(limit_order "$(nova)" BUY 87.70)")
+  assert_equal 'the trader buys it' 201 "$(status_of "$bought")" &&
+    assert_match 'filled' '"state":"FILLED"' "$(body_of "$bought")" || return 1
+  sleep 10
+  public_behind || { fail 'the trade became public while its insert was refused'; return 1; }
+  note "feed log: $(compose logs --no-log-prefix --since 30s market-data-service 2>&1 | grep -c 'reconnecting') retries"
+  psql_as market_data_owner market_data_db 'GRANT INSERT ON public_trade TO market_data_app' >> "$log" 2>&1 ||
+    { fail 'grant failed'; return 1; }
+  retry 60 feeds_live || { fail 'the trade feed did not become live again'; return 1; }
+  caught_up
+}
+
 kafka_outage() {
   # With Kafka down, both services stay ready and people still trade: the counterparty sells to the trader, the trader
   # places and cancels, and balances read as usual. The public feed says it is stale, and its tape stops short of the
@@ -582,7 +657,10 @@ step 'Toolchain versions' toolchain &&
   step 'Reconciliation: candles match the trade export exactly' reconciled_candles &&
   step 'Dashboard: Grafana loads it and every query works' dashboard &&
   step 'Flink outage: trading goes on, candles catch up' flink_outage &&
-  step 'Kafka outage: people trade, the feed catches up' kafka_outage ||
+  step 'Kafka outage: people trade, the feed catches up' kafka_outage &&
+  step 'Crash: Execution killed mid-trading restarts and reconciles' crash_recovery &&
+  step 'Rebuild: Market Data rebuilt from Kafka matches exactly' projection_rebuild &&
+  step 'Retry: a refused projection write is retried, not lost' projection_retry ||
   status=1
 
 teardown "${1:-}"

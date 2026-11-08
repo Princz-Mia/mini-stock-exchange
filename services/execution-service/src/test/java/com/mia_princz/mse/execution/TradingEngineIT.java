@@ -3,6 +3,7 @@ package com.mia_princz.mse.execution;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
@@ -19,6 +20,8 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.sql.DataSource;
@@ -49,6 +52,7 @@ import com.mia_princz.mse.execution.trading.application.CancelResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.CommandWriter;
 import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterHaltException;
+import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterStoppedException;
 import com.mia_princz.mse.execution.trading.application.ReconciliationException;
 import com.mia_princz.mse.execution.trading.application.IdempotencyConflictException;
 import com.mia_princz.mse.execution.trading.application.PlaceOrder;
@@ -56,6 +60,8 @@ import com.mia_princz.mse.execution.trading.application.PlacementResult;
 import com.mia_princz.mse.execution.trading.application.PlacementResult.OrderState;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
 import com.mia_princz.mse.execution.trading.application.TradingStore;
+import com.mia_princz.mse.execution.trading.application.TransactionRunner.CommitOutcomeUnknownException;
+import com.mia_princz.mse.execution.trading.application.TransactionRunner;
 import com.mia_princz.mse.execution.trading.domain.DepthLevel;
 import com.mia_princz.mse.execution.trading.domain.OrderType;
 import com.mia_princz.mse.execution.trading.domain.Price;
@@ -86,6 +92,9 @@ class TradingEngineIT {
 
 	@Autowired
 	PlatformTransactionManager transactionManager;
+
+	/** When set, the next transaction commits and its outcome is then lost, as if the process died right after. */
+	private final AtomicBoolean loseAnswer = new AtomicBoolean();
 
 	/** The store method that throws, simulating a failure after every earlier write but before the commit. */
 	private final AtomicReference<String> failAt = new AtomicReference<>();
@@ -118,7 +127,8 @@ class TradingEngineIT {
 
 		store = new JdbcTradingStore(JdbcClient.create(dataSource), JsonMapper.builder().build());
 		writer = new CommandWriter("test-writer", 1_000);
-		engine = new TradingEngine(failingBeforeCommit(store), new SpringTransactionRunner(transactionManager), writer,
+		engine = new TradingEngine(failingBeforeCommit(store), losingAnswers(new SpringTransactionRunner(transactionManager)),
+				writer,
 				Clock.systemUTC(), (account) -> {
 					throw new UnsupportedOperationException("no bots in these tests");
 				});
@@ -636,6 +646,20 @@ class TradingEngineIT {
 	}
 
 	/** Fails the chosen store call; pick a command's last write to fail after everything else but before the commit. */
+	/** Commits for real, then reports the outcome as unknown when {@link #loseAnswer} is set. */
+	private TransactionRunner losingAnswers(TransactionRunner real) {
+		return new TransactionRunner() {
+			@Override
+			public <T> T inTransaction(Supplier<T> work) {
+				T result = real.inTransaction(work);
+				if (loseAnswer.getAndSet(false)) {
+					throw new CommitOutcomeUnknownException(new IOException("connection lost after the commit"));
+				}
+				return result;
+			}
+		};
+	}
+
 	private TradingStore failingBeforeCommit(TradingStore store) {
 		return (TradingStore) Proxy.newProxyInstance(TradingStore.class.getClassLoader(),
 				new Class<?>[] { TradingStore.class }, (proxy, method, args) -> {
@@ -722,15 +746,85 @@ class TradingEngineIT {
 		}
 	}
 
+	/**
+	 * The process dies after a commit, before the book changes or the answer is sent; here the commit succeeds and its
+	 * outcome is then lost. The writer halts rather than trade on a book it can't trust. A restart rebuilds the book with
+	 * the order, and the same key returns the committed answer without applying anything twice.
+	 */
+	@Test
+	void aCommitWhoseAnswerIsLostIsRecoveredByARestartAndItsKey() throws Exception {
+		UUID seller = funded();
+		UUID buyer = funded();
+		place(seller, Side.SELL, OrderType.LIMIT, "100.00", 10);
+		CommandKey key = key(buyer, UUID.randomUUID(), "buy 4 at 100.00");
+		PlaceOrder order = order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 4);
+
+		loseAnswer.set(true);
+		CompletableFuture<PlacementResult> lost = engine.place(key, order);
+
+		assertThatThrownBy(lost::get).hasCauseInstanceOf(WriterHaltException.class);
+		assertThat(writer.isAvailable()).as("the writer stops").isFalse();
+		assertThat(jdbc.queryForObject("SELECT state FROM orders WHERE id = ?", String.class, order.orderId()))
+			.as("the order committed")
+			.isEqualTo("FILLED");
+		Map<String, Object> committed = snapshot();
+
+		restartEngine();
+		PlacementResult answer = engine.place(key, order).get();
+
+		assertThat(answer.state()).isEqualTo(OrderState.FILLED);
+		assertThat(answer.filled()).isEqualTo(4);
+		assertThat(snapshot()).as("nothing applied twice").isEqualTo(committed);
+		assertThat(engine.depth(instrument, Side.SELL).get())
+			.as("the rebuilt book has the fill")
+			.containsExactly(new DepthLevel(Price.parse("100.00"), 6, 1));
+		assertThat(cash(buyer)).containsExactly(STARTING_CASH - 40_000, 0L);
+		assertLedgerMatchesBalances();
+	}
+
+	/**
+	 * A restarted process takes requests before its startup has rebuilt the books; clients retrying across a crash
+	 * arrive then. Run on an engine with no epoch and no books, a command would fence the writer for good, so it is
+	 * refused without being queued, and the same key goes through once startup has finished.
+	 */
+	@Test
+	void aCommandBeforeStartupIsRefusedAndItsKeyWorksAfter() throws Exception {
+		UUID seller = funded();
+		PlacementResult resting = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 10);
+		CommandKey key = key(seller, UUID.randomUUID(), "cancel the sell");
+		CancelOrder cancel = new CancelOrder(resting.orderId(), seller);
+		replaceEngine();
+		Map<String, Object> before = snapshot();
+
+		assertThatThrownBy(() -> engine.cancel(key, cancel)).isInstanceOf(WriterStoppedException.class);
+		assertThatThrownBy(() -> engine.depth(instrument, Side.SELL)).isInstanceOf(WriterStoppedException.class);
+		assertThat(snapshot()).as("nothing written").isEqualTo(before);
+
+		engine.start();
+		CancelResult answer = engine.cancel(key, cancel).get();
+
+		assertThat(writer.isAvailable()).as("the writer still runs").isTrue();
+		assertThat(answer.status()).isEqualTo(CancelResult.Status.CANCELED);
+		assertThat(answer.canceledQuantity()).isEqualTo(10);
+		assertThat(engine.depth(instrument, Side.SELL).get()).isEmpty();
+		assertLedgerMatchesBalances();
+	}
+
 	/** Simulates a process restart: the old writer stops, a new engine starts from the database. */
 	private void restartEngine() throws InterruptedException {
+		replaceEngine();
+		engine.start();
+	}
+
+	/** A new process up to the point where its web server takes requests: the engine exists but hasn't started. */
+	private void replaceEngine() throws InterruptedException {
 		writer.close(Duration.ofSeconds(5));
 		writer = new CommandWriter("test-writer", 1_000);
-		engine = new TradingEngine(failingBeforeCommit(store), new SpringTransactionRunner(transactionManager), writer,
+		engine = new TradingEngine(failingBeforeCommit(store), losingAnswers(new SpringTransactionRunner(transactionManager)),
+				writer,
 				Clock.systemUTC(), (account) -> {
 					throw new UnsupportedOperationException("no bots in these tests");
 				});
-		engine.start();
 	}
 
 	/** A fresh idempotency key for a command whose repeat behaviour the test does not care about. */

@@ -275,6 +275,35 @@ function Assert-Reconciled {
     Assert-Match 'candles were checked' '"candlesChecked":[1-9]' $report
 }
 
+# Recovery steps: every projection table Market Data derives (service_identity is configuration, not derived).
+$projections = 'instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, candle_1m'
+$tradeTotals = "SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quantity) || ' ' || max(trade_sequence)"
+
+function Test-FeedsLive {
+    # All three Market Data feeds caught up and in contact with Kafka.
+    $scrape = Invoke-InContainer 'market-data-service' @('curl', '-fsS', 'http://localhost:8080/actuator/prometheus')
+    return @($scrape -split "`n" | Where-Object { $_ -match '^mse_feed_live\{.*\} 1' }).Count -eq 3
+}
+
+function Invoke-MarketDataOwner {
+    param([string]$Sql)
+    $result = Invoke-Psql 'market_data_owner' $passwords.market_data_owner 'market_data_db' $Sql
+    "market_data_owner: $Sql => $($result.Code) $($result.Output)" | Add-Content -Encoding utf8 $script:currentLog
+    if ($result.Code -ne 0) { throw "market_data_owner '$Sql' failed: $($result.Output)" }
+}
+
+function Assert-CaughtUp {
+    # Nothing waiting in the outbox, every trade public with the same totals, candles current and reconciled.
+    $nova = Get-Nova
+    if (-not (Wait-Until 60 { (Get-OutboxPending) -eq 0 })) { throw "outbox still holds $(Get-OutboxPending) events" }
+    [void](Wait-Until 60 { (Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$nova'") -eq (Get-MarketDataValue "$tradeTotals FROM public_trade WHERE instrument_id = '$nova'") })
+    Assert-Equal "NOVA's public trades: count, shares, notional, last sequence" `
+        (Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$nova'") `
+        (Get-MarketDataValue "$tradeTotals FROM public_trade WHERE instrument_id = '$nova'")
+    if (-not (Wait-Until 120 { (Get-TradesBehind $nova) -eq 0 })) { throw "candles still '$(Get-TradesBehind $nova)' trades behind" }
+    Assert-Reconciled
+}
+
 function Assert-ClassVersion {
     param([string]$ClassPath, [string]$ClassName, [int]$Major)
     $output = & (Join-Path $env:JAVA_HOME 'bin\javap.exe') -v -cp $ClassPath $ClassName | Select-String 'major version'
@@ -634,6 +663,59 @@ try {
             throw "candles still '$(Get-TradesBehind $nova)' trades behind after Kafka returned"
         }
         Assert-Reconciled
+    }
+
+    Step 'Crash: Execution killed mid-trading restarts and reconciles' {
+        # Execution is killed (SIGKILL) during a bot run, cutting off whatever was in flight. It must start again with
+        # its startup reconciliation passing (it refuses to start on any mismatch), the bots must carry on, and their
+        # retries must apply nothing twice. Once the run is stopped, every trade is public with the same totals and the
+        # candles reconcile.
+        $operator = New-ApiSession 'operator' $operatorPassword
+        $before = Get-LatestBotTrade
+        $run = Start-BotRun $operator 17
+        if (-not (Wait-Until 60 { (Get-LatestBotTrade) -gt $before })) { throw "no bot trade after $before" }
+        Invoke-Checked 'docker' ($compose + @('kill', '-s', 'SIGKILL', 'execution-service'))
+        "killed after bot trade $(Get-LatestBotTrade)" | Add-Content -Encoding utf8 $script:currentLog
+        Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '240', 'execution-service'))
+        $before = Get-LatestBotTrade
+        if (-not (Wait-Until 60 { (Get-LatestBotTrade) -gt $before })) { throw 'the bots did not trade again after the restart' }
+        $operator = New-ApiSession 'operator' $operatorPassword
+        Stop-BotRun $operator $run
+        Assert-CaughtUp
+    }
+
+    Step 'Rebuild: Market Data rebuilt from Kafka matches exactly' {
+        # Everything Market Data derived is deleted while it is stopped: instruments, books, tape, candles, the events it
+        # saw and its checkpoints. Started again, it must rebuild all of it from Kafka's retained topics until every feed
+        # is live, with the same trade totals as Execution and candles that reconcile exactly.
+        Invoke-Checked 'docker' ($compose + @('stop', 'market-data-service'))
+        Invoke-MarketDataOwner "TRUNCATE $projections"
+        Assert-Equal 'public trades after the wipe' '0' (Get-MarketDataValue 'SELECT count(*) FROM public_trade')
+        Invoke-Checked 'docker' ($compose + @('start', 'market-data-service'))
+        Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '180', 'market-data-service'))
+        if (-not (Wait-Until 60 { Test-FeedsLive })) { throw 'the feeds did not all become live after the rebuild' }
+        Assert-CaughtUp
+    }
+
+    Step 'Retry: a refused projection write is retried, not lost' {
+        # The trade projection's writes are refused for a while (INSERT revoked from Market Data's runtime role) while
+        # people trade. The feed must keep retrying the same records, neither skipping them nor pausing for good; the
+        # public trades stay behind meanwhile. Once the grant is back, every trade is public exactly once.
+        $trader = New-ApiSession 'trader' $traderPassword
+        $counterparty = New-ApiSession 'counterparty' $counterpartyPassword
+        $nova = Get-Nova
+        Invoke-MarketDataOwner 'REVOKE INSERT ON public_trade FROM market_data_app'
+        Assert-Equal 'the counterparty offers one share' '201' (Invoke-ApiCommand $counterparty '/orders' (New-LimitOrder $nova 'SELL' '87.70')).Status
+        $bought = Invoke-ApiCommand $trader '/orders' (New-LimitOrder $nova 'BUY' '87.70')
+        Assert-Equal 'the trader buys it' '201' $bought.Status
+        Assert-Match 'filled' '"state":"FILLED"' $bought.Body
+        Start-Sleep -Seconds 10
+        $public = [long](Get-MarketDataValue "SELECT count(*) FROM public_trade WHERE instrument_id = '$nova'")
+        $executed = [long](Get-ExecutionValue "SELECT count(*) FROM trades WHERE instrument_id = '$nova'")
+        if (-not ($public -lt $executed)) { throw 'the trade became public while its insert was refused' }
+        Invoke-MarketDataOwner 'GRANT INSERT ON public_trade TO market_data_app'
+        if (-not (Wait-Until 60 { Test-FeedsLive })) { throw 'the trade feed did not become live again' }
+        Assert-CaughtUp
     }
 }
 catch {
