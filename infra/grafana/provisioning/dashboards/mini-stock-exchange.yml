@@ -1,0 +1,11 @@
+apiVersion: 1
+
+# The dashboard is a file in the repository: edits in the Grafana UI are refused, so it can't drift from it.
+providers:
+  - name: mini-stock-exchange
+    folder: Mini Stock Exchange
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /etc/grafana/dashboards

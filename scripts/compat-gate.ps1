@@ -32,13 +32,14 @@ $traderPassword = New-Secret
 $operatorPassword = New-Secret
 # The browser test's counterparty; the Kafka outage step trades as it too.
 $counterpartyPassword = New-Secret
+$grafanaPassword = New-Secret
 $envLines = @(
     "POSTGRES_PASSWORD=$($passwords.postgres)"
     "EXECUTION_DB_OWNER_PASSWORD=$($passwords.execution_owner)"
     "EXECUTION_DB_APP_PASSWORD=$($passwords.execution_app)"
     "MARKET_DATA_DB_OWNER_PASSWORD=$($passwords.market_data_owner)"
     "MARKET_DATA_DB_APP_PASSWORD=$($passwords.market_data_app)"
-    "GRAFANA_ADMIN_PASSWORD=$(New-Secret)"
+    "GRAFANA_ADMIN_PASSWORD=$grafanaPassword"
     "DEV_OPERATOR_PASSWORD=$operatorPassword"
     "DEV_TRADER_PASSWORD=$traderPassword"
     "MSE_EXPORT_TOKEN=$(New-Secret)"
@@ -47,10 +48,12 @@ $envLines = @(
     'POSTGRES_HOST_PORT=25432'
     "KAFKA_HOST_PORT=$kafkaPort"
     'FLINK_UI_HOST_PORT=28081'
+    'PROMETHEUS_HOST_PORT=29090'
+    'GRAFANA_HOST_PORT=23000'
 )
 [System.IO.File]::WriteAllLines($envFile, [string[]]$envLines, (New-Object System.Text.UTF8Encoding $false))
 
-$compose = @('compose', '-p', 'mse-gate', '--env-file', $envFile, '--profile', 'full')
+$compose = @('compose', '-p', 'mse-gate', '--env-file', $envFile, '--profile', 'full', '--profile', 'observability')
 
 function Invoke-Checked {
     param([string]$Exe, [string[]]$Arguments)
@@ -555,6 +558,17 @@ try {
         # Every instrument Execution has, its candles checked against the trade export: the trades from the browser
         # test and the bots, computed by the job across its restart. Exact, or the step fails with the mismatches.
         Assert-Reconciled
+    }
+
+    Step 'Dashboard: Grafana loads it and every query works' {
+        # Grafana provisions the dashboard from the repository; every query on it must work against the live stack.
+        $env:GRAFANA_ADMIN_PASSWORD = $grafanaPassword
+        try {
+            Invoke-Checked 'uv' @('run', '--project', 'simulator', '--frozen', 'python', 'scripts/check-dashboard.py', 'http://localhost:29090', 'http://localhost:23000')
+        }
+        finally {
+            Remove-Item Env:GRAFANA_ADMIN_PASSWORD -ErrorAction SilentlyContinue
+        }
     }
 
     Step 'Flink outage: trading goes on, candles catch up' {
