@@ -436,9 +436,10 @@ try {
     Step 'Bot tokens: owner-only files, and the simulator control token' {
         # The browser test's setup provisioned two bots; each token is a file only its owner can read.
         Assert-Equal 'token directory' '700 mse' (Invoke-InContainer 'execution-service' @('stat', '-c', '%a %U', '/run/mse/bot-tokens'))
-        Assert-Match 'token files' '^\s*2 600 mse\s*$' (Invoke-InContainer 'execution-service' @('sh', '-c', 'stat -c "%a %U" /run/mse/bot-tokens/*.token | uniq -c'))
+        # No double quotes inside these sh commands: Windows PowerShell 5.1 strips them from native arguments.
+        Assert-Match 'token files' '^\s*2 600 mse\s*$' (Invoke-InContainer 'execution-service' @('sh', '-c', "stat -c '%a %U' /run/mse/bot-tokens/*.token | uniq -c"))
         # Tokens are read inside the container, so they never reach this shell.
-        $assignment = { param($variable) 'curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $' + $variable + '" http://localhost:8080/internal/simulator/assignment' }
+        $assignment = { param($variable) "curl -s -o /dev/null -w '%{http_code}' -H Authorization:\ Bearer\ `$$variable http://localhost:8080/internal/simulator/assignment" }
         Assert-Equal 'the simulator token opens its assignment' '200' (Invoke-InContainer 'execution-service' @('sh', '-c', (& $assignment 'MSE_SIMULATOR_TOKEN')))
         Assert-Equal 'the export token does not' '403' (Invoke-InContainer 'execution-service' @('sh', '-c', (& $assignment 'MSE_EXPORT_TOKEN')))
     }
