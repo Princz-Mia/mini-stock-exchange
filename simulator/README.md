@@ -10,7 +10,8 @@ same public and authenticated API as people use.
   provisions bots. Compose mounts that volume read-only at `/run/mse/bot-tokens`. The assignment names each
   bot's file, never its token.
 - **Pacing:** the run's commands per second across its bots, round robin, one command in flight per bot and at
-  most 32 calls in flight overall. New commands stop if the lease isn't renewed in time.
+  most 32 calls in flight overall. The rate counts commands sent: a bot that looks and decides to wait hands
+  its turn to another, up to three looks per command. New commands stop if the lease isn't renewed in time.
 - **Strategies:** each bot draws from its own generator, seeded by the run's seed and its account, so the same
   observations give the same decisions. Market makers take the first turns of a run. No bot orders more than it
   holds or than the run's position limit allows, and old orders are cancelled.
