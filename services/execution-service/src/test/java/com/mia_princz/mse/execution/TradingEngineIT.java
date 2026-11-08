@@ -263,6 +263,27 @@ class TradingEngineIT {
 		assertThat(snapshot.getLastTrade()).isEqualTo(snapshot.getRecentTrades().getFirst());
 		assertThat(snapshot.getLastTradeSequence()).isEqualTo(55);
 		assertThat(snapshot.getRecentTrades()).extracting(PublicTrade::getAggressorSide).containsOnly(AggressorSide.BUY);
+		assertTapeMatchesDatabase(snapshot);
+	}
+
+	/** The tape lives in memory between commands; a restart rebuilds it from the database, like the books. */
+	@Test
+	void aRestartRebuildsTheTape() throws Exception {
+		UUID seller = funded();
+		UUID buyer = funded();
+		place(seller, Side.SELL, OrderType.LIMIT, "100.00", 10);
+		for (int i = 0; i < 3; i++) {
+			place(buyer, Side.BUY, OrderType.LIMIT, "100.00", 1);
+		}
+
+		restartEngine();
+		PlacementResult after = place(seller, Side.SELL, OrderType.LIMIT, "99.00", 1);
+		PlacementResult taker = place(buyer, Side.BUY, OrderType.LIMIT, "100.00", 1);
+
+		MarketSnapshot snapshot = marketSnapshot(taker.commandSequence());
+		assertThat(snapshot.getRecentTrades()).extracting(PublicTrade::getTradeSequence).containsExactly(4L, 3L, 2L, 1L);
+		assertTapeMatchesDatabase(snapshot);
+		assertThat(after.state()).isEqualTo(OrderState.OPEN);
 	}
 
 	/** A database failure just before commit: nothing in the database changes, the book is untouched, work goes on. */
@@ -286,6 +307,7 @@ class TradingEngineIT {
 		failAt.set(null);
 		PlacementResult retried = place(buyer, Side.BUY, OrderType.LIMIT, "100.00", 3);
 		assertThat(retried.state()).isEqualTo(OrderState.FILLED);
+		assertTapeMatchesDatabase(marketSnapshot(retried.commandSequence()));
 		assertThat(engine.depth(instrument, Side.SELL).get())
 			.containsExactly(new DepthLevel(Price.parse("100.00"), 2, 1));
 		assertLedgerMatchesBalances();
@@ -561,6 +583,23 @@ class TradingEngineIT {
 	}
 
 	/** The single public snapshot written by one command. */
+	/**
+	 * The snapshot's tape is exactly the newest trades in the database, newest first, as snapshots used to query them.
+	 * Called right after the command, so nothing newer exists yet.
+	 */
+	private void assertTapeMatchesDatabase(MarketSnapshot snapshot) {
+		List<PublicTrade> stored = jdbc.query("""
+				SELECT t.id, t.trade_sequence, t.price_cents, t.quantity, t.executed_at, o.side
+				FROM trades t JOIN orders o ON o.id = t.taker_order_id
+				WHERE t.instrument_id = ? ORDER BY t.trade_sequence DESC LIMIT 50""",
+				(row, index) -> new PublicTrade(row.getObject("id", UUID.class), row.getLong("trade_sequence"),
+						row.getLong("price_cents"), row.getLong("quantity"), AggressorSide.valueOf(row.getString("side")),
+						row.getTimestamp("executed_at").toInstant()),
+				instrument);
+		assertThat(snapshot.getRecentTrades()).isEqualTo(stored);
+		assertThat(snapshot.getLastTrade()).isEqualTo(stored.isEmpty() ? null : stored.getFirst());
+	}
+
 	private MarketSnapshot marketSnapshot(long commandSequence) throws Exception {
 		return WireEvents.decodeSnapshot(jdbc.queryForObject(
 				"SELECT payload FROM outbox WHERE topic = 'mse.market.v1' AND command_sequence = ?", byte[].class,
