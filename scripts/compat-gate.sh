@@ -573,7 +573,7 @@ step 'Toolchain versions' toolchain &&
   step 'Proxy: routes by path to the owning service' proxy_routes &&
   step 'Login: session and CSRF through the proxy' login_flow &&
   step 'Independence: each service survives the other stopping' independence &&
-  step 'Browser: trading, phone layout, halt, resume and bot runs' browser_flow &&
+  step 'Browser: trading, halt, resume, bot runs and every screen' browser_flow &&
   step 'Bot tokens: owner-only files, and the simulator control token' bot_tokens &&
   step 'Bots: the simulator trades and the tape shows it' bot_trading &&
   step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' avro_pipeline &&

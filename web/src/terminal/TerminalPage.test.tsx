@@ -127,6 +127,22 @@ describe('terminal', () => {
     expect(within(ticket).getByRole('button', { name: 'Buy NOVA' })).toBeEnabled();
   });
 
+  it('says the book and tape are not known yet until the first market frame, rather than empty', async () => {
+    market();
+    const streams = renderTerminal();
+    await screen.findByRole('heading', { name: 'NOVA', level: 1 });
+
+    expect(screen.getAllByText('Waiting for the live market…')).toHaveLength(2);
+    expect(screen.queryByText('No trades yet.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: 'Bids' })).not.toBeInTheDocument();
+
+    act(() => streams.latest()?.emit('market', frame(NOVA, '5', { recentTrades: [] })));
+
+    expect(screen.queryByText('Waiting for the live market…')).not.toBeInTheDocument();
+    expect(screen.getByText('No trades yet.')).toBeInTheDocument();
+    expect(screen.getByRole('table', { name: 'Bids' })).toBeInTheDocument();
+  });
+
   it('streams the first instrument and shows its book, tape and last price', async () => {
     market();
     const streams = renderTerminal();

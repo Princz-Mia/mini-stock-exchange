@@ -1,12 +1,17 @@
 import type { TapeTrade } from '../api/types';
 import { groupDigits, groupInteger, utcTime } from '../format';
 
-/** The newest public trades, with the side that took liquidity in words as well as colour. */
-export function Tape({ trades }: { trades: readonly TapeTrade[] }) {
+/**
+ * The newest public trades, with the side that took liquidity in words as well as colour. While {@code waiting}, no
+ * market frame has arrived yet: the tape is unknown, not empty.
+ */
+export function Tape({ trades, waiting = false }: { trades: readonly TapeTrade[]; waiting?: boolean }) {
   return (
     <section className="panel" aria-labelledby="tape-title">
       <h2 id="tape-title">Trades</h2>
-      {trades.length === 0 ? (
+      {waiting ? (
+        <p className="muted">Waiting for the live market…</p>
+      ) : trades.length === 0 ? (
         <p className="muted">No trades yet.</p>
       ) : (
         <table aria-label="Recent trades">
