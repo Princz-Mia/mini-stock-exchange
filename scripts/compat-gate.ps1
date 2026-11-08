@@ -30,6 +30,8 @@ $passwords = @{
 }
 $traderPassword = New-Secret
 $operatorPassword = New-Secret
+# The browser test's counterparty; the Kafka outage step trades as it too.
+$counterpartyPassword = New-Secret
 $envLines = @(
     "POSTGRES_PASSWORD=$($passwords.postgres)"
     "EXECUTION_DB_OWNER_PASSWORD=$($passwords.execution_owner)"
@@ -152,6 +154,122 @@ function Get-FlinkCount {
     $match = [regex]::Match((Get-FlinkJson "/jobs/$Job/checkpoints"), """$Counter"":(\d+)")
     if ($match.Success) { return [long]$match.Groups[1].Value }
     return -1
+}
+
+# The outage steps work through the proxy as users would: sessions, CSRF tokens and a fresh key per command.
+$api = "http://localhost:$webPort/api/v1"
+
+function New-ApiSession {
+    param([string]$Username, [string]$Password)
+    $csrf = Invoke-RestMethod "$api/auth/csrf" -SessionVariable session
+    $body = @{ username = $Username; password = $Password } | ConvertTo-Json
+    $login = Invoke-RestMethod "$api/auth/login" -Method Post -WebSession $session -ContentType 'application/json' -Body $body -Headers @{ $csrf.headerName = $csrf.token }
+    if ($login.username -ne $Username) { throw "login as $Username" }
+    return $session
+}
+
+function Invoke-ApiCommand {
+    # The status and the body, whatever the status.
+    param($Session, [string]$Path, [string]$Json)
+    $csrf = Invoke-RestMethod "$api/auth/csrf" -WebSession $Session
+    $request = @{ Uri = "$api$Path"; Method = 'Post'; WebSession = $Session; UseBasicParsing = $true
+        Headers = @{ $csrf.headerName = $csrf.token; 'Idempotency-Key' = [guid]::NewGuid().ToString() } }
+    if ($Json) { $request.ContentType = 'application/json'; $request.Body = $Json }
+    try {
+        $response = Invoke-WebRequest @request
+        return @{ Status = [int]$response.StatusCode; Body = [string]$response.Content }
+    }
+    catch {
+        if ($null -eq $_.Exception.Response) { throw }
+        return @{ Status = [int]$_.Exception.Response.StatusCode; Body = [string]$_.ErrorDetails.Message }
+    }
+}
+
+function New-LimitOrder {
+    param([string]$Instrument, [string]$Side, [string]$Price)
+    return '{"instrumentId":"' + $Instrument + '","side":"' + $Side + '","type":"LIMIT","timeInForce":"GTC","quantity":1,"limitPrice":"' + $Price + '"}'
+}
+
+function Wait-Until {
+    # Every two seconds until the condition holds.
+    param([int]$Attempts, [scriptblock]$Condition)
+    foreach ($attempt in 1..$Attempts) {
+        if (& $Condition) { return $true }
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+
+function Get-ExecutionValue {
+    param([string]$Sql)
+    return (Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' $Sql).Output
+}
+
+function Get-MarketDataValue {
+    param([string]$Sql)
+    return (Invoke-Psql 'market_data_app' $passwords.market_data_app 'market_data_db' $Sql).Output
+}
+
+function Get-Nova { return Get-ExecutionValue "SELECT id FROM instrument WHERE symbol = 'NOVA'" }
+
+function Get-LatestBotTrade { return [long](Get-ExecutionValue "SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id JOIN account s ON s.id = t.seller_account_id WHERE b.kind = 'BOT' OR s.kind = 'BOT'") }
+
+function Get-Listing {
+    try { return Invoke-RestMethod "$api/instruments" -TimeoutSec 10 } catch { return $null }
+}
+
+# NOVA's newest trade on the public tape. Every trade in the stack is NOVA's; the smoke tests' simulations are not listed.
+function Get-Published {
+    $listing = Get-Listing
+    if ($null -eq $listing) { return -1 }
+    return [long](@($listing.instruments | Where-Object { $_.symbol -eq 'NOVA' })[0].lastTradeSequence)
+}
+
+function Get-FeedState {
+    $listing = Get-Listing
+    if ($null -eq $listing) { return '' }
+    return $listing.feed.state
+}
+
+function Get-TradesBehind {
+    param([string]$Instrument)
+    try { return [long](Invoke-RestMethod "$api/instruments/$Instrument/candles" -TimeoutSec 10).freshness.tradesBehind } catch { return -1 }
+}
+
+function Get-OutboxPending { return [long](Get-ExecutionValue 'SELECT count(*) FROM outbox WHERE published_at IS NULL') }
+
+function Start-BotRun {
+    param($Session, [int]$Seed)
+    $started = Invoke-ApiCommand $Session '/admin/bot-runs' ('{"marketMakers":1,"noise":1,"seed":' + $Seed + ',"commandsPerSecond":"4.00"}')
+    "start: $($started.Status) $($started.Body)" | Add-Content -Encoding utf8 $script:currentLog
+    $run = [regex]::Match($started.Body, '"runId":"([0-9a-f-]{36})"')
+    if (-not $run.Success) { throw "no run started: $($started.Body)" }
+    return $run.Groups[1].Value
+}
+
+function Stop-BotRun {
+    param($Session, [string]$Run)
+    [void](Invoke-ApiCommand $Session "/admin/bot-runs/$Run/stop")
+    if (-not (Wait-Until 30 { (Invoke-RestMethod "$api/admin/bot-runs?limit=1" -WebSession $Session).runs[0].status -eq 'STOPPED' })) {
+        throw "run $Run did not stop"
+    }
+    Assert-Equal 'bot orders left open' '0' (Get-ExecutionValue "SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id WHERE a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')")
+}
+
+function Invoke-TraderRoundTrip {
+    # A resting order placed and cancelled, then the balances read.
+    param($Session)
+    $placed = Invoke-ApiCommand $Session '/orders' (New-LimitOrder (Get-Nova) 'BUY' '1.00')
+    Assert-Equal 'the trader places an order' '201' $placed.Status
+    $order = [regex]::Match($placed.Body, '"orderId":"([0-9a-f-]{36})"').Groups[1].Value
+    Assert-Equal 'and cancels it' '200' (Invoke-ApiCommand $Session "/orders/$order/cancel").Status
+    Assert-Match 'and reads the balances' '"cash":\{"total"' (Invoke-WebRequest "$api/portfolio" -WebSession $Session -UseBasicParsing).Content
+}
+
+function Assert-Reconciled {
+    $report = Invoke-InContainer 'market-data-service' @('curl', '-fsS', 'http://localhost:8080/internal/reconciliation/candles')
+    Assert-Match 'candles reconcile with the trade export' '"reconciled":true' $report
+    Assert-Match 'candles were checked' '"candlesChecked":[1-9]' $report
 }
 
 function Assert-ClassVersion {
@@ -297,7 +415,6 @@ try {
 
     Step 'Browser: trading, phone layout, halt, resume and bot runs' {
         # Users have no API, so the counterparty's login is inserted; the test sets up the market as the operator.
-        $counterpartyPassword = New-Secret
         Invoke-Checked 'docker' ($compose + @('cp', 'web/e2e/seed-users.sql', 'postgres:/tmp/seed-users.sql'))
         Invoke-Checked 'docker' ($compose + @('exec', '-T', '-e', "PGPASSWORD=$($passwords.execution_owner)", 'postgres', 'psql', '-h', '127.0.0.1', '-q',
             '-U', 'execution_owner', '-d', 'execution_db', '-v', "counterparty_password=$counterpartyPassword", '-f', '/tmp/seed-users.sql'))
@@ -319,9 +436,10 @@ try {
     Step 'Bot tokens: owner-only files, and the simulator control token' {
         # The browser test's setup provisioned two bots; each token is a file only its owner can read.
         Assert-Equal 'token directory' '700 mse' (Invoke-InContainer 'execution-service' @('stat', '-c', '%a %U', '/run/mse/bot-tokens'))
-        Assert-Match 'token files' '^\s*2 600 mse\s*$' (Invoke-InContainer 'execution-service' @('sh', '-c', 'stat -c "%a %U" /run/mse/bot-tokens/*.token | uniq -c'))
+        # No double quotes inside these sh commands: Windows PowerShell 5.1 strips them from native arguments.
+        Assert-Match 'token files' '^\s*2 600 mse\s*$' (Invoke-InContainer 'execution-service' @('sh', '-c', "stat -c '%a %U' /run/mse/bot-tokens/*.token | uniq -c"))
         # Tokens are read inside the container, so they never reach this shell.
-        $assignment = { param($variable) 'curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $' + $variable + '" http://localhost:8080/internal/simulator/assignment' }
+        $assignment = { param($variable) "curl -s -o /dev/null -w '%{http_code}' -H Authorization:\ Bearer\ `$$variable http://localhost:8080/internal/simulator/assignment" }
         Assert-Equal 'the simulator token opens its assignment' '200' (Invoke-InContainer 'execution-service' @('sh', '-c', (& $assignment 'MSE_SIMULATOR_TOKEN')))
         Assert-Equal 'the export token does not' '403' (Invoke-InContainer 'execution-service' @('sh', '-c', (& $assignment 'MSE_EXPORT_TOKEN')))
     }
@@ -429,15 +547,70 @@ try {
     Step 'Reconciliation: candles match the trade export exactly' {
         # Every instrument Execution has, its candles checked against the trade export: the trades from the browser
         # test and the bots, computed by the job across its restart. Exact, or the step fails with the mismatches.
-        $report = Invoke-InContainer 'market-data-service' @('curl', '-fsS', 'http://localhost:8080/internal/reconciliation/candles')
-        Assert-Match 'candles reconcile with the trade export' '"reconciled":true' $report
-        Assert-Match 'candles were checked' '"candlesChecked":[1-9]' $report
+        Assert-Reconciled
     }
 
-    Step 'Outage isolation: services stay ready without Kafka' {
+    Step 'Flink outage: trading goes on, candles catch up' {
+        # With the analytics job down, the bots keep trading: their trades commit and reach the public tape, a trader
+        # places and cancels, and balances read as usual. Only the candles fall behind, and they say so. The job then
+        # resumes from its checkpoint, and the candles catch up and reconcile exactly.
+        $operator = New-ApiSession 'operator' $operatorPassword
+        $trader = New-ApiSession 'trader' $traderPassword
+        $nova = Get-Nova
+        $before = Get-LatestBotTrade
+        $run = Start-BotRun $operator 13
+        if (-not (Wait-Until 60 { (Get-LatestBotTrade) -gt $before })) { throw "no bot trade after $before" }
+        Invoke-Checked 'docker' ($compose + @('stop', 'flink-taskmanager', 'flink-jobmanager'))
+        $before = Get-LatestBotTrade
+        if (-not (Wait-Until 60 { (Get-LatestBotTrade) -gt $before })) { throw "no bot trade after $before with Flink down" }
+        $during = Get-LatestBotTrade
+        if (-not (Wait-Until 30 { (Get-Published) -ge $during })) { throw "public tape at '$(Get-Published)', bot trade at $during" }
+        Invoke-TraderRoundTrip $trader
+        if (-not (Wait-Until 30 { (Get-TradesBehind $nova) -gt 0 })) { throw "candles say '$(Get-TradesBehind $nova)' trades behind" }
+        "candles behind with Flink down => $(Get-TradesBehind $nova)" | Add-Content -Encoding utf8 $script:currentLog
+        Stop-BotRun $operator $run
+        Invoke-Checked 'docker' ($compose + @('start', 'flink-jobmanager', 'flink-taskmanager'))
+        if (-not (Wait-Until 120 { (Get-TradesBehind $nova) -eq 0 })) {
+            throw "candles still '$(Get-TradesBehind $nova)' trades behind after the restart"
+        }
+        Assert-Reconciled
+    }
+
+    Step 'Kafka outage: people trade, the feed catches up' {
+        # With Kafka down, both services stay ready and people still trade: the counterparty sells to the trader, the
+        # trader places and cancels, and balances read as usual. The public feed says it is stale, and its tape stops
+        # short of the new trade while the outbox holds the events. Once Kafka is back, the outbox drains, the tape and
+        # its totals match Execution's trades exactly, the feed is live again, and the candles catch up and reconcile.
+        $trader = New-ApiSession 'trader' $traderPassword
+        $counterparty = New-ApiSession 'counterparty' $counterpartyPassword
+        $nova = Get-Nova
         Invoke-Checked 'docker' ($compose + @('stop', 'kafka'))
         Assert-Match 'Execution readiness' '"status":"UP"' (Get-Readiness 'execution-service')
         Assert-Match 'Market Data readiness' '"status":"UP"' (Get-Readiness 'market-data-service')
+        # A price no other order rests at, so the two orders can only meet each other.
+        Assert-Equal 'the counterparty offers one share' '201' (Invoke-ApiCommand $counterparty '/orders' (New-LimitOrder $nova 'SELL' '87.65')).Status
+        $bought = Invoke-ApiCommand $trader '/orders' (New-LimitOrder $nova 'BUY' '87.65')
+        Assert-Equal 'the trader buys it' '201' $bought.Status
+        Assert-Match 'filled' '"state":"FILLED"' $bought.Body
+        $trade = [long](Get-ExecutionValue "SELECT max(trade_sequence) FROM trades WHERE instrument_id = '$nova'")
+        Invoke-TraderRoundTrip $trader
+        if (-not (Wait-Until 20 { (Get-FeedState) -eq 'STALE' })) { throw "public feed is '$(Get-FeedState)' with Kafka down" }
+        if (-not ((Get-Published) -lt $trade)) { throw "public tape reached trade $trade with Kafka down" }
+        Assert-Match 'unpublished events in the outbox' '^[1-9][0-9]*$' (Get-OutboxPending)
+
+        Invoke-Checked 'docker' ($compose + @('start', 'kafka'))
+        Invoke-Checked 'docker' ($compose + @('up', '-d', '--no-deps', '--wait', '--wait-timeout', '180', 'kafka'))
+        if (-not (Wait-Until 60 { (Get-OutboxPending) -eq 0 })) { throw "outbox still holds $(Get-OutboxPending) events" }
+        if (-not (Wait-Until 60 { (Get-Published) -ge $trade })) { throw "public tape at '$(Get-Published)', trade at $trade" }
+        if (-not (Wait-Until 30 { (Get-FeedState) -eq 'LIVE' })) { throw "public feed is '$(Get-FeedState)' after Kafka returned" }
+        $totals = "SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quantity) || ' ' || max(trade_sequence)"
+        Assert-Equal "NOVA's public trades: count, shares, notional, last sequence" `
+            (Get-ExecutionValue "$totals FROM trades WHERE instrument_id = '$nova'") `
+            (Get-MarketDataValue "$totals FROM public_trade WHERE instrument_id = '$nova'")
+        if (-not (Wait-Until 120 { (Get-TradesBehind $nova) -eq 0 })) {
+            throw "candles still '$(Get-TradesBehind $nova)' trades behind after Kafka returned"
+        }
+        Assert-Reconciled
     }
 }
 catch {

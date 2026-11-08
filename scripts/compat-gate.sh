@@ -22,6 +22,8 @@ market_data_owner_password=$(secret)
 market_data_app_password=$(secret)
 trader_password=$(secret)
 operator_password=$(secret)
+# The browser test's counterparty; the Kafka outage step trades as it too.
+counterparty_password=$(secret)
 umask 077
 cat > "$env_file" <<EOF
 POSTGRES_PASSWORD=$(secret)
@@ -230,8 +232,6 @@ login_flow() {
 
 browser_flow() {
   # Users have no API, so the counterparty's login is inserted; the test sets up the market as the operator.
-  local counterparty_password
-  counterparty_password=$(secret)
   compose cp web/e2e/seed-users.sql postgres:/tmp/seed-users.sql >> "$log" 2>&1 &&
     compose exec -T -e PGPASSWORD="$execution_owner_password" postgres psql -h 127.0.0.1 -q -U execution_owner       -d execution_db -v counterparty_password="$counterparty_password" -f /tmp/seed-users.sql >> "$log" 2>&1 &&
     (cd web && npx playwright install chromium &&
@@ -252,6 +252,92 @@ internal_status() { # the variable holding the token, read inside the container 
 }
 
 uuid() { cat /proc/sys/kernel/random/uuid 2>/dev/null || powershell.exe -NoProfile -Command '[guid]::NewGuid().ToString()' | tr -d '\r'; }
+
+# The outage steps work through the proxy as users would: sessions, CSRF tokens and a fresh key per command.
+api="http://localhost:$web_port/api/v1"
+api_csrf() { curl -s -b "$1" -c "$1" "$api/auth/csrf" | sed -E 's/.*"token":"([^"]+)".*/\1/'; }
+api_login() { # jar username password
+  rm -f "$1"
+  curl -s -b "$1" -c "$1" -H "X-CSRF-TOKEN: $(api_csrf "$1")" -H 'Content-Type: application/json' \
+    -d "{\"username\":\"$2\",\"password\":\"$3\"}" "$api/auth/login" | grep -q "\"username\":\"$2\"" ||
+    fail "login as $2"
+}
+api_command() { # jar path [json]: the body, then the status on the last line
+  if [ -n "${3:-}" ]; then
+    curl -s -b "$1" -H "X-CSRF-TOKEN: $(api_csrf "$1")" -H "Idempotency-Key: $(uuid)" \
+      -H 'Content-Type: application/json' -d "$3" -w '\n%{http_code}' "$api$2"
+  else
+    curl -s -b "$1" -H "X-CSRF-TOKEN: $(api_csrf "$1")" -H "Idempotency-Key: $(uuid)" -X POST \
+      -w '\n%{http_code}' "$api$2"
+  fi
+}
+status_of() { printf '%s' "$1" | tail -n 1; }
+body_of() { printf '%s' "$1" | sed '$d'; }
+limit_order() { # instrument side price
+  printf '{"instrumentId":"%s","side":"%s","type":"LIMIT","timeInForce":"GTC","quantity":1,"limitPrice":"%s"}' "$1" "$2" "$3"
+}
+retry() { # attempts command...: every two seconds until the command succeeds
+  local attempts=$1 i
+  shift
+  for i in $(seq 1 "$attempts"); do
+    "$@" && return 0
+    sleep 2
+  done
+  return 1
+}
+
+execution_sql() { psql_as execution_owner execution_db "$1" | tr -d '\r'; }
+market_data_sql() { psql_as market_data_app market_data_db "$1" | tr -d '\r'; }
+nova() { execution_sql "SELECT id FROM instrument WHERE symbol = 'NOVA'"; }
+latest_bot_trade() {
+  execution_sql "SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id
+    JOIN account s ON s.id = t.seller_account_id WHERE b.kind = 'BOT' OR s.kind = 'BOT'"
+}
+bot_trade_after() { [ "$(latest_bot_trade)" -gt "$1" ] 2>/dev/null; }
+# NOVA's newest trade on the public tape. Every trade in the stack is NOVA's; the smoke tests' simulations are not listed.
+published() {
+  curl -s -m 10 "$api/instruments" | sed 's/"instrumentId"/\n&/g' | grep '"symbol":"NOVA"' |
+    grep -o '"lastTradeSequence":"[0-9]*"' | grep -o '[0-9]*'
+}
+tape_reaches() { [ "$(published)" -ge "$1" ] 2>/dev/null; }
+feed_state() { curl -s -m 10 "$api/instruments" | grep -o '"feed":{"state":"[A-Z_]*"' | grep -o '[A-Z_]*"$' | tr -d '"'; }
+feed_is() { [ "$(feed_state)" = "$1" ]; }
+trades_behind() { curl -s -m 10 "$api/instruments/$1/candles" | grep -o '"tradesBehind":[0-9-]*' | cut -d: -f2; }
+candles_behind() { [ "$(trades_behind "$1")" -gt 0 ] 2>/dev/null; }
+candles_current() { [ "$(trades_behind "$1")" = 0 ]; }
+outbox_pending() { execution_sql 'SELECT count(*) FROM outbox WHERE published_at IS NULL'; }
+outbox_drained() { [ "$(outbox_pending)" = 0 ]; }
+
+start_bot_run() { # jar seed: prints the run's ID
+  local started
+  started=$(api_command "$1" /admin/bot-runs "{\"marketMakers\":1,\"noise\":1,\"seed\":$2,\"commandsPerSecond\":\"4.00\"}")
+  note "start: $(printf '%s' "$started" | tr '\n' ' ')"
+  body_of "$started" | sed -nE 's/.*"runId":"([0-9a-f-]{36})".*/\1/p' | grep . || fail "no run started: $started"
+}
+run_stopped() { curl -s -b "$1" "$api/admin/bot-runs?limit=1" | grep -q '"status":"STOPPED"'; }
+stop_bot_run() { # jar run
+  note "stop: $(api_command "$1" "/admin/bot-runs/$2/stop" | tr '\n' ' ')"
+  retry 30 run_stopped "$1" || { fail "run $2 did not stop"; return 1; }
+  assert_equal 'bot orders left open' 0 "$(execution_sql "SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id
+    WHERE a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')")"
+}
+
+trader_round_trip() { # jar: a resting order placed and cancelled, then the balances read
+  local placed order
+  placed=$(api_command "$1" /orders "$(limit_order "$(nova)" BUY 1.00)")
+  assert_equal 'the trader places an order' 201 "$(status_of "$placed")" || return 1
+  order=$(body_of "$placed" | sed -nE 's/.*"orderId":"([0-9a-f-]{36})".*/\1/p')
+  assert_equal 'and cancels it' 200 "$(status_of "$(api_command "$1" "/orders/$order/cancel")")" &&
+    assert_match 'and reads the balances' '"cash":\{"total"' "$(curl -s -m 10 -b "$1" "$api/portfolio")"
+}
+
+reconciled() {
+  local report
+  report=$(compose exec -T market-data-service curl -fsS http://localhost:8080/internal/reconciliation/candles 2>&1)
+  note "reconciliation => $report"
+  assert_match 'candles reconcile with the trade export' '"reconciled":true' "$report" &&
+    assert_match 'candles were checked' '"candlesChecked":[1-9]' "$report"
+}
 
 bot_trading() {
   # The operator starts a run for the two bots the browser test provisioned: a market maker and a noise bot.
@@ -323,11 +409,7 @@ projected_candles() {
 reconciled_candles() {
   # Every instrument Execution has, its candles checked against the trade export: the trades from the browser test
   # and the bots, computed by the job across its restart. Exact, or the step fails with the mismatches.
-  local report
-  report=$(compose exec -T market-data-service curl -fsS http://localhost:8080/internal/reconciliation/candles 2>&1)
-  note "reconciliation => $report"
-  assert_match 'candles reconcile with the trade export' '"reconciled":true' "$report" &&
-    assert_match 'candles were checked' '"candlesChecked":[1-9]' "$report"
+  reconciled
 }
 
 independence() {
@@ -387,10 +469,65 @@ flink_restart() {
     smoke services/market-data-service/pom.xml CandleConsumeSmoke after-restart
 }
 
+flink_outage() {
+  # With the analytics job down, the bots keep trading: their trades commit and reach the public tape, a trader places
+  # and cancels, and balances read as usual. Only the candles fall behind, and they say so. The job then resumes from
+  # its checkpoint, and the candles catch up and reconcile exactly.
+  local operator="$run_dir/outage-operator.txt" trader="$run_dir/outage-trader.txt" run before during
+  api_login "$operator" operator "$operator_password" && api_login "$trader" trader "$trader_password" || return 1
+  before=$(latest_bot_trade)
+  run=$(start_bot_run "$operator" 13) || return 1
+  retry 60 bot_trade_after "$before" || { fail "no bot trade after $before"; return 1; }
+  compose stop flink-taskmanager flink-jobmanager >> "$log" 2>&1 || return 1
+  before=$(latest_bot_trade)
+  retry 60 bot_trade_after "$before" || { fail "no bot trade after $before with Flink down"; return 1; }
+  during=$(latest_bot_trade)
+  retry 30 tape_reaches "$during" || { fail "public tape at '$(published)', bot trade at $during"; return 1; }
+  trader_round_trip "$trader" || return 1
+  retry 30 candles_behind "$(nova)" || { fail "candles say '$(trades_behind "$(nova)")' trades behind"; return 1; }
+  note "candles behind with Flink down => $(trades_behind "$(nova)")"
+  stop_bot_run "$operator" "$run" || return 1
+  compose start flink-jobmanager flink-taskmanager >> "$log" 2>&1 || return 1
+  retry 120 candles_current "$(nova)" ||
+    { fail "candles still '$(trades_behind "$(nova)")' trades behind after the restart"; return 1; }
+  reconciled
+}
+
 kafka_outage() {
+  # With Kafka down, both services stay ready and people still trade: the counterparty sells to the trader, the trader
+  # places and cancels, and balances read as usual. The public feed says it is stale, and its tape stops short of the
+  # new trade while the outbox holds the events. Once Kafka is back, the outbox drains, the tape and its totals match
+  # Execution's trades exactly, the feed is live again, and the candles catch up and reconcile.
+  local trader="$run_dir/outage-trader.txt" counterparty="$run_dir/outage-counterparty.txt" sold bought trade totals
+  api_login "$trader" trader "$trader_password" &&
+    api_login "$counterparty" counterparty "$counterparty_password" || return 1
   compose stop kafka >> "$log" 2>&1 &&
     assert_match 'Execution readiness' '"status":"UP"' "$(readiness execution-service)" &&
-    assert_match 'Market Data readiness' '"status":"UP"' "$(readiness market-data-service)"
+    assert_match 'Market Data readiness' '"status":"UP"' "$(readiness market-data-service)" || return 1
+  # A price no other order rests at, so the two orders can only meet each other.
+  sold=$(api_command "$counterparty" /orders "$(limit_order "$(nova)" SELL 87.65)")
+  assert_equal 'the counterparty offers one share' 201 "$(status_of "$sold")" || return 1
+  bought=$(api_command "$trader" /orders "$(limit_order "$(nova)" BUY 87.65)")
+  assert_equal 'the trader buys it' 201 "$(status_of "$bought")" &&
+    assert_match 'filled' '"state":"FILLED"' "$(body_of "$bought")" || return 1
+  trade=$(execution_sql "SELECT max(trade_sequence) FROM trades WHERE instrument_id = '$(nova)'")
+  trader_round_trip "$trader" || return 1
+  retry 20 feed_is STALE || { fail "public feed is '$(feed_state)' with Kafka down"; return 1; }
+  [ "$(published)" -lt "$trade" ] || { fail "public tape reached trade $trade with Kafka down"; return 1; }
+  assert_match 'unpublished events in the outbox' '^[1-9][0-9]*$' "$(outbox_pending)" || return 1
+
+  compose start kafka >> "$log" 2>&1 &&
+    compose up -d --no-deps --wait --wait-timeout 180 kafka >> "$log" 2>&1 || return 1
+  retry 60 outbox_drained || { fail "outbox still holds $(outbox_pending) events"; return 1; }
+  retry 60 tape_reaches "$trade" || { fail "public tape at '$(published)', trade at $trade"; return 1; }
+  retry 30 feed_is LIVE || { fail "public feed is '$(feed_state)' after Kafka returned"; return 1; }
+  totals="SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quantity) || ' ' || max(trade_sequence)"
+  assert_equal "NOVA's public trades: count, shares, notional, last sequence" \
+    "$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")" \
+    "$(market_data_sql "$totals FROM public_trade WHERE instrument_id = '$(nova)'")" || return 1
+  retry 120 candles_current "$(nova)" ||
+    { fail "candles still '$(trades_behind "$(nova)")' trades behind after Kafka returned"; return 1; }
+  reconciled
 }
 
 teardown() {
@@ -421,7 +558,8 @@ step 'Toolchain versions' toolchain &&
   step 'Analytics: a JobManager restart resumes from its checkpoint' flink_restart &&
   step 'Candles: Market Data stores and serves the bars' projected_candles &&
   step 'Reconciliation: candles match the trade export exactly' reconciled_candles &&
-  step 'Outage isolation: services stay ready without Kafka' kafka_outage ||
+  step 'Flink outage: trading goes on, candles catch up' flink_outage &&
+  step 'Kafka outage: people trade, the feed catches up' kafka_outage ||
   status=1
 
 teardown "${1:-}"
