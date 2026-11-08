@@ -91,6 +91,14 @@ cd simulator; uv sync --frozen; uv run --frozen ruff check .; uv run --frozen py
 
 On Linux or macOS, use `sh ./mvnw` and `bash scripts/compat-gate.sh`.
 
+### Load test
+
+```powershell
+uv run --project simulator python -m mse_simulator.loadtest   # about 20 minutes
+```
+
+It starts its own throwaway Compose project (`mse-load`, on port 38080) with five instruments and 1,000 bots, runs them at 100 trading commands a second, and measures 10 minutes after a 2-minute warm-up. A trader places and cancels once a second through the proxy for client latency. Afterwards it restarts Execution, whose startup reconciliation refuses to start on any accounting mismatch, and checks that every trade reached Market Data and the candles reconcile. The report goes to `runtime/load-test/`, and the exit code is 0 only when every budget is met: p95 within 150 ms and p99 within 500 ms from admission to committed result, no sustained queue growth, and under 0.1% unexpected failures. `--help` lists the options for shorter or smaller runs.
+
 ### Browser tests
 
 `web/e2e/` holds Playwright tests that drive the real stack through the reverse proxy: sign in, buy into a partial fill, cancel the rest, check the portfolio, then check the layout at phone width. The tests set up their market through the operator API: an instrument, two funded traders, then opening.
