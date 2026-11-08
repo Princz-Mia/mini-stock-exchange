@@ -307,6 +307,11 @@ candles_behind() { [ "$(trades_behind "$1")" -gt 0 ] 2>/dev/null; }
 candles_current() { [ "$(trades_behind "$1")" = 0 ]; }
 outbox_pending() { execution_sql 'SELECT count(*) FROM outbox WHERE published_at IS NULL'; }
 outbox_drained() { [ "$(outbox_pending)" = 0 ]; }
+totals="SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quantity) || ' ' || max(trade_sequence)"
+totals_match() {
+  [ "$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")" = \
+    "$(market_data_sql "$totals FROM public_trade WHERE instrument_id = '$(nova)'")" ]
+}
 
 start_bot_run() { # jar seed: prints the run's ID
   local started
@@ -505,7 +510,7 @@ kafka_outage() {
   # places and cancels, and balances read as usual. The public feed says it is stale, and its tape stops short of the
   # new trade while the outbox holds the events. Once Kafka is back, the outbox drains, the tape and its totals match
   # Execution's trades exactly, the feed is live again, and the candles catch up and reconcile.
-  local trader="$run_dir/outage-trader.txt" counterparty="$run_dir/outage-counterparty.txt" sold bought trade totals
+  local trader="$run_dir/outage-trader.txt" counterparty="$run_dir/outage-counterparty.txt" sold bought trade
   api_login "$trader" trader "$trader_password" &&
     api_login "$counterparty" counterparty "$counterparty_password" || return 1
   compose stop kafka >> "$log" 2>&1 &&
@@ -528,7 +533,8 @@ kafka_outage() {
   retry 60 outbox_drained || { fail "outbox still holds $(outbox_pending) events"; return 1; }
   retry 60 tape_reaches "$trade" || { fail "public tape at '$(published)', trade at $trade"; return 1; }
   retry 30 feed_is LIVE || { fail "public feed is '$(feed_state)' after Kafka returned"; return 1; }
-  totals="SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quantity) || ' ' || max(trade_sequence)"
+  # The tape comes from market snapshots; public_trade from the trade topic's own consumer, which can be a moment behind.
+  retry 30 totals_match
   assert_equal "NOVA's public trades: count, shares, notional, last sequence" \
     "$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")" \
     "$(market_data_sql "$totals FROM public_trade WHERE instrument_id = '$(nova)'")" || return 1

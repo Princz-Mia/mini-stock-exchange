@@ -611,6 +611,8 @@ try {
         if (-not (Wait-Until 60 { (Get-Published) -ge $trade })) { throw "public tape at '$(Get-Published)', trade at $trade" }
         if (-not (Wait-Until 30 { (Get-FeedState) -eq 'LIVE' })) { throw "public feed is '$(Get-FeedState)' after Kafka returned" }
         $totals = "SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quantity) || ' ' || max(trade_sequence)"
+        # The tape comes from market snapshots; public_trade from the trade topic's own consumer, which can be a moment behind.
+        [void](Wait-Until 30 { (Get-ExecutionValue "$totals FROM trades WHERE instrument_id = '$nova'") -eq (Get-MarketDataValue "$totals FROM public_trade WHERE instrument_id = '$nova'") })
         Assert-Equal "NOVA's public trades: count, shares, notional, last sequence" `
             (Get-ExecutionValue "$totals FROM trades WHERE instrument_id = '$nova'") `
             (Get-MarketDataValue "$totals FROM public_trade WHERE instrument_id = '$nova'")
