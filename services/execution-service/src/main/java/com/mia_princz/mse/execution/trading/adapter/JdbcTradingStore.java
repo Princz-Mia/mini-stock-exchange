@@ -25,6 +25,7 @@ import com.mia_princz.mse.contracts.events.VenueState;
 import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
+import com.mia_princz.mse.execution.trading.application.TapeTrade;
 import com.mia_princz.mse.execution.trading.application.TradingStore;
 import com.mia_princz.mse.execution.trading.domain.BookOrder;
 import com.mia_princz.mse.execution.trading.domain.DepthLevel;
@@ -54,7 +55,6 @@ public final class JdbcTradingStore implements TradingStore {
 		.parsingFingerprint64(MarketSnapshot.getClassSchema());
 
 	/** Public trades carried in each snapshot, newest first. */
-	static final int RECENT_TRADES = 50;
 
 	/** An encoded snapshot must stay under this; a bigger one fails its command instead of being published. */
 	static final int SNAPSHOT_BUDGET_BYTES = 128 * 1024;
@@ -598,6 +598,20 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public List<TapeTrade> recentTrades(UUID instrumentId, int limit) {
+		return jdbc.sql("""
+				SELECT t.id, t.trade_sequence, t.price_cents, t.quantity, t.executed_at, o.side
+				FROM trades t JOIN orders o ON o.id = t.taker_order_id
+				WHERE t.instrument_id = ?
+				ORDER BY t.trade_sequence DESC LIMIT ?""")
+			.params(instrumentId, limit)
+			.query((row, index) -> new TapeTrade(row.getObject("id", UUID.class), row.getLong("trade_sequence"),
+					row.getLong("price_cents"), row.getLong("quantity"), Side.valueOf(row.getString("side")),
+					row.getTimestamp("executed_at").toInstant()))
+			.list();
+	}
+
+	@Override
 	public void insertMarketSnapshot(MarketView view) {
 		MarketSnapshot.Builder snapshot = jdbc.sql("""
 				SELECT symbol, reference_price_cents, tick_cents, lot_size, rule_version, last_trade_sequence
@@ -610,17 +624,11 @@ public final class JdbcTradingStore implements TradingStore {
 						row.getLong("tick_cents"), row.getLong("lot_size"), Quantity.MIN_SHARES, Quantity.MAX_SHARES,
 						Price.MAX_CENTS, view.market().maxOpenOrdersPerAccount(), view.market().maxFillsPerCommand())))
 			.single();
-		// Read inside the command's transaction, so the command's own trades are already here.
-		List<PublicTrade> recent = jdbc.sql("""
-				SELECT t.id, t.trade_sequence, t.price_cents, t.quantity, t.executed_at, o.side
-				FROM trades t JOIN orders o ON o.id = t.taker_order_id
-				WHERE t.simulation_id = ? AND t.instrument_id = ?
-				ORDER BY t.trade_sequence DESC LIMIT ?""")
-			.params(view.simulationId(), view.instrumentId(), RECENT_TRADES)
-			.query((row, index) -> new PublicTrade(row.getObject("id", UUID.class), row.getLong("trade_sequence"),
-					row.getLong("price_cents"), row.getLong("quantity"), AggressorSide.valueOf(row.getString("side")),
-					row.getTimestamp("executed_at").toInstant()))
-			.list();
+		List<PublicTrade> recent = view.recentTrades()
+			.stream()
+			.map((trade) -> new PublicTrade(trade.tradeId(), trade.tradeSequence(), trade.priceCents(), trade.quantity(),
+					AggressorSide.valueOf(trade.aggressor().name()), trade.executedAt()))
+			.toList();
 		MarketSnapshot event = snapshot.setEventId(UUID.randomUUID())
 			.setSimulationId(view.simulationId())
 			.setInstrumentId(view.instrumentId())

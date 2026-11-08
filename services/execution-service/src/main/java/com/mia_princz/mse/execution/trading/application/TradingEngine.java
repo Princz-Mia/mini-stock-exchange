@@ -2,6 +2,7 @@ package com.mia_princz.mse.execution.trading.application;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -36,6 +37,9 @@ import com.mia_princz.mse.execution.trading.domain.Side;
  */
 public final class TradingEngine {
 
+	/** Trades in a public market snapshot's tape. */
+	static final int TAPE_TRADES = 50;
+
 	/** Levels per side in a public market snapshot. */
 	static final int SNAPSHOT_LEVELS = 20;
 
@@ -52,6 +56,9 @@ public final class TradingEngine {
 	private final Map<UUID, OrderBook> books = new HashMap<>();
 
 	private final Map<UUID, String> symbols = new HashMap<>();
+
+	/** Each instrument's newest trades for its snapshots, kept like the books: changed only after a commit. */
+	private final Map<UUID, Tape> tapes = new HashMap<>();
 
 	private UUID simulationId;
 
@@ -78,6 +85,7 @@ public final class TradingEngine {
 			long epoch = store.claimWriterEpoch(simulation);
 			Map<UUID, OrderBook> rebuilt = new HashMap<>();
 			Map<UUID, String> names = new HashMap<>();
+			Map<UUID, Tape> rebuiltTapes = new HashMap<>();
 			List<String> problems = new ArrayList<>();
 			for (TradingStore.Instrument instrument : store.instruments(simulation)) {
 				OrderBook book = new OrderBook(market.maxFillsPerCommand());
@@ -87,6 +95,7 @@ public final class TradingEngine {
 				}
 				rebuilt.put(instrument.id(), book);
 				names.put(instrument.id(), instrument.symbol());
+				rebuiltTapes.put(instrument.id(), new Tape(TAPE_TRADES, store.recentTrades(instrument.id(), TAPE_TRADES)));
 			}
 			problems.addAll(store.reconciliationProblems(simulation));
 			if (!problems.isEmpty()) {
@@ -96,6 +105,7 @@ public final class TradingEngine {
 			writerEpoch = epoch;
 			books.putAll(rebuilt);
 			symbols.putAll(names);
+			tapes.putAll(rebuiltTapes);
 			return null;
 		});
 	}
@@ -151,7 +161,13 @@ public final class TradingEngine {
 		return writer.submit(() -> books.get(instrumentId).depth(side, Integer.MAX_VALUE));
 	}
 
-	private record Outcome(PlacementResult result, MatchPlan plan) {
+	/** {@code trades} are the command's new trades, oldest first, for the tape once it commits. */
+	private record Outcome(PlacementResult result, MatchPlan plan, List<TapeTrade> trades) {
+
+		Outcome(PlacementResult result, MatchPlan plan) {
+			this(result, plan, List.of());
+		}
+
 	}
 
 	private PlacementResult process(CommandKey key, PlaceOrder command) {
@@ -169,6 +185,7 @@ public final class TradingEngine {
 		if (outcome.plan() != null) {
 			try {
 				book.apply(outcome.plan());
+				tapes.get(command.instrumentId()).add(outcome.trades());
 			}
 			catch (RuntimeException ex) {
 				throw new WriterHaltException("The book could not apply a committed plan", ex);
@@ -212,6 +229,7 @@ public final class TradingEngine {
 			// Never replace a book that exists: it may hold resting orders.
 			books.putIfAbsent(command.instrumentId(), new OrderBook(added.maxFillsPerCommand()));
 			symbols.putIfAbsent(command.instrumentId(), command.symbol());
+			tapes.putIfAbsent(command.instrumentId(), new Tape(TAPE_TRADES, List.of()));
 		}
 		return added.result();
 	}
@@ -594,11 +612,11 @@ public final class TradingEngine {
 		PlacementResult result = accepted(command, plan, sequence);
 		store.insertOrder(new NewOrder(command.orderId(), simulationId, request, command.instrumentId(), result.state(),
 				result.reason(), result.filled(), result.working(), result.canceled(), sequence));
-		write(command, plan, sequence);
+		List<TapeTrade> trades = write(command, plan, sequence);
 		if (!plan.fills().isEmpty() || plan.rests()) {
-			snapshot(market, command.instrumentId(), book, BookDelta.of(plan), sequence);
+			snapshot(market, command.instrumentId(), book, BookDelta.of(plan), sequence, trades);
 		}
-		return new Outcome(remember(key, 201, result), plan);
+		return new Outcome(remember(key, 201, result), plan, trades);
 	}
 
 	/**
@@ -606,14 +624,27 @@ public final class TradingEngine {
 	 * the book and the command's own changes; the book itself changes only after the commit.
 	 */
 	private void snapshot(Market market, UUID instrumentId, OrderBook book, BookDelta delta, long sequence) {
-		store.insertMarketSnapshot(new TradingStore.MarketView(simulationId, instrumentId, market,
-				book.depthAfter(delta, Side.BUY, SNAPSHOT_LEVELS), book.depthAfter(delta, Side.SELL, SNAPSHOT_LEVELS),
-				sequence, clock.instant()));
+		snapshot(market, instrumentId, book, delta, sequence, List.of());
 	}
 
-	private void write(PlaceOrder command, MatchPlan plan, long sequence) {
-		Instant executedAt = clock.instant();
+	/**
+	 * The tape comes from memory, with the command's own trades first: re-reading it from the database for every
+	 * command was the largest part of the writer's time. An instrument added by this command has no tape yet.
+	 */
+	private void snapshot(Market market, UUID instrumentId, OrderBook book, BookDelta delta, long sequence,
+			List<TapeTrade> newTrades) {
+		Tape tape = tapes.get(instrumentId);
+		store.insertMarketSnapshot(new TradingStore.MarketView(simulationId, instrumentId, market,
+				book.depthAfter(delta, Side.BUY, SNAPSHOT_LEVELS), book.depthAfter(delta, Side.SELL, SNAPSHOT_LEVELS),
+				tape == null ? List.copyOf(newTrades) : tape.with(newTrades), sequence, clock.instant()));
+	}
+
+	/** Writes the order's trades and settlement; returns its trades for the tape, oldest first. */
+	private List<TapeTrade> write(PlaceOrder command, MatchPlan plan, long sequence) {
+		// PostgreSQL keeps microseconds, so the tape in memory holds exactly what the database does.
+		Instant executedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
 		Map<Integer, TradingStore.Trade> trades = new HashMap<>();
+		List<TapeTrade> tape = new ArrayList<>(plan.fills().size());
 		Set<UUID> touched = new LinkedHashSet<>();
 		touched.add(command.accountId());
 		for (int i = 0; i < plan.fills().size(); i++) {
@@ -622,6 +653,8 @@ public final class TradingEngine {
 			TradingStore.Trade trade = store.insertTrade(simulationId, command.instrumentId(), plan.taker(), fill,
 					executedAt, sequence);
 			trades.put(i, trade);
+			tape.add(new TapeTrade(trade.id(), trade.tradeSequence(), fill.price().cents(), fill.quantity(),
+					command.side(), executedAt));
 			touched.add(fill.makerAccountId());
 		}
 		SettlementPlan settlement = Settlement.of(command.instrumentId(), plan);
@@ -635,6 +668,7 @@ public final class TradingEngine {
 			store.insertTradeEvent(simulationId, command.instrumentId(), symbols.get(command.instrumentId()), trades.get(i),
 					plan.fills().get(i), executedAt, sequence);
 		}
+		return tape;
 	}
 
 	private static PlacementResult accepted(PlaceOrder command, MatchPlan plan, long sequence) {

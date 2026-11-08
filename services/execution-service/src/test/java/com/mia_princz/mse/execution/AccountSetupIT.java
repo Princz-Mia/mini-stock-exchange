@@ -141,10 +141,8 @@ class AccountSetupIT {
 		assertThat(second.get("nextCursor").isNull()).isTrue();
 		assertThat(trader.get(PROVISION).statusCode()).isEqualTo(403);
 
-		// A restart reconciles balances, positions and the journal, including the genesis batches.
-		engine.start();
-
-		// Once open, the funded accounts trade with each other, and no more accounts are funded.
+		// Once open, the funded accounts trade with each other, and no more accounts are funded. The instrument was added
+		// through the operator API and nothing has restarted since, so this also trades on the tape the writer made then.
 		UUID openKey = UUID.randomUUID();
 		assertThat(operator.post("/api/v1/admin/market/open", "", "Idempotency-Key", openKey.toString()).statusCode())
 			.isEqualTo(200);
@@ -152,6 +150,9 @@ class AccountSetupIT {
 		assertThat(place(other, nova, "SELL", 10, "100.00").statusCode()).isEqualTo(201);
 		HttpResponse<String> bought = place(trader, nova, "BUY", 10, "100.00");
 		assertThat(JSON.readTree(bought.body()).get("state").asString()).as(bought.body()).isEqualTo("FILLED");
+
+		// A restart reconciles balances, positions and the journal, including the genesis batches and the trade.
+		engine.start();
 		UUID lateKey = UUID.randomUUID();
 		assertThat(code(provision(operator, lateKey, "nobody-else", "1.00"), 422)).isEqualTo("UNKNOWN_TRADER");
 		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, 'late', ?, 'TRADER')",

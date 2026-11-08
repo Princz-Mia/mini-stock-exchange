@@ -2,6 +2,31 @@
 
 Measured results, each with the environment it was measured in. They are results on one machine, not guarantees: rerun the command on yours before relying on a number.
 
+## Matcher
+
+The order book alone, with no database (JMH, `MatcherBenchmark`). Each invocation replays the same recorded 10,000 commands from a fresh book. Each command does matching, both sides' 20-level snapshot depth, then apply or cancel. 2 forks, 20 measured iterations, Oracle JDK 25.0.5.
+
+| Book | Per command |
+| --- | --- |
+| 200 resting orders | 427 ± 13 ns |
+| 5,000 resting orders | 596 ± 22 ns |
+
+## Writer replay
+
+The same seeded 12,000 commands (2,000 warm-up, 10,000 measured), one at a time, through the real engine and PostgreSQL in Testcontainers (`EngineReplayBench`). Every run below produced the same digest of answers, so they did identical work.
+
+The change between the two columns: each instrument's newest 50 trades, published with every market snapshot, are now kept in memory by the writer instead of being re-read from the database for every command.
+
+| Three runs each | Before | After |
+| --- | --- | --- |
+| Throughput | 124 to 126 commands a second | 131 to 133 commands a second |
+| Mean | 7.96 to 8.09 ms | 7.52 to 7.61 ms |
+| p50 | 6.55 to 6.66 ms | 6.04 to 6.11 ms |
+| p95 | 17.6 to 18.4 ms | 16.5 to 17.0 ms |
+| p99 | 23.3 ms | 22.0 to 22.4 ms |
+
+About 6% more throughput and 5 to 8% lower latency. Most of a command's time is spent waiting on database round trips, and this removes one of them.
+
 ## Steady load
 
 **Scenario:** five instruments and 1,000 bots (200 market makers, 200 momentum, 600 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured.

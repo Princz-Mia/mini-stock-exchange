@@ -160,11 +160,15 @@ public interface TradingStore {
 
 	/**
 	 * The public state of one instrument once the current command commits: depth from the book plus the command's
-	 * changes, and everything else read from the database inside the same transaction.
+	 * changes, the tape newest first with the command's own trades, and the rest read from the database inside the
+	 * same transaction.
 	 */
 	record MarketView(UUID simulationId, UUID instrumentId, Market market, List<DepthLevel> bids,
-			List<DepthLevel> asks, long commandSequence, Instant generatedAt) {
+			List<DepthLevel> asks, List<TapeTrade> recentTrades, long commandSequence, Instant generatedAt) {
 	}
+
+	/** An instrument's newest trades, newest first, to rebuild its tape at startup. */
+	List<TapeTrade> recentTrades(UUID instrumentId, int limit);
 
 	/** Writes the instrument's {@code MarketSnapshot} to the outbox, in the command's transaction. */
 	void insertMarketSnapshot(MarketView view);
