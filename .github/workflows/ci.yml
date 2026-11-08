@@ -96,4 +96,13 @@ jobs:
         run: bash scripts/compat-gate.sh
       - name: Keep gate logs
         if: always()
-        run: tail -n 40 runtime/compat-gate/summary.txt || true
+        run: |
+          tail -n 40 runtime/compat-gate/summary.txt || true
+          # The failing step's own log says why; it is named after the step, as the gate names it.
+          step=$(sed -n 's/^FAIL  //p' runtime/compat-gate/summary.txt 2>/dev/null | head -n 1 | sed -E 's/ +[0-9]+s.*$//')
+          if [ -n "$step" ]; then
+            log="runtime/compat-gate/$(printf '%s' "$step" | tr -cs 'A-Za-z0-9' '-' | tr 'A-Z' 'a-z').log"
+            echo "::group::$log"
+            tail -n 200 "$log" || true
+            echo "::endgroup::"
+          fi
