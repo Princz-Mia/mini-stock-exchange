@@ -88,8 +88,8 @@ export function TerminalPage() {
             </div>
             <PriceChart trades={frame?.recentTrades ?? []} />
             <div className="market-split">
-              <OrderBook bids={frame?.bids ?? []} asks={frame?.asks ?? []} />
-              <Tape trades={frame?.recentTrades ?? []} />
+              <OrderBook bids={frame?.bids ?? []} asks={frame?.asks ?? []} waiting={frame === null} />
+              <Tape trades={frame?.recentTrades ?? []} waiting={frame === null} />
             </div>
           </div>
           <OrderTicket

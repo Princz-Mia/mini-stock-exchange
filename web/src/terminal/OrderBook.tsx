@@ -39,8 +39,19 @@ function Side({ label, quotes, side }: { label: string; quotes: readonly Quote[]
   );
 }
 
-/** Aggregate depth, best first on both sides, with the spread between them. */
-export function OrderBook({ bids, asks }: { bids: readonly Quote[]; asks: readonly Quote[] }) {
+/**
+ * Aggregate depth, best first on both sides, with the spread between them. While {@code waiting}, no market frame has
+ * arrived yet, so the book is unknown rather than empty and says so.
+ */
+export function OrderBook({
+  bids,
+  asks,
+  waiting = false,
+}: {
+  bids: readonly Quote[];
+  asks: readonly Quote[];
+  waiting?: boolean;
+}) {
   const bestBid = bids[0];
   const bestAsk = asks[0];
   const spread =
@@ -53,10 +64,14 @@ export function OrderBook({ bids, asks }: { bids: readonly Quote[]; asks: readon
         <h2 id="book-title">Order book</h2>
         {spread !== null && <span className="muted">Spread {groupDigits(spread)}</span>}
       </div>
-      <div className="book">
-        <Side label="Bids" quotes={bids} side="buy" />
-        <Side label="Asks" quotes={asks} side="sell" />
-      </div>
+      {waiting ? (
+        <p className="muted">Waiting for the live market…</p>
+      ) : (
+        <div className="book">
+          <Side label="Bids" quotes={bids} side="buy" />
+          <Side label="Asks" quotes={asks} side="sell" />
+        </div>
+      )}
     </section>
   );
 }
