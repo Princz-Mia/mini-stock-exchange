@@ -9,6 +9,7 @@ import pytest
 from mse_simulator.control import Assignment
 from mse_simulator.credentials import load_token
 from mse_simulator.market import fetch
+from mse_simulator.pacing import Pacer
 from mse_simulator.runner import Runner
 from mse_simulator.settings import Settings
 from mse_simulator.strategy import Holdings
@@ -438,6 +439,58 @@ def test_market_data_that_is_not_live_pauses_new_orders(tmp_path) -> None:
             await asyncio.wait_for(runner.drain(), 2)
 
     asyncio.run(scenario())
+    assert exchange.placed == []
+
+
+def test_a_command_with_no_idle_bot_waits_in_the_pacer(tmp_path) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 1)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["NOISE"])
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            runner.start_run(Assignment.parse(exchange.run))
+            for bot in runner._bots.values():
+                bot.busy = True
+            pacer = Pacer(1.0, 0.0)
+
+            assert runner.spend(pacer) == 0
+            assert pacer.take(), "the command was kept for the next round"
+
+    asyncio.run(scenario())
+
+
+class Waits:
+    """A strategy that always decides to wait."""
+
+    def decide(self, *_args) -> None:
+        return None
+
+
+@pytest.mark.parametrize(("live", "refunded"), [("LIVE", True), ("CATCHING_UP", False)])
+def test_a_bot_that_waits_by_choice_gives_its_command_to_another(tmp_path, live, refunded) -> None:
+    """The run's rate counts commands: a step that decides to wait hands its credit back, but not
+    while the data is stale, when the bots pause at the paced rate of steps."""
+    accounts = write_tokens(tmp_path / "tokens", 1)
+    exchange = Exchange()
+    exchange.live = live
+    exchange.run = run_body(accounts, ["NOISE"])
+
+    async def scenario() -> bool:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            runner.start_run(Assignment.parse(exchange.run))
+            await runner.refresh_market()
+            for bot in runner._bots.values():
+                bot.strategy = Waits()
+            runner._pacer = pacer = Pacer(1.0, 0.0)
+            assert pacer.take() and not pacer.take()
+            runner.tick()
+            await asyncio.wait_for(runner.drain(), 2)
+            return pacer.take()
+
+    assert asyncio.run(scenario()) is refunded
     assert exchange.placed == []
 
 

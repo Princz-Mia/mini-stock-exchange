@@ -23,6 +23,7 @@ from mse_simulator.market import CLOSED, MarketView
 from mse_simulator.market_maker import MarketMaker, MarketMakerConfig
 from mse_simulator.momentum import MomentumBot, MomentumConfig, PriceSignal
 from mse_simulator.noise import NoiseBot, NoiseConfig
+from mse_simulator.pacing import Pacer
 from mse_simulator.settings import Settings
 from mse_simulator.strategy import Cancel, Holdings, OpenOrder, Place, Strategy
 
@@ -89,6 +90,7 @@ class Runner:
         self._stopping = False
         self._lost = False
         self._lease_until = float("-inf")
+        self._pacer: Pacer | None = None
         self._shutdown = asyncio.Event()
         self.activity = Activity()
 
@@ -212,6 +214,17 @@ class Runner:
                 return True
         return False
 
+    def spend(self, pacer: Pacer) -> int:
+        """Starts a step for each command the pacer allows, while a bot is idle. A command with no
+        idle bot to take it stays in the pacer for the next round. Returns the steps started."""
+        started = 0
+        while pacer.take():
+            if not self.tick():
+                pacer.refund()
+                break
+            started += 1
+        return started
+
     async def _step(self, bot: Bot, strategy: Strategy) -> None:
         assert self._run is not None
         try:
@@ -220,6 +233,10 @@ class Runner:
             tradable = view.tradable(now, self._settings.max_data_age_seconds)
             holdings, orders = await self._observe(bot.client, now)
             intent = strategy.decide(view, tradable, holdings, orders, now)
+            if intent is None and tradable and self._pacer is not None:
+                # Waiting by choice sends nothing, so its command goes to another bot. Not while
+                # the data is stale: then the bots pause, at the paced rate of steps.
+                self._pacer.refund()
             if isinstance(intent, Place):
                 answer = await bot.client.place(
                     {
@@ -309,7 +326,10 @@ class Runner:
 
     async def _trade(self, stop: asyncio.Event) -> None:
         assert self._run is not None
-        interval = 1.0 / self._run.commands_per_second
+        # The rate counts commands, not steps: see pacing.py. Polled often enough that a high rate
+        # is spread over each second rather than sent in bursts.
+        self._pacer = pacer = Pacer(self._run.commands_per_second, self._clock())
+        interval = min(1.0 / self._run.commands_per_second, 0.05)
         last_poll = last_report = float("-inf")
         while not (stop.is_set() or self._stopping or self._lost):
             now = self._clock()
@@ -320,8 +340,9 @@ class Runner:
                 logger.info("run %s: %s", self._run.run_id, asdict(self.activity))
                 last_report = now
             # Without a renewed lease another worker may take the run, so no new commands.
+            pacer.accrue(self._clock())
             if now < self._lease_until:
-                self.tick()
+                self.spend(pacer)
             await self._sleep(interval)
 
     async def settle(self) -> None:
