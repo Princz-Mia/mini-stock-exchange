@@ -16,6 +16,9 @@
 	<properties>
 		<java.version>25</java.version>
 		<archunit.version>1.5.1</archunit.version>
+		<jmh.version>1.37</jmh.version>
+		<!-- What the jmh profile runs; any JMH options, e.g. -Djmh.args="MatcherBenchmark -prof gc". -->
+		<jmh.args>MatcherBenchmark</jmh.args>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -136,6 +139,13 @@
 			<artifactId>testcontainers-postgresql</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<!-- The matcher benchmark compiles with the tests; only the jmh profile generates and runs it. -->
+		<dependency>
+			<groupId>org.openjdk.jmh</groupId>
+			<artifactId>jmh-core</artifactId>
+			<version>${jmh.version}</version>
+			<scope>test</scope>
+		</dependency>
 		<!-- Validates real responses against api/openapi.yaml (JSON Schema 2020-12, Jackson 3). -->
 		<dependency>
 			<groupId>com.networknt</groupId>
@@ -190,5 +200,50 @@
 			</plugin>
 		</plugins>
 	</build>
+
+	<profiles>
+		<!-- Matcher benchmark: mvnw -pl services/execution-service -Pjmh -DskipTests clean test-compile exec:exec@jmh.
+			 The clean makes sure the annotation processor generates the benchmark list. -->
+		<profile>
+			<id>jmh</id>
+			<build>
+				<plugins>
+					<plugin>
+						<artifactId>maven-compiler-plugin</artifactId>
+						<executions>
+							<execution>
+								<id>default-testCompile</id>
+								<configuration>
+									<!-- JDK 23 and later run no processor found on the class path by default. -->
+									<annotationProcessorPaths>
+										<path>
+											<groupId>org.openjdk.jmh</groupId>
+											<artifactId>jmh-generator-annprocess</artifactId>
+											<version>${jmh.version}</version>
+										</path>
+									</annotationProcessorPaths>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+					<plugin>
+						<groupId>org.codehaus.mojo</groupId>
+						<artifactId>exec-maven-plugin</artifactId>
+						<version>3.6.4</version>
+						<executions>
+							<execution>
+								<id>jmh</id>
+								<configuration>
+									<executable>java</executable>
+									<classpathScope>test</classpathScope>
+									<commandlineArgs>-classpath %classpath org.openjdk.jmh.Main -rf json -rff target/jmh-result.json ${jmh.args}</commandlineArgs>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
 
 </project>
