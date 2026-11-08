@@ -573,6 +573,13 @@ button.chip {
   gap: var(--space-3);
 }
 
+/* The two sides share a narrow panel: tighter cells keep both in view with wider fonts too. With Linux's fonts at
+   1280 px wide, the asks reached 14 px past the panel. */
+.book-side th,
+.book-side td {
+  padding: var(--space-2) var(--space-1);
+}
+
 .watchlist-items {
   list-style: none;
   margin: 0;
