@@ -24,6 +24,7 @@ trader_password=$(secret)
 operator_password=$(secret)
 # The browser test's counterparty; the Kafka outage step trades as it too.
 counterparty_password=$(secret)
+grafana_password=$(secret)
 umask 077
 cat > "$env_file" <<EOF
 POSTGRES_PASSWORD=$(secret)
@@ -31,7 +32,7 @@ EXECUTION_DB_OWNER_PASSWORD=$execution_owner_password
 EXECUTION_DB_APP_PASSWORD=$execution_app_password
 MARKET_DATA_DB_OWNER_PASSWORD=$market_data_owner_password
 MARKET_DATA_DB_APP_PASSWORD=$market_data_app_password
-GRAFANA_ADMIN_PASSWORD=$(secret)
+GRAFANA_ADMIN_PASSWORD=$grafana_password
 DEV_OPERATOR_PASSWORD=$operator_password
 DEV_TRADER_PASSWORD=$trader_password
 MSE_EXPORT_TOKEN=$(secret)
@@ -40,10 +41,12 @@ WEB_HOST_PORT=$web_port
 POSTGRES_HOST_PORT=25432
 KAFKA_HOST_PORT=$kafka_port
 FLINK_UI_HOST_PORT=28081
+PROMETHEUS_HOST_PORT=29090
+GRAFANA_HOST_PORT=23000
 EOF
 
 # MSYS_NO_PATHCONV only here: Git Bash must not rewrite container paths, but Maven still needs its conversion.
-compose() { MSYS_NO_PATHCONV=1 docker compose -p mse-gate --env-file runtime/compat-gate/gate.env --profile full "$@"; }
+compose() { MSYS_NO_PATHCONV=1 docker compose -p mse-gate --env-file runtime/compat-gate/gate.env --profile full --profile observability "$@"; }
 mvnw() { sh "$root/mvnw" -B -ntp "$@"; }
 
 log=/dev/null
@@ -505,6 +508,12 @@ flink_outage() {
   reconciled
 }
 
+dashboard() {
+  # Grafana provisions the dashboard from the repository; every query on it must work against the live stack.
+  GRAFANA_ADMIN_PASSWORD="$grafana_password" uv run --project simulator --frozen python scripts/check-dashboard.py \
+    http://localhost:29090 http://localhost:23000 >> "$log" 2>&1
+}
+
 kafka_outage() {
   # With Kafka down, both services stay ready and people still trade: the counterparty sells to the trader, the trader
   # places and cancels, and balances read as usual. The public feed says it is stale, and its tape stops short of the
@@ -571,6 +580,7 @@ step 'Toolchain versions' toolchain &&
   step 'Analytics: a JobManager restart resumes from its checkpoint' flink_restart &&
   step 'Candles: Market Data stores and serves the bars' projected_candles &&
   step 'Reconciliation: candles match the trade export exactly' reconciled_candles &&
+  step 'Dashboard: Grafana loads it and every query works' dashboard &&
   step 'Flink outage: trading goes on, candles catch up' flink_outage &&
   step 'Kafka outage: people trade, the feed catches up' kafka_outage ||
   status=1
