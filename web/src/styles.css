@@ -287,7 +287,10 @@ tbody th {
 }
 
 /* Login */
+/* Border-box, so the padding is inside the full height and the card's padding and border inside its width: without
+   it the card overflowed a phone's width by its padding. */
 .login {
+  box-sizing: border-box;
   min-height: 100vh;
   display: grid;
   place-items: center;
@@ -295,6 +298,7 @@ tbody th {
 }
 
 .login-card {
+  box-sizing: border-box;
   width: min(360px, 100%);
 }
 
@@ -512,6 +516,11 @@ button.chip {
   .content {
     padding: var(--space-4);
   }
+
+  /* Two figures a row, so the whole summary fits on the first screen. */
+  .summary {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 .market-header {
@@ -549,6 +558,13 @@ button.chip {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: var(--space-4);
+}
+
+/* After the rule above, so it wins: side by side, the book's asks and the tape's columns were cut off on phones. */
+@media (max-width: 640px) {
+  .market-split {
+    grid-template-columns: 1fr;
+  }
 }
 
 .book {
