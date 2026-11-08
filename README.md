@@ -91,6 +91,14 @@ cd simulator; uv sync --frozen; uv run --frozen ruff check .; uv run --frozen py
 
 On Linux or macOS, use `sh ./mvnw` and `bash scripts/compat-gate.sh`.
 
+### Matcher benchmark
+
+```powershell
+.\mvnw.cmd -B -ntp -pl services/execution-service -Pjmh -DskipTests clean test-compile exec:exec@jmh
+```
+
+A JMH benchmark of the order book alone, with no database: the same recorded 10,000 commands replayed on a quiet and a busy book, timing each command's matching and snapshot depth. Results go to `services/execution-service/target/jmh-result.json`; `-Djmh.args="MatcherBenchmark -prof gc"` passes other JMH options. The `clean` is needed so the benchmark list is generated.
+
 ### Load test
 
 ```powershell
