@@ -106,3 +106,14 @@ jobs:
             tail -n 200 "$log" || true
             echo "::endgroup::"
           fi
+      # The accessibility scan of every screen and state, and the screenshots it was taken from: the report.
+      - name: Keep the screen audit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screen-audit
+          path: |
+            web/test-results/accessibility/
+            web/test-results/screens/
+          if-no-files-found: warn
+          retention-days: 30

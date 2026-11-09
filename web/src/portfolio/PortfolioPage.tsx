@@ -2,6 +2,7 @@ import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
 
 import { ApiError, api, pollEvery } from '../api/client';
 import type { Holding } from '../api/types';
+import { useKeyboardScroll } from '../app/useKeyboardScroll';
 import { groupDigits, groupInteger, utcTime } from '../format';
 
 /**
@@ -42,6 +43,10 @@ export function PortfolioPage() {
     getNextPageParam: (page) => page.nextCursor ?? undefined,
     ...REFRESH,
   });
+  // The three tables are wider than a phone, so their panels scroll; the keyboard has to reach them too.
+  const holdingsPanel = useKeyboardScroll<HTMLElement>();
+  const tradesPanel = useKeyboardScroll<HTMLElement>();
+  const ordersPanel = useKeyboardScroll<HTMLElement>();
 
   if (portfolio.isPending) {
     return <p className="page-status">Loading portfolio…</p>;
@@ -79,7 +84,7 @@ export function PortfolioPage() {
         </div>
       </section>
 
-      <section className="panel" aria-labelledby="holdings-title">
+      <section ref={holdingsPanel} className="panel" aria-labelledby="holdings-title">
         <h2 id="holdings-title">Holdings</h2>
         {holdings.length === 0 ? (
           <p className="muted">No holdings.</p>
@@ -121,7 +126,7 @@ export function PortfolioPage() {
         )}
       </section>
 
-      <section className="panel" aria-labelledby="trades-title">
+      <section ref={tradesPanel} className="panel" aria-labelledby="trades-title">
         <h2 id="trades-title">Executions</h2>
         {trades.data?.pages[0]?.trades.length === 0 && <p className="muted">No executions yet.</p>}
         {trades.data !== undefined && trades.data.pages[0]?.trades.length !== 0 && (
@@ -169,7 +174,7 @@ export function PortfolioPage() {
         )}
       </section>
 
-      <section className="panel" aria-labelledby="orders-title">
+      <section ref={ordersPanel} className="panel" aria-labelledby="orders-title">
         <h2 id="orders-title">Orders</h2>
         {orders.data?.pages[0]?.orders.length === 0 && <p className="muted">No orders yet.</p>}
         {orders.data !== undefined && orders.data.pages[0]?.orders.length !== 0 && (
