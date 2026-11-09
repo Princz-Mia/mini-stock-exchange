@@ -2,11 +2,68 @@ import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, useCallback, useState } from 'react';
 
 import { api } from '../api/client';
-import type { AccountRequest, Instrument } from '../api/types';
+import type { AccountRequest, AccountSummary, Instrument } from '../api/types';
 import { groupDigits, groupInteger } from '../format';
 import { CommandStatus } from './CommandStatus';
 import { DEFAULT_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
 import { useCommand } from './useCommand';
+
+/** A bot's token: whether it still works, and a way to revoke it, confirmed first since it can't be undone. */
+function BotToken({ account }: { account: AccountSummary }) {
+  const client = useQueryClient();
+  const [confirming, setConfirming] = useState(false);
+  const send = useCallback(
+    async (accountId: string, key: string) => {
+      const revoked = await api.revokeBotToken(accountId, key);
+      void client.invalidateQueries({ queryKey: ['accounts'] });
+      return revoked;
+    },
+    [client],
+  );
+  const command = useCommand(send);
+
+  if (account.token === 'REVOKED') {
+    return <span className="muted">Revoked</span>;
+  }
+  return (
+    <div className="token-cell">
+      <span>Active</span>
+      {confirming ? (
+        <>
+          <button
+            type="button"
+            className="primary danger"
+            aria-label={`Confirm revoking ${account.username}'s token`}
+            onClick={() => {
+              setConfirming(false);
+              void command.run(account.accountId);
+            }}
+          >
+            Confirm revoke
+          </button>
+          <button type="button" className="quiet" onClick={() => setConfirming(false)}>
+            Keep
+          </button>
+        </>
+      ) : (
+        <button
+          type="button"
+          className="quiet"
+          aria-label={`Revoke ${account.username}'s token`}
+          disabled={command.outcome.kind === 'sending'}
+          onClick={() => setConfirming(true)}
+        >
+          Revoke
+        </button>
+      )}
+      <CommandStatus
+        outcome={command.outcome}
+        done={(result) => (result.revoked > 0 ? 'Revoked: its next request is refused.' : 'Already revoked.')}
+        onRetry={() => void command.retry()}
+      />
+    </div>
+  );
+}
 
 /** Funded accounts, traders and bots, with what they started with and, during setup, a form to fund a trader. */
 export function AccountSetup({ instruments, editable }: { instruments: readonly Instrument[]; editable: boolean }) {
@@ -53,6 +110,7 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
                 Starting cash
               </th>
               <th scope="col">Starting shares</th>
+              <th scope="col">Token</th>
             </tr>
           </thead>
           <tbody>
@@ -67,6 +125,7 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
                     ? '—'
                     : account.holdings.map((held) => `${held.symbol} ${groupInteger(held.quantity)}`).join(' · ')}
                 </td>
+                <td>{account.kind === 'BOT' ? <BotToken account={account} /> : '—'}</td>
               </tr>
             ))}
           </tbody>

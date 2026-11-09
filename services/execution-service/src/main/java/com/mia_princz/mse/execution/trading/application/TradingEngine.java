@@ -160,6 +160,11 @@ public final class TradingEngine {
 		return submit(() -> processBots(key, command));
 	}
 
+	/** Revokes a bot's tokens, in any market state; the bot's next request is refused. */
+	public CompletableFuture<TokenRevocation> revokeBotToken(CommandKey key, RevokeBotToken command) {
+		return submit(() -> processRevoke(key, command));
+	}
+
 	/** Starts a bot run while the market is open or halted; one run runs at a time. */
 	public CompletableFuture<BotRunResult> startBotRun(CommandKey key, StartBotRun command) {
 		return submit(() -> processStartRun(key, command));
@@ -187,7 +192,7 @@ public final class TradingEngine {
 	private PlacementResult process(CommandKey key, PlaceOrder command) {
 		OrderBook book = books.get(command.instrumentId());
 		if (book == null) {
-			throw new IllegalArgumentException("Unknown instrument " + command.instrumentId());
+			throw new UnknownInstrumentException(command.instrumentId());
 		}
 		Outcome outcome;
 		try {
@@ -399,6 +404,47 @@ public final class TradingEngine {
 		return remember(key, 201, new BotsResult(BotsResult.Status.CREATED, command.count(),
 				ProvisionBots.name(population + 1), ProvisionBots.name(population + command.count()),
 				population + command.count(), sequence));
+	}
+
+	private TokenRevocation processRevoke(CommandKey key, RevokeBotToken command) {
+		if (simulationId == null) {
+			return new TokenRevocation(TokenRevocation.Status.NOT_A_BOT, command.accountId(), 0, 0);
+		}
+		try {
+			return transactions.inTransaction(() -> revokeInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+	}
+
+	/**
+	 * Revoking is identity, not trading: the bot's orders and balances are untouched, and a run it belongs to keeps
+	 * running without it. Revoking again revokes nothing and says so.
+	 */
+	private TokenRevocation revokeInTransaction(CommandKey key, RevokeBotToken command) {
+		Market market = store.lockMarket();
+		if (market.writerEpoch() != writerEpoch) {
+			throw new StaleWriterException();
+		}
+		Optional<TradingStore.StoredResult<TokenRevocation>> prior = store.findResult(simulationId, key,
+				TokenRevocation.class);
+		if (prior.isPresent()) {
+			return replay(key, prior.get());
+		}
+		long sequence = store.nextCommandSequence(simulationId);
+		if (!store.isBotAccount(simulationId, command.accountId())) {
+			store.insertAudit(simulationId, command.actorUserId(), "BOT_TOKEN_REVOKE", "NOT_ALLOWED",
+					key.idempotencyKey(), sequence);
+			return remember(key, 404,
+					new TokenRevocation(TokenRevocation.Status.NOT_A_BOT, command.accountId(), 0, sequence));
+		}
+		int revoked = store.revokeApiTokens(command.accountId(), clock.instant());
+		store.insertAudit(simulationId, command.actorUserId(), "BOT_TOKEN_REVOKE", revoked > 0 ? "APPLIED" : "NOT_ALLOWED",
+				key.idempotencyKey(), sequence);
+		TokenRevocation.Status status = revoked > 0 ? TokenRevocation.Status.REVOKED
+				: TokenRevocation.Status.ALREADY_REVOKED;
+		return remember(key, 200, new TokenRevocation(status, command.accountId(), revoked, sequence));
 	}
 
 	private BotRunResult processStartRun(CommandKey key, StartBotRun command) {
@@ -734,6 +780,7 @@ public final class TradingEngine {
 			case AccountResult account -> account.commandSequence();
 			case BotsResult bots -> bots.commandSequence();
 			case BotRunResult run -> run.commandSequence();
+			case TokenRevocation revocation -> revocation.commandSequence();
 			default -> throw new IllegalArgumentException("Not a command result: " + result);
 		};
 		store.insertResult(simulationId, key, httpStatus, result, sequence);
@@ -759,6 +806,17 @@ public final class TradingEngine {
 	}
 
 	/** Another process has claimed the market since this engine started; this one must stop writing. */
+	/** An order for an instrument the market doesn't have. Raised before any transaction, so nothing was written. */
+	public static final class UnknownInstrumentException extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+
+		public UnknownInstrumentException(UUID instrumentId) {
+			super("Unknown instrument " + instrumentId);
+		}
+
+	}
+
 	static final class StaleWriterException extends RuntimeException {
 
 		private static final long serialVersionUID = 1L;

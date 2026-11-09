@@ -279,6 +279,27 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/bots/{accountId}/revoke-token": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Revoke a bot's token, so its next request is refused. Works in any market state.
+         * @description Operator only. Sequenced on the writer and audited, with an idempotency key. The bot's orders and balances
+         *     are untouched. Revoking again revokes nothing: revoked is 0. A revoked token stays revoked.
+         */
+        readonly post: operations["revokeBotToken"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/bot-runs": {
         readonly parameters: {
             readonly query?: never;
@@ -786,6 +807,12 @@ export interface components {
             readonly population: number;
             readonly commandSequence: components["schemas"]["Sequence"];
         };
+        readonly TokenRevoked: {
+            readonly accountId: components["schemas"]["Uuid"];
+            /** @description Tokens this command revoked; 0 when they already were. */
+            readonly revoked: number;
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
         readonly BotRunRequest: {
             readonly marketMakers?: number;
             readonly noise?: number;
@@ -937,6 +964,11 @@ export interface components {
             readonly username: string;
             /** @enum {string} */
             readonly kind: "TRADER" | "BOT";
+            /**
+             * @description A bot's token, ACTIVE until revoked; null for a trader.
+             * @enum {string|null}
+             */
+            readonly token: "ACTIVE" | "REVOKED" | null;
             /** @description The cash it started with. */
             readonly cash: components["schemas"]["Money"];
             /** @description The shares it started with. */
@@ -1892,6 +1924,66 @@ export interface operations {
             };
             /** @description UNKNOWN_INSTRUMENT (committed and audited). */
             readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly revokeBotToken: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path: {
+                readonly accountId: components["schemas"]["Uuid"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Revoked, or already revoked. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["TokenRevoked"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description BOT_NOT_FOUND (committed and audited when the market exists). */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description IDEMPOTENCY_CONFLICT. */
+            readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;
                 };

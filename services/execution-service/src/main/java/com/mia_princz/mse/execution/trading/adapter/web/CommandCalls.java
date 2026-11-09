@@ -18,6 +18,7 @@ import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterBusy
 import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterHaltException;
 import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterStoppedException;
 import com.mia_princz.mse.execution.trading.application.IdempotencyConflictException;
+import com.mia_princz.mse.execution.trading.application.TradingEngine.UnknownInstrumentException;
 
 /** How every command endpoint submits to the writer and answers: keys, admission, timeouts and failures. */
 final class CommandCalls {
@@ -63,7 +64,8 @@ final class CommandCalls {
 				throw new ApiException(HttpStatus.CONFLICT, "IDEMPOTENCY_CONFLICT",
 						"This idempotency key was already used for a different request");
 			}
-			if (cause instanceof IllegalArgumentException) {
+			// Only this exception means an unknown instrument; any other is a fault, answered below as one.
+			if (cause instanceof UnknownInstrumentException) {
 				throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_INSTRUMENT", "No such instrument");
 			}
 			if (cause instanceof WriterHaltException) {

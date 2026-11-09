@@ -200,8 +200,9 @@ describe('the operator screen', () => {
             kind: 'TRADER',
             cash: '100000.00',
             holdings: [{ instrumentId: NOVA.instrumentId, symbol: 'NOVA', quantity: 1000 }],
+            token: null,
           },
-          { accountId: 'b', username: 'bot-0001', kind: 'BOT', cash: '5000.00', holdings: [] },
+          { accountId: 'b', username: 'bot-0001', kind: 'BOT', cash: '5000.00', holdings: [], token: 'ACTIVE' },
         ],
         nextCursor: null,
       },
@@ -216,6 +217,37 @@ describe('the operator screen', () => {
     expect(within(bot).getByText('bot')).toHaveClass('tag');
     expect(screen.getByText(/Endowments are frozen once the market opens/)).toBeInTheDocument();
     expect(screen.queryByRole('form', { name: 'Fund a trader' })).toBeNull();
+  });
+
+  it("revokes a bot's token only after a confirmation, then shows it revoked", async () => {
+    const { server } = exchange('OPEN');
+    let token: 'ACTIVE' | 'REVOKED' = 'ACTIVE';
+    server.on('GET /api/v1/admin/accounts', () => ({
+      status: 200,
+      json: {
+        accounts: [{ accountId: 'b', username: 'bot-0001', kind: 'BOT', cash: '5000.00', holdings: [], token }],
+        nextCursor: null,
+      },
+    }));
+    server.on('POST /api/v1/admin/bots/b/revoke-token', () => {
+      token = 'REVOKED';
+      return { status: 200, json: { accountId: 'b', revoked: 1, commandSequence: '12' } };
+    });
+    const revocations = () => server.requests.filter((request) => request.url.endsWith('/revoke-token'));
+    renderPage();
+
+    const bot = await screen.findByRole('row', { name: /bot-0001/ });
+    expect(within(bot).getByText('Active')).toBeInTheDocument();
+    fireEvent.click(within(bot).getByRole('button', { name: "Revoke bot-0001's token" }));
+    fireEvent.click(within(bot).getByRole('button', { name: 'Keep' }));
+    expect(revocations()).toHaveLength(0);
+    fireEvent.click(within(bot).getByRole('button', { name: "Revoke bot-0001's token" }));
+    fireEvent.click(within(bot).getByRole('button', { name: "Confirm revoking bot-0001's token" }));
+
+    expect(await within(bot).findByText('Revoked')).toBeInTheDocument();
+    expect(revocations()).toHaveLength(1);
+    expect(revocations()[0]?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(within(bot).queryByRole('button', { name: /Revoke/ })).toBeNull();
   });
 
   it('creates bots with the default endowment and shows the new population', async () => {

@@ -23,6 +23,7 @@ import type {
   OwnTradePage,
   Portfolio,
   Problem,
+  TokenRevoked,
 } from './types';
 
 /** A response other than 2xx. `code` is the contract's stable reason when the server sent one. */
@@ -176,6 +177,9 @@ export const api = {
 
   stopBotRun: (runId: string, idempotencyKey: string) =>
     request<BotRunStopping>('POST', `/api/v1/admin/bot-runs/${runId}/stop`, { idempotencyKey }),
+
+  revokeBotToken: (accountId: string, idempotencyKey: string) =>
+    request<TokenRevoked>('POST', `/api/v1/admin/bots/${accountId}/revoke-token`, { idempotencyKey }),
 
   orders: (status: 'all' | 'active', cursor?: string) =>
     request<OrderPage>('GET', `/api/v1/orders${query({ status, cursor, limit: status === 'all' ? 50 : undefined })}`),

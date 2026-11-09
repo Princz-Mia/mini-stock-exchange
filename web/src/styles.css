@@ -558,6 +558,13 @@ button.chip {
   min-width: 0;
 }
 
+.token-cell {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
 .chart-credit {
   margin: 0;
   font-size: 12px;

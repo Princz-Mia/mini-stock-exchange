@@ -117,6 +117,12 @@ public interface TradingStore {
 	/** Stores a bot's token hash; the token itself is never stored. */
 	void insertApiToken(UUID tokenId, UUID accountId, byte[] tokenHash);
 
+	/** Whether the account is a bot in this market. */
+	boolean isBotAccount(UUID simulationId, UUID accountId);
+
+	/** Revokes the account's active tokens; how many there were. A revoked token stays revoked. */
+	int revokeApiTokens(UUID accountId, Instant at);
+
 	/**
 	 * Funds a new account from the issuance account in one balanced GENESIS batch, creates its cash and position rows,
 	 * and records each amount as an initial allocation linked to that batch.
