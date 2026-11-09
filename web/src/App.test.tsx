@@ -85,6 +85,27 @@ describe('signing in', () => {
     expect(screen.getByLabelText('Username')).toHaveValue('trader');
   });
 
+  it('says how long to wait after too many failed sign-ins', async () => {
+    fakeServer()
+      .on('GET /api/v1/me', { status: 401 })
+      .on('GET /api/v1/auth/csrf', { status: 200, json: { headerName: 'X-CSRF-TOKEN', token: 't' } })
+      .on('POST /api/v1/auth/login', {
+        status: 429,
+        problem: {
+          status: 429,
+          code: 'LOGIN_RATE_LIMITED',
+          detail: 'Too many failed sign-ins. Try again in 12 seconds.',
+        },
+      });
+    openAt('/login');
+
+    fireEvent.change(await screen.findByLabelText('Username'), { target: { value: 'trader' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'guess' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Too many failed sign-ins. Try again in 12 seconds.');
+  });
+
   it('asks for both fields before sending anything', async () => {
     const server = fakeServer().on('GET /api/v1/me', { status: 401 });
     openAt('/login');

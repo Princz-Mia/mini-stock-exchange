@@ -16,6 +16,10 @@ function loginError(error: unknown): string {
   if (error instanceof ApiError && error.code === 'INVALID_CREDENTIALS') {
     return 'Wrong username or password.';
   }
+  if (error instanceof ApiError && error.code === 'LOGIN_RATE_LIMITED') {
+    // The server's message says how long to wait.
+    return error.message;
+  }
   return 'Could not sign in. Try again in a moment.';
 }
 
