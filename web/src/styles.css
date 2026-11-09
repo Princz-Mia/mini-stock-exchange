@@ -12,6 +12,8 @@
   --line: #dedbe5;
   --accent: #a3123f;
   --accent-text: #ffffff;
+  /* Text on a secondary, buy or sell fill. Those fills are lighter in the dark scheme, where white fails AA. */
+  --fill-text: #ffffff;
   --secondary: #5b3fa0;
   --buy: #16733d;
   --sell: #b0262f;
@@ -42,6 +44,7 @@
     --secondary: #9b82e0;
     --buy: #4cc27b;
     --sell: #f0646d;
+    --fill-text: #121017;
     --warn-bg: #3a2e12;
     --warn-text: #f3d48b;
   }
@@ -365,7 +368,7 @@ tbody th {
 
 .state-open {
   background: var(--secondary);
-  color: var(--accent-text);
+  color: var(--fill-text);
 }
 
 .state-halted {
@@ -437,6 +440,7 @@ tbody th {
 button.primary.danger:enabled {
   background: var(--sell);
   border-color: var(--sell);
+  color: var(--fill-text);
 }
 
 .setup-form button[type='submit'] {
@@ -554,6 +558,16 @@ button.chip {
   min-width: 0;
 }
 
+.chart-credit {
+  margin: 0;
+  font-size: 12px;
+}
+
+.chart-credit a {
+  color: inherit;
+  text-decoration: underline;
+}
+
 .market-split {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -614,13 +628,13 @@ button.chip {
 .segment.selected-buy {
   background: var(--buy);
   border-color: var(--buy);
-  color: #fff;
+  color: var(--fill-text);
 }
 
 .segment.selected-sell {
   background: var(--sell);
   border-color: var(--sell);
-  color: #fff;
+  color: var(--fill-text);
 }
 
 .balances {
@@ -667,11 +681,13 @@ button.chip {
 button.primary.buy:enabled {
   background: var(--buy);
   border-color: var(--buy);
+  color: var(--fill-text);
 }
 
 button.primary.sell:enabled {
   background: var(--sell);
   border-color: var(--sell);
+  color: var(--fill-text);
 }
 
 .outcome {

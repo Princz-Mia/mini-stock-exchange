@@ -31,7 +31,7 @@ export function PriceChart({ trades }: { trades: readonly TapeTrade[] }) {
     const token = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     chart.current = createChart(host.current, {
       autoSize: true,
-      layout: { background: { color: token('--surface') }, textColor: token('--muted'), attributionLogo: true },
+      layout: { background: { color: token('--surface') }, textColor: token('--muted'), attributionLogo: false },
       grid: { vertLines: { color: token('--line') }, horzLines: { color: token('--line') } },
       timeScale: { timeVisible: true, secondsVisible: true },
     });
@@ -53,7 +53,15 @@ export function PriceChart({ trades }: { trades: readonly TapeTrade[] }) {
         <h2 id="chart-title">Price</h2>
         <span className="muted">Recent trades · candles arrive with analytics</span>
       </div>
+      {/* A picture of the tape below, so hidden from screen readers; nothing in it may take focus. The library's
+          attribution is a plain link here instead of its logo, which is a link inside the hidden canvas. */}
       <div ref={host} className="chart" aria-hidden="true" />
+      <p className="chart-credit muted">
+        Chart:{' '}
+        <a href="https://www.tradingview.com/lightweight-charts/" target="_blank" rel="noopener noreferrer">
+          TradingView Lightweight Charts
+        </a>
+      </p>
     </section>
   );
 }

@@ -1,10 +1,14 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
+
+import AxeBuilder from '@axe-core/playwright';
 import { type Browser, type Page, type Route, expect, test } from '@playwright/test';
 
 // Every screen and the states it can be in, at the three sizes the screens are checked at. Runs after
 // trading-flow.spec.ts (files run in name order on one worker), which set up the market and left the trader holding
 // NOVA. States the live stack won't produce on demand (a busy exchange, a rate limit, a lost stream, a service
-// down) are made by answering those requests in the browser. Each case must not scroll sideways and must show its
-// state; a full-page screenshot of each goes to test-results/screens/ for review.
+// down) are made by answering those requests in the browser. Each case must not scroll sideways, must show its state
+// and must pass an accessibility scan; a full-page screenshot of each goes to test-results/screens/ for review, and
+// each scan's results to test-results/accessibility/.
 
 const SIZES = [
   { name: 'desktop', width: 1440, height: 900 },
@@ -32,11 +36,34 @@ async function signIn(page: Page, username: 'trader' | 'operator'): Promise<void
   await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
 }
 
-/** No sideways scrolling, and a screenshot to look at. */
+/** The WCAG 2.2 A and AA rules axe can check automatically. */
+const WCAG_AA = ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'];
+
+/** No WCAG A or AA violation axe can find in the page as it is now, with every result kept for the report. */
+async function scan(page: Page, size: Size, name: string): Promise<void> {
+  const results = await new AxeBuilder({ page }).withTags(WCAG_AA).analyze();
+  mkdirSync('test-results/accessibility', { recursive: true });
+  writeFileSync(`test-results/accessibility/${size.name}-${name}.json`, JSON.stringify(results, null, 2));
+  const found = results.violations.map(
+    (violation) =>
+      `${violation.id} (${violation.impact ?? 'unknown'}): ${violation.help}\n` +
+      violation.nodes.map((node) => `    ${node.target.join(' ')}: ${node.failureSummary ?? ''}`).join('\n'),
+  );
+  expect(found, `${name} at ${size.name} has accessibility violations`).toEqual([]);
+}
+
+/**
+ * No sideways scrolling, no accessibility violation in either colour scheme (the stylesheet follows the system's), and
+ * a screenshot to look at.
+ */
 async function capture(page: Page, size: Size, name: string): Promise<void> {
   const width = await page.evaluate(() => document.documentElement.scrollWidth);
   expect(width, `${name} at ${size.name} scrolls sideways`).toBeLessThanOrEqual(size.width);
   await page.screenshot({ path: `test-results/screens/${size.name}-${name}.png`, fullPage: true });
+  await scan(page, size, name);
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await scan(page, size, `${name}-dark`);
+  await page.emulateMedia({ colorScheme: 'light' });
 }
 
 /**
