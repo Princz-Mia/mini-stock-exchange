@@ -1,12 +1,15 @@
 import { NavLink, Navigate, Outlet, useLocation } from 'react-router';
 
 import { isOperator, isTrader, useLogout, useSession } from '../auth/session';
+import { useAccountEvents } from './useAccountEvents';
 
 /** The frame around every signed-in page: the simulation context stays visible wherever the user goes. */
 export function AppShell() {
   const session = useSession();
   const logout = useLogout();
   const location = useLocation();
+  // A trader's own change notifications, for as long as they are signed in.
+  useAccountEvents(isTrader(session.data));
 
   if (session.isPending) {
     return <p className="page-status">Loading…</p>;

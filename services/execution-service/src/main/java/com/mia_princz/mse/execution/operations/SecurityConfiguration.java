@@ -26,6 +26,7 @@ import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
 import org.springframework.security.web.authentication.logout.HttpStatusReturningLogoutSuccessHandler;
+import org.springframework.security.web.authentication.logout.LogoutHandler;
 import org.springframework.security.web.authentication.session.ChangeSessionIdAuthenticationStrategy;
 import org.springframework.security.web.authentication.session.CompositeSessionAuthenticationStrategy;
 import org.springframework.security.web.authentication.session.SessionAuthenticationStrategy;
@@ -113,7 +114,7 @@ class SecurityConfiguration {
 	@Bean
 	@Order(2)
 	SecurityFilterChain securityFilterChain(HttpSecurity http, CsrfTokenRepository csrfTokens,
-			SecurityContextRepository contexts) throws Exception {
+			SecurityContextRepository contexts, List<LogoutHandler> logoutHandlers) throws Exception {
 		return http
 			.authorizeHttpRequests((requests) -> requests
 				.requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/prometheus")
@@ -137,6 +138,9 @@ class SecurityConfiguration {
 				.hasRole("TRADER")
 				.requestMatchers(HttpMethod.GET, TRADING_READS)
 				.hasRole("TRADER")
+				// The private stream: a trader's session only, never a bot token.
+				.requestMatchers(HttpMethod.GET, "/api/v1/account-events")
+				.hasRole("TRADER")
 				.anyRequest()
 				.denyAll())
 			.csrf((csrf) -> csrf.csrfTokenRepository(csrfTokens))
@@ -145,9 +149,13 @@ class SecurityConfiguration {
 				.authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
 				// setStatus, not sendError: an error dispatch would hit denyAll and turn a 403 into a 401.
 				.accessDeniedHandler((request, response, denied) -> response.setStatus(HttpServletResponse.SC_FORBIDDEN)))
-			.logout((logout) -> logout.logoutUrl("/api/v1/auth/logout")
-				.deleteCookies("SESSION")
-				.logoutSuccessHandler(new HttpStatusReturningLogoutSuccessHandler(HttpStatus.NO_CONTENT)))
+			.logout((logout) -> {
+				logout.logoutUrl("/api/v1/auth/logout")
+					.deleteCookies("SESSION")
+					.logoutSuccessHandler(new HttpStatusReturningLogoutSuccessHandler(HttpStatus.NO_CONTENT));
+				// Such as closing the session's private streams.
+				logoutHandlers.forEach(logout::addLogoutHandler);
+			})
 			.build();
 	}
 

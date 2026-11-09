@@ -940,6 +940,34 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
 
+  /api/v1/account-events:
+    get:
+      tags: [execution]
+      operationId: streamAccount
+      summary: The signed-in trader's own change notifications, as server-sent events.
+      description: |
+        Event `account` carries an AccountFrame: only the account's version, the command sequence of its latest
+        change since the service started (0 before any). It comes first on connecting, then after each committed
+        command that changed the account: an order placed, rejected, filled (as either side) or cancelled. On each,
+        read orders and portfolio from the REST API again; frames carry no private data. Event `heartbeat`
+        carries an AccountHeartbeat after 10 seconds without a frame. A trader's session only, never a bot token;
+        the stream ends when the session does, at once on logout and within a heartbeat on expiry.
+      responses:
+        '200':
+          description: The stream. Each event's data is JSON, an AccountFrame or an AccountHeartbeat.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not a trader, or a bot token. No body, or NO_TRADING_ACCOUNT.
+        '503':
+          description: TOO_MANY_STREAMS, in all or for this account. Retry after the Retry-After header.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
 components:
   parameters:
     IdempotencyKey:
@@ -1326,6 +1354,22 @@ components:
           maximum: 1000
           description: Bots in the market after this command.
         commandSequence: { $ref: '#/components/schemas/Sequence' }
+
+    AccountFrame:
+      type: object
+      additionalProperties: false
+      required: [accountVersion]
+      properties:
+        accountVersion:
+          $ref: '#/components/schemas/Sequence'
+          description: The command sequence of the account's latest change, or 0.
+
+    AccountHeartbeat:
+      type: object
+      additionalProperties: false
+      required: [at]
+      properties:
+        at: { type: string, format: date-time }
 
     TokenRevoked:
       type: object
