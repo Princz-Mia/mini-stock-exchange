@@ -679,6 +679,31 @@ EOF
   return 0
 }
 
+restore_rehearsal() {
+  # A backup, one more trade after it, then a restore. Execution must be back at the backup exactly, so the extra
+  # trade is gone, and Market Data and the candles must rebuild from the republished history to match it again.
+  # Paths relative to the repository: the scripts hand them to Docker unconverted, which on Windows means as typed.
+  local backup=runtime/compat-gate/backup gate_env=runtime/compat-gate/gate.env
+  local trader="$run_dir/restore-trader.txt" counterparty="$run_dir/restore-counterparty.txt"
+  local at_backup bought
+  rm -rf "$backup"
+  bash scripts/backup.sh --project mse-gate --env-file "$gate_env" --to "$backup" >> "$log" 2>&1 ||
+    { fail 'the backup failed'; return 1; }
+  at_backup=$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")
+  note "at the backup => $at_backup"
+  api_login "$trader" trader "$trader_password" &&
+    api_login "$counterparty" counterparty "$counterparty_password" || return 1
+  assert_equal 'the counterparty offers one share' 201 \
+    "$(status_of "$(api_command "$counterparty" /orders "$(limit_order "$(nova)" SELL 87.80)")")" || return 1
+  bought=$(api_command "$trader" /orders "$(limit_order "$(nova)" BUY 87.80)")
+  assert_match 'a trade after the backup' '"state":"FILLED"' "$(body_of "$bought")" || return 1
+  bash scripts/restore.sh "$backup" --project mse-gate --env-file "$gate_env" --yes >> "$log" 2>&1 ||
+    { fail 'the restore failed'; return 1; }
+  assert_equal 'Execution back at the backup' "$at_backup" \
+    "$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")" &&
+    caught_up
+}
+
 kafka_outage() {
   # With Kafka down, both services stay ready and people still trade: the counterparty sells to the trader, the trader
   # places and cancels, and balances read as usual. The public feed says it is stale, and its tape stops short of the
@@ -752,7 +777,8 @@ step 'Toolchain versions' toolchain &&
   step 'Kafka outage: people trade, the feed catches up' kafka_outage &&
   step 'Crash: Execution killed mid-trading restarts and reconciles' crash_recovery &&
   step 'Rebuild: Market Data rebuilt from Kafka matches exactly' projection_rebuild &&
-  step 'Retry: a refused projection write is retried, not lost' projection_retry ||
+  step 'Retry: a refused projection write is retried, not lost' projection_retry &&
+  step 'Restore: a backup restored, and everything derived rebuilt to match' restore_rehearsal ||
   status=1
 
 teardown "${1:-}"

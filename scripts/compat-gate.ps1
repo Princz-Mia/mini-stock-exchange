@@ -808,6 +808,24 @@ try {
         if (-not (Wait-Until 60 { Test-FeedsLive })) { throw 'the trade feed did not become live again' }
         Assert-CaughtUp
     }
+
+    Step 'Restore: a backup restored, and everything derived rebuilt to match' {
+        # A backup, one more trade after it, then a restore. Execution must be back at the backup exactly, so the
+        # extra trade is gone, and Market Data and the candles must rebuild from the republished history to match it.
+        $backup = Join-Path $runDir 'backup'
+        if (Test-Path $backup) { Remove-Item -Recurse -Force $backup }
+        Invoke-Checked 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts\backup.ps1', '-Project', 'mse-gate', '-EnvFile', $envFile, '-To', $backup)
+        $nova = Get-Nova
+        $atBackup = Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$nova'"
+        "at the backup => $atBackup" | Add-Content -Encoding utf8 $script:currentLog
+        $trader = New-ApiSession 'trader' $traderPassword
+        $counterparty = New-ApiSession 'counterparty' $counterpartyPassword
+        Assert-Equal 'the counterparty offers one share' '201' (Invoke-ApiCommand $counterparty '/orders' (New-LimitOrder $nova 'SELL' '87.80')).Status
+        Assert-Match 'a trade after the backup' '"state":"FILLED"' (Invoke-ApiCommand $trader '/orders' (New-LimitOrder $nova 'BUY' '87.80')).Body
+        Invoke-Checked 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts\restore.ps1', $backup, '-Project', 'mse-gate', '-EnvFile', $envFile, '-Yes')
+        Assert-Equal 'Execution back at the backup' $atBackup (Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$nova'")
+        Assert-CaughtUp
+    }
 }
 catch {
     $failed = $true
