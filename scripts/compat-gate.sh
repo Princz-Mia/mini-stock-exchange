@@ -704,6 +704,26 @@ restore_rehearsal() {
     caught_up
 }
 
+account_stream() {
+  # Through the proxy, as a browser would: the trader's stream opens with a frame, and an order placed and cancelled
+  # far below the market is heard at its own command sequence. Proves the route and that nothing buffers the frames.
+  local trader="$run_dir/stream-trader.txt" out="$run_dir/account-stream.txt" placed order sequence reader
+  api_login "$trader" trader "$trader_password" || return 1
+  curl -s -N -m 6 -b "$trader" -H 'Accept: text/event-stream' "$api/account-events" > "$out" 2>/dev/null &
+  reader=$!
+  sleep 1
+  placed=$(api_command "$trader" /orders "$(limit_order "$(nova)" BUY 1.00)")
+  assert_equal 'a resting buy far below the market' 201 "$(status_of "$placed")" || { kill "$reader"; return 1; }
+  sequence=$(body_of "$placed" | sed -nE 's/.*"commandSequence":"([0-9]+)".*/\1/p')
+  order=$(body_of "$placed" | sed -nE 's/.*"orderId":"([0-9a-f-]{36})".*/\1/p')
+  assert_equal 'cancelled again' 200 "$(status_of "$(api_command "$trader" "/orders/$order/cancel")")" ||
+    { kill "$reader"; return 1; }
+  wait "$reader"
+  note "stream => $(tr '\r\n' '  ' < "$out")"
+  assert_match 'a frame on connecting' 'event:account' "$(cat "$out")" &&
+    assert_match "a frame at the order's sequence $sequence" "\"accountVersion\":\"$sequence\"" "$(cat "$out")"
+}
+
 kafka_outage() {
   # With Kafka down, both services stay ready and people still trade: the counterparty sells to the trader, the trader
   # places and cancels, and balances read as usual. The public feed says it is stale, and its tape stops short of the
@@ -768,6 +788,7 @@ step 'Toolchain versions' toolchain &&
   step 'Browser: trading, halt, resume, bot runs and every screen' browser_flow &&
   step 'Bot tokens: owner-only files, and the simulator control token' bot_tokens &&
   step 'Bots: the simulator trades and the tape shows it' bot_trading &&
+  step 'Account stream: a trader hears their own changes through the proxy' account_stream &&
   step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' avro_pipeline &&
   step 'Analytics: a JobManager restart resumes from its checkpoint' flink_restart &&
   step 'Candles: Market Data stores and serves the bars' projected_candles &&

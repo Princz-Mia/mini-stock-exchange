@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -54,6 +55,8 @@ public final class TradingEngine {
 
 	private final BotCredentials botCredentials;
 
+	private final AccountChanges accountChanges;
+
 	private final Map<UUID, OrderBook> books = new HashMap<>();
 
 	private final Map<UUID, String> symbols = new HashMap<>();
@@ -74,11 +77,17 @@ public final class TradingEngine {
 
 	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
 			BotCredentials botCredentials) {
+		this(store, transactions, writer, clock, botCredentials, AccountChanges.NONE);
+	}
+
+	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
+			BotCredentials botCredentials, AccountChanges accountChanges) {
 		this.store = store;
 		this.transactions = transactions;
 		this.writer = writer;
 		this.clock = clock;
 		this.botCredentials = botCredentials;
+		this.accountChanges = accountChanges;
 	}
 
 	/**
@@ -181,10 +190,15 @@ public final class TradingEngine {
 	}
 
 	/** {@code trades} are the command's new trades, oldest first, for the tape once it commits. */
-	private record Outcome(PlacementResult result, MatchPlan plan, List<TapeTrade> trades) {
+	/** {@code fresh} is false for a repeated key's stored answer, which changed nothing. */
+	private record Outcome(PlacementResult result, MatchPlan plan, List<TapeTrade> trades, boolean fresh) {
 
 		Outcome(PlacementResult result, MatchPlan plan) {
-			this(result, plan, List.of());
+			this(result, plan, List.of(), true);
+		}
+
+		Outcome(PlacementResult result, MatchPlan plan, List<TapeTrade> trades) {
+			this(result, plan, trades, true);
 		}
 
 	}
@@ -210,6 +224,15 @@ public final class TradingEngine {
 				throw new WriterHaltException("The book could not apply a committed plan", ex);
 			}
 		}
+		if (outcome.fresh()) {
+			// The order's own account, a rejection included, and every resting order's account it traded against.
+			Set<UUID> changed = new HashSet<>();
+			changed.add(command.accountId());
+			if (outcome.plan() != null) {
+				outcome.plan().fills().forEach((fill) -> changed.add(fill.makerAccountId()));
+			}
+			accountChanges.changed(changed, outcome.result().commandSequence());
+		}
 		return outcome.result();
 	}
 
@@ -228,6 +251,9 @@ public final class TradingEngine {
 				&& books.get(outcome.instrumentId()).cancel(command.orderId()).isEmpty()) {
 			throw new WriterHaltException("A committed cancel found no order in the book",
 					new BookOutOfStepException(command.orderId()));
+		}
+		if (outcome.instrumentId() != null && outcome.result().status() == CancelResult.Status.CANCELED) {
+			accountChanges.changed(Set.of(command.accountId()), outcome.result().commandSequence());
 		}
 		return outcome.result();
 	}
@@ -651,7 +677,7 @@ public final class TradingEngine {
 		Optional<TradingStore.StoredResult<PlacementResult>> prior = store.findResult(simulationId, key,
 				PlacementResult.class);
 		if (prior.isPresent()) {
-			return new Outcome(replay(key, prior.get()), null);
+			return new Outcome(replay(key, prior.get()), null, List.of(), false);
 		}
 		long sequence = store.nextCommandSequence(simulationId);
 		if (!"OPEN".equals(market.state())) {

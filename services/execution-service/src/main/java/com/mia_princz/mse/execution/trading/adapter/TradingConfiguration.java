@@ -15,6 +15,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 
 import tools.jackson.databind.json.JsonMapper;
 
+import com.mia_princz.mse.execution.trading.application.AccountChanges;
 import com.mia_princz.mse.execution.trading.application.BotCredentials;
 import com.mia_princz.mse.execution.trading.application.CommandWriter;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
@@ -55,8 +56,9 @@ class TradingConfiguration {
 
 	@Bean
 	TradingEngine tradingEngine(TradingStore store, PlatformTransactionManager transactionManager, CommandWriter writer,
-			Clock clock, BotCredentials botCredentials) {
-		return new TradingEngine(store, new SpringTransactionRunner(transactionManager), writer, clock, botCredentials);
+			Clock clock, BotCredentials botCredentials, AccountChanges accountChanges) {
+		return new TradingEngine(store, new SpringTransactionRunner(transactionManager), writer, clock, botCredentials,
+				accountChanges);
 	}
 
 	@Bean(destroyMethod = "close")

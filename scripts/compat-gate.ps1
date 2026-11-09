@@ -622,6 +622,30 @@ try {
         Assert-Match 'writer queue capacity' 'mse_writer_queue_capacity 256' $scrape
     }
 
+    Step 'Account stream: a trader hears their own changes through the proxy' {
+        # Through the proxy, as a browser would: the trader's stream opens with a frame, and an order placed and
+        # cancelled far below the market is heard at its own command sequence. Proves the route and that nothing
+        # buffers the frames.
+        $trader = New-ApiSession 'trader' $traderPassword
+        $cookie = $trader.Cookies.GetCookies("http://localhost:$webPort")['SESSION'].Value
+        $out = Join-Path $runDir 'account-stream.txt'
+        # One argument string, quoted by hand: Windows PowerShell 5.1 joins an argument array with spaces and no
+        # quotes, which would split each header in two.
+        $arguments = '-s -N -m 6 -H "Cookie: SESSION=' + $cookie + '" -H "Accept: text/event-stream" ' + "$api/account-events"
+        $reader = Start-Process curl.exe -ArgumentList $arguments -RedirectStandardOutput $out -NoNewWindow -PassThru
+        Start-Sleep -Seconds 1
+        $placed = Invoke-ApiCommand $trader '/orders' (New-LimitOrder (Get-Nova) 'BUY' '1.00')
+        Assert-Equal 'a resting buy far below the market' '201' $placed.Status
+        $sequence = ($placed.Body | ConvertFrom-Json).commandSequence
+        $order = ($placed.Body | ConvertFrom-Json).orderId
+        Assert-Equal 'cancelled again' '200' (Invoke-ApiCommand $trader "/orders/$order/cancel").Status
+        $reader.WaitForExit()
+        $stream = Get-Content -Raw $out
+        "stream => $stream" | Add-Content -Encoding utf8 $script:currentLog
+        Assert-Match 'a frame on connecting' 'event:account' $stream
+        Assert-Match "a frame at the order's sequence $sequence" ('"accountVersion":"' + $sequence + '"') $stream
+    }
+
     Step 'Avro: JDK 25 > Kafka > Flink JDK 17 > Kafka > JDK 25' {
         $script:smokeSimulation = [guid]::NewGuid().ToString()
         $script:smokeMinute = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:00Z')
