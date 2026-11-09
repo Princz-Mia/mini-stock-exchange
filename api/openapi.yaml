@@ -471,6 +471,46 @@ paths:
         '504':
           $ref: '#/components/responses/OutcomeUnknown'
 
+  /api/v1/admin/bots/{accountId}/revoke-token:
+    post:
+      tags: [execution]
+      operationId: revokeBotToken
+      summary: Revoke a bot's token, so its next request is refused. Works in any market state.
+      description: |
+        Operator only. Sequenced on the writer and audited, with an idempotency key. The bot's orders and balances
+        are untouched. Revoking again revokes nothing: revoked is 0. A revoked token stays revoked.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: accountId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Uuid' }
+      responses:
+        '200':
+          description: Revoked, or already revoked.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenRevoked' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '404':
+          description: BOT_NOT_FOUND (committed and audited when the market exists).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
   /api/v1/admin/bot-runs:
     get:
       tags: [execution]
@@ -1287,6 +1327,18 @@ components:
           description: Bots in the market after this command.
         commandSequence: { $ref: '#/components/schemas/Sequence' }
 
+    TokenRevoked:
+      type: object
+      additionalProperties: false
+      required: [accountId, revoked, commandSequence]
+      properties:
+        accountId: { $ref: '#/components/schemas/Uuid' }
+        revoked:
+          type: integer
+          minimum: 0
+          description: Tokens this command revoked; 0 when they already were.
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+
     BotRunRequest:
       type: object
       additionalProperties: false
@@ -1498,11 +1550,15 @@ components:
     AccountSummary:
       type: object
       additionalProperties: false
-      required: [accountId, username, kind, cash, holdings]
+      required: [accountId, username, kind, cash, holdings, token]
       properties:
         accountId: { $ref: '#/components/schemas/Uuid' }
         username: { type: string }
         kind: { type: string, enum: [TRADER, BOT] }
+        token:
+          type: [string, 'null']
+          enum: [ACTIVE, REVOKED, null]
+          description: A bot's token, ACTIVE until revoked; null for a trader.
         cash:
           $ref: '#/components/schemas/Money'
           description: The cash it started with.

@@ -326,6 +326,21 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public boolean isBotAccount(UUID simulationId, UUID accountId) {
+		return jdbc.sql("SELECT count(*) FROM account WHERE simulation_id = ? AND id = ? AND kind = 'BOT'")
+			.params(simulationId, accountId)
+			.query(Integer.class)
+			.single() == 1;
+	}
+
+	@Override
+	public int revokeApiTokens(UUID accountId, Instant at) {
+		return jdbc.sql("UPDATE api_token SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL")
+			.params(Timestamp.from(at), accountId)
+			.update();
+	}
+
+	@Override
 	public void insertGenesis(UUID simulationId, UUID accountId, String accountKind, long commandSequence,
 			long cashCents, List<ProvisionAccount.Holding> holdings) {
 		UUID issuance = jdbc.sql("SELECT id FROM account WHERE simulation_id = ? AND kind = 'ISSUANCE'")

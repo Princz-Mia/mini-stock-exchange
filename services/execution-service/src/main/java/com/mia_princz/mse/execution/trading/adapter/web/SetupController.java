@@ -9,6 +9,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -23,6 +24,8 @@ import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.InstrumentResult;
 import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
 import com.mia_princz.mse.execution.trading.application.ProvisionBots;
+import com.mia_princz.mse.execution.trading.application.RevokeBotToken;
+import com.mia_princz.mse.execution.trading.application.TokenRevocation;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
 import com.mia_princz.mse.execution.trading.domain.Money;
 import com.mia_princz.mse.execution.trading.domain.Price;
@@ -40,6 +43,8 @@ class SetupController {
 	static final String ACCOUNT_ROUTE = "POST /api/v1/admin/accounts";
 
 	static final String BOTS_ROUTE = "POST /api/v1/admin/bots";
+
+	static final String REVOKE_ROUTE = "POST /api/v1/admin/bots/{accountId}/revoke-token";
 
 	private final TradingEngine engine;
 
@@ -73,7 +78,11 @@ class SetupController {
 	record AllocationView(String instrumentId, String symbol, long quantity) {
 	}
 
-	record AccountView(String accountId, String username, String kind, String cash, List<AllocationView> holdings) {
+	record AccountView(String accountId, String username, String kind, String cash, List<AllocationView> holdings,
+			String token) {
+	}
+
+	record RevocationResponse(String accountId, int revoked, String commandSequence) {
 	}
 
 	record AccountPage(List<AccountView> accounts, String nextCursor) {
@@ -92,7 +101,8 @@ class SetupController {
 					account.holdings()
 						.stream()
 						.map((held) -> new AllocationView(held.instrumentId().toString(), held.symbol(), held.quantity()))
-						.toList()))
+						.toList(),
+					account.token()))
 			.toList();
 		if (page.size() <= limit) {
 			return new AccountPage(views, null);
@@ -100,6 +110,27 @@ class SetupController {
 		TradingQueries.AccountSummary last = page.get(limit - 1);
 		return new AccountPage(views,
 				Cursors.accounts(new TradingQueries.AccountPosition(last.createdAt(), last.accountId())));
+	}
+
+	/**
+	 * Revokes a bot's token: its next request is refused. Works in any market state. Its orders and balances stay as
+	 * they are, and revoking again revokes nothing and says so with {@code revoked: 0}.
+	 */
+	@PostMapping("/bots/{accountId}/revoke-token")
+	RevocationResponse revokeBotToken(@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader,
+			@PathVariable UUID accountId, Authentication authentication) {
+		UUID key = CommandCalls.idempotencyKey(keyHeader);
+		UUID account = accountId;
+		UUID operator = queries.userId(authentication.getName()).orElseThrow();
+		CommandKey commandKey = new CommandKey(operator, key, REVOKE_ROUTE, CommandCalls.sha256(account.toString()));
+		TokenRevocation result = CommandCalls.await(key, timeout,
+				() -> engine.revokeBotToken(commandKey, new RevokeBotToken(account, operator)));
+		String sequence = Long.toString(result.commandSequence());
+		return switch (result.status()) {
+			case REVOKED, ALREADY_REVOKED -> new RevocationResponse(account.toString(), result.revoked(), sequence);
+			case NOT_A_BOT -> throw new ApiException(HttpStatus.NOT_FOUND, "BOT_NOT_FOUND", "No such bot")
+				.with("commandSequence", sequence);
+		};
 	}
 
 	/** How many bots exist, and how many more may be made, so the screen can say so before trying. */

@@ -91,8 +91,9 @@ class TradingQueries {
 	}
 
 	/** An account and what it started with, for the operator. Cash is null if it started with shares only. */
+	/** {@code token} is a bot's: ACTIVE while it has a token that works, REVOKED once none does; null for others. */
 	record AccountSummary(UUID accountId, String username, String kind, Long cashCents, List<Allocation> holdings,
-			Instant createdAt) {
+			Instant createdAt, String token) {
 	}
 
 	record Allocation(UUID instrumentId, String symbol, long quantity) {
@@ -104,10 +105,14 @@ class TradingQueries {
 
 	/** Every trading account with its initial allocation, oldest first, in keyset pages. */
 	List<AccountSummary> accounts(AccountPosition after, int limit) {
-		record Row(UUID id, String name, String kind, Instant createdAt) {
+		record Row(UUID id, String name, String kind, Instant createdAt, String token) {
 		}
 		List<Row> rows = jdbc.sql("""
-				SELECT id, display_name, kind, created_at FROM account
+				SELECT id, display_name, kind, created_at,
+				    CASE WHEN kind <> 'BOT' THEN NULL
+				         WHEN EXISTS (SELECT 1 FROM api_token t WHERE t.account_id = account.id AND t.revoked_at IS NULL)
+				         THEN 'ACTIVE' ELSE 'REVOKED' END AS token
+				FROM account
 				WHERE kind <> 'ISSUANCE'
 				  AND (CAST(:afterAt AS timestamptz) IS NULL OR (created_at, id) > (:afterAt, :afterId))
 				ORDER BY created_at, id LIMIT :limit""")
@@ -115,7 +120,7 @@ class TradingQueries {
 			.param("afterId", after == null ? null : after.id())
 			.param("limit", limit)
 			.query((row, index) -> new Row(row.getObject("id", UUID.class), row.getString("display_name"),
-					row.getString("kind"), row.getTimestamp("created_at").toInstant()))
+					row.getString("kind"), row.getTimestamp("created_at").toInstant(), row.getString("token")))
 			.list();
 		if (rows.isEmpty()) {
 			return List.of();
@@ -144,7 +149,7 @@ class TradingQueries {
 					holdings.add(new Allocation(allocated.instrumentId(), allocated.symbol(), allocated.amount()));
 				}
 			}
-			return new AccountSummary(row.id(), row.name(), row.kind(), cash, holdings, row.createdAt());
+			return new AccountSummary(row.id(), row.name(), row.kind(), cash, holdings, row.createdAt(), row.token());
 		}).toList();
 	}
 
