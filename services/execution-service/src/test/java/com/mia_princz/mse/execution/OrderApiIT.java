@@ -389,7 +389,7 @@ class OrderApiIT {
 		}
 		for (String username : List.of("other", "unfunded")) {
 			jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, ?, 'TRADER')",
-					UUID.randomUUID(), username, "{noop}" + OTHER_PASSWORD);
+					UUID.randomUUID(), username, TestBrowser.passwordHash(OTHER_PASSWORD));
 		}
 		for (String username : List.of("trader", "other")) {
 			fund(simulation, issuance, username);

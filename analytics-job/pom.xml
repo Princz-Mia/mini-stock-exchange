@@ -21,6 +21,31 @@
 		<assertj.version>3.27.7</assertj.version>
 	</properties>
 
+	<dependencyManagement>
+		<dependencies>
+			<!-- The Kafka connector brings Jackson 2.18.2, with known HIGH vulnerabilities fixed in 2.18.11. Kept on Flink's 2.18 line. -->
+			<dependency>
+				<groupId>com.fasterxml.jackson</groupId>
+				<artifactId>jackson-bom</artifactId>
+				<version>2.18.11</version>
+				<type>pom</type>
+				<scope>import</scope>
+			</dependency>
+			<!-- kafka-clients brings lz4-java and snappy-java versions with known HIGH vulnerabilities: lz4-java
+			     CVE-2026-106451 (fixed in 1.11.4), snappy-java CVE-2026-93451 and CVE-2026-108106 (fixed in 1.1.10.9). -->
+			<dependency>
+				<groupId>at.yawk.lz4</groupId>
+				<artifactId>lz4-java</artifactId>
+				<version>1.11.4</version>
+			</dependency>
+			<dependency>
+				<groupId>org.xerial.snappy</groupId>
+				<artifactId>snappy-java</artifactId>
+				<version>1.1.10.9</version>
+			</dependency>
+		</dependencies>
+	</dependencyManagement>
+
 	<dependencies>
 		<dependency>
 			<groupId>com.mia_princz.mse</groupId>

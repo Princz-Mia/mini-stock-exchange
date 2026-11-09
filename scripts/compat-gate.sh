@@ -589,6 +589,84 @@ projection_retry() {
   caught_up
 }
 
+# Security scanners, pinned by digest. Their vulnerability database is downloaded on every run, so a vulnerability
+# published today can fail a run with no change here; scripts/security-report.py says which findings fail and why.
+trivy_image="ghcr.io/aquasecurity/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c"
+gitleaks_image="ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"
+security_dir="$run_dir/security"
+host_root=$( (cd "$root" && pwd -W) 2>/dev/null || printf '%s' "$root")
+trivy() {
+  MSYS_NO_PATHCONV=1 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v mse-trivy-cache:/root/.cache \
+    -v "$host_root:/repo" -w /repo "$trivy_image" "$@"
+}
+
+security_scan() {
+  # Secrets in the whole git history; the npm and uv lockfiles and the Dockerfiles; every image Compose runs. The
+  # Java dependencies are scanned in the images, as the jars that actually ship, so Maven Central isn't queried.
+  local image name
+  rm -rf "$security_dir" && mkdir -p "$security_dir" || return 1
+  MSYS_NO_PATHCONV=1 docker run --rm -v "$host_root:/repo" -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory \
+    -e GIT_CONFIG_VALUE_0='*' "$gitleaks_image" git /repo --redact --no-banner --exit-code 0 --report-format json \
+    --report-path /repo/runtime/compat-gate/security/gitleaks.json >> "$log" 2>&1 || { fail 'gitleaks did not run'; return 1; }
+  trivy fs . --scanners vuln,misconfig --ignorefile .trivyignore.yaml --skip-files '**/pom.xml' \
+    --skip-dirs runtime --skip-dirs local-docs --skip-dirs '**/node_modules' --skip-dirs '**/target' \
+    --skip-dirs '**/.venv' --skip-dirs web/dist --skip-dirs web/test-results \
+    --format json --output runtime/compat-gate/security/trivy-repo.json --quiet >> "$log" 2>&1 ||
+    { fail 'the repository scan did not run'; return 1; }
+  for image in $(compose config --images | sort -u); do
+    case "$image" in
+      *@sha256:*) name="third-party-$(printf '%s' "${image%%@*}" | tr '/:' '--')" ;;
+      *) name="own-$(printf '%s' "$image" | tr '/:' '--')" ;;
+    esac
+    trivy image "$image" --scanners vuln --format json --output "runtime/compat-gate/security/image-$name.json" \
+      --quiet >> "$log" 2>&1 || { fail "the scan of $image did not run"; return 1; }
+  done
+  uv run --project simulator --frozen python scripts/security-report.py "$security_dir" >> "$log" 2>&1 ||
+    fail "something to fix here; see $security_dir/summary.md"
+}
+
+security_surface() {
+  # What a browser and the network see: security headers on every kind of response, the session cookie Secure
+  # exactly when the client used HTTPS, and nothing published beyond localhost.
+  local base="http://localhost:$web_port" jar="$run_dir/surface-cookies.txt" path headers token cookie ports
+  for path in / /api/v1/instruments /api/v1/nowhere; do
+    headers=$(curl -s -m 10 -o /dev/null -D - "$base$path" | tr -d '\r' | tr 'A-Z' 'a-z')
+    assert_match "$path content security policy" "^content-security-policy: default-src 'self';.*frame-ancestors 'none'" "$headers" &&
+      assert_equal "$path nosniff, once" 1 "$(printf '%s\n' "$headers" | grep -c '^x-content-type-options: nosniff$')" &&
+      assert_equal "$path never framed, once" 1 "$(printf '%s\n' "$headers" | grep -c '^x-frame-options: deny$')" &&
+      assert_match "$path referrer policy" '^referrer-policy: no-referrer$' "$headers" || return 1
+    printf '%s\n' "$headers" | grep -q '^server: nginx/' && { fail "$path names the nginx version"; return 1; }
+  done
+  # The CSRF token belongs to the session, so it is fetched as a plain-HTTP client would; logging in rotates the
+  # session, and the new cookie shows the attributes.
+  rm -f "$jar"
+  token=$(curl -s -b "$jar" -c "$jar" "$base/api/v1/auth/csrf" | sed -E 's/.*"token":"([^"]+)".*/\1/')
+  cookie=$(curl -s -o /dev/null -D - -b "$jar" -c "$jar" -H "X-CSRF-TOKEN: $token" -H 'X-Forwarded-Proto: https' \
+    -H 'Content-Type: application/json' -d "{\"username\":\"trader\",\"password\":\"$trader_password\"}" \
+    "$base/api/v1/auth/login" | tr -d '\r' | grep -i '^set-cookie: SESSION=')
+  assert_match 'session cookie behind HTTPS' '; Secure; HttpOnly; SameSite=Lax' "${cookie#*;}" || return 1
+  rm -f "$jar"
+  token=$(curl -s -b "$jar" -c "$jar" "$base/api/v1/auth/csrf" | sed -E 's/.*"token":"([^"]+)".*/\1/')
+  cookie=$(curl -s -o /dev/null -D - -b "$jar" -c "$jar" -H "X-CSRF-TOKEN: $token" -H 'Content-Type: application/json' \
+    -d "{\"username\":\"trader\",\"password\":\"$trader_password\"}" "$base/api/v1/auth/login" | tr -d '\r' |
+    grep -i '^set-cookie: SESSION=')
+  printf '%s' "$cookie" | grep -q 'Secure' && { fail "session cookie over plain HTTP is Secure: ${cookie#*;}"; return 1; }
+  # Every published port is bound to localhost; only the proxy is meant to be reached, and only from this machine.
+  compose config --format json > "$run_dir/compose-config.json" || return 1
+  ports=$(uv run --project simulator --frozen python - "$run_dir/compose-config.json" <<'EOF'
+import json, sys
+services = json.load(open(sys.argv[1], encoding='utf-8'))['services']
+print(' '.join(f"{name}={port.get('host_ip', '*')}:{port.get('published')}"
+               for name, service in sorted(services.items()) for port in service.get('ports', [])))
+EOF
+)
+  note "published ports => $ports"
+  assert_match 'some ports are published' '=' "$ports" || return 1
+  printf '%s\n' $ports | grep -v '=127\.0\.0\.1:' | grep -q . &&
+    { fail "published beyond localhost: $(printf '%s\n' $ports | grep -v '=127\.0\.0\.1:' | tr '\n' ' ')"; return 1; }
+  return 0
+}
+
 kafka_outage() {
   # With Kafka down, both services stay ready and people still trade: the counterparty sells to the trader, the trader
   # places and cancels, and balances read as usual. The public feed says it is stale, and its tape stops short of the
@@ -642,11 +720,13 @@ step 'Toolchain versions' toolchain &&
   step 'Simulator: frozen uv sync, ruff, pytest' simulator &&
   step 'Compose: clean stack builds and turns healthy' stack_up &&
   step 'Runtimes: Oracle JDK 25 services, Flink JDK 17' runtimes &&
+  step 'Security: no secrets, nothing fixable here in dependencies or images' security_scan &&
   step 'Kafka topics: partitions and retention' kafka_topics &&
   step 'Migrations: each service owns its own history' migrations &&
   step 'Database isolation: cross-service access denied' isolation &&
   step 'Proxy: routes by path to the owning service' proxy_routes &&
   step 'Login: session and CSRF through the proxy' login_flow &&
+  step 'Security: headers, the Secure cookie, ports on localhost only' security_surface &&
   step 'Independence: each service survives the other stopping' independence &&
   step 'Browser: trading, halt, resume, bot runs and every screen' browser_flow &&
   step 'Bot tokens: owner-only files, and the simulator control token' bot_tokens &&

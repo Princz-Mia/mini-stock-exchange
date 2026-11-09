@@ -12,4 +12,28 @@ export default tseslint.config(
     plugins: { 'react-hooks': reactHooks },
     rules: reactHooks.configs.recommended.rules,
   },
+  {
+    // Credentials and tokens never go into browser storage: the session is an HttpOnly cookie and the CSRF token
+    // lives in memory. No storage is used at all, so none is allowed.
+    files: ['src/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-globals': [
+        'error',
+        ...['localStorage', 'sessionStorage', 'indexedDB'].map((name) => ({
+          name,
+          message: 'No browser storage: the session is an HttpOnly cookie and the CSRF token stays in memory.',
+        })),
+      ],
+      'no-restricted-properties': [
+        'error',
+        ...['window', 'globalThis', 'self'].flatMap((object) =>
+          ['localStorage', 'sessionStorage', 'indexedDB'].map((property) => ({
+            object,
+            property,
+            message: 'No browser storage: the session is an HttpOnly cookie and the CSRF token stays in memory.',
+          })),
+        ),
+      ],
+    },
+  },
 );

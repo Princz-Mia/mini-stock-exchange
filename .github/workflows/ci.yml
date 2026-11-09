@@ -71,6 +71,9 @@ jobs:
     needs: [java, web, simulator]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # The whole history, which the security step scans for secrets.
+        with:
+          fetch-depth: 0
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           distribution: temurin
@@ -106,14 +109,15 @@ jobs:
             tail -n 200 "$log" || true
             echo "::endgroup::"
           fi
-      # The accessibility scan of every screen and state, and the screenshots it was taken from: the report.
-      - name: Keep the screen audit
+      # The reports: the accessibility scan of every screen and state with its screenshots, and the security scans.
+      - name: Keep the reports
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: screen-audit
+          name: gate-reports
           path: |
             web/test-results/accessibility/
             web/test-results/screens/
+            runtime/compat-gate/security/
           if-no-files-found: warn
           retention-days: 30

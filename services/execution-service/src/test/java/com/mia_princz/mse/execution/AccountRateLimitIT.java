@@ -241,7 +241,7 @@ class AccountRateLimitIT {
 					VALUES (?, ?, 'BOT', ?, 'TRADE', NULL)""", UUID.randomUUID(), bot, TOKENS.get(i).hash());
 		}
 		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, 'other', ?, 'TRADER')",
-				UUID.randomUUID(), "{noop}" + PASSWORD);
+				UUID.randomUUID(), TestBrowser.passwordHash(PASSWORD));
 		for (String username : List.of("trader", "other")) {
 			UUID account = UUID.randomUUID();
 			jdbc.update("""

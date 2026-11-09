@@ -1,0 +1,10 @@
+# Findings the security scan accepts, each with its reason. Read by Trivy in the compatibility gate.
+misconfigurations:
+  - id: DS-0026
+    paths:
+      - analytics-job/Dockerfile
+      - simulator/Dockerfile
+      - web/Dockerfile
+    statement: >-
+      No HEALTHCHECK in the image: Compose defines one for each of these services, with the timings that fit
+      how it is run there.

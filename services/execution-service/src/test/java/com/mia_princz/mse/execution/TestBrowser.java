@@ -12,6 +12,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+
 /** A minimal browser for the real filter chain: cookies and the CSRF header handled by hand, so both can be observed. */
 final class TestBrowser {
 
@@ -37,6 +39,11 @@ final class TestBrowser {
 		assertThat(login.statusCode()).as("login as " + username).isEqualTo(200);
 		browser.fetchCsrfToken();
 		return browser;
+	}
+
+	/** How a test stores a login it inserts by hand: bcrypt, the only form the service accepts. */
+	static String passwordHash(String password) {
+		return "{bcrypt}" + new BCryptPasswordEncoder().encode(password);
 	}
 
 	void fetchCsrfToken() throws Exception {

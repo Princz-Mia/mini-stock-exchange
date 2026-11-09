@@ -57,6 +57,7 @@ async function scan(page: Page, size: Size, name: string): Promise<void> {
  * a screenshot to look at.
  */
 async function capture(page: Page, size: Size, name: string): Promise<void> {
+  expect(blocked.get(page) ?? [], `${name} at ${size.name}: the content security policy blocked something`).toEqual([]);
   const width = await page.evaluate(() => document.documentElement.scrollWidth);
   expect(width, `${name} at ${size.name} scrolls sideways`).toBeLessThanOrEqual(size.width);
   await page.screenshot({ path: `test-results/screens/${size.name}-${name}.png`, fullPage: true });
@@ -65,6 +66,9 @@ async function capture(page: Page, size: Size, name: string): Promise<void> {
   await scan(page, size, `${name}-dark`);
   await page.emulateMedia({ colorScheme: 'light' });
 }
+
+/** What the proxy's content security policy blocked on each page; the app should need nothing it forbids. */
+const blocked = new WeakMap<Page, string[]>();
 
 /**
  * A fresh browser at one size, signed in. Routes go in before signing in: signing in lands on the terminal, whose
@@ -78,6 +82,13 @@ async function at(
 ): Promise<Page> {
   const context = await browser.newContext({ viewport: { width: size.width, height: size.height } });
   const page = await context.newPage();
+  const violations: string[] = [];
+  blocked.set(page, violations);
+  page.on('console', (message) => {
+    if (message.text().includes('Content Security Policy')) {
+      violations.push(message.text());
+    }
+  });
   await routes(page);
   if (user !== null) {
     await signIn(page, user);
