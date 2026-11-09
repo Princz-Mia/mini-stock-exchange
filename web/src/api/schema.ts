@@ -589,6 +589,31 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/account-events": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * The signed-in trader's own change notifications, as server-sent events.
+         * @description Event `account` carries an AccountFrame: only the account's version, the command sequence of its latest
+         *     change since the service started (0 before any). It comes first on connecting, then after each committed
+         *     command that changed the account: an order placed, rejected, filled (as either side) or cancelled. On each,
+         *     read orders and portfolio from the REST API again; frames carry no private data. Event `heartbeat`
+         *     carries an AccountHeartbeat after 10 seconds without a frame. A trader's session only, never a bot token;
+         *     the stream ends when the session does, at once on logout and within a heartbeat on expiry.
+         */
+        readonly get: operations["streamAccount"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -806,6 +831,14 @@ export interface components {
             /** @description Bots in the market after this command. */
             readonly population: number;
             readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly AccountFrame: {
+            /** @description The command sequence of the account's latest change, or 0. */
+            readonly accountVersion: components["schemas"]["Sequence"];
+        };
+        readonly AccountHeartbeat: {
+            /** Format: date-time */
+            readonly at: string;
         };
         readonly TokenRevoked: {
             readonly accountId: components["schemas"]["Uuid"];
@@ -2595,6 +2628,49 @@ export interface operations {
             readonly 400: components["responses"]["Problem"];
             readonly 404: components["responses"]["Problem"];
             /** @description TOO_MANY_STREAMS. Retry after the Retry-After header. */
+            readonly 503: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    readonly streamAccount: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The stream. Each event's data is JSON, an AccountFrame or an AccountHeartbeat. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "text/event-stream": string;
+                };
+            };
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not a trader, or a bot token. No body, or NO_TRADING_ACCOUNT. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description TOO_MANY_STREAMS, in all or for this account. Retry after the Retry-After header. */
             readonly 503: {
                 headers: {
                     readonly [name: string]: unknown;
