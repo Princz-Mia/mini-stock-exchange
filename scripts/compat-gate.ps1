@@ -493,6 +493,22 @@ try {
         $plain = Get-SessionCookie @{}
         "session cookie over plain HTTP => $plain" | Add-Content -Encoding utf8 $script:currentLog
         if ($plain -match 'Secure') { throw "session cookie over plain HTTP is Secure: $plain" }
+        # Failed sign-ins are limited per username: five guesses for a name that doesn't exist, then the sixth waits.
+        $base = "http://localhost:$webPort/api/v1"
+        foreach ($guess in 1..6) {
+            $csrf = Invoke-RestMethod "$base/auth/csrf" -SessionVariable prober
+            $body = @{ username = 'limit-probe'; password = "guess-$guess" } | ConvertTo-Json
+            try {
+                $answer = Invoke-WebRequest "$base/auth/login" -Method Post -WebSession $prober -ContentType 'application/json' -Body $body -Headers @{ $csrf.headerName = $csrf.token } -UseBasicParsing
+                $status = [int]$answer.StatusCode; $retry = $answer.Headers['Retry-After']
+            }
+            catch {
+                if ($null -eq $_.Exception.Response) { throw }
+                $status = [int]$_.Exception.Response.StatusCode; $retry = $_.Exception.Response.Headers['Retry-After']
+            }
+        }
+        Assert-Equal 'the sixth guess is refused' '429' $status
+        Assert-Match 'the sixth guess waits' '^[0-9]+$' $retry
         # Every published port is bound to localhost; only the proxy is meant to be reached, and only from this machine.
         $config = (& docker @($compose + @('config', '--format', 'json'))) -join "`n" | ConvertFrom-Json
         $ports = @(foreach ($service in $config.services.PSObject.Properties) {

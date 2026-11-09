@@ -651,6 +651,18 @@ security_surface() {
     -d "{\"username\":\"trader\",\"password\":\"$trader_password\"}" "$base/api/v1/auth/login" | tr -d '\r' |
     grep -i '^set-cookie: SESSION=')
   printf '%s' "$cookie" | grep -q 'Secure' && { fail "session cookie over plain HTTP is Secure: ${cookie#*;}"; return 1; }
+  # Failed sign-ins are limited per username: five guesses for a name that doesn't exist, then the sixth waits. The
+  # address's own budget is used too, and refills within a minute.
+  local guess answer
+  for guess in 1 2 3 4 5 6; do
+    rm -f "$jar"
+    token=$(curl -s -b "$jar" -c "$jar" "$base/api/v1/auth/csrf" | sed -E 's/.*"token":"([^"]+)".*/\1/')
+    answer=$(curl -s -o /dev/null -D - -w '%{http_code}' -b "$jar" -c "$jar" -H "X-CSRF-TOKEN: $token" \
+      -H 'Content-Type: application/json' -d "{\"username\":\"limit-probe\",\"password\":\"guess-$guess\"}" \
+      "$base/api/v1/auth/login" | tr -d '\r')
+  done
+  assert_match 'the sixth guess waits' '^Retry-After: [0-9]+$' "$answer" &&
+    assert_match 'the sixth guess is refused' '429$' "$answer" || return 1
   # Every published port is bound to localhost; only the proxy is meant to be reached, and only from this machine.
   compose config --format json > "$run_dir/compose-config.json" || return 1
   ports=$(uv run --project simulator --frozen python - "$run_dir/compose-config.json" <<'EOF'

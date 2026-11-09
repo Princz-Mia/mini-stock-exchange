@@ -1266,6 +1266,20 @@ export interface operations {
                 };
                 content?: never;
             };
+            /**
+             * @description LOGIN_RATE_LIMITED: too many failed sign-ins for this username or from this address (5 at once then
+             *     one every 12 seconds per username, 20 then one every 3 seconds per address, by default). The password
+             *     was not checked. Try again after Retry-After.
+             */
+            readonly 429: {
+                headers: {
+                    readonly "Retry-After"?: number;
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
         };
     };
     readonly logout: {
