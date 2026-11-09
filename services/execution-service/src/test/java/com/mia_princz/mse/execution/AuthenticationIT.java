@@ -87,6 +87,35 @@ class AuthenticationIT {
 			.doesNotContain("XSRF");
 	}
 
+	/**
+	 * Secure only when the client reached the site over HTTPS, which a TLS terminator in front of the proxy reports in
+	 * X-Forwarded-Proto: a Secure cookie over plain HTTP would never be sent back, and local runs are plain HTTP.
+	 */
+	@Test
+	void sessionCookieIsSecureWhenTheClientUsedHttps() throws Exception {
+		TestBrowser plain = new TestBrowser(port);
+		plain.fetchCsrfToken();
+		TestBrowser secure = new TestBrowser(port);
+		secure.fetchCsrfToken();
+
+		String plainCookie = sessionCookie(plain.post("/api/v1/auth/login", TRADER_LOGIN));
+		String secureCookie = sessionCookie(
+				secure.post("/api/v1/auth/login", TRADER_LOGIN, "X-Forwarded-Proto", "https"));
+
+		assertThat(plainCookie).doesNotContain("Secure");
+		assertThat(secureCookie).contains("Secure").contains("HttpOnly").contains("SameSite=Lax");
+	}
+
+	private static String sessionCookie(HttpResponse<String> response) {
+		assertThat(response.statusCode()).isEqualTo(200);
+		return response.headers()
+			.allValues("Set-Cookie")
+			.stream()
+			.filter((value) -> value.startsWith("SESSION="))
+			.findFirst()
+			.orElseThrow();
+	}
+
 	@Test
 	void sessionsLiveInTheDatabase() throws Exception {
 		TestBrowser browser = new TestBrowser(port);

@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/root/.m2 sh -c '\
     sh ./mvnw -B -ntp -f event-contracts/pom.xml -DskipTests install && \
     sh ./mvnw -B -ntp -f analytics-job/pom.xml verify'
 
-FROM flink:2.2.1-java17@sha256:c95f48391db3e191345549b4d06406c08616fe8f99ee57fa4f4c44268c912a46
+FROM flink:2.2.1-java17@sha256:15e8901a97a3703ad351f8212166798e36dd411c100b869e30c7c5e6b64351b0
 # Application mode loads the job from usrlib; a named volume inherits this directory's ownership.
 COPY --from=build --chown=flink:flink /src/analytics-job/target/analytics-job.jar /opt/flink/usrlib/analytics-job.jar
 RUN mkdir -p /opt/flink/checkpoints && chown flink:flink /opt/flink/checkpoints

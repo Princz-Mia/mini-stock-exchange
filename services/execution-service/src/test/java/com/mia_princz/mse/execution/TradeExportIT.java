@@ -217,7 +217,7 @@ class TradeExportIT {
 		jdbc.update("INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, 'XPRT', 10000)",
 				instrument, simulation);
 		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, 'buyer', ?, 'TRADER')",
-				UUID.randomUUID(), "{noop}" + PASSWORD);
+				UUID.randomUUID(), TestBrowser.passwordHash(PASSWORD));
 		for (String username : List.of("trader", "buyer")) {
 			UUID account = UUID.randomUUID();
 			jdbc.update("""

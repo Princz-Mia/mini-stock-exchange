@@ -15,9 +15,12 @@ import java.util.UUID;
 import java.util.stream.Stream;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -34,6 +37,7 @@ import com.mia_princz.mse.execution.identity.ApiTokens;
  * One test walks the whole sequence, because the market it sets up is shared.
  */
 @Import(TestcontainersConfiguration.class)
+@ExtendWith(OutputCaptureExtension.class)
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT,
 		properties = { "mse.test.database=bot-provisioning",
 				"mse.dev-users.trader-password=" + BotProvisioningIT.PASSWORD,
@@ -71,7 +75,7 @@ class BotProvisioningIT {
 	JdbcTemplate jdbc;
 
 	@Test
-	void botsAreFundedInSetupAndTradeWithTheTokenTheyWereGiven() throws Exception {
+	void botsAreFundedInSetupAndTradeWithTheTokenTheyWereGiven(CapturedOutput output) throws Exception {
 		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
 		assertThat(population(operator)).isEqualTo("0 of 1000, 100 at a time");
 		String nova = instrument(operator, "NOVA", "100.00");
@@ -190,6 +194,9 @@ class BotProvisioningIT {
 				String.class, firstKey, unknownKey, limitKey, lateKey);
 		assertThat(audit).containsExactly("APPLIED " + firstKey, "NOT_ALLOWED " + unknownKey,
 				"NOT_ALLOWED " + limitKey, "NOT_ALLOWED " + lateKey);
+
+		// Provisioning, a failed handover and a trade with a token all happened above; none of it logged a token.
+		assertThat(output.getAll()).as("the log").doesNotContain(ApiTokens.PREFIX);
 	}
 
 	private List<Path> tokenFiles() throws IOException {

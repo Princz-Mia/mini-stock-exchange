@@ -304,6 +304,37 @@ function Assert-CaughtUp {
     Assert-Reconciled
 }
 
+# Security scanners, pinned by digest. Their vulnerability database is downloaded on every run, so a vulnerability
+# published today can fail a run with no change here; scripts/security-report.py says which findings fail and why.
+$trivyImage = 'ghcr.io/aquasecurity/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c'
+$gitleaksImage = 'ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f'
+$securityDir = Join-Path $runDir 'security'
+
+function Invoke-Trivy {
+    param([string[]]$Arguments)
+    Invoke-Checked 'docker' (@('run', '--rm', '-v', '/var/run/docker.sock:/var/run/docker.sock', '-v', 'mse-trivy-cache:/root/.cache', '-v', "${root}:/repo", '-w', '/repo', $trivyImage) + $Arguments)
+}
+
+function Get-Headers {
+    # A response's headers in lower case, one per line, whatever the status.
+    param([string]$Path)
+    return ((& curl.exe -s -m 10 -o NUL -D - "http://localhost:$webPort$Path") -join "`n").ToLower()
+}
+
+function Get-SessionCookie {
+    # Signs in as the trader and returns the session cookie the login sets. The CSRF token belongs to the session,
+    # so it is fetched as a plain-HTTP client would.
+    param([hashtable]$Headers)
+    $base = "http://localhost:$webPort/api/v1"
+    $csrf = Invoke-RestMethod "$base/auth/csrf" -SessionVariable browser
+    $body = @{ username = 'trader'; password = $traderPassword } | ConvertTo-Json
+    $all = @{ $csrf.headerName = $csrf.token } + $Headers
+    $login = Invoke-WebRequest "$base/auth/login" -Method Post -WebSession $browser -ContentType 'application/json' -Body $body -Headers $all -UseBasicParsing
+    $cookie = @($login.Headers['Set-Cookie'] -split ',(?=\s*[A-Za-z_-]+=)' | Where-Object { $_.Trim().StartsWith('SESSION=') })
+    if ($cookie.Count -ne 1) { throw "login set no single session cookie: $($login.Headers['Set-Cookie'])" }
+    return $cookie[0].Trim()
+}
+
 function Assert-ClassVersion {
     param([string]$ClassPath, [string]$ClassName, [int]$Major)
     $output = & (Join-Path $env:JAVA_HOME 'bin\javap.exe') -v -cp $ClassPath $ClassName | Select-String 'major version'
@@ -376,6 +407,23 @@ try {
         }
     }
 
+    Step 'Security: no secrets, nothing fixable here in dependencies or images' {
+        # Secrets in the whole git history; the npm and uv lockfiles and the Dockerfiles; every image Compose runs.
+        # The Java dependencies are scanned in the images, as the jars that actually ship, so Maven Central isn't
+        # queried.
+        if (Test-Path $securityDir) { Remove-Item -Recurse -Force $securityDir }
+        New-Item -ItemType Directory -Force $securityDir | Out-Null
+        Invoke-Checked 'docker' @('run', '--rm', '-v', "${root}:/repo", '-e', 'GIT_CONFIG_COUNT=1', '-e', 'GIT_CONFIG_KEY_0=safe.directory', '-e', 'GIT_CONFIG_VALUE_0=*', $gitleaksImage, 'git', '/repo', '--redact', '--no-banner', '--exit-code', '0', '--report-format', 'json', '--report-path', '/repo/runtime/compat-gate/security/gitleaks.json')
+        Invoke-Trivy @('fs', '.', '--scanners', 'vuln,misconfig', '--ignorefile', '.trivyignore.yaml', '--skip-files', '**/pom.xml', '--skip-dirs', 'runtime', '--skip-dirs', 'local-docs', '--skip-dirs', '**/node_modules', '--skip-dirs', '**/target', '--skip-dirs', '**/.venv', '--skip-dirs', 'web/dist', '--skip-dirs', 'web/test-results', '--format', 'json', '--output', 'runtime/compat-gate/security/trivy-repo.json', '--quiet')
+        foreach ($image in (& docker @($compose + @('config', '--images')) | Sort-Object -Unique)) {
+            if ($image -match '@sha256:') { $name = 'third-party-' + (($image -split '@')[0] -replace '[/:]', '-') }
+            else { $name = 'own-' + ($image -replace '[/:]', '-') }
+            Invoke-Trivy @('image', $image, '--scanners', 'vuln', '--format', 'json', '--output', "runtime/compat-gate/security/image-$name.json", '--quiet')
+        }
+        & uv run --project simulator --frozen python scripts/security-report.py $securityDir 2>&1 | Out-File -Append -Encoding utf8 -Width 400 $script:currentLog
+        if ($LASTEXITCODE -ne 0) { throw "something to fix here; see $securityDir\summary.md" }
+    }
+
     Step 'Kafka topics: partitions and retention' {
         $describe = Invoke-InContainer 'kafka' @('/opt/kafka/bin/kafka-topics.sh', '--bootstrap-server', 'localhost:9092', '--describe')
         Assert-Match 'mse.trades.v1' 'Topic: mse\.trades\.v1\s.*PartitionCount: 3\s.*retention\.ms=604800000' $describe
@@ -427,6 +475,33 @@ try {
         $login = Invoke-RestMethod "$base/auth/login" -Method Post -WebSession $browser -ContentType 'application/json' -Body $body -Headers @{ $csrf.headerName = $csrf.token }
         Assert-Equal 'login user' 'trader' $login.username
         Assert-Equal 'me' 'TRADER' (Invoke-RestMethod "$base/me" -WebSession $browser).roles
+    }
+
+    Step 'Security: headers, the Secure cookie, ports on localhost only' {
+        # What a browser and the network see: security headers on every kind of response, the session cookie Secure
+        # exactly when the client used HTTPS, and nothing published beyond localhost.
+        foreach ($path in '/', '/api/v1/instruments', '/api/v1/nowhere') {
+            $headers = Get-Headers $path
+            Assert-Match "$path content security policy" "(?m)^content-security-policy: default-src 'self';.*frame-ancestors 'none'" $headers
+            Assert-Equal "$path nosniff, once" '1' ([regex]::Matches($headers, '(?m)^x-content-type-options: nosniff\r?$').Count)
+            Assert-Equal "$path never framed, once" '1' ([regex]::Matches($headers, '(?m)^x-frame-options: deny\r?$').Count)
+            Assert-Match "$path referrer policy" '(?m)^referrer-policy: no-referrer\r?$' $headers
+            if ($headers -match '(?m)^server: nginx/') { throw "$path names the nginx version" }
+        }
+        $secure = Get-SessionCookie @{ 'X-Forwarded-Proto' = 'https' }
+        Assert-Match 'session cookie behind HTTPS' '; Secure; HttpOnly; SameSite=Lax' $secure
+        $plain = Get-SessionCookie @{}
+        "session cookie over plain HTTP => $plain" | Add-Content -Encoding utf8 $script:currentLog
+        if ($plain -match 'Secure') { throw "session cookie over plain HTTP is Secure: $plain" }
+        # Every published port is bound to localhost; only the proxy is meant to be reached, and only from this machine.
+        $config = (& docker @($compose + @('config', '--format', 'json'))) -join "`n" | ConvertFrom-Json
+        $ports = @(foreach ($service in $config.services.PSObject.Properties) {
+                foreach ($port in @($service.Value.ports)) { if ($null -ne $port) { "$($service.Name)=$($port.host_ip):$($port.published)" } }
+            })
+        "published ports => $($ports -join ' ')" | Add-Content -Encoding utf8 $script:currentLog
+        if ($ports.Count -eq 0) { throw 'no published ports found' }
+        $open = @($ports | Where-Object { $_ -notmatch '=127\.0\.0\.1:' })
+        if ($open.Count -gt 0) { throw "published beyond localhost: $($open -join ' ')" }
     }
 
     Step 'Independence: each service survives the other stopping' {
