@@ -66,7 +66,12 @@ final class CommandCalls {
 			if (cause instanceof IllegalArgumentException) {
 				throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_INSTRUMENT", "No such instrument");
 			}
-			if (cause instanceof WriterHaltException || cause instanceof WriterStoppedException) {
+			if (cause instanceof WriterHaltException) {
+				// Trading stays stopped until a restart rebuilds from the database, so the reason must be on record.
+				LOG.error("Command {} halted the writer; trading is stopped until a restart", key, cause);
+				throw unavailable();
+			}
+			if (cause instanceof WriterStoppedException) {
 				throw unavailable();
 			}
 			// Anything else failed inside the command's transaction, which rolled back. Answered here, because an error
