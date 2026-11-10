@@ -68,7 +68,14 @@ export function TerminalPage() {
       <Watchlist
         instruments={list}
         selected={selectedId}
-        onSelect={(instrumentId) => setParams({ instrument: instrumentId })}
+        onSelect={(instrumentId) =>
+          setParams((current) => {
+            // The chart's settings stay as they are when another instrument is chosen.
+            const next = new URLSearchParams(current);
+            next.set('instrument', instrumentId);
+            return next;
+          })
+        }
       />
       {selected === null ? (
         <p className="muted terminal-empty">Choose an instrument to trade.</p>
@@ -86,7 +93,7 @@ export function TerminalPage() {
                 {TRANSPORT_LABELS[stream.transport]}
               </span>
             </div>
-            <PriceChart trades={frame?.recentTrades ?? []} />
+            <PriceChart instrumentId={selected.instrumentId} trades={frame?.recentTrades ?? null} />
             <div className="market-split">
               <OrderBook bids={frame?.bids ?? []} asks={frame?.asks ?? []} waiting={frame === null} />
               <Tape trades={frame?.recentTrades ?? []} waiting={frame === null} />
