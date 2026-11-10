@@ -34,6 +34,8 @@ flowchart TD
 
 Each service owns its own database, with no shared access. Kafka sits downstream of the commit, so trading keeps working if Kafka or Flink is down, and public data goes stale until they return.
 
+[docs/architecture.md](docs/architecture.md) goes further: who owns what, how an order moves through the system, order and market states, the data model, recovery, and where each requirement is met.
+
 ## Tech stack
 
 | Area | Technology |
