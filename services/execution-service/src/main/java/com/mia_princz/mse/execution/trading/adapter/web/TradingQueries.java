@@ -241,6 +241,34 @@ class TradingQueries {
 				ORDER BY o.created_at %2$s, o.id %2$s LIMIT :limit""".formatted(conditions, order.direction());
 	}
 
+	/** The newest-ended finished orders, at most {@code limit}, optionally of one instrument or side. */
+	List<OrderView> finishedOrders(UUID accountId, int limit, HistoryFilter filter) {
+		JdbcClient.StatementSpec statement = jdbc.sql(finishedSql(filter))
+			.param("account", accountId)
+			.param("limit", limit);
+		if (filter.instrumentId() != null) {
+			statement = statement.param("instrument", filter.instrumentId());
+		}
+		if (filter.side() != null) {
+			statement = statement.param("side", filter.side());
+		}
+		return statement.query((row, index) -> orderView(row)).list();
+	}
+
+	/**
+	 * Finished orders by when they ended. The state list matches the partial indexes' condition word for word, so the
+	 * planner can use them; filters are fixed conditions added only when set, as in {@link #ordersSql}.
+	 */
+	static String finishedSql(HistoryFilter filter) {
+		String conditions = (filter.instrumentId() == null ? "" : " AND o.instrument_id = :instrument")
+				+ (filter.side() == null ? "" : " AND o.side = :side");
+		return "SELECT " + ORDER_COLUMNS + """
+
+				FROM orders o JOIN instrument i ON i.id = o.instrument_id
+				WHERE o.account_id = :account AND o.state IN ('FILLED', 'CANCELED', 'REJECTED')%s
+				ORDER BY o.updated_at DESC, o.id DESC LIMIT :limit""".formatted(conditions);
+	}
+
 	Optional<StoredCommand> command(UUID principalId, UUID idempotencyKey) {
 		return jdbc.sql("""
 				SELECT route, response_body::text AS body FROM command_result

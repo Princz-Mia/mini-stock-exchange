@@ -75,6 +75,17 @@ class HistoryPlanIT {
 	}
 
 	@Test
+	void recentlyFinishedOrdersAreTheHeadOfOneRange() {
+		assertThat(plan(TradingQueries.finishedSql(HistoryFilter.NONE)))
+			.contains("orders_finished_by_account")
+			.doesNotContain("orders_finished_by_account_instrument")
+			.doesNotContain("Sort");
+		assertThat(plan(TradingQueries.finishedSql(new HistoryFilter(BY_INSTRUMENT.instrumentId(), "SELL", null))))
+			.contains("orders_finished_by_account_instrument", "(instrument_id = $")
+			.doesNotContain("Sort");
+	}
+
+	@Test
 	void firstPagesHaveNoPositionToCompare() {
 		assertThat(TradingQueries.ordersSql(PageOrder.NEWEST, BY_INSTRUMENT, false)).doesNotContain("afterAt");
 		assertThat(TradingQueries.ownTradesSql(PageOrder.OLDEST, HistoryFilter.NONE, false)).doesNotContain("afterCommand");

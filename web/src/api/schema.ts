@@ -82,8 +82,10 @@ export interface paths {
         /**
          * The caller's own orders, newest first unless order=oldest.
          * @description With status=active, every open or partially filled order, at most 20, in one response. With status=all,
-         *     every order including rejected ones, in keyset pages. The instrumentId, side and state filters apply to
-         *     status=all only; with status=active they are refused.
+         *     every order including rejected ones, in keyset pages. With status=finished, the filled, canceled and
+         *     rejected orders that ended most recently, most recent first, in one page of at most limit; it takes no
+         *     cursor or order. The instrumentId and side filters apply to status=all and status=finished, state to
+         *     status=all only; filters are refused with status=active.
          */
         readonly get: operations["listOrders"];
         readonly put?: never;
@@ -1414,7 +1416,7 @@ export interface operations {
     readonly listOrders: {
         readonly parameters: {
             readonly query?: {
-                readonly status?: "all" | "active";
+                readonly status?: "all" | "active" | "finished";
                 readonly limit?: components["parameters"]["Limit"];
                 /**
                  * @description The nextCursor of the previous page. Opaque. Refused under an order or filters other than the ones it came
