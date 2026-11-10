@@ -197,7 +197,17 @@ class BotRunIT {
 		CONTRACT.assertResponse("GET", RUNS, 200, limited.headers().firstValue("Content-Type").orElse(null),
 				limited.body());
 		assertThat(JSON.readTree(limited.body()).get("runs")).hasSize(2);
-		assertThat(code(operator.get(RUNS + "?limit=51"), 400)).isEqualTo("VALIDATION_FAILED");
+		assertThat(operator.get(RUNS + "?limit=200").statusCode()).isEqualTo(200);
+		assertThat(code(operator.get(RUNS + "?limit=201"), 400)).isEqualTo("VALIDATION_FAILED");
+
+		// Three runs in pages of one, either way: each once, the one order the exact reverse of the other.
+		List<String> newest = walk(operator, RUNS + "?limit=1");
+		List<String> oldest = walk(operator, RUNS + "?limit=1&order=oldest");
+		assertThat(newest).hasSize(3).doesNotHaveDuplicates().startsWith(JSON.readTree(halted.body()).get("runId").asString());
+		assertThat(oldest).isEqualTo(newest.reversed());
+		String cursor = JSON.readTree(operator.get(RUNS + "?limit=1").body()).get("nextCursor").asString();
+		assertThat(code(operator.get(RUNS + "?limit=1&order=oldest&cursor=" + cursor), 400)).isEqualTo("VALIDATION_FAILED");
+		assertThat(code(operator.get(RUNS + "?order=up"), 400)).isEqualTo("VALIDATION_FAILED");
 
 		// Operators only.
 		TestBrowser trader = TestBrowser.loggedIn(port, "trader", PASSWORD);
@@ -215,6 +225,23 @@ class BotRunIT {
 				"BOT_RUN_START APPLIED " + firstKey, "BOT_RUN_START NOT_ALLOWED " + activeKey,
 				"BOT_RUN_STOP APPLIED " + stopKey, "BOT_RUN_STOP NOT_ALLOWED " + againKey,
 				"BOT_RUN_STOP NOT_ALLOWED " + missingKey);
+	}
+
+	/** Every page of runs from the start, as run IDs in the order they came. */
+	private static List<String> walk(TestBrowser operator, String path) throws Exception {
+		List<String> seen = new ArrayList<>();
+		HttpResponse<String> response = operator.get(path);
+		for (int pages = 0; pages < 100; pages++) {
+			CONTRACT.assertResponse("GET", RUNS, 200, response.headers().firstValue("Content-Type").orElse(null),
+					response.body());
+			JsonNode page = JSON.readTree(response.body());
+			page.get("runs").forEach((run) -> seen.add(run.get("runId").asString()));
+			if (page.get("nextCursor").isNull()) {
+				return seen;
+			}
+			response = operator.get(path + "&cursor=" + page.get("nextCursor").asString());
+		}
+		throw new AssertionError("more than 100 pages: the cursor is not moving on");
 	}
 
 	/** What a worker's heartbeat writes. */

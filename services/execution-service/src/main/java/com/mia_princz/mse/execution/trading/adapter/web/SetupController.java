@@ -88,12 +88,14 @@ class SetupController {
 	record AccountPage(List<AccountView> accounts, String nextCursor) {
 	}
 
-	/** Every account with what it started with, oldest first, in pages. */
+	/** Every account with what it started with, oldest first unless {@code order=newest}, in pages. */
 	@GetMapping("/accounts")
-	AccountPage accounts(@RequestParam(required = false) String cursor, @RequestParam(defaultValue = "50") int limit) {
+	AccountPage accounts(@RequestParam(required = false) String cursor, @RequestParam(defaultValue = "50") int limit,
+			@RequestParam(required = false) String order) {
 		Pages.checkLimit(limit);
-		TradingQueries.AccountPosition after = cursor == null ? null : Cursors.accounts(cursor);
-		List<TradingQueries.AccountSummary> page = queries.accounts(after, limit + 1);
+		PageOrder direction = PageOrder.parse(order, PageOrder.OLDEST);
+		TradingQueries.AccountPosition after = cursor == null ? null : Cursors.accounts(cursor, direction);
+		List<TradingQueries.AccountSummary> page = queries.accounts(after, limit + 1, direction);
 		List<AccountView> views = page.stream()
 			.limit(limit)
 			.map((account) -> new AccountView(account.accountId().toString(), account.username(), account.kind(),
@@ -109,7 +111,7 @@ class SetupController {
 		}
 		TradingQueries.AccountSummary last = page.get(limit - 1);
 		return new AccountPage(views,
-				Cursors.accounts(new TradingQueries.AccountPosition(last.createdAt(), last.accountId())));
+				Cursors.accounts(new TradingQueries.AccountPosition(last.createdAt(), last.accountId()), direction));
 	}
 
 	/**

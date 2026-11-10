@@ -109,26 +109,33 @@ class OrderController {
 	record OrderPage(List<TradingQueries.OrderView> orders, String nextCursor) {
 	}
 
-	/** Active orders all at once (at most the per-account limit), or the whole history in keyset pages. */
+	/**
+	 * Active orders all at once (at most the per-account limit), or the whole history in keyset pages, newest first
+	 * unless {@code order=oldest}.
+	 */
 	@GetMapping("/orders")
 	OrderPage orders(@RequestParam(defaultValue = "all") String status, @RequestParam(required = false) String cursor,
-			@RequestParam(defaultValue = "50") int limit, Authentication authentication) {
+			@RequestParam(defaultValue = "50") int limit, @RequestParam(required = false) String order,
+			Authentication authentication) {
 		UUID account = trader(authentication).accountId();
+		PageOrder direction = PageOrder.parse(order, PageOrder.NEWEST);
 		if ("active".equals(status)) {
-			return new OrderPage(queries.activeOrders(account), null);
+			List<TradingQueries.OrderView> active = queries.activeOrders(account);
+			return new OrderPage(direction == PageOrder.NEWEST ? active : active.reversed(), null);
 		}
 		if (!"all".equals(status)) {
 			throw ApiException.invalid("status", "INVALID_VALUE", "status must be all or active");
 		}
 		Pages.checkLimit(limit);
-		TradingQueries.OrderPosition after = cursor == null ? null : Cursors.orders(cursor);
-		List<TradingQueries.OrderView> page = queries.orders(account, after, limit + 1);
+		TradingQueries.OrderPosition after = cursor == null ? null : Cursors.orders(cursor, direction);
+		List<TradingQueries.OrderView> page = queries.orders(account, after, limit + 1, direction);
 		if (page.size() <= limit) {
 			return new OrderPage(page, null);
 		}
 		TradingQueries.OrderView last = page.get(limit - 1);
 		return new OrderPage(page.subList(0, limit),
-				Cursors.orders(new TradingQueries.OrderPosition(last.createdAt(), UUID.fromString(last.orderId()))));
+				Cursors.orders(new TradingQueries.OrderPosition(last.createdAt(), UUID.fromString(last.orderId())),
+						direction));
 	}
 
 	@GetMapping("/orders/{orderId}")
