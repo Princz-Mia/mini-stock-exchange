@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Instrument } from '../api/types';
 import { botRun } from '../test/botRun';
+import { seeded } from '../test/seeded';
 import {
   activeRun,
   averageRate,
@@ -12,18 +13,6 @@ import {
   suggestedSplit,
   workerText,
 } from './runView';
-
-/** A small seeded generator (mulberry32), so every randomized case can be repeated. */
-function seeded(seed: number) {
-  let state = seed >>> 0;
-  return (below: number) => {
-    state = (state + 0x6d2b79f5) >>> 0;
-    let t = state;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return Math.floor((((t ^ (t >>> 14)) >>> 0) / 4294967296) * below);
-  };
-}
 
 function instrument(id: string, symbol: string): Instrument {
   return {
