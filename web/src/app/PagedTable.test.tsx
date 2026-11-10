@@ -4,7 +4,7 @@ import { MemoryRouter, useLocation } from 'react-router';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { type Column, PagedTable, sortedRows } from './PagedTable';
-import { type Paging, usePagedList } from './paging';
+import { type Filter, type FilterValues, type Paging, usePagedList } from './paging';
 
 interface Row {
   id: number;
@@ -28,19 +28,33 @@ const COLUMNS: readonly Column<Row>[] = [
 
 /** A server for the rows: the cursor is the index to continue from, in the order asked for. */
 let calls: { cursor: string | undefined; size: number; order: string }[] = [];
+let filtersAsked: FilterValues[] = [];
 let failing = false;
 /** While set, fetches wait for it, so a test can look at the screen while a page is loading. */
 let gate: Promise<void> | null = null;
 
-async function fetchRows(cursor: string | undefined, { size, order }: Paging) {
+/** Rows by parity (`kind`) and by half (`band`), the way the server narrows by side or instrument. */
+const FILTERS: readonly Filter[] = [
+  { name: 'kind', label: 'Kind', options: [{ value: 'even', label: 'Even' }, { value: 'odd', label: 'Odd' }] },
+  { name: 'band', label: 'Band', options: [{ value: 'low', label: 'Low' }, { value: 'high', label: 'High' }] },
+];
+
+function matches(row: Row, filters: FilterValues): boolean {
+  const kind = row.id % 2 === 0 ? 'even' : 'odd';
+  const band = row.id <= 28 ? 'low' : 'high';
+  return (filters.kind ?? kind) === kind && (filters.band ?? band) === band && filters.kind !== 'none';
+}
+
+async function fetchRows(cursor: string | undefined, { size, order, filters }: Paging) {
   calls.push({ cursor, size, order });
+  filtersAsked.push(filters);
   if (gate !== null) {
     await gate;
   }
   if (failing) {
     throw new Error('down');
   }
-  const all = order === 'newest' ? [...ROWS].reverse() : ROWS;
+  const all = (order === 'newest' ? [...ROWS].reverse() : ROWS).filter((row) => matches(row, filters));
   const start = cursor === undefined ? 0 : Number(cursor);
   const rows = all.slice(start, start + size);
   return { rows, nextCursor: start + size < all.length ? String(start + size) : null };
@@ -52,6 +66,7 @@ function Table({ empty = false }: { empty?: boolean }) {
     queryKey: ['rows'],
     fetch: empty ? async () => ({ rows: [], nextCursor: null }) : fetchRows,
     defaults: { size: 10, order: 'newest' },
+    filters: FILTERS,
   });
   return (
     <PagedTable label="Rows" list={list} columns={COLUMNS} rowKey={(row) => String(row.id)} empty="Nothing yet." noun="rows" />
@@ -85,6 +100,7 @@ const address = () => screen.getByTestId('address').textContent;
 
 beforeEach(() => {
   calls = [];
+  filtersAsked = [];
   failing = false;
   gate = null;
 });
@@ -266,6 +282,10 @@ describe('PagedTable while a page loads or fails', () => {
     fireEvent.change(screen.getByLabelText('Order'), { target: { value: 'oldest' } });
 
     expect(await screen.findByText('Loading…')).toBeInTheDocument();
+    // The controls stay while the new list loads, and nothing claims the list has ended.
+    expect(screen.getByLabelText('Order')).toHaveValue('oldest');
+    expect(screen.queryByText('No more rows.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: 'Rows' })).not.toBeInTheDocument();
     act(() => release());
     await waitFor(() => expect(numbers()[0]).toBe('1'));
   });
@@ -283,6 +303,102 @@ describe('PagedTable while a page loads or fails', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Previous' }));
     await waitFor(() => expect(numbers()[0]).toBe('57'));
     expect(showing()).toBe('Showing 1–10');
+  });
+});
+
+describe('PagedTable filters', () => {
+  it('narrows the list from the first page, shows the filter as a chip and keeps it in the address', async () => {
+    renderTable();
+    await waitFor(() => expect(numbers()).toHaveLength(10));
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(showing()).toBe('Showing 11–20'));
+
+    fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'even' } });
+
+    await waitFor(() => expect(numbers()).toEqual(['56', '54', '52', '50', '48', '46', '44', '42', '40', '38']));
+    expect(showing()).toBe('Showing 1–10');
+    expect(filtersAsked.at(-1)).toEqual({ kind: 'even' });
+    expect(calls.at(-1)?.cursor).toBeUndefined();
+    expect(address()).toBe('?rowsKind=even');
+    const chips = screen.getByRole('list', { name: 'Rows filters in use' });
+    expect(within(chips).getByRole('button', { name: 'Remove filter Kind: Even from Rows' })).toHaveTextContent('Kind: Even');
+    expect(within(chips).queryByRole('button', { name: 'Clear filters from Rows' })).toBeNull();
+  });
+
+  it('takes a filter off with its chip, and all of them with Clear filters', async () => {
+    renderTable('/list?rowsKind=odd&rowsBand=high');
+    await waitFor(() => expect(numbers()[0]).toBe('57'));
+    expect(numbers().every((id) => Number(id) % 2 === 1 && Number(id) > 28)).toBe(true);
+    expect(screen.getByLabelText('Band')).toHaveValue('high');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove filter Band: High from Rows' }));
+    await waitFor(() => expect(address()).toBe('?rowsKind=odd'));
+    await waitFor(() => expect(filtersAsked.at(-1)).toEqual({ kind: 'odd' }));
+
+    fireEvent.change(screen.getByLabelText('Band'), { target: { value: 'low' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Clear filters from Rows' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters from Rows' }));
+    await waitFor(() => expect(numbers()[1]).toBe('56'));
+    expect(address()).toBe('');
+    expect(screen.queryByRole('list', { name: 'Rows filters in use' })).toBeNull();
+  });
+
+  it('says nothing matches, and keeps the filters to change, rather than that the list is empty', async () => {
+    renderTable('/list?rowsKind=none');
+    expect(await screen.findByText('No rows match these filters.')).toBeInTheDocument();
+    expect(screen.queryByText('Nothing yet.')).not.toBeInTheDocument();
+    // A value the options do not list is still shown, as it is.
+    expect(screen.getByRole('button', { name: 'Remove filter Kind: none from Rows' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Kind')).toBeInTheDocument();
+  });
+
+  it('pages within the filter, and starts again when the filter changes', async () => {
+    renderTable('/list?rowsKind=even');
+    await waitFor(() => expect(numbers()).toHaveLength(10));
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(numbers()[0]).toBe('36'));
+    expect(calls.at(-1)?.cursor).toBe('10');
+    expect(filtersAsked.at(-1)).toEqual({ kind: 'even' });
+
+    fireEvent.change(screen.getByLabelText('Band'), { target: { value: 'low' } });
+    await waitFor(() => expect(numbers()[0]).toBe('28'));
+    expect(showing()).toBe('Showing 1–10');
+    expect(filtersAsked.at(-1)).toEqual({ kind: 'even', band: 'low' });
+  });
+});
+
+describe('PagedTable filters, more', () => {
+  it('does not show the unfiltered rows under a new filter while the filtered list loads', async () => {
+    renderTable();
+    await waitFor(() => expect(numbers()).toHaveLength(10));
+    const release = hold();
+
+    fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'even' } });
+
+    expect(await screen.findByText('Loading…')).toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: 'Rows' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove filter Kind: Even from Rows' })).toBeInTheDocument();
+    act(() => release());
+    await waitFor(() => expect(numbers()[0]).toBe('56'));
+  });
+
+  it('leaves the page size, the order and anything else in the address alone when filters come off', async () => {
+    renderTable('/list?rowsSize=25&rowsOrder=oldest&rowsKind=odd&rowsBand=low&other=kept');
+    await waitFor(() => expect(numbers()[0]).toBe('1'));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove filter Kind: Odd from Rows' }));
+    await waitFor(() => expect(address()).toBe('?rowsSize=25&rowsOrder=oldest&rowsBand=low&other=kept'));
+    fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'even' } });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Clear filters from Rows' })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filters from Rows' }));
+    await waitFor(() => expect(address()).toBe('?rowsSize=25&rowsOrder=oldest&other=kept'));
+    expect(screen.getByLabelText('Rows per page')).toHaveValue('25');
+  });
+
+  it('shows in the select a value its options do not list yet', async () => {
+    renderTable('/list?rowsKind=none');
+    expect(await screen.findByText('No rows match these filters.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Kind')).toHaveValue('none');
   });
 });
 

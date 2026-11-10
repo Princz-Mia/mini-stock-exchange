@@ -77,10 +77,20 @@ export function PagedTable<T>({
           : null,
     );
 
-  if (list.isPending) {
+  // Filters in use, with the label of the value chosen; a value the options do not list yet shows as it is.
+  const active = list.filters.flatMap((filter) => {
+    const value = list.paging.filters[filter.name];
+    if (value === undefined) {
+      return [];
+    }
+    const option = filter.options.find((each) => each.value === value);
+    return [{ filter, value, text: option?.label ?? value }];
+  });
+
+  if (list.isPending && !list.hasLoaded) {
     return <p className="muted">Loading…</p>;
   }
-  if (!list.isError && list.rows.length === 0 && list.offset === 0) {
+  if (!list.isPending && !list.isError && list.rows.length === 0 && list.offset === 0 && active.length === 0) {
     return <p className="muted">{empty}</p>;
   }
 
@@ -112,8 +122,62 @@ export function PagedTable<T>({
             </option>
           ))}
         </select>
+        {list.filters.map((filter) => (
+          <span key={filter.name} className="table-filter">
+            <label htmlFor={`${id}-${filter.name}`}>{filter.label}</label>
+            <select
+              id={`${id}-${filter.name}`}
+              value={list.paging.filters[filter.name] ?? ''}
+              onChange={(event) => list.setFilter(filter.name, event.target.value === '' ? null : event.target.value)}
+            >
+              <option value="">All</option>
+              {/* A value the options do not list yet, such as a symbol before the instruments load, still shows. */}
+              {list.paging.filters[filter.name] !== undefined &&
+                !filter.options.some((option) => option.value === list.paging.filters[filter.name]) && (
+                  <option value={list.paging.filters[filter.name]}>{list.paging.filters[filter.name]}</option>
+                )}
+              {filter.options.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </span>
+        ))}
         {sort !== null && <span className="muted">Column order applies to this page only.</span>}
       </div>
+      {active.length > 0 && (
+        <ul className="filter-chips" aria-label={`${label} filters in use`}>
+          {active.map(({ filter, text }) => (
+            <li key={filter.name}>
+              <button
+                type="button"
+                className="chip"
+                aria-label={`Remove filter ${filter.label}: ${text} from ${label}`}
+                onClick={() => list.setFilter(filter.name, null)}
+              >
+                {filter.label}: {text} <span aria-hidden="true">×</span>
+              </button>
+            </li>
+          ))}
+          {active.length > 1 && (
+            <li>
+              <button
+                type="button"
+                className="quiet"
+                aria-label={`Clear filters from ${label}`}
+                onClick={list.clearFilters}
+              >
+                Clear filters
+              </button>
+            </li>
+          )}
+        </ul>
+      )}
+      {list.isPending && <p className="muted">Loading…</p>}
+      {!list.isPending && !list.isError && list.rows.length === 0 && list.offset === 0 && (
+        <p className="muted">No {noun} match these filters.</p>
+      )}
       {list.isError &&
         (list.rows.length === 0 ? (
           <div className="table-problem">
@@ -178,7 +242,7 @@ export function PagedTable<T>({
         <span className="muted" role="status">
           {list.rows.length > 0
             ? `Showing ${groupInteger(first)}–${groupInteger(last)}`
-            : list.isError
+            : list.isError || list.isPending || list.offset === 0
               ? ''
               : 'No more rows.'}
         </span>

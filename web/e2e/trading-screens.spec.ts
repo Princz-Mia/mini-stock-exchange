@@ -355,7 +355,10 @@ for (const size of SIZES) {
           asked.push(url);
           const limit = Number(url.searchParams.get('limit') ?? '50');
           const start = Number(url.searchParams.get('cursor') ?? '0');
-          const ordered = url.searchParams.get('order') === 'oldest' ? history : [...history].reverse();
+          const side = url.searchParams.get('side');
+          const ordered = (url.searchParams.get('order') === 'oldest' ? history : [...history].reverse()).filter(
+            (trade) => side === null || trade.side === side,
+          );
           const trades = ordered.slice(start, start + limit);
           await route.fulfill({
             json: { trades, nextCursor: start + limit < ordered.length ? String(start + limit) : null },
@@ -387,6 +390,15 @@ for (const size of SIZES) {
       await expect(rows.first()).toContainText('09:00:00 UTC');
       expect(new URL(page.url()).search).toContain('executionsSize=100');
       await capture(page, size, 'portfolio-paged');
+
+      // Filtered: only sells, from the first page, with the filter as a chip to take off.
+      await panel.getByLabel('Side').selectOption('SELL');
+      await expect(panel.getByRole('button', { name: 'Remove filter Side: Sell from Executions' })).toBeVisible();
+      await expect(rows).toHaveCount(100);
+      await expect(panel.getByText('Showing 1–100')).toBeVisible();
+      await expect(rows.filter({ hasText: 'Buy' })).toHaveCount(0);
+      expect(asked.at(-1)?.searchParams.get('side')).toBe('SELL');
+      await capture(page, size, 'portfolio-filtered');
       await page.context().close();
     });
 
