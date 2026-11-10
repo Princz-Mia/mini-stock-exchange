@@ -10,40 +10,41 @@ import java.util.UUID;
 import org.springframework.http.HttpStatus;
 
 /**
- * Opaque, versioned page cursors. Clients pass back what they were given. A {@code v2} cursor names the order it was
- * issued in, and is refused under the other one, since its position means nothing there. A {@code v1} cursor, from
- * before lists could be read either way, stands for the list's default order. Anything else is one answer: not a
- * cursor we issued.
+ * Opaque, versioned page cursors. Clients pass back what they were given. A {@code v3} cursor names the order it was
+ * issued in and a digest of the filter it was issued under, and is refused under any other, since its position means
+ * nothing in a different list. Older cursors still work where they meant something: a {@code v2} one (its order, no
+ * filter), and a {@code v1} one (the list's default order, no filter). Anything else is one answer: not a cursor we
+ * issued.
  */
 final class Cursors {
 
 	private Cursors() {
 	}
 
-	static String orders(TradingQueries.OrderPosition position, PageOrder order) {
-		return encode(order, position.createdAt() + "|" + position.id());
+	static String orders(TradingQueries.OrderPosition position, PageOrder order, HistoryFilter filter) {
+		return encode(order, filter.fingerprint(), position.createdAt() + "|" + position.id());
 	}
 
-	static TradingQueries.OrderPosition orders(String cursor, PageOrder order) {
-		String[] parts = decode(cursor, order, PageOrder.NEWEST);
+	static TradingQueries.OrderPosition orders(String cursor, PageOrder order, HistoryFilter filter) {
+		String[] parts = decode(cursor, order, filter.fingerprint(), PageOrder.NEWEST);
 		return new TradingQueries.OrderPosition(instant(parts[0]), uuid(parts[1]));
 	}
 
 	static String accounts(TradingQueries.AccountPosition position, PageOrder order) {
-		return encode(order, position.createdAt() + "|" + position.id());
+		return encode(order, "", position.createdAt() + "|" + position.id());
 	}
 
 	static TradingQueries.AccountPosition accounts(String cursor, PageOrder order) {
-		String[] parts = decode(cursor, order, PageOrder.OLDEST);
+		String[] parts = decode(cursor, order, "", PageOrder.OLDEST);
 		return new TradingQueries.AccountPosition(instant(parts[0]), uuid(parts[1]));
 	}
 
-	static String trades(TradingQueries.TradePosition position, PageOrder order) {
-		return encode(order, position.commandSequence() + "|" + position.tradeSequence());
+	static String trades(TradingQueries.TradePosition position, PageOrder order, HistoryFilter filter) {
+		return encode(order, filter.fingerprint(), position.commandSequence() + "|" + position.tradeSequence());
 	}
 
-	static TradingQueries.TradePosition trades(String cursor, PageOrder order) {
-		String[] parts = decode(cursor, order, PageOrder.NEWEST);
+	static TradingQueries.TradePosition trades(String cursor, PageOrder order, HistoryFilter filter) {
+		String[] parts = decode(cursor, order, filter.fingerprint(), PageOrder.NEWEST);
 		try {
 			long command = Long.parseLong(parts[0]);
 			long trade = Long.parseLong(parts[1]);
@@ -62,21 +63,24 @@ final class Cursors {
 	}
 
 	static String runs(RunPosition position, PageOrder order) {
-		return encode(order, position.startedAt() + "|" + position.id());
+		return encode(order, "", position.startedAt() + "|" + position.id());
 	}
 
 	static RunPosition runs(String cursor, PageOrder order) {
-		String[] parts = decode(cursor, order, PageOrder.NEWEST);
+		String[] parts = decode(cursor, order, "", PageOrder.NEWEST);
 		return new RunPosition(instant(parts[0]), uuid(parts[1]));
 	}
 
-	private static String encode(PageOrder order, String position) {
-		String value = "v2:" + order.wire() + "|" + position;
+	private static String encode(PageOrder order, String fingerprint, String position) {
+		String value = "v3:" + order.wire() + "|" + fingerprint + "|" + position;
 		return Base64.getUrlEncoder().withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8));
 	}
 
-	/** The cursor's two position parts, if it was issued in {@code order}; a v1 cursor stands for {@code v1Order}. */
-	private static String[] decode(String cursor, PageOrder order, PageOrder v1Order) {
+	/**
+	 * The cursor's two position parts, if it was issued in {@code order} under the filter with {@code fingerprint}
+	 * (empty for none). A v2 cursor had no filter; a v1 cursor had no filter and stands for {@code v1Order}.
+	 */
+	private static String[] decode(String cursor, PageOrder order, String fingerprint, PageOrder v1Order) {
 		String text;
 		try {
 			text = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
@@ -84,18 +88,24 @@ final class Cursors {
 		catch (IllegalArgumentException ex) {
 			throw invalid();
 		}
+		String[] parts = text.length() < 3 ? new String[0] : text.substring(3).split("\\|", -1);
 		if (text.startsWith("v1:")) {
-			String[] parts = text.substring(3).split("\\|", -1);
-			if (parts.length != 2 || order != v1Order) {
+			if (parts.length != 2 || order != v1Order || !fingerprint.isEmpty()) {
 				throw invalid();
 			}
 			return parts;
 		}
-		String[] parts = text.startsWith("v2:") ? text.substring(3).split("\\|", -1) : new String[0];
-		if (parts.length != 3 || !parts[0].equals(order.wire())) {
+		if (text.startsWith("v2:")) {
+			if (parts.length != 3 || !parts[0].equals(order.wire()) || !fingerprint.isEmpty()) {
+				throw invalid();
+			}
+			return new String[] { parts[1], parts[2] };
+		}
+		if (!text.startsWith("v3:") || parts.length != 4 || !parts[0].equals(order.wire())
+				|| !parts[1].equals(fingerprint)) {
 			throw invalid();
 		}
-		return new String[] { parts[1], parts[2] };
+		return new String[] { parts[2], parts[3] };
 	}
 
 	/** Positions we issue are row timestamps; anything outside years 1 to 9999 cannot be one, nor be queried. */

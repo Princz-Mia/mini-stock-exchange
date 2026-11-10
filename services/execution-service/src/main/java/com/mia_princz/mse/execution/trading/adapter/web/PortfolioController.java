@@ -75,16 +75,18 @@ class PortfolioController {
 
 	@GetMapping("/trades")
 	OwnTradePage trades(@RequestParam(required = false) String cursor, @RequestParam(defaultValue = "50") int limit,
-			@RequestParam(required = false) String order, Authentication authentication) {
+			@RequestParam(required = false) String order, @RequestParam(required = false) String instrumentId,
+			@RequestParam(required = false) String side, Authentication authentication) {
 		Pages.checkLimit(limit);
 		PageOrder direction = PageOrder.parse(order, PageOrder.NEWEST);
-		TradingQueries.TradePosition after = cursor == null ? null : Cursors.trades(cursor, direction);
+		HistoryFilter filter = HistoryFilter.parse(instrumentId, side, null);
+		TradingQueries.TradePosition after = cursor == null ? null : Cursors.trades(cursor, direction, filter);
 		List<TradingQueries.OwnTrade> page = queries.ownTrades(Pages.trader(queries, authentication).accountId(), after,
-				limit + 1, direction);
+				limit + 1, direction, filter);
 		boolean more = page.size() > limit;
 		List<TradingQueries.OwnTrade> shown = more ? page.subList(0, limit) : page;
 		String next = more ? Cursors.trades(new TradingQueries.TradePosition(shown.getLast().commandSequence(),
-				shown.getLast().tradeSequence()), direction) : null;
+				shown.getLast().tradeSequence()), direction, filter) : null;
 		return new OwnTradePage(shown.stream().map(PortfolioController::view).toList(), next);
 	}
 

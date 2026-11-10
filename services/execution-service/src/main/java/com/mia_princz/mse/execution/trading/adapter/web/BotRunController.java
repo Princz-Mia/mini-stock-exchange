@@ -166,9 +166,10 @@ class BotRunController {
 				SELECT id, desired_state, started_at, ends_at, stop_requested_at, stopped_at, seed, commands_per_second,
 				    max_order_quantity, max_position, worker_id, heartbeat_at, lease_expires_at, placed, canceled,
 				    rejected, errors, in_flight, stop_failures
-				FROM bot_run
-				WHERE CAST(:afterAt AS TIMESTAMPTZ) IS NULL OR (started_at, id) %1$s (:afterAt, :afterId)
-				ORDER BY started_at %2$s, id %2$s LIMIT :limit""".formatted(direction.after(), direction.direction()))
+				FROM bot_run%1$s
+				ORDER BY started_at %2$s, id %2$s LIMIT :limit""".formatted(
+				after == null ? "" : " WHERE (started_at, id) " + direction.after() + " (:afterAt, :afterId)",
+				direction.direction()))
 			.param("afterAt", after == null ? null : Timestamp.from(after.startedAt()))
 			.param("afterId", after == null ? null : after.id())
 			.param("limit", limit + 1)

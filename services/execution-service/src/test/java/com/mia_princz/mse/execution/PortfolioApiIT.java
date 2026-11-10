@@ -73,6 +73,8 @@ class PortfolioApiIT {
 			}
 		}
 		int n = NEXT.getAndIncrement();
+		// One instrument per test; the last is kept for the filter test's second instrument.
+		assertThat(n).as("more tests than instruments: add instruments").isLessThan(INSTRUMENTS.size() - 1);
 		instrument = INSTRUMENTS.get(n);
 		new TransactionTemplate(transactionManager).executeWithoutResult((status) -> {
 			fundedTrader("trader" + n);
@@ -250,6 +252,79 @@ class PortfolioApiIT {
 		assertThat(trader.get("/api/v1/portfolio/trades?order=oldest&cursor=" + trades).statusCode()).isEqualTo(200);
 	}
 
+	/**
+	 * Each filter, alone and together, narrows the history to exactly the rows that match, in pages, either way. Its
+	 * cursors carry it: one is refused under another filter or none, and one from no filter is refused under a filter.
+	 */
+	@Test
+	void filtersNarrowTheHistory() throws Exception {
+		UUID spare = INSTRUMENTS.getLast();
+		place(trader, "SELL", 1, "100.00");
+		place(trader, "SELL", 1, "100.00");
+		place(other, "BUY", 2, "100.00");
+		place(other, "SELL", 1, "99.00");
+		place(trader, "BUY", 1, "99.00");
+		place(trader, spare, "BUY", 1, "50.00");
+		String canceled = place(trader, spare, "BUY", 1, "51.00");
+		assertThat(trader.post("/api/v1/orders/" + canceled + "/cancel", "", "Idempotency-Key",
+				UUID.randomUUID().toString()).statusCode()).isEqualTo(200);
+		HttpResponse<String> rejected = trader.post("/api/v1/orders", limit(spare, "BUY", 10_000, "900.00"),
+				"Idempotency-Key", UUID.randomUUID().toString());
+		assertThat(rejected.statusCode()).isEqualTo(422);
+
+		String trades = "/api/v1/portfolio/trades?limit=1";
+		assertThat(walk(trades + "&instrumentId=" + instrument, "trades", "tradeId")).hasSize(3);
+		assertThat(walk(trades + "&instrumentId=" + spare, "trades", "tradeId")).isEmpty();
+		assertThat(walk(trades + "&side=SELL", "trades", "side")).containsExactly("SELL", "SELL");
+		assertThat(walk(trades + "&side=BUY", "trades", "side")).containsExactly("BUY");
+		assertThat(walk(trades + "&side=BUY&instrumentId=" + instrument, "trades", "tradeId")).hasSize(1);
+		assertThat(walk(trades + "&side=BUY&instrumentId=" + spare, "trades", "tradeId")).isEmpty();
+		List<String> sells = walk(trades + "&side=SELL", "trades", "tradeId");
+		assertThat(walk(trades + "&side=SELL&order=oldest", "trades", "tradeId")).isEqualTo(sells.reversed());
+
+		String orders = "/api/v1/orders?limit=1";
+		assertThat(walk(orders + "&instrumentId=" + spare, "orders", "state")).containsExactly("REJECTED", "CANCELED",
+				"OPEN");
+		assertThat(walk(orders + "&instrumentId=" + spare + "&state=CANCELED", "orders", "orderId"))
+			.containsExactly(canceled);
+		assertThat(walk(orders + "&state=FILLED", "orders", "side")).containsExactlyInAnyOrder("SELL", "SELL", "BUY");
+		assertThat(walk(orders + "&state=FILLED&side=SELL", "orders", "side")).containsExactly("SELL", "SELL");
+		assertThat(walk(orders + "&side=BUY&order=oldest", "orders", "state")).containsExactly("FILLED", "OPEN",
+				"CANCELED", "REJECTED");
+		assertThat(walk(orders + "&state=PARTIALLY_FILLED", "orders", "orderId")).isEmpty();
+
+		// Cursors belong to their filter.
+		String bySell = json(trader.get(trades + "&side=SELL")).get("nextCursor").asString();
+		assertThat(json(trader.get(trades + "&side=SELL&cursor=" + bySell)).get("trades")).hasSize(1);
+		assertRefusedCursor(trader.get(trades + "&side=BUY&cursor=" + bySell));
+		assertRefusedCursor(trader.get(trades + "&cursor=" + bySell));
+		String unfiltered = json(trader.get(orders)).get("nextCursor").asString();
+		assertRefusedCursor(trader.get(orders + "&state=FILLED&cursor=" + unfiltered));
+		String bySpare = json(trader.get(orders + "&instrumentId=" + spare)).get("nextCursor").asString();
+		assertRefusedCursor(trader.get(orders + "&instrumentId=" + instrument + "&cursor=" + bySpare));
+		assertRefusedCursor(trader.get(orders + "&instrumentId=" + spare + "&state=OPEN&cursor=" + bySpare));
+		JsonNode newest = json(trader.get(orders)).get("orders").get(0);
+		String v2 = Base64.getUrlEncoder()
+			.withoutPadding()
+			.encodeToString(("v2:newest|" + Instant.parse(newest.get("createdAt").asString()) + "|"
+					+ newest.get("orderId").asString()).getBytes(StandardCharsets.UTF_8));
+		assertThat(trader.get(orders + "&cursor=" + v2).statusCode()).isEqualTo(200);
+		assertRefusedCursor(trader.get(orders + "&side=BUY&cursor=" + v2));
+		String v1 = Base64.getUrlEncoder()
+			.withoutPadding()
+			.encodeToString(("v1:" + Instant.parse(newest.get("createdAt").asString()) + "|"
+					+ newest.get("orderId").asString()).getBytes(StandardCharsets.UTF_8));
+		assertThat(trader.get(orders + "&cursor=" + v1).statusCode()).isEqualTo(200);
+		assertRefusedCursor(trader.get(orders + "&state=FILLED&cursor=" + v1));
+
+		// Bad filters are refused, and filters are for the history, not the active list.
+		assertThat(trader.get("/api/v1/orders?instrumentId=NOVA").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/orders?side=buy").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/orders?state=DONE").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/portfolio/trades?side=BOTH").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/orders?status=active&side=BUY").statusCode()).isEqualTo(400);
+	}
+
 	@Test
 	void activeOrdersAndTheFullHistory() throws Exception {
 		String resting = place(trader, "BUY", 1, "95.00");
@@ -303,16 +378,24 @@ class PortfolioApiIT {
 	}
 
 	private String place(TestBrowser browser, String side, long quantity, String price) throws Exception {
-		HttpResponse<String> response = browser.post("/api/v1/orders", limit(side, quantity, price), "Idempotency-Key",
-				UUID.randomUUID().toString());
+		return place(browser, instrument, side, quantity, price);
+	}
+
+	private String place(TestBrowser browser, UUID on, String side, long quantity, String price) throws Exception {
+		HttpResponse<String> response = browser.post("/api/v1/orders", limit(on, side, quantity, price),
+				"Idempotency-Key", UUID.randomUUID().toString());
 		assertThat(response.statusCode()).as(response.body()).isEqualTo(201);
 		return JSON.readTree(response.body()).get("orderId").asString();
 	}
 
 	private String limit(String side, long quantity, String price) {
+		return limit(instrument, side, quantity, price);
+	}
+
+	private static String limit(UUID on, String side, long quantity, String price) {
 		return """
 				{"instrumentId":"%s","side":"%s","type":"LIMIT","timeInForce":"GTC","quantity":%d,"limitPrice":"%s"}"""
-			.formatted(instrument, side, quantity, price);
+			.formatted(on, side, quantity, price);
 	}
 
 	private String newestTradeId() {
@@ -350,7 +433,7 @@ class PortfolioApiIT {
 		jdbc.update("INSERT INTO simulation (id, state, opened_at) VALUES (?, 'OPEN', now())", simulation);
 		jdbc.update("INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'ISSUANCE', 'Issuance')",
 				UUID.randomUUID(), simulation);
-		for (int i = 0; i < 8; i++) {
+		for (int i = 0; i < 12; i++) {
 			UUID id = UUID.randomUUID();
 			jdbc.update(
 					"INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, ?, 10000)",

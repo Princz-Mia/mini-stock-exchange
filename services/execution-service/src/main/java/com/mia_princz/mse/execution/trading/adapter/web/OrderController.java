@@ -116,10 +116,16 @@ class OrderController {
 	@GetMapping("/orders")
 	OrderPage orders(@RequestParam(defaultValue = "all") String status, @RequestParam(required = false) String cursor,
 			@RequestParam(defaultValue = "50") int limit, @RequestParam(required = false) String order,
-			Authentication authentication) {
+			@RequestParam(required = false) String instrumentId, @RequestParam(required = false) String side,
+			@RequestParam(required = false) String state, Authentication authentication) {
 		UUID account = trader(authentication).accountId();
 		PageOrder direction = PageOrder.parse(order, PageOrder.NEWEST);
+		HistoryFilter filter = HistoryFilter.parse(instrumentId, side, state);
 		if ("active".equals(status)) {
+			if (!filter.isNone()) {
+				// The active list is at most the per-account limit and comes whole; filters are for the history.
+				throw ApiException.invalid("status", "INVALID_VALUE", "filters apply to status=all only");
+			}
 			List<TradingQueries.OrderView> active = queries.activeOrders(account);
 			return new OrderPage(direction == PageOrder.NEWEST ? active : active.reversed(), null);
 		}
@@ -127,15 +133,15 @@ class OrderController {
 			throw ApiException.invalid("status", "INVALID_VALUE", "status must be all or active");
 		}
 		Pages.checkLimit(limit);
-		TradingQueries.OrderPosition after = cursor == null ? null : Cursors.orders(cursor, direction);
-		List<TradingQueries.OrderView> page = queries.orders(account, after, limit + 1, direction);
+		TradingQueries.OrderPosition after = cursor == null ? null : Cursors.orders(cursor, direction, filter);
+		List<TradingQueries.OrderView> page = queries.orders(account, after, limit + 1, direction, filter);
 		if (page.size() <= limit) {
 			return new OrderPage(page, null);
 		}
 		TradingQueries.OrderView last = page.get(limit - 1);
 		return new OrderPage(page.subList(0, limit),
 				Cursors.orders(new TradingQueries.OrderPosition(last.createdAt(), UUID.fromString(last.orderId())),
-						direction));
+						direction, filter));
 	}
 
 	@GetMapping("/orders/{orderId}")
