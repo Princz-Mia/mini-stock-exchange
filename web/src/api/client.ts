@@ -144,8 +144,9 @@ export const api = {
 
   portfolio: () => request<Portfolio>('GET', '/api/v1/portfolio'),
 
-  ownTrades: (cursor?: string, limit = 50, order?: ListOrder) =>
-    request<OwnTradePage>('GET', `/api/v1/portfolio/trades${query({ cursor, limit, order })}`),
+  /** `filters` narrows to an instrument (`instrumentId`) or a side (`side`). */
+  ownTrades: (cursor?: string, limit = 50, order?: ListOrder, filters: Readonly<Record<string, string>> = {}) =>
+    request<OwnTradePage>('GET', `/api/v1/portfolio/trades${query({ ...filters, cursor, limit, order })}`),
 
   /** Committed when it returns; the same key with the same request returns the first answer again. */
   placeOrder: (order: OrderRequest, idempotencyKey: string) =>
@@ -194,9 +195,16 @@ export const api = {
   revokeBotToken: (accountId: string, idempotencyKey: string) =>
     request<TokenRevoked>('POST', `/api/v1/admin/bots/${accountId}/revoke-token`, { idempotencyKey }),
 
-  orders: (status: 'all' | 'active', cursor?: string, limit?: number, order?: ListOrder) =>
+  /** With status=all, `filters` narrows to an instrument (`instrumentId`), a side (`side`) or a state (`state`). */
+  orders: (
+    status: 'all' | 'active',
+    cursor?: string,
+    limit?: number,
+    order?: ListOrder,
+    filters: Readonly<Record<string, string>> = {},
+  ) =>
     request<OrderPage>(
       'GET',
-      `/api/v1/orders${query({ status, cursor, limit: status === 'all' ? (limit ?? 50) : undefined, order })}`,
+      `/api/v1/orders${query({ ...filters, status, cursor, limit: status === 'all' ? (limit ?? 50) : undefined, order })}`,
     ),
 };

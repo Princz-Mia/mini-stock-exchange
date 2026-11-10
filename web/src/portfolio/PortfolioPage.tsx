@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { ApiError, api, pollEvery } from '../api/client';
 import type { Holding, OrderDetail, OwnTrade } from '../api/types';
 import { type Column, PagedTable } from '../app/PagedTable';
-import { usePagedList } from '../app/paging';
+import { type Filter, usePagedList } from '../app/paging';
 import { useKeyboardScroll } from '../app/useKeyboardScroll';
 import { groupDigits, groupInteger, utcTime } from '../format';
 import { toCents } from '../terminal/money';
@@ -106,27 +106,56 @@ const ORDER_COLUMNS: readonly Column<OrderDetail>[] = [
   },
 ];
 
+const SIDES: readonly { value: OrderDetail['side']; label: string }[] = [
+  { value: 'BUY', label: 'Buy' },
+  { value: 'SELL', label: 'Sell' },
+];
+
+const SIDE_FILTER: Filter = { name: 'side', label: 'Side', options: SIDES, complete: true };
+
+// Typed against the contract, so a misspelt state does not compile.
+const STATES: readonly { value: OrderDetail['state']; label: string }[] = [
+  { value: 'OPEN', label: 'Open' },
+  { value: 'PARTIALLY_FILLED', label: 'Partly filled' },
+  { value: 'FILLED', label: 'Filled' },
+  { value: 'CANCELED', label: 'Canceled' },
+  { value: 'REJECTED', label: 'Rejected' },
+];
+
+const STATE_FILTER: Filter = { name: 'state', label: 'Status', options: STATES, complete: true };
+
 export function PortfolioPage() {
   const portfolio = useQuery({ queryKey: ['portfolio'], queryFn: api.portfolio, ...REFRESH });
+  // The instruments to filter by, by symbol; the terminal reads the same list.
+  const instruments = useQuery({ queryKey: ['instruments'], queryFn: api.instruments });
+  const symbolFilter: Filter = {
+    name: 'instrumentId',
+    label: 'Symbol',
+    options: (instruments.data?.instruments ?? [])
+      .map((instrument) => ({ value: instrument.instrumentId, label: instrument.symbol }))
+      .sort((a, b) => a.label.localeCompare(b.label)),
+  };
   // One page of each history at a time; only that page is fetched again every five seconds and after account events.
   const trades = usePagedList({
     table: 'executions',
     queryKey: ['own-trades'],
-    fetch: async (cursor, { size, order }) => {
-      const page = await api.ownTrades(cursor, size, order);
+    fetch: async (cursor, { size, order, filters }) => {
+      const page = await api.ownTrades(cursor, size, order, filters);
       return { rows: page.trades, nextCursor: page.nextCursor };
     },
     defaults: { size: 25, order: 'newest' },
+    filters: [symbolFilter, SIDE_FILTER],
     refetchInterval: REFRESH.refetchInterval,
   });
   const orders = usePagedList({
     table: 'orders',
     queryKey: ['orders', 'all'],
-    fetch: async (cursor, { size, order }) => {
-      const page = await api.orders('all', cursor, size, order);
+    fetch: async (cursor, { size, order, filters }) => {
+      const page = await api.orders('all', cursor, size, order, filters);
       return { rows: page.orders, nextCursor: page.nextCursor };
     },
     defaults: { size: 25, order: 'newest' },
+    filters: [symbolFilter, SIDE_FILTER, STATE_FILTER],
     refetchInterval: REFRESH.refetchInterval,
   });
   // The three tables are wider than a phone, so their panels scroll; the keyboard has to reach them too.

@@ -105,6 +105,79 @@ describe('portfolio page', () => {
     expect(window.location.search).toBe('?executionsOrder=oldest');
   });
 
+  it('filters executions and orders by symbol, side and status, as the server is asked', async () => {
+    const ORBIT = '00000000-0000-0000-0000-000000000002';
+    const server = signedIn()
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/instruments', {
+        status: 200,
+        json: {
+          instruments: [
+            { instrumentId: ORBIT, symbol: 'ORBIT' },
+            { instrumentId: '00000000-0000-0000-0000-000000000001', symbol: 'NOVA' },
+          ],
+          feed: { state: 'LIVE', lag: 0 },
+        },
+      })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [trade(1)], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    window.history.pushState({}, '', '/portfolio');
+    render(<App />);
+    const orders = await screen.findByRole('region', { name: 'Orders' });
+    const executions = screen.getByRole('region', { name: 'Executions' });
+    await within(executions).findByRole('table', { name: 'Executions' });
+
+    // The symbols come from the instrument list, in alphabetical order.
+    const symbol = within(executions).getByLabelText('Symbol');
+    await waitFor(() =>
+      expect(within(symbol).getAllByRole('option').map((option) => option.textContent)).toEqual(['All', 'NOVA', 'ORBIT']),
+    );
+    fireEvent.change(symbol, { target: { value: ORBIT } });
+    fireEvent.change(within(executions).getByLabelText('Side'), { target: { value: 'SELL' } });
+    await waitFor(() =>
+      expect(
+        server.requests.some(
+          (request) =>
+            request.url.startsWith('/api/v1/portfolio/trades') &&
+            request.url.includes(`instrumentId=${ORBIT}`) &&
+            request.url.includes('side=SELL'),
+        ),
+      ).toBe(true),
+    );
+    expect(within(executions).getByRole('button', { name: 'Remove filter Symbol: ORBIT from Executions' })).toBeInTheDocument();
+
+    // Orders filter by symbol, side and status, and say when nothing matches.
+    expect(await within(orders).findByText('No orders yet.')).toBeInTheDocument();
+    expect(within(orders).queryByLabelText('Status')).toBeNull();
+    // A side or status the server does not take is dropped from the address rather than sent.
+    const before = server.requests.length;
+    window.history.pushState({}, '', '/portfolio?ordersSide=buy&ordersState=EXPIRED&ordersSize=10');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    // The page size is new, so the orders are asked for again; the bad side and status are not in that request.
+    const asked = () =>
+      server.requests.slice(before).filter((request) => request.url.startsWith('/api/v1/orders?') && request.url.includes('limit=10'));
+    await waitFor(() => expect(asked().length).toBeGreaterThan(0));
+    expect(asked().every((request) => !request.url.includes('side=') && !request.url.includes('state='))).toBe(true);
+    expect(within(orders).queryByRole('list', { name: 'Orders filters in use' })).toBeNull();
+    window.history.pushState({}, '', '/portfolio?ordersState=FILLED');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    expect(await within(orders).findByText('No orders match these filters.')).toBeInTheDocument();
+    expect(within(orders).getByLabelText('Status')).toHaveValue('FILLED');
+    expect(within(orders).getByLabelText('Symbol')).toBeInTheDocument();
+    expect(within(orders).getByLabelText('Side')).toBeInTheDocument();
+    expect(within(within(orders).getByLabelText('Status')).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'All',
+      'Open',
+      'Partly filled',
+      'Filled',
+      'Canceled',
+      'Rejected',
+    ]);
+    expect(server.requests.some((request) => request.url.includes('state=FILLED') && request.url.includes('status=all'))).toBe(
+      true,
+    );
+  });
+
   it('explains a missing trading account instead of calling it an outage', async () => {
     signedIn()
       .on('GET /api/v1/portfolio', { status: 403, problem: { status: 403, code: 'NO_TRADING_ACCOUNT' } })
