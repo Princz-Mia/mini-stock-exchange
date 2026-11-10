@@ -79,12 +79,12 @@ function market() {
     .on('GET /api/v1/orders', { status: 200, json: { orders: [OPEN_ORDER], nextCursor: null } });
 }
 
-function renderTerminal() {
+function renderTerminal(at = '/terminal') {
   const streams = fakeStreams();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={['/terminal']}>
+      <MemoryRouter initialEntries={[at]}>
         <StreamContext.Provider value={streams.create}>
           <TerminalPage />
         </StreamContext.Provider>
@@ -183,6 +183,28 @@ describe('terminal', () => {
     await screen.findByRole('heading', { name: 'ORBIT', level: 1 });
     expect(streams.opened[0]?.closed).toBe(true);
     expect(streams.latest()?.url).toContain(ORBIT);
+  });
+
+  it('keeps the chart settings and asks for the new instrument bars when another instrument is chosen', async () => {
+    const server = market();
+    renderTerminal('/terminal?chart=line&range=30m&bars=5m');
+    fireEvent.click(await screen.findByRole('button', { name: /^ORBIT/ }));
+    await screen.findByRole('heading', { name: 'ORBIT', level: 1 });
+
+    const chart = screen.getByRole('region', { name: 'Price' });
+    for (const [group, name] of [
+      ['Chart type', 'Line'],
+      ['Range', '30 min'],
+      ['Bar size', '5 min'],
+    ] as const) {
+      expect(within(within(chart).getByRole('group', { name: group })).getByRole('button', { name })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      );
+    }
+    await waitFor(() =>
+      expect(server.requests.some((request) => request.url.startsWith(`/api/v1/instruments/${ORBIT}/candles?`))).toBe(true),
+    );
   });
 
   it('shows the maximum spend beside the available balances, and sends the order with a key', async () => {

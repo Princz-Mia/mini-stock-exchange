@@ -224,6 +224,84 @@ for (const size of SIZES) {
       await down.context().close();
     });
 
+    test('the price chart, its controls, and its data behind or gone', async ({ browser }) => {
+      const chart = (page: Page) => page.getByRole('region', { name: 'Price', exact: true });
+      const choose = (page: Page, group: string, name: string) =>
+        chart(page).getByRole('group', { name: group }).getByRole('button', { name, exact: true }).click();
+
+      // Live: bars from the analytics, topped up from the tape, with the newest bar in text.
+      const page = await at(browser, size, 'trader');
+      await openTerminal(page);
+      await expect(chart(page).getByText(/^C \d/)).toBeVisible({ timeout: 30_000 });
+      await choose(page, 'Chart type', 'Area');
+      await choose(page, 'Bar size', '5 min');
+      await choose(page, 'Range', '30 min');
+      for (const [group, name] of [
+        ['Chart type', 'Area'],
+        ['Bar size', '5 min'],
+        ['Range', '30 min'],
+      ] as const) {
+        await expect(chart(page).getByRole('group', { name: group }).getByRole('button', { name, exact: true })).toHaveAttribute(
+          'aria-pressed',
+          'true',
+        );
+      }
+      await expect(chart(page).getByRole('button', { name: '1 hour', exact: true })).toBeDisabled();
+      await expect(chart(page).getByText('5 min bars · last 30 min')).toBeVisible();
+      // The settings are in the address, so a reload keeps them.
+      await page.reload();
+      await expect(chart(page).getByText('5 min bars · last 30 min')).toBeVisible();
+      await capture(page, size, 'terminal-chart-area');
+      await page.context().close();
+
+      // The analytics are further behind than the tape reaches back: the bars stay, and say so.
+      const behind = await at(browser, size, 'trader', async (fresh) => {
+        await fresh.route('**/api/v1/instruments/*/candles*', async (route) => {
+          const response = await route.fetch();
+          const body = (await response.json()) as {
+            freshness: { candlesThroughTradeSequence: string | null; latestTradeSequence: string; tradesBehind: number };
+          };
+          // Far past anything on the tape, so the tape cannot cover the difference.
+          body.freshness = {
+            ...body.freshness,
+            candlesThroughTradeSequence: '100000',
+            latestTradeSequence: '200000',
+            tradesBehind: 100_000,
+          };
+          await route.fulfill({ response, json: body });
+        });
+      });
+      await openTerminal(behind);
+      await expect(chart(behind).getByRole('status')).toHaveText('Analytics behind by 100,000 trades');
+      await capture(behind, size, 'terminal-chart-behind');
+      await behind.context().close();
+
+      // The bars cannot be read: the tape is drawn as a line instead.
+      const unavailable = await at(browser, size, 'trader', async (fresh) => {
+        await fresh.route('**/api/v1/instruments/*/candles*', problem(503, 'UNAVAILABLE'));
+      });
+      await openTerminal(unavailable);
+      await expect(chart(unavailable).getByRole('status')).toContainText('Bars unavailable', { timeout: 30_000 });
+      await capture(unavailable, size, 'terminal-chart-unavailable');
+      await unavailable.context().close();
+
+      // Nothing has traded in the range, and there is no tape to fall back on.
+      const empty = await at(browser, size, 'trader', async (fresh) => {
+        await fresh.route('**/api/v1/market-events*', (route) => route.abort());
+        await fresh.route('**/api/v1/instruments/*/candles*', async (route) => {
+          const response = await route.fetch();
+          const body = (await response.json()) as { candles: unknown[]; freshness: Record<string, unknown> };
+          body.candles = [];
+          body.freshness = { ...body.freshness, candlesThroughTradeSequence: null, latestTradeSequence: '0', tradesBehind: 0 };
+          await route.fulfill({ response, json: body });
+        });
+      });
+      await openTerminal(empty);
+      await expect(chart(empty).getByText('No trades in this range yet.')).toBeVisible();
+      await capture(empty, size, 'terminal-chart-empty');
+      await empty.context().close();
+    });
+
     test('the portfolio, empty, and unreachable', async ({ browser }) => {
       const page = await at(browser, size, 'trader');
       await page.getByRole('link', { name: 'Portfolio' }).click();
