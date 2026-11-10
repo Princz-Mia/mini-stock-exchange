@@ -66,6 +66,8 @@ On Linux or macOS, run `./scripts/init-env.sh` instead of the first command. The
 
 On first start, the full profile sets up a demo market: NOVA, ORBT, HELI, QUAD and VELO at their reference prices, the trader funded with USD 100,000.00 and 1,000 shares of each, 20 funded bots, and the market open. Start the bots from the operator screen, and trade as `trader`. Set `MSE_DEMO_SEED=false` in `.env` to start with an empty market instead, which the operator sets up.
 
+[docs/demo.md](docs/demo.md) is a five-minute scripted walk through it: bots, orders, fills, a halt, and analytics failing without stopping trading.
+
 `init-env` also warns when a host port in `.env` is already taken on this machine; change that port in `.env` before starting.
 
 | Command | Starts |
