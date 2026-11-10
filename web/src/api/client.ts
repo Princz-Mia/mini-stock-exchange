@@ -9,6 +9,7 @@ import type {
   BotRunStopping,
   BotsCreated,
   BotsRequest,
+  Candles,
   Cancellation,
   CsrfToken,
   Identity,
@@ -133,6 +134,10 @@ export const api = {
   },
 
   instruments: () => request<Instruments>('GET', '/api/v1/instruments'),
+
+  /** One-minute bars with from <= start < to, oldest first, and how far the analytics are behind the tape. */
+  candles: (instrumentId: string, from: string, to: string) =>
+    request<Candles>('GET', `/api/v1/instruments/${instrumentId}/candles${query({ from, to })}`),
 
   portfolio: () => request<Portfolio>('GET', '/api/v1/portfolio'),
 
