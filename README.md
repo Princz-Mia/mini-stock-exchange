@@ -62,6 +62,10 @@ On Linux or macOS, run `./scripts/init-env.sh` instead of the first command. The
 
 `init-env` creates a local `.env` with random secrets. Its `DEV_TRADER_PASSWORD` and `DEV_OPERATOR_PASSWORD` are the passwords for the demo users `trader` and `operator`.
 
+On first start, the full profile sets up a demo market: NOVA, ORBT, HELI, QUAD and VELO at their reference prices, the trader funded with USD 100,000.00 and 1,000 shares of each, 20 funded bots, and the market open. Start the bots from the operator screen, and trade as `trader`. Set `MSE_DEMO_SEED=false` in `.env` to start with an empty market instead, which the operator sets up.
+
+`init-env` also warns when a host port in `.env` is already taken on this machine; change that port in `.env` before starting.
+
 | Command | Starts |
 | --- | --- |
 | `docker compose up -d --build --wait` | Services, proxy, PostgreSQL and Kafka |
