@@ -205,6 +205,10 @@ services:
     build:
       context: ./simulator
     restart: unless-stopped
+    # After the demo seed has finished (at once when seeding is off): `up --wait` then counts its exit as done.
+    depends_on:
+      demo-seed:
+        condition: service_completed_successfully
     environment:
       MSE_EXECUTION_URL: http://execution-service:8080
       MSE_MARKET_DATA_URL: http://market-data-service:8080
@@ -221,6 +225,23 @@ services:
       start_period: 10s
     mem_limit: 512m
     cpus: 1.0
+
+  # One-shot: sets up the demo market through the operator API, then exits. Repeats nothing on later starts.
+  demo-seed:
+    profiles: [full]
+    build:
+      context: ./simulator
+    restart: "no"
+    depends_on:
+      execution-service:
+        condition: service_healthy
+    environment:
+      MSE_EXECUTION_URL: http://execution-service:8080
+      MSE_DEMO_SEED: ${MSE_DEMO_SEED:-false}
+      MSE_DEMO_BOTS: ${MSE_DEMO_BOTS:-20}
+      MSE_DEMO_OPERATOR_PASSWORD: ${DEV_OPERATOR_PASSWORD:-}
+    entrypoint: [python, -m, mse_simulator.seed]
+    mem_limit: 256m
 
   prometheus:
     profiles: [observability]
