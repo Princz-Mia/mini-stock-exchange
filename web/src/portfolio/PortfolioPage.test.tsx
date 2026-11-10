@@ -71,7 +71,7 @@ describe('portfolio page', () => {
     expect(await screen.findByText('No executions yet.')).toBeInTheDocument();
   });
 
-  it('loads the next page of executions with the cursor it was given', async () => {
+  it('pages the executions with the cursor, page size and order it was given, one page on screen at a time', async () => {
     const server = signedIn()
       .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
       .on('GET /api/v1/portfolio/trades', (request) =>
@@ -82,14 +82,27 @@ describe('portfolio page', () => {
       .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
     window.history.pushState({}, '', '/portfolio');
     render(<App />);
-    const executions = await screen.findByRole('table', { name: 'Executions' });
+    const panel = await screen.findByRole('region', { name: 'Executions' });
+    const executions = await within(panel).findByRole('table', { name: 'Executions' });
     expect(within(executions).getAllByRole('row')).toHaveLength(3);
+    const first = server.requests.find((request) => request.url.startsWith('/api/v1/portfolio/trades'))!;
+    expect(first.url).toContain('limit=25');
+    expect(first.url).toContain('order=newest');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Load more executions' }));
+    fireEvent.click(within(panel).getByRole('button', { name: 'Next' }));
 
-    await waitFor(() => expect(within(executions).getAllByRole('row')).toHaveLength(4));
+    await waitFor(() => expect(within(executions).getAllByRole('row')).toHaveLength(2));
+    expect(within(panel).getByText('Showing 3–3')).toBeInTheDocument();
     expect(server.requests.some((request) => request.url.includes('cursor=next'))).toBe(true);
-    expect(screen.queryByRole('button', { name: 'Load more executions' })).not.toBeInTheDocument();
+    expect(within(panel).getByRole('button', { name: 'Next' })).toBeDisabled();
+
+    fireEvent.change(within(panel).getByLabelText('Order'), { target: { value: 'oldest' } });
+    await waitFor(() =>
+      expect(server.requests.some((request) => request.url.includes('order=oldest') && !request.url.includes('cursor'))).toBe(
+        true,
+      ),
+    );
+    expect(window.location.search).toBe('?executionsOrder=oldest');
   });
 
   it('explains a missing trading account instead of calling it an outage', async () => {

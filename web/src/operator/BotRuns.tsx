@@ -1,8 +1,10 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { type FormEvent, useCallback, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useState } from 'react';
 
 import { api, pollEvery } from '../api/client';
 import type { BotRun, BotRunRequest, Instrument, MarketStatus } from '../api/types';
+import { type Column, PagedTable } from '../app/PagedTable';
+import { usePagedList } from '../app/paging';
 import { groupInteger, utcTime } from '../format';
 import {
   activeRun,
@@ -30,15 +32,33 @@ const DEFAULTS = {
 };
 
 /**
- * Bot runs: the one that is running with its worker and activity, a form to start the next, and the recent ones.
- * Everything shown is what Execution committed and what the worker last reported, refetched every two seconds.
+ * Bot runs: the one that is running with its worker and activity, a form to start the next, and every run a page at a
+ * time. Everything shown is what Execution committed and what the worker last reported. The current run is refetched
+ * every two seconds; the history every five, and at once whenever the newest run changes, so the two agree.
  */
 export function BotRuns({ market, instruments }: { market: MarketStatus['state']; instruments: readonly Instrument[] }) {
   const runs = useQuery({ queryKey: ['bot-runs'], queryFn: api.botRuns, refetchInterval: pollEvery(2_000) });
   const population = useQuery({ queryKey: ['bots'], queryFn: api.botPopulation });
   const list = runs.data?.runs ?? [];
   const active = activeRun(list);
-  const past = list.filter((run) => run !== active).slice(0, 5);
+  const history = usePagedList({
+    table: 'runs',
+    queryKey: ['bot-runs', 'history'],
+    fetch: async (cursor, { size, order }) => {
+      const page = await api.botRunPage(cursor, size, order);
+      return { rows: page.runs, nextCursor: page.nextCursor };
+    },
+    defaults: { size: 10, order: 'newest' },
+    refetchInterval: pollEvery(5_000),
+  });
+  const client = useQueryClient();
+  const newest = list[0];
+  const newestState = newest === undefined ? '' : `${newest.runId}|${newest.status}|${newest.stoppedAt ?? ''}`;
+  useEffect(() => {
+    if (newestState !== '') {
+      void client.invalidateQueries({ queryKey: ['bot-runs', 'history'] });
+    }
+  }, [client, newestState]);
 
   return (
     <section className="panel" aria-labelledby="runs-title">
@@ -60,7 +80,19 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
           blocked={runs.isError ? 'The bot runs could not be loaded.' : null}
         />
       )}
-      {past.length > 0 && <RecentRuns runs={past} />}
+      {list.length > 0 && (
+        <>
+          <h3>Recent runs</h3>
+          <PagedTable
+            label="Recent runs"
+            list={history}
+            columns={RUN_COLUMNS}
+            rowKey={(run) => run.runId}
+            empty="No runs yet."
+            noun="runs"
+          />
+        </>
+      )}
     </section>
   );
 }
@@ -310,36 +342,37 @@ function StartForm({
   );
 }
 
-function RecentRuns({ runs }: { runs: readonly BotRun[] }) {
-  return (
-    <table aria-label="Recent runs">
-      <thead>
-        <tr>
-          <th scope="col">Started</th>
-          <th scope="col">Bots</th>
-          <th scope="col" className="num">
-            Placed
-          </th>
-          <th scope="col" className="num">
-            Canceled
-          </th>
-          <th scope="col">Ended</th>
-        </tr>
-      </thead>
-      <tbody>
-        {runs.map((run) => (
-          <tr key={run.runId}>
-            <th scope="row">{utcTime(run.startedAt)}</th>
-            <td>{strategiesText(run.config.strategies)}</td>
-            <td className="num">{groupInteger(run.activity.placed)}</td>
-            <td className="num">{groupInteger(run.activity.canceled)}</td>
-            <td>
-              {run.stoppedAt === null ? 'Not confirmed' : utcTime(run.stoppedAt)}
-              {run.activity.stopFailures > 0 && ` · ${groupInteger(run.activity.stopFailures)} not canceled`}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
+/** When a run ended, or where it stands while it has not. */
+function ended(run: BotRun): string {
+  const failures = run.activity.stopFailures > 0 ? ` · ${groupInteger(run.activity.stopFailures)} not canceled` : '';
+  if (run.stoppedAt !== null) {
+    return utcTime(run.stoppedAt) + failures;
+  }
+  return (run.status === 'STOPPED' ? 'Not confirmed' : STATUS_LABELS[run.status]) + failures;
 }
+
+const RUN_COLUMNS: readonly Column<BotRun>[] = [
+  {
+    key: 'started',
+    header: 'Started',
+    rowHeader: true,
+    cell: (run) => utcTime(run.startedAt),
+    sortValue: (run) => run.startedAt,
+  },
+  { key: 'bots', header: 'Bots', cell: (run) => strategiesText(run.config.strategies) },
+  {
+    key: 'placed',
+    header: 'Placed',
+    numeric: true,
+    cell: (run) => groupInteger(run.activity.placed),
+    sortValue: (run) => run.activity.placed,
+  },
+  {
+    key: 'canceled',
+    header: 'Canceled',
+    numeric: true,
+    cell: (run) => groupInteger(run.activity.canceled),
+    sortValue: (run) => run.activity.canceled,
+  },
+  { key: 'ended', header: 'Ended', cell: ended },
+];

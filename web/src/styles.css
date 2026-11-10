@@ -477,6 +477,55 @@ button.primary.danger:enabled {
   margin: 0;
 }
 
+.paged-table {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.table-toolbar,
+.table-footer,
+.table-problem {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  font-size: 13px;
+}
+
+.table-toolbar select {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  padding: 2px var(--space-2);
+}
+
+.table-footer {
+  justify-content: flex-end;
+}
+
+.table-footer [role='status'] {
+  margin-right: auto;
+}
+
+button.column-sort {
+  border: none;
+  background: none;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+}
+
+button.column-sort:hover {
+  text-decoration: underline;
+}
+
+table[aria-busy='true'] tbody {
+  opacity: 0.6;
+}
+
 button.chip {
   font-size: 12px;
   padding: 2px var(--space-2);

@@ -1,9 +1,12 @@
-import { useInfiniteQuery, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 
 import { ApiError, api, pollEvery } from '../api/client';
-import type { Holding } from '../api/types';
+import type { Holding, OrderDetail, OwnTrade } from '../api/types';
+import { type Column, PagedTable } from '../app/PagedTable';
+import { usePagedList } from '../app/paging';
 import { useKeyboardScroll } from '../app/useKeyboardScroll';
 import { groupDigits, groupInteger, utcTime } from '../format';
+import { toCents } from '../terminal/money';
 
 /**
  * Private data is refetched every five seconds while the page is open, and when the tab regains focus. Polling stops
@@ -27,21 +30,104 @@ function Mark({ holding }: { holding: Holding }) {
   );
 }
 
+const side = (row: { side: 'BUY' | 'SELL' }) => (
+  <span className={row.side === 'BUY' ? 'side-buy' : 'side-sell'}>{row.side === 'BUY' ? 'Buy' : 'Sell'}</span>
+);
+
+const EXECUTION_COLUMNS: readonly Column<OwnTrade>[] = [
+  { key: 'time', header: 'Time', cell: (trade) => utcTime(trade.executedAt), sortValue: (trade) => trade.executedAt },
+  { key: 'symbol', header: 'Symbol', cell: (trade) => trade.symbol, sortValue: (trade) => trade.symbol },
+  { key: 'side', header: 'Side', cell: side, sortValue: (trade) => trade.side },
+  {
+    key: 'quantity',
+    header: 'Quantity',
+    numeric: true,
+    cell: (trade) => groupInteger(trade.quantity),
+    sortValue: (trade) => trade.quantity,
+  },
+  {
+    key: 'price',
+    header: 'Price',
+    numeric: true,
+    cell: (trade) => groupDigits(trade.price),
+    sortValue: (trade) => toCents(trade.price),
+  },
+  {
+    key: 'amount',
+    header: 'Amount',
+    numeric: true,
+    cell: (trade) => groupDigits(trade.notional),
+    sortValue: (trade) => toCents(trade.notional),
+  },
+  {
+    key: 'role',
+    header: 'Role',
+    cell: (trade) => (trade.liquidity === 'MAKER' ? 'Maker' : 'Taker'),
+    sortValue: (trade) => trade.liquidity,
+  },
+];
+
+const orderPrice = (order: OrderDetail) => order.limitPrice ?? order.protectionPrice ?? '0.00';
+
+const ORDER_COLUMNS: readonly Column<OrderDetail>[] = [
+  { key: 'placed', header: 'Placed', cell: (order) => utcTime(order.createdAt), sortValue: (order) => order.createdAt },
+  { key: 'symbol', header: 'Symbol', cell: (order) => order.symbol, sortValue: (order) => order.symbol },
+  { key: 'side', header: 'Side', cell: side, sortValue: (order) => order.side },
+  {
+    key: 'type',
+    header: 'Type',
+    cell: (order) => (order.type === 'LIMIT' ? 'Limit' : 'Protected market'),
+    sortValue: (order) => order.type,
+  },
+  {
+    key: 'price',
+    header: 'Price',
+    numeric: true,
+    cell: (order) => groupDigits(orderPrice(order)),
+    sortValue: (order) => toCents(orderPrice(order)),
+  },
+  {
+    key: 'filled',
+    header: 'Filled',
+    numeric: true,
+    cell: (order) => `${groupInteger(order.filledQuantity)} / ${groupInteger(order.requestedQuantity)}`,
+    sortValue: (order) => order.filledQuantity,
+  },
+  {
+    key: 'state',
+    header: 'State',
+    cell: (order) => (
+      <>
+        {order.state.replace('_', ' ').toLowerCase()}
+        {order.reason !== null && <span className="muted"> · {order.reason}</span>}
+      </>
+    ),
+    sortValue: (order) => order.state,
+  },
+];
+
 export function PortfolioPage() {
   const portfolio = useQuery({ queryKey: ['portfolio'], queryFn: api.portfolio, ...REFRESH });
-  const trades = useInfiniteQuery({
+  // One page of each history at a time; only that page is fetched again every five seconds and after account events.
+  const trades = usePagedList({
+    table: 'executions',
     queryKey: ['own-trades'],
-    queryFn: ({ pageParam }) => api.ownTrades(pageParam),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (page) => page.nextCursor ?? undefined,
-    ...REFRESH,
+    fetch: async (cursor, { size, order }) => {
+      const page = await api.ownTrades(cursor, size, order);
+      return { rows: page.trades, nextCursor: page.nextCursor };
+    },
+    defaults: { size: 25, order: 'newest' },
+    refetchInterval: REFRESH.refetchInterval,
   });
-  const orders = useInfiniteQuery({
+  const orders = usePagedList({
+    table: 'orders',
     queryKey: ['orders', 'all'],
-    queryFn: ({ pageParam }) => api.orders('all', pageParam),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (page) => page.nextCursor ?? undefined,
-    ...REFRESH,
+    fetch: async (cursor, { size, order }) => {
+      const page = await api.orders('all', cursor, size, order);
+      return { rows: page.orders, nextCursor: page.nextCursor };
+    },
+    defaults: { size: 25, order: 'newest' },
+    refetchInterval: REFRESH.refetchInterval,
   });
   // The three tables are wider than a phone, so their panels scroll; the keyboard has to reach them too.
   const holdingsPanel = useKeyboardScroll<HTMLElement>();
@@ -128,101 +214,26 @@ export function PortfolioPage() {
 
       <section ref={tradesPanel} className="panel" aria-labelledby="trades-title">
         <h2 id="trades-title">Executions</h2>
-        {trades.data?.pages[0]?.trades.length === 0 && <p className="muted">No executions yet.</p>}
-        {trades.data !== undefined && trades.data.pages[0]?.trades.length !== 0 && (
-          <table aria-label="Executions">
-            <thead>
-              <tr>
-                <th scope="col">Time</th>
-                <th scope="col">Symbol</th>
-                <th scope="col">Side</th>
-                <th scope="col" className="num">
-                  Quantity
-                </th>
-                <th scope="col" className="num">
-                  Price
-                </th>
-                <th scope="col" className="num">
-                  Amount
-                </th>
-                <th scope="col">Role</th>
-              </tr>
-            </thead>
-            <tbody>
-              {trades.data.pages.flatMap((page) =>
-                page.trades.map((trade) => (
-                  <tr key={trade.tradeId}>
-                    <td>{utcTime(trade.executedAt)}</td>
-                    <td>{trade.symbol}</td>
-                    <td className={trade.side === 'BUY' ? 'side-buy' : 'side-sell'}>
-                      {trade.side === 'BUY' ? 'Buy' : 'Sell'}
-                    </td>
-                    <td className="num">{groupInteger(trade.quantity)}</td>
-                    <td className="num">{groupDigits(trade.price)}</td>
-                    <td className="num">{groupDigits(trade.notional)}</td>
-                    <td>{trade.liquidity === 'MAKER' ? 'Maker' : 'Taker'}</td>
-                  </tr>
-                )),
-              )}
-            </tbody>
-          </table>
-        )}
-        {trades.hasNextPage && (
-          <button type="button" className="quiet" onClick={() => void trades.fetchNextPage()}>
-            Load more executions
-          </button>
-        )}
+        <PagedTable
+          label="Executions"
+          list={trades}
+          columns={EXECUTION_COLUMNS}
+          rowKey={(trade) => trade.tradeId}
+          empty="No executions yet."
+          noun="executions"
+        />
       </section>
 
       <section ref={ordersPanel} className="panel" aria-labelledby="orders-title">
         <h2 id="orders-title">Orders</h2>
-        {orders.data?.pages[0]?.orders.length === 0 && <p className="muted">No orders yet.</p>}
-        {orders.data !== undefined && orders.data.pages[0]?.orders.length !== 0 && (
-          <table aria-label="Orders">
-            <thead>
-              <tr>
-                <th scope="col">Placed</th>
-                <th scope="col">Symbol</th>
-                <th scope="col">Side</th>
-                <th scope="col">Type</th>
-                <th scope="col" className="num">
-                  Price
-                </th>
-                <th scope="col" className="num">
-                  Filled
-                </th>
-                <th scope="col">State</th>
-              </tr>
-            </thead>
-            <tbody>
-              {orders.data.pages.flatMap((page) =>
-                page.orders.map((order) => (
-                  <tr key={order.orderId}>
-                    <td>{utcTime(order.createdAt)}</td>
-                    <td>{order.symbol}</td>
-                    <td className={order.side === 'BUY' ? 'side-buy' : 'side-sell'}>
-                      {order.side === 'BUY' ? 'Buy' : 'Sell'}
-                    </td>
-                    <td>{order.type === 'LIMIT' ? 'Limit' : 'Protected market'}</td>
-                    <td className="num">{groupDigits(order.limitPrice ?? order.protectionPrice ?? '0.00')}</td>
-                    <td className="num">
-                      {groupInteger(order.filledQuantity)} / {groupInteger(order.requestedQuantity)}
-                    </td>
-                    <td>
-                      {order.state.replace('_', ' ').toLowerCase()}
-                      {order.reason !== null && <span className="muted"> · {order.reason}</span>}
-                    </td>
-                  </tr>
-                )),
-              )}
-            </tbody>
-          </table>
-        )}
-        {orders.hasNextPage && (
-          <button type="button" className="quiet" onClick={() => void orders.fetchNextPage()}>
-            Load more orders
-          </button>
-        )}
+        <PagedTable
+          label="Orders"
+          list={orders}
+          columns={ORDER_COLUMNS}
+          rowKey={(order) => order.orderId}
+          empty="No orders yet."
+          noun="orders"
+        />
       </section>
     </div>
   );
