@@ -109,7 +109,8 @@ paths:
       summary: The caller's own orders, newest first unless order=oldest.
       description: |
         With status=active, every open or partially filled order, at most 20, in one response. With status=all,
-        every order including rejected ones, in keyset pages.
+        every order including rejected ones, in keyset pages. The instrumentId, side and state filters apply to
+        status=all only; with status=active they are refused.
       parameters:
         - name: status
           in: query
@@ -117,6 +118,12 @@ paths:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Order'
+        - $ref: '#/components/parameters/FilterInstrument'
+        - $ref: '#/components/parameters/FilterSide'
+        - name: state
+          in: query
+          description: Only orders in this state.
+          schema: { type: string, enum: [OPEN, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED] }
       responses:
         '200':
           description: One page of orders.
@@ -288,6 +295,8 @@ paths:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Order'
+        - $ref: '#/components/parameters/FilterInstrument'
+        - $ref: '#/components/parameters/FilterSide'
       responses:
         '200':
           description: One page of executions.
@@ -1000,8 +1009,20 @@ components:
     Cursor:
       name: cursor
       in: query
-      description: The nextCursor of the previous page. Opaque. Refused under an order other than the one it came from.
+      description: |
+        The nextCursor of the previous page. Opaque. Refused under an order or filters other than the ones it came
+        from.
       schema: { type: string }
+    FilterInstrument:
+      name: instrumentId
+      in: query
+      description: Only this instrument's rows.
+      schema: { type: string, format: uuid }
+    FilterSide:
+      name: side
+      in: query
+      description: Only buys, or only sells.
+      schema: { type: string, enum: [BUY, SELL] }
     Order:
       name: order
       in: query

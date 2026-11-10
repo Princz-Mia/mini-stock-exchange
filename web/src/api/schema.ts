@@ -82,7 +82,8 @@ export interface paths {
         /**
          * The caller's own orders, newest first unless order=oldest.
          * @description With status=active, every open or partially filled order, at most 20, in one response. With status=all,
-         *     every order including rejected ones, in keyset pages.
+         *     every order including rejected ones, in keyset pages. The instrumentId, side and state filters apply to
+         *     status=all only; with status=active they are refused.
          */
         readonly get: operations["listOrders"];
         readonly put?: never;
@@ -1265,8 +1266,15 @@ export interface components {
         readonly OrderId: string;
         readonly InstrumentId: string;
         readonly Limit: number;
-        /** @description The nextCursor of the previous page. Opaque. Refused under an order other than the one it came from. */
+        /**
+         * @description The nextCursor of the previous page. Opaque. Refused under an order or filters other than the ones it came
+         *     from.
+         */
         readonly Cursor: string;
+        /** @description Only this instrument's rows. */
+        readonly FilterInstrument: string;
+        /** @description Only buys, or only sells. */
+        readonly FilterSide: "BUY" | "SELL";
         /** @description Which end of the list pages start from. Without it, the operation's own default, named in its summary. */
         readonly Order: "newest" | "oldest";
     };
@@ -1408,10 +1416,19 @@ export interface operations {
             readonly query?: {
                 readonly status?: "all" | "active";
                 readonly limit?: components["parameters"]["Limit"];
-                /** @description The nextCursor of the previous page. Opaque. Refused under an order other than the one it came from. */
+                /**
+                 * @description The nextCursor of the previous page. Opaque. Refused under an order or filters other than the ones it came
+                 *     from.
+                 */
                 readonly cursor?: components["parameters"]["Cursor"];
                 /** @description Which end of the list pages start from. Without it, the operation's own default, named in its summary. */
                 readonly order?: components["parameters"]["Order"];
+                /** @description Only this instrument's rows. */
+                readonly instrumentId?: components["parameters"]["FilterInstrument"];
+                /** @description Only buys, or only sells. */
+                readonly side?: components["parameters"]["FilterSide"];
+                /** @description Only orders in this state. */
+                readonly state?: "OPEN" | "PARTIALLY_FILLED" | "FILLED" | "CANCELED" | "REJECTED";
             };
             readonly header?: never;
             readonly path?: never;
@@ -1672,10 +1689,17 @@ export interface operations {
         readonly parameters: {
             readonly query?: {
                 readonly limit?: components["parameters"]["Limit"];
-                /** @description The nextCursor of the previous page. Opaque. Refused under an order other than the one it came from. */
+                /**
+                 * @description The nextCursor of the previous page. Opaque. Refused under an order or filters other than the ones it came
+                 *     from.
+                 */
                 readonly cursor?: components["parameters"]["Cursor"];
                 /** @description Which end of the list pages start from. Without it, the operation's own default, named in its summary. */
                 readonly order?: components["parameters"]["Order"];
+                /** @description Only this instrument's rows. */
+                readonly instrumentId?: components["parameters"]["FilterInstrument"];
+                /** @description Only buys, or only sells. */
+                readonly side?: components["parameters"]["FilterSide"];
             };
             readonly header?: never;
             readonly path?: never;
@@ -1780,7 +1804,10 @@ export interface operations {
         readonly parameters: {
             readonly query?: {
                 readonly limit?: components["parameters"]["Limit"];
-                /** @description The nextCursor of the previous page. Opaque. Refused under an order other than the one it came from. */
+                /**
+                 * @description The nextCursor of the previous page. Opaque. Refused under an order or filters other than the ones it came
+                 *     from.
+                 */
                 readonly cursor?: components["parameters"]["Cursor"];
                 /** @description Which end of the list pages start from. Without it, the operation's own default, named in its summary. */
                 readonly order?: components["parameters"]["Order"];
@@ -2042,7 +2069,10 @@ export interface operations {
         readonly parameters: {
             readonly query?: {
                 readonly limit?: number;
-                /** @description The nextCursor of the previous page. Opaque. Refused under an order other than the one it came from. */
+                /**
+                 * @description The nextCursor of the previous page. Opaque. Refused under an order or filters other than the ones it came
+                 *     from.
+                 */
                 readonly cursor?: components["parameters"]["Cursor"];
                 /** @description Which end of the list pages start from. Without it, the operation's own default, named in its summary. */
                 readonly order?: components["parameters"]["Order"];
