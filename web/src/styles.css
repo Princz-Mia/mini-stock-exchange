@@ -826,6 +826,33 @@ button.primary.sell:enabled {
   color: var(--warn-text);
 }
 
+.tabs {
+  display: flex;
+  gap: var(--space-1);
+  border-bottom: 1px solid var(--line);
+}
+
+button.tab {
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  padding: var(--space-1) var(--space-2);
+  color: var(--muted);
+}
+
+button.tab[aria-selected='true'] {
+  border-bottom-color: var(--secondary);
+  color: var(--text);
+}
+
+.inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: 13px;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

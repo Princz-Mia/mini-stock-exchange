@@ -195,9 +195,12 @@ export const api = {
   revokeBotToken: (accountId: string, idempotencyKey: string) =>
     request<TokenRevoked>('POST', `/api/v1/admin/bots/${accountId}/revoke-token`, { idempotencyKey }),
 
-  /** With status=all, `filters` narrows to an instrument (`instrumentId`), a side (`side`) or a state (`state`). */
+  /**
+   * `active` is every open order; `all` the history in pages; `finished` the most recently ended, one page. `filters`
+   * narrows to an instrument (`instrumentId`) or a side (`side`), and the history also to a state (`state`).
+   */
   orders: (
-    status: 'all' | 'active',
+    status: 'all' | 'active' | 'finished',
     cursor?: string,
     limit?: number,
     order?: ListOrder,
@@ -205,6 +208,6 @@ export const api = {
   ) =>
     request<OrderPage>(
       'GET',
-      `/api/v1/orders${query({ ...filters, status, cursor, limit: status === 'all' ? (limit ?? 50) : undefined, order })}`,
+      `/api/v1/orders${query({ ...filters, status, cursor, limit: status === 'active' ? undefined : (limit ?? 50), order })}`,
     ),
 };
