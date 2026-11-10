@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { resetSession } from '../api/client';
@@ -48,7 +49,7 @@ function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
       status: 200,
       json: { population: state.bots, maxPopulation: 1000, maxPerCommand: 100 },
     }))
-    .on('GET /api/v1/admin/bot-runs', () => ({ status: 200, json: { runs: state.runs } }));
+    .on('GET /api/v1/admin/bot-runs', () => ({ status: 200, json: { runs: state.runs, nextCursor: null } }));
   return { server, state };
 }
 
@@ -56,7 +57,9 @@ function renderPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <OperatorPage />
+      <MemoryRouter initialEntries={['/operator']}>
+        <OperatorPage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -210,6 +213,10 @@ describe('the operator screen', () => {
     renderPage();
 
     const row = await screen.findByRole('row', { name: /trader/ });
+    // Oldest first unless asked otherwise, a page at a time.
+    const asked = server.requests.find((request) => request.url.startsWith('/api/v1/admin/accounts'))!;
+    expect(asked.url).toContain('order=oldest');
+    expect(asked.url).toContain('limit=25');
     expect(row).toHaveTextContent('100,000.00');
     expect(row).toHaveTextContent('NOVA 1,000');
     expect(within(row).queryByText('bot')).toBeNull();
@@ -405,12 +412,15 @@ describe('bot runs on the operator screen', () => {
     expect(await within(panel).findByRole('status', { name: 'Run status: Running' })).toHaveClass('state-open');
     expect(within(panel).queryByRole('form', { name: 'Start a bot run' })).toBeNull();
     expect(within(panel).getByText('sim-1 holds the run.')).toBeInTheDocument();
-    expect(within(panel).getByText('1 market maker, 2 noise')).toBeInTheDocument();
     const counters = within(panel).getByRole('group', { name: 'Current run' });
+    expect(within(panel).getAllByText('1 market maker, 2 noise')[0]).toBeInTheDocument();
     expect(counters).toHaveTextContent('Placed150');
     expect(counters).toHaveTextContent('In flight1');
     expect(counters).toHaveTextContent('Per second2.50 of 4.00');
-    expect(within(panel).queryByRole('table', { name: 'Recent runs' })).toBeNull();
+    // The history lists every run, the running one too, and says where it stands.
+    const history = await within(panel).findByRole('table', { name: 'Recent runs' });
+    expect(within(history).getAllByRole('row')).toHaveLength(2);
+    expect(within(history).getAllByRole('row')[1]).toHaveTextContent('Running');
     expect(within(panel).getByRole('button', { name: 'Stop run' })).toBeEnabled();
   });
 
@@ -469,7 +479,13 @@ describe('bot runs on the operator screen', () => {
     const { state } = exchange('OPEN');
     state.bots = 3;
     state.runs = [
-      botRun({ runId: 'b', status: 'STOPPED', desiredState: 'STOPPED', stoppedAt: '2026-11-06T10:05:00Z' }),
+      botRun({
+        runId: 'b',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        stoppedAt: '2026-11-06T10:05:00Z',
+        activity: { ...botRun().activity, stopFailures: 2 },
+      }),
       botRun({
         runId: 'a',
         status: 'STOPPED',
@@ -484,10 +500,49 @@ describe('bot runs on the operator screen', () => {
     expect(await screen.findByRole('form', { name: 'Start a bot run' })).toBeInTheDocument();
     const recent = screen.getByRole('table', { name: 'Recent runs' });
     expect(within(recent).getAllByRole('row')).toHaveLength(3);
-    expect(within(recent).getByRole('row', { name: /10:00:00 UTC/ })).toHaveTextContent('10:05:00 UTC');
+    expect(within(recent).getByRole('row', { name: /10:00:00 UTC/ })).toHaveTextContent('10:05:00 UTC · 2 not canceled');
     expect(within(recent).getByRole('row', { name: /09:00:00 UTC/ })).toHaveTextContent(
       'Not confirmed · 1 not canceled',
     );
+  });
+
+  it('pages the run history and the accounts with the cursor, size and order they were given', async () => {
+    const { server, state } = exchange('OPEN');
+    state.bots = 3;
+    const older = botRun({ runId: 'older', status: 'STOPPED', desiredState: 'STOPPED', startedAt: '2026-11-06T08:00:00Z' });
+    const newer = botRun({ runId: 'newer', status: 'STOPPED', desiredState: 'STOPPED', startedAt: '2026-11-06T09:00:00Z' });
+    state.runs = [newer];
+    server
+      .on('GET /api/v1/admin/bot-runs', (request) => ({
+        status: 200,
+        json: request.url.includes('cursor=runs-2')
+          ? { runs: [older], nextCursor: null }
+          : { runs: state.runs, nextCursor: 'runs-2' },
+      }))
+      .on('GET /api/v1/admin/accounts', (request) => ({
+        status: 200,
+        json: request.url.includes('cursor=accounts-2')
+          ? { accounts: [{ accountId: 'b', username: 'second', kind: 'TRADER', cash: '1.00', holdings: [], token: null }], nextCursor: null }
+          : { accounts: [{ accountId: 'a', username: 'first', kind: 'TRADER', cash: '1.00', holdings: [], token: null }], nextCursor: 'accounts-2' },
+      }));
+    renderPage();
+
+    const runsPanel = await runs();
+    const history = await within(runsPanel).findByRole('table', { name: 'Recent runs' });
+    expect(within(history).getByRole('row', { name: /09:00:00 UTC/ })).toBeInTheDocument();
+    fireEvent.click(within(runsPanel).getByRole('button', { name: 'Next' }));
+    await waitFor(() => expect(within(history).getByRole('row', { name: /08:00:00 UTC/ })).toBeInTheDocument());
+    const asked = server.requests.find((request) => request.url.includes('cursor=runs-2'))!.url;
+    expect(asked).toContain('limit=10');
+    expect(asked).toContain('order=newest');
+
+    const accounts = screen.getByRole('region', { name: 'Accounts' });
+    await within(accounts).findByRole('row', { name: /first/ });
+    fireEvent.click(within(accounts).getByRole('button', { name: 'Next' }));
+    await within(accounts).findByRole('row', { name: /second/ });
+    const accountsAsked = server.requests.find((request) => request.url.includes('cursor=accounts-2'))!.url;
+    expect(accountsAsked).toContain('limit=25');
+    expect(accountsAsked).toContain('order=oldest');
   });
 
   it('puts bot runs first once the market is open, and after the setup editor before', async () => {

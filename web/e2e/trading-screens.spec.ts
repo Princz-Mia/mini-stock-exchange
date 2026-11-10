@@ -334,6 +334,62 @@ for (const size of SIZES) {
       await down.context().close();
     });
 
+    test('a long history, one page at a time', async ({ browser }) => {
+      // 300 executions, served a page at a time the way the exchange pages them: limit, cursor and order honoured.
+      const history = Array.from({ length: 300 }, (_, index) => ({
+        tradeId: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+        instrumentId: '00000000-0000-4000-8000-000000000000',
+        symbol: 'NOVA',
+        side: index % 2 === 0 ? 'BUY' : 'SELL',
+        liquidity: index % 3 === 0 ? 'MAKER' : 'TAKER',
+        price: `${100 + (index % 7)}.00`,
+        quantity: 1 + (index % 9),
+        notional: `${(100 + (index % 7)) * (1 + (index % 9))}.00`,
+        executedAt: new Date(Date.UTC(2026, 10, 10, 9, 0, index)).toISOString(),
+        commandSequence: String(index + 1),
+      }));
+      const asked: URL[] = [];
+      const page = await at(browser, size, 'trader', async (fresh) => {
+        await fresh.route(/\/api\/v1\/portfolio\/trades/, async (route) => {
+          const url = new URL(route.request().url());
+          asked.push(url);
+          const limit = Number(url.searchParams.get('limit') ?? '50');
+          const start = Number(url.searchParams.get('cursor') ?? '0');
+          const ordered = url.searchParams.get('order') === 'oldest' ? history : [...history].reverse();
+          const trades = ordered.slice(start, start + limit);
+          await route.fulfill({
+            json: { trades, nextCursor: start + limit < ordered.length ? String(start + limit) : null },
+          });
+        });
+      });
+      await page.getByRole('link', { name: 'Portfolio' }).click();
+      const panel = page.getByRole('region', { name: 'Executions' });
+      const rows = panel.getByRole('table', { name: 'Executions' }).locator('tbody tr');
+      await expect(rows).toHaveCount(25);
+      await expect(panel.getByText('Showing 1–25')).toBeVisible();
+
+      for (let next = 0; next < 3; next++) {
+        await panel.getByRole('button', { name: 'Next' }).click();
+      }
+      await expect(panel.getByText('Showing 76–100')).toBeVisible();
+      // Only the page on screen is in the page, and only it is asked for again by the five-second refresh.
+      await expect(rows).toHaveCount(25);
+      const before = asked.length;
+      await expect.poll(() => asked.length, { timeout: 12_000 }).toBeGreaterThan(before);
+      expect(asked.slice(before).map((url) => url.searchParams.get('cursor'))).toEqual(
+        asked.slice(before).map(() => '75'),
+      );
+
+      await panel.getByLabel('Rows per page').selectOption('100');
+      await expect(rows).toHaveCount(100);
+      await expect(panel.getByText('Showing 1–100')).toBeVisible();
+      await panel.getByLabel('Order').selectOption('oldest');
+      await expect(rows.first()).toContainText('09:00:00 UTC');
+      expect(new URL(page.url()).search).toContain('executionsSize=100');
+      await capture(page, size, 'portfolio-paged');
+      await page.context().close();
+    });
+
     test('the operator screen, and the exchange unreachable', async ({ browser }) => {
       const page = await at(browser, size, 'operator');
       await expect(page.getByRole('heading', { name: 'Market' })).toBeVisible();

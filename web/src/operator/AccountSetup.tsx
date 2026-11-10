@@ -1,9 +1,12 @@
-import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, useCallback, useState } from 'react';
 
 import { api } from '../api/client';
 import type { AccountRequest, AccountSummary, Instrument } from '../api/types';
+import { type Column, PagedTable } from '../app/PagedTable';
+import { usePagedList } from '../app/paging';
 import { groupDigits, groupInteger } from '../format';
+import { toCents } from '../terminal/money';
 import { CommandStatus } from './CommandStatus';
 import { DEFAULT_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
 import { useCommand } from './useCommand';
@@ -65,14 +68,47 @@ function BotToken({ account }: { account: AccountSummary }) {
   );
 }
 
+const ACCOUNT_COLUMNS: readonly Column<AccountSummary>[] = [
+  {
+    key: 'account',
+    header: 'Account',
+    rowHeader: true,
+    cell: (account) => (
+      <>
+        {account.username} {account.kind === 'BOT' && <span className="tag">bot</span>}
+      </>
+    ),
+    sortValue: (account) => account.username,
+  },
+  {
+    key: 'cash',
+    header: 'Starting cash',
+    numeric: true,
+    cell: (account) => groupDigits(account.cash),
+    sortValue: (account) => toCents(account.cash),
+  },
+  {
+    key: 'shares',
+    header: 'Starting shares',
+    cell: (account) =>
+      account.holdings.length === 0
+        ? '—'
+        : account.holdings.map((held) => `${held.symbol} ${groupInteger(held.quantity)}`).join(' · '),
+  },
+  { key: 'token', header: 'Token', cell: (account) => (account.kind === 'BOT' ? <BotToken account={account} /> : '—') },
+];
+
 /** Funded accounts, traders and bots, with what they started with and, during setup, a form to fund a trader. */
 export function AccountSetup({ instruments, editable }: { instruments: readonly Instrument[]; editable: boolean }) {
   const client = useQueryClient();
-  const accounts = useInfiniteQuery({
+  const accounts = usePagedList({
+    table: 'accounts',
     queryKey: ['accounts'],
-    queryFn: ({ pageParam }) => api.accounts(pageParam),
-    initialPageParam: undefined as string | undefined,
-    getNextPageParam: (page) => page.nextCursor ?? undefined,
+    fetch: async (cursor, { size, order }) => {
+      const page = await api.accounts(cursor, size, order);
+      return { rows: page.accounts, nextCursor: page.nextCursor };
+    },
+    defaults: { size: 25, order: 'oldest' },
   });
   const [username, setUsername] = useState('');
   const [cash, setCash] = useState(DEFAULT_CASH);
@@ -90,52 +126,17 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
     void command.run({ username: username.trim(), cash: cash.trim(), holdings: holdingsFrom(instruments, shares) });
   };
 
-  const rows = accounts.data?.pages.flatMap((page) => page.accounts) ?? [];
-
   return (
     <section className="panel" aria-labelledby="accounts-title">
       <h2 id="accounts-title">Accounts</h2>
-      {accounts.isError ? (
-        <p role="alert" className="form-error">
-          The accounts could not be loaded.
-        </p>
-      ) : rows.length === 0 ? (
-        <p className="muted">{accounts.isPending ? 'Loading…' : 'No accounts yet.'}</p>
-      ) : (
-        <table aria-label="Accounts">
-          <thead>
-            <tr>
-              <th scope="col">Account</th>
-              <th scope="col" className="num">
-                Starting cash
-              </th>
-              <th scope="col">Starting shares</th>
-              <th scope="col">Token</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((account) => (
-              <tr key={account.accountId}>
-                <th scope="row">
-                  {account.username} {account.kind === 'BOT' && <span className="tag">bot</span>}
-                </th>
-                <td className="num">{groupDigits(account.cash)}</td>
-                <td>
-                  {account.holdings.length === 0
-                    ? '—'
-                    : account.holdings.map((held) => `${held.symbol} ${groupInteger(held.quantity)}`).join(' · ')}
-                </td>
-                <td>{account.kind === 'BOT' ? <BotToken account={account} /> : '—'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-      {accounts.hasNextPage && (
-        <button type="button" className="quiet" onClick={() => void accounts.fetchNextPage()}>
-          Show more
-        </button>
-      )}
+      <PagedTable
+        label="Accounts"
+        list={accounts}
+        columns={ACCOUNT_COLUMNS}
+        rowKey={(account) => account.accountId}
+        empty="No accounts yet."
+        noun="accounts"
+      />
       {editable ? (
         <form onSubmit={submit} className="setup-form" aria-label="Fund a trader">
           <fieldset disabled={command.outcome.kind === 'sending' || command.unresolved}>

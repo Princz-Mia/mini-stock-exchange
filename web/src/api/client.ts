@@ -27,6 +27,9 @@ import type {
   TokenRevoked,
 } from './types';
 
+/** Which end of a paged list to start from. */
+export type ListOrder = 'newest' | 'oldest';
+
 /** A response other than 2xx. `code` is the contract's stable reason when the server sent one. */
 export class ApiError extends Error {
   readonly status: number;
@@ -141,8 +144,8 @@ export const api = {
 
   portfolio: () => request<Portfolio>('GET', '/api/v1/portfolio'),
 
-  ownTrades: (cursor?: string) =>
-    request<OwnTradePage>('GET', `/api/v1/portfolio/trades${query({ cursor, limit: 50 })}`),
+  ownTrades: (cursor?: string, limit = 50, order?: ListOrder) =>
+    request<OwnTradePage>('GET', `/api/v1/portfolio/trades${query({ cursor, limit, order })}`),
 
   /** Committed when it returns; the same key with the same request returns the first answer again. */
   placeOrder: (order: OrderRequest, idempotencyKey: string) =>
@@ -167,7 +170,8 @@ export const api = {
   provisionAccount: (account: AccountRequest, idempotencyKey: string) =>
     request<AccountCreated>('POST', '/api/v1/admin/accounts', { body: account, idempotencyKey }),
 
-  accounts: (cursor?: string) => request<AccountPage>('GET', `/api/v1/admin/accounts${query({ cursor, limit: 50 })}`),
+  accounts: (cursor?: string, limit = 50, order?: ListOrder) =>
+    request<AccountPage>('GET', `/api/v1/admin/accounts${query({ cursor, limit, order })}`),
 
   botPopulation: () => request<BotPopulation>('GET', '/api/v1/admin/bots'),
 
@@ -176,6 +180,10 @@ export const api = {
 
   /** The newest runs first, with what their workers last reported. */
   botRuns: () => request<BotRunList>('GET', `/api/v1/admin/bot-runs${query({ limit: 10 })}`),
+
+  /** Every run, a page at a time. */
+  botRunPage: (cursor: string | undefined, limit: number, order: ListOrder) =>
+    request<BotRunList>('GET', `/api/v1/admin/bot-runs${query({ cursor, limit, order })}`),
 
   startBotRun: (run: BotRunRequest, idempotencyKey: string) =>
     request<BotRunStarted>('POST', '/api/v1/admin/bot-runs', { body: run, idempotencyKey }),
@@ -186,6 +194,9 @@ export const api = {
   revokeBotToken: (accountId: string, idempotencyKey: string) =>
     request<TokenRevoked>('POST', `/api/v1/admin/bots/${accountId}/revoke-token`, { idempotencyKey }),
 
-  orders: (status: 'all' | 'active', cursor?: string) =>
-    request<OrderPage>('GET', `/api/v1/orders${query({ status, cursor, limit: status === 'all' ? 50 : undefined })}`),
+  orders: (status: 'all' | 'active', cursor?: string, limit?: number, order?: ListOrder) =>
+    request<OrderPage>(
+      'GET',
+      `/api/v1/orders${query({ status, cursor, limit: status === 'all' ? (limit ?? 50) : undefined, order })}`,
+    ),
 };
