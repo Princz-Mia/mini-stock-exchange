@@ -85,6 +85,18 @@ The simulator's bots trade only during a bot run. Provision bots as the operator
 
 Each trader's account may send ten trading commands (places and cancels) a second, and each bot account two, with up to that many at once; `mse.trading.human-commands-per-second` and `mse.trading.bot-commands-per-second` change them. A command over the limit is answered `429 RATE_LIMITED` with `Retry-After` before it is queued, so sending it again under the same key is safe.
 
+### Run a published release
+
+Each version tag publishes its images to GitHub Container Registry. To run one without building, check out its tag and start it with the release override:
+
+```bash
+git checkout v0.1.0
+./scripts/init-env.sh
+MSE_VERSION=v0.1.0 docker compose -f compose.yaml -f compose.release.yaml --profile full up -d --no-build --wait
+```
+
+In PowerShell, set the version first with `$env:MSE_VERSION = 'v0.1.0'`. The images are `ghcr.io/princz-mia/mini-stock-exchange/<image>:<version>` for `execution-service`, `market-data-service`, `web`, `simulator` and `analytics-job`.
+
 ## Develop
 
 You need Oracle JDK 25.0.5, a JDK 17 for the Flink tests, Node.js 24.22.2, uv and Docker. Point `JAVA_HOME` at JDK 25 and `JAVA17_HOME` at JDK 17, then:
