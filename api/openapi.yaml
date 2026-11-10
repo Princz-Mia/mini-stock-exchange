@@ -963,7 +963,9 @@ paths:
         '403':
           description: Not a trader, or a bot token. No body, or NO_TRADING_ACCOUNT.
         '503':
-          description: TOO_MANY_STREAMS, in all or for this account. Retry after the Retry-After header.
+          description: |
+            TOO_MANY_STREAMS in all. Retry after the Retry-After header. An account's sixth stream is not refused:
+            it replaces the account's oldest, which then ends.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }

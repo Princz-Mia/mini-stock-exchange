@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -15,6 +16,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
@@ -45,6 +47,14 @@ final class AccountStream implements AccountChanges, AutoCloseable {
 	private static final Logger log = LoggerFactory.getLogger(AccountStream.class);
 
 	record Settings(Duration heartbeat, Duration slowLimit, int maxStreams, int maxPerAccount) {
+
+		Settings {
+			if (maxStreams < 1 || maxPerAccount < 1) {
+				throw new IllegalArgumentException("Stream limits must allow at least one: " + maxStreams + ", "
+						+ maxPerAccount);
+			}
+		}
+
 	}
 
 	record AccountFrame(String accountVersion) {
@@ -53,7 +63,7 @@ final class AccountStream implements AccountChanges, AutoCloseable {
 	record Heartbeat(Instant at) {
 	}
 
-	/** Too many streams, in all or for this account; refused instead of degrading everyone. */
+	/** Too many streams in all; refused instead of degrading everyone. */
 	static final class TooManyStreamsException extends RuntimeException {
 
 		private static final long serialVersionUID = 1L;
@@ -82,6 +92,9 @@ final class AccountStream implements AccountChanges, AutoCloseable {
 
 	private final AtomicInteger open = new AtomicInteger();
 
+	/** Orders streams by when they opened, to find an account's oldest. */
+	private final AtomicLong openings = new AtomicLong();
+
 	private final ScheduledExecutorService ticker = Executors
 		.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("account-stream").daemon().factory());
 
@@ -100,8 +113,10 @@ final class AccountStream implements AccountChanges, AutoCloseable {
 	/** Opens a stream for the account, tied to the session that opened it; its first frame is the current version. */
 	SseEmitter subscribe(UUID accountId, String sessionId) {
 		Set<Stream> own = streams.computeIfAbsent(accountId, (id) -> ConcurrentHashMap.newKeySet());
-		if (own.size() >= settings.maxPerAccount()) {
-			throw new TooManyStreamsException("Too many account streams are open for this account");
+		// At the account's limit the oldest stream makes way. It is most likely a tab already closed: a closed
+		// connection only shows when a write to it fails, up to two heartbeats later. A live one reconnects by itself.
+		while (own.size() >= settings.maxPerAccount()) {
+			own.stream().min(Comparator.comparingLong((stream) -> stream.opened)).ifPresent(Stream::disconnect);
 		}
 		if (open.incrementAndGet() > settings.maxStreams()) {
 			open.decrementAndGet();
@@ -193,6 +208,8 @@ final class AccountStream implements AccountChanges, AutoCloseable {
 		private final BlockingQueue<Event> slot = new ArrayBlockingQueue<>(1);
 
 		private final AtomicBoolean removed = new AtomicBoolean();
+
+		private final long opened = openings.incrementAndGet();
 
 		private final Thread sender;
 

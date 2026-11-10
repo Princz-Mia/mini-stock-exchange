@@ -2670,7 +2670,10 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description TOO_MANY_STREAMS, in all or for this account. Retry after the Retry-After header. */
+            /**
+             * @description TOO_MANY_STREAMS in all. Retry after the Retry-After header. An account's sixth stream is not refused:
+             *     it replaces the account's oldest, which then ends.
+             */
             readonly 503: {
                 headers: {
                     readonly [name: string]: unknown;
