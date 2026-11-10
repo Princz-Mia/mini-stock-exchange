@@ -1,0 +1,30 @@
+# Runs a published release instead of building: every image this repository builds comes from GitHub Container
+# Registry at the version in MSE_VERSION, such as v0.1.0. Use it from a checkout of that version's tag, so the
+# configuration it mounts matches the images:
+#
+#   MSE_VERSION=v0.1.0 docker compose -f compose.yaml -f compose.release.yaml --profile full up -d --no-build --wait
+#
+# Everything else (ports, profiles, volumes, the demo seed) is as in compose.yaml.
+
+services:
+  execution-service:
+    image: ghcr.io/princz-mia/mini-stock-exchange/execution-service:${MSE_VERSION:?set MSE_VERSION to a release tag}
+    pull_policy: missing
+  market-data-service:
+    image: ghcr.io/princz-mia/mini-stock-exchange/market-data-service:${MSE_VERSION:?set MSE_VERSION to a release tag}
+    pull_policy: missing
+  web:
+    image: ghcr.io/princz-mia/mini-stock-exchange/web:${MSE_VERSION:?set MSE_VERSION to a release tag}
+    pull_policy: missing
+  flink-jobmanager:
+    image: ghcr.io/princz-mia/mini-stock-exchange/analytics-job:${MSE_VERSION:?set MSE_VERSION to a release tag}
+    pull_policy: missing
+  flink-taskmanager:
+    image: ghcr.io/princz-mia/mini-stock-exchange/analytics-job:${MSE_VERSION:?set MSE_VERSION to a release tag}
+    pull_policy: missing
+  simulator:
+    image: ghcr.io/princz-mia/mini-stock-exchange/simulator:${MSE_VERSION:?set MSE_VERSION to a release tag}
+    pull_policy: missing
+  demo-seed:
+    image: ghcr.io/princz-mia/mini-stock-exchange/simulator:${MSE_VERSION:?set MSE_VERSION to a release tag}
+    pull_policy: missing
