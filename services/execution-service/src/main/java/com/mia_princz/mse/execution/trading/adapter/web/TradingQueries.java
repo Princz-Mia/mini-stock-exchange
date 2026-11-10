@@ -99,12 +99,12 @@ class TradingQueries {
 	record Allocation(UUID instrumentId, String symbol, long quantity) {
 	}
 
-	/** Where a page of accounts ends: oldest first by creation, then by ID. */
+	/** Where a page of accounts ends: by creation, then by ID. */
 	record AccountPosition(Instant createdAt, UUID id) {
 	}
 
-	/** Every trading account with its initial allocation, oldest first, in keyset pages. */
-	List<AccountSummary> accounts(AccountPosition after, int limit) {
+	/** Every trading account with its initial allocation, in creation order either way, in keyset pages. */
+	List<AccountSummary> accounts(AccountPosition after, int limit, PageOrder order) {
 		record Row(UUID id, String name, String kind, Instant createdAt, String token) {
 		}
 		List<Row> rows = jdbc.sql("""
@@ -114,8 +114,8 @@ class TradingQueries {
 				         THEN 'ACTIVE' ELSE 'REVOKED' END AS token
 				FROM account
 				WHERE kind <> 'ISSUANCE'
-				  AND (CAST(:afterAt AS timestamptz) IS NULL OR (created_at, id) > (:afterAt, :afterId))
-				ORDER BY created_at, id LIMIT :limit""")
+				  AND (CAST(:afterAt AS timestamptz) IS NULL OR (created_at, id) %1$s (:afterAt, :afterId))
+				ORDER BY created_at %2$s, id %2$s LIMIT :limit""".formatted(order.after(), order.direction()))
 			.param("afterAt", after == null ? null : Timestamp.from(after.createdAt()))
 			.param("afterId", after == null ? null : after.id())
 			.param("limit", limit)
@@ -198,14 +198,17 @@ class TradingQueries {
 			.list();
 	}
 
-	/** Every order, rejected ones included, newest first after {@code after}; one extra row signals another page. */
-	List<OrderView> orders(UUID accountId, OrderPosition after, int limit) {
+	/**
+	 * Every order, rejected ones included, after {@code after} in either time order; one extra row signals another
+	 * page.
+	 */
+	List<OrderView> orders(UUID accountId, OrderPosition after, int limit, PageOrder order) {
 		return jdbc.sql("SELECT " + ORDER_COLUMNS + """
 
 				FROM orders o JOIN instrument i ON i.id = o.instrument_id
 				WHERE o.account_id = :account
-				  AND (CAST(:afterAt AS TIMESTAMPTZ) IS NULL OR (o.created_at, o.id) < (:afterAt, :afterId))
-				ORDER BY o.created_at DESC, o.id DESC LIMIT :limit""")
+				  AND (CAST(:afterAt AS TIMESTAMPTZ) IS NULL OR (o.created_at, o.id) %1$s (:afterAt, :afterId))
+				ORDER BY o.created_at %2$s, o.id %2$s LIMIT :limit""".formatted(order.after(), order.direction()))
 			.param("account", accountId)
 			.param("afterAt", after == null ? null : Timestamp.from(after.createdAt()))
 			.param("afterId", after == null ? null : after.id())
@@ -261,10 +264,10 @@ class TradingQueries {
 	}
 
 	/**
-	 * The caller's executions, newest first after {@code after}. Two index range scans, one per side of the trade,
+	 * The caller's executions after {@code after}, in either order. Two index range scans, one per side of the trade,
 	 * merged; the caller is never on both sides, because self-trades are prevented.
 	 */
-	List<OwnTrade> ownTrades(UUID accountId, TradePosition after, int limit) {
+	List<OwnTrade> ownTrades(UUID accountId, TradePosition after, int limit, PageOrder order) {
 		String side = """
 				SELECT t.id, t.instrument_id, i.symbol, '%1$s' AS side,
 				    CASE WHEN m.account_id = :account THEN 'MAKER' ELSE 'TAKER' END AS liquidity,
@@ -272,11 +275,13 @@ class TradingQueries {
 				FROM trades t JOIN instrument i ON i.id = t.instrument_id JOIN orders m ON m.id = t.maker_order_id
 				WHERE t.%2$s = :account
 				  AND (CAST(:afterCommand AS BIGINT) IS NULL
-				       OR (t.command_sequence, t.trade_sequence) < (:afterCommand, :afterTrade))
-				ORDER BY t.command_sequence DESC, t.trade_sequence DESC LIMIT :limit""";
-		return jdbc.sql("(" + side.formatted("BUY", "buyer_account_id") + ") UNION ALL ("
-				+ side.formatted("SELL", "seller_account_id") + ") ORDER BY command_sequence DESC, trade_sequence DESC "
-				+ "LIMIT :limit")
+				       OR (t.command_sequence, t.trade_sequence) %3$s (:afterCommand, :afterTrade))
+				ORDER BY t.command_sequence %4$s, t.trade_sequence %4$s LIMIT :limit""";
+		String beyond = order.after();
+		String direction = order.direction();
+		return jdbc.sql("(" + side.formatted("BUY", "buyer_account_id", beyond, direction) + ") UNION ALL ("
+				+ side.formatted("SELL", "seller_account_id", beyond, direction) + ") ORDER BY command_sequence "
+				+ direction + ", trade_sequence " + direction + " LIMIT :limit")
 			.param("account", accountId)
 			.param("afterCommand", after == null ? null : after.commandSequence())
 			.param("afterTrade", after == null ? null : after.tradeSequence())

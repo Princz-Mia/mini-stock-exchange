@@ -106,7 +106,7 @@ paths:
     get:
       tags: [execution]
       operationId: listOrders
-      summary: The caller's own orders, newest first.
+      summary: The caller's own orders, newest first unless order=oldest.
       description: |
         With status=active, every open or partially filled order, at most 20, in one response. With status=all,
         every order including rejected ones, in keyset pages.
@@ -116,6 +116,7 @@ paths:
           schema: { type: string, enum: [all, active], default: all }
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Order'
       responses:
         '200':
           description: One page of orders.
@@ -282,10 +283,11 @@ paths:
     get:
       tags: [execution]
       operationId: listOwnTrades
-      summary: The caller's own executions, newest first, in keyset pages.
+      summary: The caller's own executions, newest first unless order=oldest, in keyset pages.
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Order'
       responses:
         '200':
           description: One page of executions.
@@ -354,10 +356,11 @@ paths:
     get:
       tags: [execution]
       operationId: listAccounts
-      summary: Every trading account with what it started with, oldest first. Operator only.
+      summary: Every trading account with what it started with, oldest first unless order=newest. Operator only.
       parameters:
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Order'
       responses:
         '200':
           description: One page.
@@ -515,14 +518,16 @@ paths:
     get:
       tags: [execution]
       operationId: listBotRuns
-      summary: The newest bot runs with their configuration, worker and activity. Operator only.
+      summary: Bot runs with their configuration, worker and activity, newest first unless order=oldest. Operator only.
       parameters:
         - name: limit
           in: query
-          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
+          schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Order'
       responses:
         '200':
-          description: The runs, newest first.
+          description: One page of runs.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/BotRunList' }
@@ -995,8 +1000,13 @@ components:
     Cursor:
       name: cursor
       in: query
-      description: The nextCursor of the previous page. Opaque.
+      description: The nextCursor of the previous page. Opaque. Refused under an order other than the one it came from.
       schema: { type: string }
+    Order:
+      name: order
+      in: query
+      description: Which end of the list pages start from. Without it, the operation's own default, named in its summary.
+      schema: { type: string, enum: [newest, oldest] }
 
   responses:
     NotTrader:
@@ -1423,12 +1433,15 @@ components:
     BotRunList:
       type: object
       additionalProperties: false
-      required: [runs]
+      required: [runs, nextCursor]
       properties:
         runs:
           type: array
-          maxItems: 50
+          maxItems: 200
           items: { $ref: '#/components/schemas/BotRun' }
+        nextCursor:
+          type: [string, 'null']
+          description: Null on the last page.
     BotRun:
       type: object
       additionalProperties: false

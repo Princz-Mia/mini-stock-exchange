@@ -10,43 +10,40 @@ import java.util.UUID;
 import org.springframework.http.HttpStatus;
 
 /**
- * Opaque, versioned page cursors. Clients pass back what they were given; the {@code v1} prefix lets the format
- * change later without breaking cursors already handed out. Anything else is one answer: not a cursor we issued.
+ * Opaque, versioned page cursors. Clients pass back what they were given. A {@code v2} cursor names the order it was
+ * issued in, and is refused under the other one, since its position means nothing there. A {@code v1} cursor, from
+ * before lists could be read either way, stands for the list's default order. Anything else is one answer: not a
+ * cursor we issued.
  */
 final class Cursors {
 
 	private Cursors() {
 	}
 
-	static String orders(TradingQueries.OrderPosition position) {
-		return encode("v1:" + position.createdAt() + "|" + position.id());
+	static String orders(TradingQueries.OrderPosition position, PageOrder order) {
+		return encode(order, position.createdAt() + "|" + position.id());
 	}
 
-	static TradingQueries.OrderPosition orders(String cursor) {
-		String[] parts = decode(cursor);
-		try {
-			return new TradingQueries.OrderPosition(Instant.parse(parts[0]), UUID.fromString(parts[1]));
-		}
-		catch (DateTimeParseException | IllegalArgumentException ex) {
-			throw invalid();
-		}
+	static TradingQueries.OrderPosition orders(String cursor, PageOrder order) {
+		String[] parts = decode(cursor, order, PageOrder.NEWEST);
+		return new TradingQueries.OrderPosition(instant(parts[0]), uuid(parts[1]));
 	}
 
-	static String accounts(TradingQueries.AccountPosition position) {
-		return encode("v1:" + position.createdAt() + "|" + position.id());
+	static String accounts(TradingQueries.AccountPosition position, PageOrder order) {
+		return encode(order, position.createdAt() + "|" + position.id());
 	}
 
-	static TradingQueries.AccountPosition accounts(String cursor) {
-		TradingQueries.OrderPosition position = orders(cursor);
-		return new TradingQueries.AccountPosition(position.createdAt(), position.id());
+	static TradingQueries.AccountPosition accounts(String cursor, PageOrder order) {
+		String[] parts = decode(cursor, order, PageOrder.OLDEST);
+		return new TradingQueries.AccountPosition(instant(parts[0]), uuid(parts[1]));
 	}
 
-	static String trades(TradingQueries.TradePosition position) {
-		return encode("v1:" + position.commandSequence() + "|" + position.tradeSequence());
+	static String trades(TradingQueries.TradePosition position, PageOrder order) {
+		return encode(order, position.commandSequence() + "|" + position.tradeSequence());
 	}
 
-	static TradingQueries.TradePosition trades(String cursor) {
-		String[] parts = decode(cursor);
+	static TradingQueries.TradePosition trades(String cursor, PageOrder order) {
+		String[] parts = decode(cursor, order, PageOrder.NEWEST);
 		try {
 			long command = Long.parseLong(parts[0]);
 			long trade = Long.parseLong(parts[1]);
@@ -60,11 +57,26 @@ final class Cursors {
 		throw invalid();
 	}
 
-	private static String encode(String value) {
+	/** Where a page of bot runs ends: by start time, then by ID. */
+	record RunPosition(Instant startedAt, UUID id) {
+	}
+
+	static String runs(RunPosition position, PageOrder order) {
+		return encode(order, position.startedAt() + "|" + position.id());
+	}
+
+	static RunPosition runs(String cursor, PageOrder order) {
+		String[] parts = decode(cursor, order, PageOrder.NEWEST);
+		return new RunPosition(instant(parts[0]), uuid(parts[1]));
+	}
+
+	private static String encode(PageOrder order, String position) {
+		String value = "v2:" + order.wire() + "|" + position;
 		return Base64.getUrlEncoder().withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8));
 	}
 
-	private static String[] decode(String cursor) {
+	/** The cursor's two position parts, if it was issued in {@code order}; a v1 cursor stands for {@code v1Order}. */
+	private static String[] decode(String cursor, PageOrder order, PageOrder v1Order) {
 		String text;
 		try {
 			text = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
@@ -72,11 +84,46 @@ final class Cursors {
 		catch (IllegalArgumentException ex) {
 			throw invalid();
 		}
-		String[] parts = text.startsWith("v1:") ? text.substring(3).split("\\|", -1) : new String[0];
-		if (parts.length != 2) {
+		if (text.startsWith("v1:")) {
+			String[] parts = text.substring(3).split("\\|", -1);
+			if (parts.length != 2 || order != v1Order) {
+				throw invalid();
+			}
+			return parts;
+		}
+		String[] parts = text.startsWith("v2:") ? text.substring(3).split("\\|", -1) : new String[0];
+		if (parts.length != 3 || !parts[0].equals(order.wire())) {
 			throw invalid();
 		}
-		return parts;
+		return new String[] { parts[1], parts[2] };
+	}
+
+	/** Positions we issue are row timestamps; anything outside years 1 to 9999 cannot be one, nor be queried. */
+	private static final Instant EARLIEST = Instant.parse("0001-01-01T00:00:00Z");
+
+	private static final Instant LATEST = Instant.parse("9999-12-31T23:59:59.999999Z");
+
+	private static Instant instant(String text) {
+		Instant parsed;
+		try {
+			parsed = Instant.parse(text);
+		}
+		catch (DateTimeParseException ex) {
+			throw invalid();
+		}
+		if (parsed.isBefore(EARLIEST) || parsed.isAfter(LATEST)) {
+			throw invalid();
+		}
+		return parsed;
+	}
+
+	private static UUID uuid(String text) {
+		try {
+			return UUID.fromString(text);
+		}
+		catch (IllegalArgumentException ex) {
+			throw invalid();
+		}
 	}
 
 	private static ApiException invalid() {

@@ -147,15 +147,16 @@ class BotRunController {
 			Instant stopRequestedAt, Instant stoppedAt, Config config, Worker worker, Activity activity) {
 	}
 
-	record RunList(List<RunView> runs) {
+	record RunList(List<RunView> runs, String nextCursor) {
 	}
 
-	/** The newest runs first. */
+	/** The newest runs first unless {@code order=oldest}, in keyset pages. */
 	@GetMapping
-	RunList runs(@RequestParam(defaultValue = "20") int limit) {
-		if (limit < 1 || limit > 50) {
-			throw ApiException.invalid("limit", "OUT_OF_RANGE", "limit must be between 1 and 50");
-		}
+	RunList runs(@RequestParam(defaultValue = "20") int limit, @RequestParam(required = false) String cursor,
+			@RequestParam(required = false) String order) {
+		Pages.checkLimit(limit);
+		PageOrder direction = PageOrder.parse(order, PageOrder.NEWEST);
+		Cursors.RunPosition after = cursor == null ? null : Cursors.runs(cursor, direction);
 		Instant now = clock.instant();
 		record Row(UUID id, String desired, Instant startedAt, Instant endsAt, Instant stopRequestedAt,
 				Instant stoppedAt, long seed, BigDecimal rate, int maxOrderQuantity, int maxPosition, String workerId,
@@ -165,8 +166,12 @@ class BotRunController {
 				SELECT id, desired_state, started_at, ends_at, stop_requested_at, stopped_at, seed, commands_per_second,
 				    max_order_quantity, max_position, worker_id, heartbeat_at, lease_expires_at, placed, canceled,
 				    rejected, errors, in_flight, stop_failures
-				FROM bot_run ORDER BY started_at DESC, id DESC LIMIT ?""")
-			.param(limit)
+				FROM bot_run
+				WHERE CAST(:afterAt AS TIMESTAMPTZ) IS NULL OR (started_at, id) %1$s (:afterAt, :afterId)
+				ORDER BY started_at %2$s, id %2$s LIMIT :limit""".formatted(direction.after(), direction.direction()))
+			.param("afterAt", after == null ? null : Timestamp.from(after.startedAt()))
+			.param("afterId", after == null ? null : after.id())
+			.param("limit", limit + 1)
 			.query((row, index) -> new Row(row.getObject("id", UUID.class), row.getString("desired_state"),
 					instant(row.getTimestamp("started_at")), instant(row.getTimestamp("ends_at")),
 					instant(row.getTimestamp("stop_requested_at")), instant(row.getTimestamp("stopped_at")),
@@ -177,7 +182,12 @@ class BotRunController {
 							row.getLong("errors"), row.getInt("in_flight"), row.getInt("stop_failures"))))
 			.list();
 		if (rows.isEmpty()) {
-			return new RunList(List.of());
+			return new RunList(List.of(), null);
+		}
+		String next = null;
+		if (rows.size() > limit) {
+			rows = rows.subList(0, limit);
+			next = Cursors.runs(new Cursors.RunPosition(rows.getLast().startedAt(), rows.getLast().id()), direction);
 		}
 		List<UUID> ids = rows.stream().map(Row::id).toList();
 		Map<UUID, List<Instrument>> instruments = new HashMap<>();
@@ -209,7 +219,7 @@ class BotRunController {
 							row.maxPosition(), instruments.getOrDefault(row.id(), List.of()),
 							new Strategies(counts[0], counts[1], counts[2])),
 					new Worker(row.workerId(), row.heartbeatAt(), row.leaseExpiresAt()), row.activity());
-		}).toList());
+		}).toList(), next);
 	}
 
 	static String status(String desired, Instant endsAt, Instant stoppedAt, String workerId, Instant leaseExpiresAt,

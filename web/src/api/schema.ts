@@ -80,7 +80,7 @@ export interface paths {
             readonly cookie?: never;
         };
         /**
-         * The caller's own orders, newest first.
+         * The caller's own orders, newest first unless order=oldest.
          * @description With status=active, every open or partially filled order, at most 20, in one response. With status=all,
          *     every order including rejected ones, in keyset pages.
          */
@@ -180,7 +180,7 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        /** The caller's own executions, newest first, in keyset pages. */
+        /** The caller's own executions, newest first unless order=oldest, in keyset pages. */
         readonly get: operations["listOwnTrades"];
         readonly put?: never;
         readonly post?: never;
@@ -239,7 +239,7 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        /** Every trading account with what it started with, oldest first. Operator only. */
+        /** Every trading account with what it started with, oldest first unless order=newest. Operator only. */
         readonly get: operations["listAccounts"];
         readonly put?: never;
         /**
@@ -307,7 +307,7 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        /** The newest bot runs with their configuration, worker and activity. Operator only. */
+        /** Bot runs with their configuration, worker and activity, newest first unless order=oldest. Operator only. */
         readonly get: operations["listBotRuns"];
         readonly put?: never;
         /**
@@ -872,6 +872,8 @@ export interface components {
         };
         readonly BotRunList: {
             readonly runs: readonly components["schemas"]["BotRun"][];
+            /** @description Null on the last page. */
+            readonly nextCursor: string | null;
         };
         readonly BotRun: {
             readonly runId: components["schemas"]["Uuid"];
@@ -1263,8 +1265,10 @@ export interface components {
         readonly OrderId: string;
         readonly InstrumentId: string;
         readonly Limit: number;
-        /** @description The nextCursor of the previous page. Opaque. */
+        /** @description The nextCursor of the previous page. Opaque. Refused under an order other than the one it came from. */
         readonly Cursor: string;
+        /** @description Which end of the list pages start from. Without it, the operation's own default, named in its summary. */
+        readonly Order: "newest" | "oldest";
     };
     requestBodies: never;
     headers: never;
@@ -1404,8 +1408,10 @@ export interface operations {
             readonly query?: {
                 readonly status?: "all" | "active";
                 readonly limit?: components["parameters"]["Limit"];
-                /** @description The nextCursor of the previous page. Opaque. */
+                /** @description The nextCursor of the previous page. Opaque. Refused under an order other than the one it came from. */
                 readonly cursor?: components["parameters"]["Cursor"];
+                /** @description Which end of the list pages start from. Without it, the operation's own default, named in its summary. */
+                readonly order?: components["parameters"]["Order"];
             };
             readonly header?: never;
             readonly path?: never;
@@ -1666,8 +1672,10 @@ export interface operations {
         readonly parameters: {
             readonly query?: {
                 readonly limit?: components["parameters"]["Limit"];
-                /** @description The nextCursor of the previous page. Opaque. */
+                /** @description The nextCursor of the previous page. Opaque. Refused under an order other than the one it came from. */
                 readonly cursor?: components["parameters"]["Cursor"];
+                /** @description Which end of the list pages start from. Without it, the operation's own default, named in its summary. */
+                readonly order?: components["parameters"]["Order"];
             };
             readonly header?: never;
             readonly path?: never;
@@ -1772,8 +1780,10 @@ export interface operations {
         readonly parameters: {
             readonly query?: {
                 readonly limit?: components["parameters"]["Limit"];
-                /** @description The nextCursor of the previous page. Opaque. */
+                /** @description The nextCursor of the previous page. Opaque. Refused under an order other than the one it came from. */
                 readonly cursor?: components["parameters"]["Cursor"];
+                /** @description Which end of the list pages start from. Without it, the operation's own default, named in its summary. */
+                readonly order?: components["parameters"]["Order"];
             };
             readonly header?: never;
             readonly path?: never;
@@ -2032,6 +2042,10 @@ export interface operations {
         readonly parameters: {
             readonly query?: {
                 readonly limit?: number;
+                /** @description The nextCursor of the previous page. Opaque. Refused under an order other than the one it came from. */
+                readonly cursor?: components["parameters"]["Cursor"];
+                /** @description Which end of the list pages start from. Without it, the operation's own default, named in its summary. */
+                readonly order?: components["parameters"]["Order"];
             };
             readonly header?: never;
             readonly path?: never;
@@ -2039,7 +2053,7 @@ export interface operations {
         };
         readonly requestBody?: never;
         readonly responses: {
-            /** @description The runs, newest first. */
+            /** @description One page of runs. */
             readonly 200: {
                 headers: {
                     readonly [name: string]: unknown;

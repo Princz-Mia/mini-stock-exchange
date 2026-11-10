@@ -3,7 +3,10 @@ package com.mia_princz.mse.execution;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -168,6 +171,85 @@ class PortfolioApiIT {
 		assertThat(seen.getFirst()).as("the newest command first").isEqualTo(newestTradeId());
 	}
 
+	/** Read either way, the executions and the orders are the same rows, each once, in exactly reverse order. */
+	@Test
+	void historyReadsOldestFirstAsTheExactReverse() throws Exception {
+		for (int i = 0; i < 3; i++) {
+			place(trader, "SELL", 1, "100.00");
+		}
+		place(other, "BUY", 3, "100.00");
+		place(trader, "SELL", 2, "100.50");
+		place(other, "BUY", 1, "100.50");
+		place(trader, "BUY", 1, "90.00");
+		// The trader buys too, between sells, so pages merge the buy and sell sides in both orders.
+		place(other, "SELL", 2, "99.00");
+		place(trader, "BUY", 2, "99.00");
+		place(trader, "SELL", 1, "100.50");
+		place(other, "BUY", 1, "100.50");
+
+		List<String> newestTrades = walk("/api/v1/portfolio/trades?limit=2", "trades", "tradeId");
+		List<String> oldestTrades = walk("/api/v1/portfolio/trades?limit=2&order=oldest", "trades", "tradeId");
+		assertThat(newestTrades).hasSize(6).doesNotHaveDuplicates();
+		assertThat(oldestTrades).isEqualTo(newestTrades.reversed());
+		List<String> sides = new ArrayList<>();
+		for (String path : List.of("/api/v1/portfolio/trades?limit=200", "/api/v1/portfolio/trades?limit=200&order=oldest")) {
+			json(trader.get(path)).get("trades").forEach((trade) -> sides.add(trade.get("side").asString()));
+		}
+		assertThat(sides).contains("BUY", "SELL");
+		assertThat(walk("/api/v1/portfolio/trades?limit=3", "trades", "tradeId")).isEqualTo(newestTrades);
+
+		List<String> newestOrders = walk("/api/v1/orders?limit=2", "orders", "orderId");
+		List<String> oldestOrders = walk("/api/v1/orders?limit=2&order=oldest", "orders", "orderId");
+		assertThat(newestOrders).as("the trader's own seven").hasSize(7).doesNotHaveDuplicates();
+		assertThat(oldestOrders).isEqualTo(newestOrders.reversed());
+		assertThat(walk("/api/v1/orders?limit=2&order=newest", "orders", "orderId")).isEqualTo(newestOrders);
+	}
+
+	/**
+	 * A cursor names the order it was issued in and is refused under the other, where its position means nothing. A
+	 * cursor from before either order could be chosen still works in the default one.
+	 */
+	@Test
+	void aCursorWorksOnlyInTheOrderItCameFrom() throws Exception {
+		for (int i = 0; i < 3; i++) {
+			place(trader, "BUY", 1, (90 + i) + ".00");
+		}
+		String newest = json(trader.get("/api/v1/orders?limit=1")).get("nextCursor").asString();
+		String oldest = json(trader.get("/api/v1/orders?limit=1&order=oldest")).get("nextCursor").asString();
+		assertThat(json(trader.get("/api/v1/orders?limit=1&cursor=" + newest)).get("orders")).hasSize(1);
+		assertRefusedCursor(trader.get("/api/v1/orders?limit=1&order=oldest&cursor=" + newest));
+		assertRefusedCursor(trader.get("/api/v1/orders?limit=1&cursor=" + oldest));
+
+		JsonNode first = json(trader.get("/api/v1/orders?limit=1")).get("orders").get(0);
+		String v1 = Base64.getUrlEncoder()
+			.withoutPadding()
+			.encodeToString(("v1:" + Instant.parse(first.get("createdAt").asString()) + "|" + first.get("orderId").asString())
+				.getBytes(StandardCharsets.UTF_8));
+		JsonNode afterV1 = json(trader.get("/api/v1/orders?limit=1&cursor=" + v1));
+		assertThat(afterV1.get("orders").get(0).get("orderId").asString())
+			.isNotEqualTo(first.get("orderId").asString());
+		assertRefusedCursor(trader.get("/api/v1/orders?limit=1&order=oldest&cursor=" + v1));
+
+		// Executions from before kept working newest first, and only there.
+		place(other, "SELL", 2, "92.00");
+		JsonNode trade = json(trader.get("/api/v1/portfolio/trades?limit=1")).get("trades").get(0);
+		String v1Trades = Base64.getUrlEncoder()
+			.withoutPadding()
+			.encodeToString(("v1:" + trade.get("commandSequence").asString() + "|1").getBytes(StandardCharsets.UTF_8));
+		assertThat(trader.get("/api/v1/portfolio/trades?cursor=" + v1Trades).statusCode()).isEqualTo(200);
+		assertRefusedCursor(trader.get("/api/v1/portfolio/trades?order=oldest&cursor=" + v1Trades));
+
+		// A position no row can have is not a cursor we issued: refused, not an error from the database.
+		String farFuture = Base64.getUrlEncoder()
+			.withoutPadding()
+			.encodeToString(("v2:newest|+300000-01-01T00:00:00Z|" + UUID.randomUUID()).getBytes(StandardCharsets.UTF_8));
+		assertRefusedCursor(trader.get("/api/v1/orders?cursor=" + farFuture));
+
+		String trades = Base64.getUrlEncoder().withoutPadding().encodeToString("v2:oldest|1|1".getBytes(StandardCharsets.UTF_8));
+		assertRefusedCursor(trader.get("/api/v1/portfolio/trades?cursor=" + trades));
+		assertThat(trader.get("/api/v1/portfolio/trades?order=oldest&cursor=" + trades).statusCode()).isEqualTo(200);
+	}
+
 	@Test
 	void activeOrdersAndTheFullHistory() throws Exception {
 		String resting = place(trader, "BUY", 1, "95.00");
@@ -191,6 +273,18 @@ class PortfolioApiIT {
 		second.get("orders").forEach((order) -> states.add(order.get("state").asString()));
 		assertThat(states).as("newest first, rejected included").containsExactly("REJECTED", "OPEN", "CANCELED");
 		assertThat(second.get("nextCursor").isNull()).isTrue();
+
+		// Active orders, too, either way.
+		place(trader, "BUY", 1, "93.50");
+		List<String> newestActive = new ArrayList<>();
+		List<String> oldestActive = new ArrayList<>();
+		json(trader.get("/api/v1/orders?status=active")).get("orders")
+			.forEach((order) -> newestActive.add(order.get("orderId").asString()));
+		json(trader.get("/api/v1/orders?status=active&order=oldest")).get("orders")
+			.forEach((order) -> oldestActive.add(order.get("orderId").asString()));
+		assertThat(newestActive).hasSize(2);
+		assertThat(oldestActive).isEqualTo(newestActive.reversed());
+		assertThat(trader.get("/api/v1/orders?status=active&order=sideways").statusCode()).isEqualTo(400);
 	}
 
 	@Test
@@ -201,6 +295,8 @@ class PortfolioApiIT {
 		assertThat(trader.get("/api/v1/portfolio/trades?limit=0").statusCode()).isEqualTo(400);
 		assertThat(trader.get("/api/v1/portfolio/trades?limit=many").statusCode()).isEqualTo(400);
 		assertThat(trader.get("/api/v1/portfolio/trades?cursor=%25").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/orders?order=sideways").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/portfolio/trades?order=OLDEST").statusCode()).isEqualTo(400);
 		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
 		assertThat(operator.get("/api/v1/portfolio").statusCode()).isEqualTo(403);
 		assertThat(new TestBrowser(port).get("/api/v1/orders").statusCode()).isEqualTo(401);
@@ -223,6 +319,25 @@ class PortfolioApiIT {
 		return jdbc.queryForObject("""
 				SELECT id::text FROM trades WHERE instrument_id = ?
 				ORDER BY command_sequence DESC, trade_sequence DESC LIMIT 1""", String.class, instrument);
+	}
+
+	/** Every page of a list from the start, as the IDs in the order they came; a list that never ends fails. */
+	private List<String> walk(String path, String rows, String id) throws Exception {
+		List<String> seen = new ArrayList<>();
+		JsonNode page = json(trader.get(path));
+		for (int pages = 0; pages < 100; pages++) {
+			page.get(rows).forEach((row) -> seen.add(row.get(id).asString()));
+			if (page.get("nextCursor").isNull()) {
+				return seen;
+			}
+			page = json(trader.get(path + "&cursor=" + page.get("nextCursor").asString()));
+		}
+		throw new AssertionError("more than 100 pages: the cursor is not moving on");
+	}
+
+	private static void assertRefusedCursor(HttpResponse<String> response) {
+		assertThat(response.statusCode()).as(response.body()).isEqualTo(400);
+		assertThat(response.body()).contains("INVALID_CURSOR");
 	}
 
 	private static JsonNode json(HttpResponse<String> response) {

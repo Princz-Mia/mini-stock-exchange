@@ -3,7 +3,10 @@ package com.mia_princz.mse.execution;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.sql.Timestamp;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -139,6 +142,26 @@ class AccountSetupIT {
 		assertThat(second.get("accounts").get(0).get("username").asString()).isEqualTo("other");
 		assertThat(second.get("accounts").get(0).get("cash").asString()).isEqualTo("50000.00");
 		assertThat(second.get("nextCursor").isNull()).isTrue();
+		JsonNode newest = JSON.readTree(operator.get(PROVISION + "?limit=1&order=newest").body());
+		assertThat(newest.get("accounts").get(0).get("username").asString()).isEqualTo("other");
+		JsonNode older = JSON.readTree(
+				operator.get(PROVISION + "?limit=1&order=newest&cursor=" + newest.get("nextCursor").asString()).body());
+		assertThat(older.get("accounts").get(0).get("username").asString()).isEqualTo("trader");
+		assertThat(older.get("nextCursor").isNull()).isTrue();
+		assertThat(operator.get(PROVISION + "?limit=1&cursor=" + newest.get("nextCursor").asString()).statusCode())
+			.as("a newest-first cursor in the default, oldest-first order")
+			.isEqualTo(400);
+		// A cursor from before either order could be chosen keeps working in the default, oldest-first order only.
+		JsonNode firstAccount = first.get("accounts").get(0);
+		String createdAt = jdbc.queryForObject("SELECT created_at FROM account WHERE id = ?::uuid", Timestamp.class,
+				firstAccount.get("accountId").asString()).toInstant().toString();
+		String v1 = Base64.getUrlEncoder()
+			.withoutPadding()
+			.encodeToString(("v1:" + createdAt + "|" + firstAccount.get("accountId").asString())
+				.getBytes(StandardCharsets.UTF_8));
+		JsonNode afterV1 = JSON.readTree(operator.get(PROVISION + "?limit=1&cursor=" + v1).body());
+		assertThat(afterV1.get("accounts").get(0).get("username").asString()).isEqualTo("other");
+		assertThat(operator.get(PROVISION + "?limit=1&order=newest&cursor=" + v1).statusCode()).isEqualTo(400);
 		assertThat(trader.get(PROVISION).statusCode()).isEqualTo(403);
 
 		// Once open, the funded accounts trade with each other, and no more accounts are funded. The instrument was added
