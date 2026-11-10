@@ -162,6 +162,17 @@ class AccountEventsIT {
 		assertThat(otherStream.nextVersion()).isEqualTo(buy);
 		assertThat(traderStream.nextVersion()).as("the seller hears the fill").isEqualTo(buy);
 
+		// A sixth stream for one account replaces its oldest, which is most likely a closed tab, instead of being
+		// refused. Tabs reloaded quickly leave connections the server can't yet know are gone.
+		Listener newest = null;
+		for (int i = 0; i < 5; i++) {
+			newest = new Listener(trader);
+			assertThat(newest.status).isEqualTo(200);
+		}
+		traderStream.endsWithin(Duration.ofSeconds(1));
+		assertThat(newest.nextVersion()).as("the newest starts at the latest change").isEqualTo(buy);
+		traderStream = newest;
+
 		// Logging out ends the stream at once; an expired session's stream ends at the next heartbeat.
 		assertThat(trader.post("/api/v1/auth/logout", "").statusCode()).isEqualTo(204);
 		traderStream.endsWithin(Duration.ofMillis(300));
