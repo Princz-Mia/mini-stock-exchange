@@ -2,6 +2,9 @@
 # Commit Maven Wrapper files, package-lock.json, uv.lock, version pins,
 # Avro schemas, migrations, Docker/Compose files and safe templates.
 
+# Database backups made by scripts/backup: real data, never committed
+/backups/
+
 # Local secrets and machine-specific configuration
 .env
 .env.*
