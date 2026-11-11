@@ -4,7 +4,11 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -20,11 +24,12 @@ import org.springframework.boot.health.contributor.Health;
 import org.springframework.boot.health.contributor.HealthIndicator;
 
 /**
- * Publishes committed outbox events to Kafka in id order, one batch at a time: send the batch, wait for each
- * acknowledgement in order, then mark the acknowledged prefix as published. It never marks an event that was not
- * acknowledged and never moves past one that failed; after a failure it backs off and starts again from the oldest
- * pending event. A crash between acknowledgement and marking sends that event again with the same id and bytes, so
- * consumers deduplicate by event id.
+ * Publishes committed outbox events to Kafka in id order, one batch at a time, then marks the acknowledged prefix as
+ * published. Within a batch, events with different keys go out together, but an event is sent only after the previous
+ * one with its topic and key was acknowledged, so a failure can duplicate events on Kafka but never put a later one
+ * ahead of an earlier one. It never marks an event that was not acknowledged and never moves past one that failed;
+ * after a failure it backs off and starts again from the oldest pending event. A crash between acknowledgement and
+ * marking sends that event again with the same id and bytes, so consumers deduplicate by event id.
  *
  * <p>
  * Only the instance that owns the writer publishes. The relay is outside readiness: with Kafka down, trading goes
@@ -36,7 +41,15 @@ public final class OutboxRelay implements HealthIndicator, AutoCloseable {
 
 	private static final Duration BACKLOG_REFRESH = Duration.ofSeconds(1);
 
+	/** {@code ackTimeout} bounds the wait for one round of a batch, not for the whole batch. */
 	public record Settings(int batchSize, Duration pollInterval, Duration ackTimeout, Duration maxBackoff) {
+	}
+
+	/** Kafka keeps order per partition, and a topic's key picks the partition. */
+	private record TopicKey(String topic, String key) {
+	}
+
+	private record Failure(Outbox.PendingEvent event, Exception cause) {
 	}
 
 	private final Outbox outbox;
@@ -94,40 +107,88 @@ public final class OutboxRelay implements HealthIndicator, AutoCloseable {
 		if (batch.isEmpty()) {
 			return 0;
 		}
-		List<Future<RecordMetadata>> acks = new ArrayList<>(batch.size());
+		Set<Long> acknowledged = new HashSet<>();
+		Failure failure = null;
+		try {
+			for (List<Outbox.PendingEvent> round : rounds(batch)) {
+				failure = publish(round, acknowledged);
+				if (failure != null) {
+					break;
+				}
+			}
+		}
+		finally {
+			markPublished(acknowledgedPrefix(batch, acknowledged));
+		}
+		if (failure != null) {
+			resetProducer();
+			throw new OutboxPublishException(failure.event(), failure.cause());
+		}
+		return batch.size();
+	}
+
+	/**
+	 * Splits a batch so that no event is handed to Kafka before the previous event with its topic and key is
+	 * acknowledged. Round n holds the n-th event of every topic and key, in id order.
+	 *
+	 * <p>
+	 * Sending the whole batch at once is not safe: if an event fails, a later one on the same partition may still be
+	 * written (it may have been in flight already, and the producer moves later sequences past a failed batch). The
+	 * retry then puts the later event ahead of the earlier one, and a consumer that requires consecutive sequences,
+	 * such as the candle job, sees a gap.
+	 */
+	static List<List<Outbox.PendingEvent>> rounds(List<Outbox.PendingEvent> batch) {
+		Map<TopicKey, Integer> seen = new HashMap<>();
+		List<List<Outbox.PendingEvent>> rounds = new ArrayList<>();
+		for (Outbox.PendingEvent event : batch) {
+			int round = seen.merge(new TopicKey(event.topic(), event.key()), 1, Integer::sum) - 1;
+			if (round == rounds.size()) {
+				rounds.add(new ArrayList<>());
+			}
+			rounds.get(round).add(event);
+		}
+		return rounds;
+	}
+
+	/** Sends one round, waits for its acknowledgements in order, and returns the first failure, if any. */
+	private Failure publish(List<Outbox.PendingEvent> round, Set<Long> acknowledged) throws InterruptedException {
+		List<Future<RecordMetadata>> acks = new ArrayList<>(round.size());
 		RuntimeException sendFailure = null;
 		try {
 			Producer<String, byte[]> current = producer();
-			for (Outbox.PendingEvent event : batch) {
+			for (Outbox.PendingEvent event : round) {
 				acks.add(current.send(new ProducerRecord<>(event.topic(), event.key(), event.payload())));
 			}
 		}
 		catch (RuntimeException ex) {
 			sendFailure = ex;
 		}
-		List<Long> acknowledged = new ArrayList<>(acks.size());
-		Exception failure = sendFailure;
 		long deadline = System.nanoTime() + settings.ackTimeout().toNanos();
-		for (int i = 0; i < acks.size() && failure == null; i++) {
+		for (int i = 0; i < acks.size(); i++) {
 			try {
 				acks.get(i).get(Math.max(0, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
-				acknowledged.add(batch.get(i).id());
+				acknowledged.add(round.get(i).id());
 			}
 			catch (InterruptedException ex) {
-				markPublished(acknowledged);
 				throw ex;
 			}
 			catch (Exception ex) {
-				failure = ex;
+				return new Failure(round.get(i), ex);
 			}
 		}
-		markPublished(acknowledged);
-		if (failure != null) {
-			resetProducer();
-			Outbox.PendingEvent stuck = batch.get(acknowledged.size());
-			throw new OutboxPublishException(stuck, failure);
+		return sendFailure == null ? null : new Failure(round.get(acks.size()), sendFailure);
+	}
+
+	/** Only the acknowledged prefix in id order is marked; an acknowledged event after a gap is sent again. */
+	private static List<Long> acknowledgedPrefix(List<Outbox.PendingEvent> batch, Set<Long> acknowledged) {
+		List<Long> prefix = new ArrayList<>(batch.size());
+		for (Outbox.PendingEvent event : batch) {
+			if (!acknowledged.contains(event.id())) {
+				break;
+			}
+			prefix.add(event.id());
 		}
-		return acknowledged.size();
+		return prefix;
 	}
 
 	private void markPublished(List<Long> ids) {
