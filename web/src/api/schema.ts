@@ -72,6 +72,24 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/me/tour": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** The newest version of the first-login tour this user has seen; 0 if none. */
+        readonly get: operations["getTourSeen"];
+        /** Record a tour version as seen. The stored version only rises; the answer is the version now stored. */
+        readonly put: operations["putTourSeen"];
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/orders": {
         readonly parameters: {
             readonly query?: never;
@@ -679,6 +697,12 @@ export interface components {
         readonly Identity: {
             readonly username: string;
             readonly roles: readonly ("TRADER" | "OPERATOR")[];
+        };
+        readonly TourSeen: {
+            readonly seenVersion: number;
+        };
+        readonly TourSeenRequest: {
+            readonly seenVersion: number;
         };
         /** @description LIMIT goes with GTC and limitPrice; MARKET_PROTECTED with IOC and protectionPrice. */
         readonly OrderRequest: {
@@ -1459,6 +1483,72 @@ export interface operations {
             };
             /** @description No session. No body. */
             readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly getTourSeen: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The version seen. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["TourSeen"];
+                };
+            };
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly putTourSeen: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["TourSeenRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description The version now stored, which is never lower than before. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["TourSeen"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid CSRF token. No body. */
+            readonly 403: {
                 headers: {
                     readonly [name: string]: unknown;
                 };

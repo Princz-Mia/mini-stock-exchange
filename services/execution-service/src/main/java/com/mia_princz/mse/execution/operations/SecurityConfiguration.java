@@ -125,6 +125,11 @@ class SecurityConfiguration {
 				.permitAll()
 				.requestMatchers(HttpMethod.GET, "/api/v1/me")
 				.authenticated()
+				// Either role's own tour flag; a session only, since bots go through the bearer chain.
+				.requestMatchers(HttpMethod.GET, "/api/v1/me/tour")
+				.authenticated()
+				.requestMatchers(HttpMethod.PUT, "/api/v1/me/tour")
+				.authenticated()
 				.requestMatchers(HttpMethod.GET, "/api/v1/market")
 				.permitAll()
 				.requestMatchers(HttpMethod.GET, "/api/v1/admin/accounts", "/api/v1/admin/bots", "/api/v1/admin/bot-runs",

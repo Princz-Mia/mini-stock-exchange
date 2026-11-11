@@ -102,6 +102,40 @@ paths:
         '401':
           description: No session. No body.
 
+  /api/v1/me/tour:
+    get:
+      tags: [execution]
+      operationId: getTourSeen
+      summary: The newest version of the first-login tour this user has seen; 0 if none.
+      responses:
+        '200':
+          description: The version seen.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TourSeen' }
+        '401':
+          description: No session. No body.
+    put:
+      tags: [execution]
+      operationId: putTourSeen
+      summary: Record a tour version as seen. The stored version only rises; the answer is the version now stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TourSeenRequest' }
+      responses:
+        '200':
+          description: The version now stored, which is never lower than before.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TourSeen' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Missing or invalid CSRF token. No body.
+
   /api/v1/orders:
     get:
       tags: [execution]
@@ -1152,6 +1186,20 @@ components:
         roles:
           type: array
           items: { type: string, enum: [TRADER, OPERATOR] }
+
+    TourSeen:
+      type: object
+      additionalProperties: false
+      required: [seenVersion]
+      properties:
+        seenVersion: { type: integer, minimum: 0, maximum: 1000 }
+
+    TourSeenRequest:
+      type: object
+      additionalProperties: false
+      required: [seenVersion]
+      properties:
+        seenVersion: { type: integer, minimum: 1, maximum: 1000 }
 
     OrderRequest:
       type: object
