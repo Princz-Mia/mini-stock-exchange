@@ -92,9 +92,24 @@ jobs:
         with:
           version: "0.13.6"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # Playwright installs Chromium's libraries and fonts with apt, so an Ubuntu mirror outage would fail the gate
+      # through no fault of the code. Retry with a backoff, then install the browser alone: the runner image ships
+      # Google Chrome, so it has the libraries Chromium needs. If one were missing, the browser test could not launch
+      # Chromium and the gate would still fail.
       - name: Install Chromium and its system libraries for the browser test
         working-directory: web
-        run: npm ci && npx playwright install --with-deps chromium
+        run: |
+          npm ci
+          for attempt in 1 2 3; do
+            if npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep $((attempt * 30))
+            fi
+          done
+          echo "::warning::apt failed 3 times; installing Chromium without its system packages"
+          npx playwright install chromium
       - name: Container builds and full-pipeline smoke test
         run: bash scripts/compat-gate.sh
       - name: Keep gate logs
