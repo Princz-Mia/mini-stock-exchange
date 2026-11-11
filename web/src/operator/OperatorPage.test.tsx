@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { resetSession } from '../api/client';
 import type { BotRun, MarketStatus } from '../api/types';
+import { TOURS } from '../help/tours';
 import { botRun } from '../test/botRun';
 import { signedIn } from '../test/fakeServer';
 import { OperatorPage } from './OperatorPage';
@@ -575,6 +576,23 @@ describe('bot runs on the operator screen', () => {
     renderPage();
     await screen.findByRole('heading', { name: 'Market' });
     expect(screen.queryByRole('region', { name: 'Health' })).toBeNull();
+  });
+
+  it("has a part for every step of the operator's tour once the market is open", async () => {
+    const { server } = exchange('OPEN');
+    server.on('GET /api/v1/admin/health', {
+      status: 200,
+      json: {
+        writer: { available: true, queueDepth: 0, queueCapacity: 256 },
+        lastMinute: { committed: 0, failed: 0, withinBudget: 0, refused: 0 },
+        outbox: { admitting: true, pendingEvents: 0, oldestPendingMillis: 0 },
+      },
+    });
+    renderPage();
+    await screen.findByRole('region', { name: 'Health' });
+    for (const step of TOURS.OPERATOR.steps) {
+      expect(document.querySelector(step.anchor), step.title).not.toBeNull();
+    }
   });
 
   it('puts bot runs first once the market is open, and after the setup editor before', async () => {

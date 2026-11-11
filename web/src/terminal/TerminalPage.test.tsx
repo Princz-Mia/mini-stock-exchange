@@ -4,6 +4,7 @@ import { MemoryRouter } from 'react-router';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { resetSession } from '../api/client';
+import { TOURS } from '../help/tours';
 import { signedIn } from '../test/fakeServer';
 import { fakeStreams, frame } from '../test/fakeStream';
 import { StreamContext, TerminalPage } from './TerminalPage';
@@ -113,6 +114,18 @@ describe('terminal', () => {
     expect(screen.getByText('Trading halted')).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Cancel sell NOVA at 105.00' })).toBeEnabled();
     expect(server.requests.some((request) => request.method === 'POST')).toBe(false);
+  });
+
+  it("has a part for every step of the trader's tour, but the Portfolio link, which is in the top bar", async () => {
+    market().on('GET /api/v1/market', {
+      status: 200,
+      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '9' },
+    });
+    renderTerminal();
+    await screen.findByRole('region', { name: 'Order · NOVA' });
+    for (const step of TOURS.TRADER.steps.filter((each) => each.title !== 'Portfolio')) {
+      expect(document.querySelector(step.anchor), step.title).not.toBeNull();
+    }
   });
 
   it('takes orders once the market is open', async () => {

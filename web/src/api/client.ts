@@ -26,6 +26,7 @@ import type {
   Portfolio,
   Problem,
   TokenRevoked,
+  TourSeen,
 } from './types';
 
 /** Which end of a paged list to start from. */
@@ -82,7 +83,7 @@ interface Options {
   idempotencyKey?: string;
 }
 
-async function request<T>(method: 'GET' | 'POST', path: string, options: Options = {}): Promise<T> {
+async function request<T>(method: 'GET' | 'POST' | 'PUT', path: string, options: Options = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (method !== 'GET') {
     const token = await csrfToken();
@@ -120,6 +121,8 @@ function query(params: Record<string, string | number | undefined>): string {
 
 export const api = {
   me: () => request<Identity>('GET', '/api/v1/me'),
+  tourSeen: () => request<TourSeen>('GET', '/api/v1/me/tour'),
+  seeTour: (seenVersion: number) => request<TourSeen>('PUT', '/api/v1/me/tour', { body: { seenVersion } }),
 
   /** Login rotates the session and its CSRF token, so the token is fetched again afterwards. */
   login: async (username: string, password: string) => {

@@ -212,11 +212,18 @@ input[aria-invalid='true'] {
   background: var(--surface-sunken);
 }
 
+/* Help and the theme, then the user and Log out, sit together at the right. */
+.topbar-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin-left: auto;
+}
+
 .theme-switch {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin-left: auto;
   white-space: nowrap;
 }
 
@@ -657,9 +664,11 @@ button.chip {
     order: 2;
   }
 
-  /* On a row of its own under the navigation, so the account stays beside it. */
-  .topbar .theme-switch {
+  /* Help and the theme on a whole row of their own under the navigation, so the account stays beside it and Help's
+     list, which opens to the right, has the row's width. */
+  .topbar .topbar-tools {
     order: 3;
+    flex-basis: 100%;
     margin-left: 0;
   }
 
@@ -975,4 +984,108 @@ button.tab[aria-selected='true'] {
 .population meter::-moz-meter-bar {
   background: var(--secondary);
   border-radius: 4px;
+}
+
+/* Help in the top bar: the list opens under the button, above the page. */
+.help {
+  position: relative;
+}
+
+.help-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + var(--space-1));
+  z-index: 20;
+  margin: 0;
+  padding: var(--space-1);
+  list-style: none;
+  min-width: 180px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 18%);
+}
+
+.help-list button {
+  width: 100%;
+  text-align: left;
+  border: none;
+}
+
+/*
+ * The tour: a card at the bottom of the screen, so it never needs placing beside its target and fits a phone. The
+ * page stays visible behind it, with the step's part outlined.
+ */
+dialog.tour {
+  position: fixed;
+  inset: auto var(--space-4) var(--space-4) auto;
+  margin: 0;
+  box-sizing: border-box;
+  width: min(420px, calc(100vw - 2 * var(--space-4)));
+  padding: var(--space-4);
+  gap: var(--space-2);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--control-line, var(--line));
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 25%);
+}
+
+/* Only while open: an author display would otherwise show a closed dialog too. */
+dialog.tour[open] {
+  display: grid;
+}
+
+/* Room below the page, and scrolling that centres a part in the space above the card. */
+html.tour-open {
+  scroll-padding-bottom: 40vh;
+}
+
+html.tour-open .content {
+  padding-bottom: 40vh;
+}
+
+dialog.tour::backdrop {
+  background: rgb(0 0 0 / 8%);
+}
+
+dialog.tour h2:focus {
+  outline: none;
+}
+
+dialog.tour p {
+  margin: 0;
+}
+
+.tour-progress {
+  font-size: 12px;
+}
+
+.tour-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.tour-actions .quiet {
+  margin-right: auto;
+}
+
+.tour-target {
+  outline: 3px solid var(--secondary);
+  outline-offset: 4px;
+}
+
+@media (max-width: 640px) {
+  dialog.tour {
+    inset: auto var(--space-4) var(--space-4) var(--space-4);
+    width: auto;
+  }
+
+  /* Help is at the left of its row on a phone, so its list opens to the right. */
+  .help-list {
+    left: 0;
+    right: auto;
+  }
 }
