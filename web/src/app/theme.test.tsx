@@ -241,7 +241,54 @@ describe('the stylesheet', () => {
       '--fill-text: #121017;',
       '--warn-bg: #3a2e12;',
       '--warn-text: #f3d48b;',
+      // Added with the light palette review, as what dark already showed: controls outlined like rules, no shadow, and
+      // the live status pill on its old sunken fill; disabled controls drawn as enabled ones were, no warning edge,
+      // the meter track on the sunken fill, and no mark beside a selected item's fill.
+      '--control-line: #322e3d;',
+      '--panel-shadow: none;',
+      '--pill-on-page: #24202d;',
+      '--control-disabled-bg: #1b1822;',
+      '--control-disabled-line: #322e3d;',
+      '--control-disabled-text: #ece9f2;',
+      '--warn-line: transparent;',
+      '--track: #24202d;',
+      '--selected-mark: transparent;',
     ]);
+  });
+
+  it('gives the light scheme enough contrast: text, controls against what they sit on, panels against the page', () => {
+    const light = Object.fromEntries(
+      tokens(':root {').map((line) => {
+        const [name, value] = line.replace(/;$/, '').split(/:\s*/);
+        return [name, value];
+      }),
+    );
+    const luminance = (hex: string) => {
+      const [r, g, b] = [1, 3, 5].map((at) => {
+        const channel = parseInt(hex.slice(at, at + 2), 16) / 255;
+        return channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
+    };
+    const contrast = (a: string, b: string) => {
+      const [high, low] = [luminance(light[a]!), luminance(light[b]!)].sort((x, y) => y - x);
+      return (high! + 0.05) / (low! + 0.05);
+    };
+    for (const text of ['--text', '--muted', '--secondary', '--accent', '--buy', '--sell']) {
+      for (const under of ['--surface', '--surface-sunken', '--bg']) {
+        expect(contrast(text, under), `${text} on ${under}`).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+    expect(contrast('--warn-text', '--warn-bg')).toBeGreaterThanOrEqual(4.5);
+    // WCAG 1.4.11: the outline that shows where a control is.
+    for (const under of ['--surface', '--surface-sunken', '--bg']) {
+      expect(contrast('--control-line', under), `--control-line on ${under}`).toBeGreaterThanOrEqual(3);
+    }
+    // A selected item's mark, and a disabled control's text, are still read.
+    expect(contrast('--selected-mark', '--surface-sunken')).toBeGreaterThanOrEqual(3);
+    expect(contrast('--control-disabled-text', '--control-disabled-bg')).toBeGreaterThanOrEqual(4.5);
+    // The review's finding: white panels on a near-white page did not stand apart.
+    expect(contrast('--surface', '--bg')).toBeGreaterThanOrEqual(1.15);
   });
 
   it('applies the dark tokens only under a dark system scheme unless light is forced, after the light ones', () => {
@@ -251,6 +298,21 @@ describe('the stylesheet', () => {
     expect(css.slice(light, css.indexOf('}', light))).toContain('color-scheme: light dark;');
     for (const later of ['@media (prefers-color-scheme: dark)', ":root[data-theme='dark']", ":root[data-theme='light']"]) {
       expect(css.indexOf(later), `${later} comes after the light tokens`).toBeGreaterThan(light);
+    }
+  });
+
+  it('outlines every kind of control with the control outline, and lifts panels and figures', () => {
+    const block = (selector: string) => {
+      const start = css.indexOf(`
+${selector} {`);
+      expect(start, `${selector} is in the stylesheet`).toBeGreaterThanOrEqual(0);
+      return css.slice(start, css.indexOf('}', start));
+    };
+    for (const control of ['button', 'input', '.theme-switch select', '.ticket select']) {
+      expect(block(control), control).toContain('border: 1px solid var(--control-line);');
+    }
+    for (const lifted of ['.panel', '.figure']) {
+      expect(block(lifted), lifted).toContain('box-shadow: var(--panel-shadow);');
     }
   });
 

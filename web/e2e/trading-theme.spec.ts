@@ -14,7 +14,7 @@ function required(name: string): string {
 
 /** The page background in the dark and the light palettes, as the browser reports a computed colour. */
 const DARK_BACKGROUND = 'rgb(18, 16, 23)';
-const LIGHT_BACKGROUND = 'rgb(246, 245, 248)';
+const LIGHT_BACKGROUND = 'rgb(236, 234, 241)';
 
 const background = (page: Page) => page.evaluate(() => getComputedStyle(document.documentElement).backgroundColor);
 
