@@ -205,17 +205,22 @@ class OutboxRelayIT {
 	void failedEventStopsTheRelayEvenWhenLaterEventsWereAcknowledged() throws Exception {
 		long first = insert("k", "first");
 		long failing = insert("k", "failing");
-		long third = insert("k", "third");
+		long other = insert("j", "other");
+		long fourth = insert("k", "fourth");
+		List<Long> ids = List.of(first, failing, other, fourth);
 		AtomicBoolean failed = new AtomicBoolean();
 		OutboxRelay relay = relay(failingOnce("failing", failed), new JdbcOutbox(JdbcClient.create(dataSource)));
 
+		// "other" is on another key, so it goes out with "first" and is acknowledged; "fourth" waits for "failing".
 		assertThatThrownBy(relay::relayOnce).isInstanceOf(OutboxPublishException.class)
-			.hasMessageContaining("outbox event " + failing);
-		assertThat(unpublished(List.of(first, failing, third))).containsExactly(failing, third);
+			.hasMessageContaining("outbox event " + failing + " ");
+		assertThat(unpublished(ids)).containsExactly(failing, other, fourth);
 
-		assertThat(relay.relayOnce()).isEqualTo(2);
-		assertThat(unpublished(List.of(first, failing, third))).isEmpty();
-		assertThat(consume(4)).extracting(OutboxRelayIT::value).containsExactly("first", "third", "failing", "third");
+		assertThat(relay.relayOnce()).isEqualTo(3);
+		assertThat(unpublished(ids)).isEmpty();
+		List<ConsumerRecord<String, byte[]>> records = consume(5);
+		assertThat(values(records, "k")).as("never reordered").containsExactly("first", "failing", "fourth");
+		assertThat(values(records, "j")).as("acknowledged but not marked, so sent again").containsExactly("other", "other");
 	}
 
 	@Test
