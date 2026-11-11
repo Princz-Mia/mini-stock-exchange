@@ -63,6 +63,11 @@ describe('portfolio page', () => {
     expect(within(summary).getByText('22,100.00')).toBeInTheDocument();
     expect(within(summary).getByText('10,224.00')).toBeInTheDocument();
     expect(within(summary).getByText('180.00')).toBeInTheDocument();
+    for (const term of ['equity', 'available', 'reserved']) {
+      expect(within(summary).getByRole('button', { name: `What is ${term}?` })).toBeInTheDocument();
+    }
+    expect(screen.getByRole('button', { name: 'What is mark?' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'What is partial fill?' })).toBeInTheDocument();
     const nova = screen.getByRole('row', { name: /NOVA/ });
     expect(within(nova).getByText(/last trade · 12:30:05 UTC/)).toBeInTheDocument();
     expect(within(nova).getByText('9,696.00')).toBeInTheDocument();

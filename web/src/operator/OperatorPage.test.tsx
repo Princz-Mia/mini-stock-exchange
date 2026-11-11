@@ -593,6 +593,7 @@ describe('bot runs on the operator screen', () => {
     for (const step of TOURS.OPERATOR.steps) {
       expect(document.querySelector(step.anchor), step.title).not.toBeNull();
     }
+    expect(screen.getByRole('button', { name: 'What is halted?' })).toBeInTheDocument();
   });
 
   it('puts bot runs first once the market is open, and after the setup editor before', async () => {

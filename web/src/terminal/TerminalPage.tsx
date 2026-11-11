@@ -6,6 +6,7 @@ import { api, pollEvery } from '../api/client';
 import type { MarketStatus } from '../api/types';
 import { FeedStatus } from '../app/FeedStatus';
 import { groupDigits } from '../format';
+import { TermTip } from '../help/TermTip';
 import { OrderBook } from './OrderBook';
 import { OrderTicket } from './OrderTicket';
 import { OwnOrders } from './OwnOrders';
@@ -87,7 +88,12 @@ export function TerminalPage() {
               <span className="last-price num">
                 {frame?.lastPrice != null ? groupDigits(frame.lastPrice) : `${groupDigits(selected.referencePrice)} ref`}
               </span>
-              {paused !== null && <span className="state-badge state-halted">{paused.badge}</span>}
+              {paused !== null && (
+                <>
+                  <span className="state-badge state-halted">{paused.badge}</span>
+                  {market.data?.state === 'HALTED' && <TermTip terms={['halted']} />}
+                </>
+              )}
               <FeedStatus feed={stream.feed ?? instruments.data.feed} />
               <span className={`transport transport-${stream.transport}`} role="status">
                 {TRANSPORT_LABELS[stream.transport]}

@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import type { Instrument, Order, OrderRequest, Portfolio } from '../api/types';
 import { groupDigits, groupInteger } from '../format';
+import { TermTip } from '../help/TermTip';
 import { isPrice, maximumSpend } from './money';
 import { isUnresolved, type Outcome, useOrderIntent } from './orderIntent';
 
@@ -154,7 +155,11 @@ export function OrderTicket({
 
   return (
     <section className="panel ticket" aria-labelledby="ticket-title">
-      <h2 id="ticket-title">Order · {instrument.symbol}</h2>
+      <div className="heading-row">
+        <h2 id="ticket-title">Order · {instrument.symbol}</h2>
+        {/* Outside the form's fieldset, which is disabled while an order is on its way. */}
+        <TermTip terms={['limit', 'protected']} />
+      </div>
       <div className="segmented" role="group" aria-label="Side">
         {(['BUY', 'SELL'] as const).map((choice) => (
           <button
@@ -170,7 +175,10 @@ export function OrderTicket({
         ))}
       </div>
       <dl className="balances">
-        <dt>Available cash</dt>
+        <dt>
+          <span>Available cash</span>
+          <TermTip terms={['available', 'reserved']} />
+        </dt>
         <dd className="num">{portfolio === undefined ? '—' : groupDigits(portfolio.cash.available)}</dd>
         <dt>Available shares</dt>
         <dd className="num">{holding === undefined ? '0' : groupInteger(holding.available)}</dd>

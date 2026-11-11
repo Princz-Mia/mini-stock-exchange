@@ -1,5 +1,5 @@
 import { type RefObject, useEffect, useId, useRef, useState } from 'react';
-import { useLocation } from 'react-router';
+import { Link, useLocation } from 'react-router';
 
 /**
  * Help in the top bar: a button that shows a short list of what help there is. A disclosure rather than an ARIA menu,
@@ -71,6 +71,11 @@ export function HelpMenu({ onTour, button }: { onTour: () => void; button: RefOb
             >
               Take the tour
             </button>
+          </li>
+          <li>
+            <Link to="/help" onClick={() => setOpen(false)}>
+              How this exchange works
+            </Link>
           </li>
         </ul>
       )}

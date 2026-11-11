@@ -6,6 +6,7 @@ import { type Column, PagedTable } from '../app/PagedTable';
 import { type Filter, usePagedList } from '../app/paging';
 import { useKeyboardScroll } from '../app/useKeyboardScroll';
 import { groupDigits, groupInteger, utcTime } from '../format';
+import { TermTip } from '../help/TermTip';
 import { toCents } from '../terminal/money';
 
 /**
@@ -182,7 +183,10 @@ export function PortfolioPage() {
     <div className="stack">
       <section className="summary" aria-label="Summary">
         <div className="figure">
-          <span className="muted">Estimated equity</span>
+          <span className="figure-label">
+            <span className="muted">Estimated equity</span>
+            <TermTip terms={['equity']} />
+          </span>
           <strong>{groupDigits(equity)}</strong>
         </div>
         <div className="figure">
@@ -190,17 +194,26 @@ export function PortfolioPage() {
           <strong>{groupDigits(cash.total)}</strong>
         </div>
         <div className="figure">
-          <span className="muted">Available</span>
+          <span className="figure-label">
+            <span className="muted">Available</span>
+            <TermTip terms={['available']} />
+          </span>
           <strong>{groupDigits(cash.available)}</strong>
         </div>
         <div className="figure">
-          <span className="muted">Reserved for open orders</span>
+          <span className="figure-label">
+            <span className="muted">Reserved for open orders</span>
+            <TermTip terms={['reserved']} />
+          </span>
           <strong>{groupDigits(cash.reserved)}</strong>
         </div>
       </section>
 
       <section ref={holdingsPanel} className="panel" aria-labelledby="holdings-title">
-        <h2 id="holdings-title">Holdings</h2>
+        <div className="heading-row">
+          <h2 id="holdings-title">Holdings</h2>
+          <TermTip terms={['mark']} />
+        </div>
         {holdings.length === 0 ? (
           <p className="muted">No holdings.</p>
         ) : (
@@ -254,7 +267,10 @@ export function PortfolioPage() {
       </section>
 
       <section ref={ordersPanel} className="panel" aria-labelledby="orders-title">
-        <h2 id="orders-title">Orders</h2>
+        <div className="heading-row">
+          <h2 id="orders-title">Orders</h2>
+          <TermTip terms={['partial']} />
+        </div>
         <PagedTable
           label="Orders"
           list={orders}
