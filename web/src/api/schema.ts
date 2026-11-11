@@ -303,6 +303,27 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/health": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * How trading is keeping up, for the operator's health panel. Operator only.
+         * @description The writer and its queue, the trading commands of the last sixty seconds, and the publication outbox, read
+         *     in-process. withinBudget counts the finished commands that took 150 ms or less from admission to result.
+         */
+        readonly get: operations["getHealthSummary"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/bot-runs": {
         readonly parameters: {
             readonly query?: never;
@@ -872,6 +893,38 @@ export interface components {
         readonly BotRunStopping: {
             readonly runId: components["schemas"]["Uuid"];
             readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly HealthSummary: {
+            readonly writer: {
+                /** @description Running and taking commands; false once halted. */
+                readonly available: boolean;
+                readonly queueDepth: number;
+                readonly queueCapacity: number;
+            };
+            readonly lastMinute: {
+                /** Format: int64 */
+                readonly committed: number;
+                /** Format: int64 */
+                readonly failed: number;
+                /** Format: int64 */
+                readonly withinBudget: number;
+                /**
+                 * Format: int64
+                 * @description Turned away before admission because the queue was full or the publication backlog stopped new orders. Rate limits are counted separately.
+                 */
+                readonly refused: number;
+            };
+            readonly outbox: {
+                /** @description False while the publication backlog stops new orders. */
+                readonly admitting: boolean;
+                /**
+                 * Format: int64
+                 * @description Null where the relay does not run.
+                 */
+                readonly pendingEvents: number | null;
+                /** Format: int64 */
+                readonly oldestPendingMillis: number | null;
+            };
         };
         readonly BotRunList: {
             readonly runs: readonly components["schemas"]["BotRun"][];
@@ -2065,6 +2118,40 @@ export interface operations {
             };
             readonly 503: components["responses"]["Unavailable"];
             readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly getHealthSummary: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The summary. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["HealthSummary"];
+                };
+            };
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     readonly listBotRuns: {

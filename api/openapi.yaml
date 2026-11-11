@@ -525,6 +525,25 @@ paths:
         '504':
           $ref: '#/components/responses/OutcomeUnknown'
 
+  /api/v1/admin/health:
+    get:
+      tags: [execution]
+      operationId: getHealthSummary
+      summary: How trading is keeping up, for the operator's health panel. Operator only.
+      description: |
+        The writer and its queue, the trading commands of the last sixty seconds, and the publication outbox, read
+        in-process. withinBudget counts the finished commands that took 150 ms or less from admission to result.
+      responses:
+        '200':
+          description: The summary.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthSummary' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator. No body.
+
   /api/v1/admin/bot-runs:
     get:
       tags: [execution]
@@ -1453,6 +1472,47 @@ components:
       properties:
         runId: { $ref: '#/components/schemas/Uuid' }
         commandSequence: { $ref: '#/components/schemas/Sequence' }
+    HealthSummary:
+      type: object
+      additionalProperties: false
+      required: [writer, lastMinute, outbox]
+      properties:
+        writer:
+          type: object
+          additionalProperties: false
+          required: [available, queueDepth, queueCapacity]
+          properties:
+            available: { type: boolean, description: 'Running and taking commands; false once halted.' }
+            queueDepth: { type: integer, minimum: 0 }
+            queueCapacity: { type: integer, minimum: 1 }
+        lastMinute:
+          type: object
+          additionalProperties: false
+          required: [committed, failed, withinBudget, refused]
+          properties:
+            committed: { type: integer, format: int64, minimum: 0 }
+            failed: { type: integer, format: int64, minimum: 0 }
+            withinBudget: { type: integer, format: int64, minimum: 0 }
+            refused:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Turned away before admission because the queue was full or the publication backlog stopped new orders. Rate limits are counted separately.
+        outbox:
+          type: object
+          additionalProperties: false
+          required: [admitting, pendingEvents, oldestPendingMillis]
+          properties:
+            admitting: { type: boolean, description: 'False while the publication backlog stops new orders.' }
+            pendingEvents:
+              type: [integer, 'null']
+              format: int64
+              minimum: 0
+              description: Null where the relay does not run.
+            oldestPendingMillis:
+              type: [integer, 'null']
+              format: int64
+              minimum: 0
     BotRunList:
       type: object
       additionalProperties: false

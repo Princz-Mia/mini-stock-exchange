@@ -31,14 +31,17 @@ class CommandMetrics {
 
 	private final LongSupplier nanoTime;
 
+	private final CommandActivity activity;
+
 	@Autowired
-	CommandMetrics(MeterRegistry meters) {
-		this(meters, System::nanoTime);
+	CommandMetrics(MeterRegistry meters, CommandActivity activity) {
+		this(meters, System::nanoTime, activity);
 	}
 
-	CommandMetrics(MeterRegistry meters, LongSupplier nanoTime) {
+	CommandMetrics(MeterRegistry meters, LongSupplier nanoTime, CommandActivity activity) {
 		this.meters = meters;
 		this.nanoTime = nanoTime;
+		this.activity = activity;
 	}
 
 	/** The same submission, timed from admission to result; a full queue is counted as refused and rethrown. */
@@ -53,14 +56,18 @@ class CommandMetrics {
 				refused(command, "busy");
 				throw ex;
 			}
-			future.whenComplete((result, failure) -> timer(command, failure == null ? "committed" : "failed")
-				.record(nanoTime.getAsLong() - start, TimeUnit.NANOSECONDS));
+			future.whenComplete((result, failure) -> {
+				long took = nanoTime.getAsLong() - start;
+				timer(command, failure == null ? "committed" : "failed").record(took, TimeUnit.NANOSECONDS);
+				activity.finished(failure == null, Duration.ofNanos(took));
+			});
 			return future;
 		};
 	}
 
 	/** A command turned away before admission, for a reason such as a full queue or the publication backlog. */
 	void refused(String command, String reason) {
+		activity.refused();
 		Counter.builder("mse.commands.refused")
 			.description("Trading commands refused before admission")
 			.tag("command", command)

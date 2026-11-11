@@ -102,6 +102,11 @@ public final class CommandWriter implements AutoCloseable {
 		return queue.size();
 	}
 
+	/** How many commands the queue holds before admission refuses more. */
+	public int queueCapacity() {
+		return queue.size() + queue.remainingCapacity();
+	}
+
 	/** Stops admission, lets admitted commands finish within the grace period, then fails whatever is left. */
 	public void close(Duration grace) throws InterruptedException {
 		synchronized (admission) {
