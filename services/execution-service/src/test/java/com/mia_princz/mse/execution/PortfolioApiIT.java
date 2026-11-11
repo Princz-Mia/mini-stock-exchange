@@ -253,6 +253,48 @@ class PortfolioApiIT {
 	}
 
 	/**
+	 * Finished orders come by when they ended, not when they were placed: an order resting a long time and canceled
+	 * last is first, ahead of quick fills placed after it. Open orders are not there; filters narrow it; it is one page.
+	 */
+	@Test
+	void finishedOrdersComeByWhenTheyEnded() throws Exception {
+		String resting = place(trader, "BUY", 1, "90.00");
+		place(trader, "BUY", 1, "91.00");
+		for (int i = 0; i < 3; i++) {
+			place(trader, "SELL", 1, "100.00");
+			place(other, "BUY", 1, "100.00");
+		}
+		HttpResponse<String> rejected = trader.post("/api/v1/orders", limit("BUY", 10_000, "900.00"), "Idempotency-Key",
+				UUID.randomUUID().toString());
+		assertThat(rejected.statusCode()).isEqualTo(422);
+		assertThat(trader.post("/api/v1/orders/" + resting + "/cancel", "", "Idempotency-Key",
+				UUID.randomUUID().toString()).statusCode()).isEqualTo(200);
+
+		JsonNode finished = json(trader.get("/api/v1/orders?status=finished&limit=20"));
+		List<String> states = new ArrayList<>();
+		finished.get("orders").forEach((order) -> states.add(order.get("state").asString()));
+		assertThat(states).as("ended last first; the open 91.00 buy is not finished")
+			.containsExactly("CANCELED", "REJECTED", "FILLED", "FILLED", "FILLED");
+		assertThat(finished.get("orders").get(0).get("orderId").asString()).isEqualTo(resting);
+		assertThat(finished.get("nextCursor").isNull()).isTrue();
+		List<String> ended = new ArrayList<>();
+		finished.get("orders").forEach((order) -> ended.add(order.get("updatedAt").asString()));
+		assertThat(ended).isSortedAccordingTo((a, b) -> Instant.parse(b).compareTo(Instant.parse(a)));
+
+		assertThat(json(trader.get("/api/v1/orders?status=finished&limit=2")).get("orders")).hasSize(2);
+		assertThat(json(trader.get("/api/v1/orders?status=finished&side=SELL")).get("orders")).hasSize(3);
+		assertThat(json(trader.get("/api/v1/orders?status=finished&instrumentId=" + instrument)).get("orders")).hasSize(5);
+		assertThat(json(trader.get("/api/v1/orders?status=finished&instrumentId=" + INSTRUMENTS.getLast())).get("orders"))
+			.isEmpty();
+		assertThat(trader.get("/api/v1/orders?status=finished&state=FILLED").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/orders?status=finished&order=oldest").statusCode()).isEqualTo(400);
+		String cursor = json(trader.get("/api/v1/orders?limit=1")).get("nextCursor").asString();
+		assertThat(trader.get("/api/v1/orders?status=finished&cursor=" + cursor).statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/orders?status=finished&limit=201").statusCode()).isEqualTo(400);
+		assertThat(trader.get("/api/v1/orders?status=done").statusCode()).isEqualTo(400);
+	}
+
+	/**
 	 * Each filter, alone and together, narrows the history to exactly the rows that match, in pages, either way. Its
 	 * cursors carry it: one is refused under another filter or none, and one from no filter is refused under a filter.
 	 */
@@ -433,7 +475,7 @@ class PortfolioApiIT {
 		jdbc.update("INSERT INTO simulation (id, state, opened_at) VALUES (?, 'OPEN', now())", simulation);
 		jdbc.update("INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'ISSUANCE', 'Issuance')",
 				UUID.randomUUID(), simulation);
-		for (int i = 0; i < 12; i++) {
+		for (int i = 0; i < 16; i++) {
 			UUID id = UUID.randomUUID();
 			jdbc.update(
 					"INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, ?, 10000)",

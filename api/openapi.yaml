@@ -109,12 +109,14 @@ paths:
       summary: The caller's own orders, newest first unless order=oldest.
       description: |
         With status=active, every open or partially filled order, at most 20, in one response. With status=all,
-        every order including rejected ones, in keyset pages. The instrumentId, side and state filters apply to
-        status=all only; with status=active they are refused.
+        every order including rejected ones, in keyset pages. With status=finished, the filled, canceled and
+        rejected orders that ended most recently, most recent first, in one page of at most limit; it takes no
+        cursor or order. The instrumentId and side filters apply to status=all and status=finished, state to
+        status=all only; filters are refused with status=active.
       parameters:
         - name: status
           in: query
-          schema: { type: string, enum: [all, active], default: all }
+          schema: { type: string, enum: [all, active, finished], default: all }
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Order'

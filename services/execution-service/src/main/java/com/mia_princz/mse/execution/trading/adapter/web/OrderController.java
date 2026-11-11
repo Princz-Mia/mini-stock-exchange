@@ -110,8 +110,8 @@ class OrderController {
 	}
 
 	/**
-	 * Active orders all at once (at most the per-account limit), or the whole history in keyset pages, newest first
-	 * unless {@code order=oldest}.
+	 * Active orders all at once (at most the per-account limit); the whole history in keyset pages, newest first
+	 * unless {@code order=oldest}; or the most recently ended finished orders, one page of at most {@code limit}.
 	 */
 	@GetMapping("/orders")
 	OrderPage orders(@RequestParam(defaultValue = "all") String status, @RequestParam(required = false) String cursor,
@@ -129,8 +129,20 @@ class OrderController {
 			List<TradingQueries.OrderView> active = queries.activeOrders(account);
 			return new OrderPage(direction == PageOrder.NEWEST ? active : active.reversed(), null);
 		}
+		if ("finished".equals(status)) {
+			// Finished orders by when they ended: one page, for the terminal's recent orders; the history has the rest.
+			if (filter.state() != null) {
+				throw ApiException.invalid("state", "INVALID_VALUE", "state applies to status=all only");
+			}
+			if (direction != PageOrder.NEWEST || cursor != null) {
+				throw ApiException.invalid("status", "INVALID_VALUE",
+						"status=finished is one page, the most recently ended first");
+			}
+			Pages.checkLimit(limit);
+			return new OrderPage(queries.finishedOrders(account, limit, filter), null);
+		}
 		if (!"all".equals(status)) {
-			throw ApiException.invalid("status", "INVALID_VALUE", "status must be all or active");
+			throw ApiException.invalid("status", "INVALID_VALUE", "status must be all, active or finished");
 		}
 		Pages.checkLimit(limit);
 		TradingQueries.OrderPosition after = cursor == null ? null : Cursors.orders(cursor, direction, filter);
