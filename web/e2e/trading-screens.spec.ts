@@ -406,8 +406,41 @@ for (const size of SIZES) {
       const page = await at(browser, size, 'operator');
       await expect(page.getByRole('heading', { name: 'Market' })).toBeVisible();
       await expect(page.getByRole('region', { name: 'Bot runs' })).toBeVisible();
+      const live = page.getByRole('region', { name: 'Health' });
+      await expect(live.getByText('Taking commands')).toBeVisible();
+      // Market data and analytics have answered, through the proxy, before the screen is captured.
+      await expect(live.getByText('Checking…')).toHaveCount(0, { timeout: 15_000 });
+      await expect(live.getByText('Not reachable')).toHaveCount(0);
       await capture(page, size, 'operator');
       await page.context().close();
+
+      // Trading falling behind: a halted writer, a full queue, refusals and a backlog, each said in words.
+      const behind = await at(browser, size, 'operator', async (fresh) => {
+        await fresh.route('**/api/v1/admin/health', (route) =>
+          route.fulfill({
+            json: {
+              writer: { available: false, queueDepth: 200, queueCapacity: 256 },
+              lastMinute: { committed: 80, failed: 20, withinBudget: 60, refused: 12 },
+              outbox: { admitting: false, pendingEvents: 50_000, oldestPendingMillis: 30_000 },
+            },
+          }),
+        );
+      });
+      const health = behind.getByRole('region', { name: 'Health' });
+      await expect(health.getByText('Trading stopped until Execution restarts')).toBeVisible();
+      await expect(health.getByText('Publication backlog is full')).toBeVisible();
+      await capture(behind, size, 'operator-health-behind');
+      await behind.context().close();
+
+      // Execution's summary cannot be read.
+      const lost = await at(browser, size, 'operator', async (fresh) => {
+        await fresh.route('**/api/v1/admin/health', problem(503, 'UNAVAILABLE'));
+      });
+      await expect(lost.getByRole('region', { name: 'Health' }).getByRole('alert')).toContainText(
+        'Trading health is not reachable',
+      );
+      await capture(lost, size, 'operator-health-down');
+      await lost.context().close();
 
       const down = await at(browser, size, 'operator');
       await down.route(/\/api\/v1\/market$/, problem(503, 'TRADING_UNAVAILABLE'));

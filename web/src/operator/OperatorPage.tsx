@@ -4,11 +4,13 @@ import { api, pollEvery } from '../api/client';
 import { AccountSetup } from './AccountSetup';
 import { BotRuns } from './BotRuns';
 import { BotSetup } from './BotSetup';
+import { HealthPanel } from './HealthPanel';
 import { InstrumentSetup } from './InstrumentSetup';
 import { MarketControl } from './MarketControl';
 
 /**
- * The operator's screen: the authoritative trading phase with its controls, bot runs, and the SETUP editor for
+ * The operator's screen: the authoritative trading phase with its controls and, once open, how trading is keeping
+ * up; bot runs, and the SETUP editor for
  * instruments, bots and endowments. Once the market opens, bot runs come first. Everything shown is what the exchange committed, refetched after each command and every five
  * seconds.
  */
@@ -35,7 +37,21 @@ export function OperatorPage() {
 
   return (
     <div className="operator">
-      <MarketControl market={market.data} instruments={listed.length} />
+      <div className="operator-side">
+        <MarketControl market={market.data} instruments={listed.length} />
+        {!editable && (
+          <HealthPanel
+            instruments={listed}
+            feed={
+              instruments.isError
+                ? { kind: 'unreachable' }
+                : instruments.data === undefined
+                  ? { kind: 'checking' }
+                  : { kind: 'read', feed: instruments.data.feed }
+            }
+          />
+        )}
+      </div>
       <div className="operator-setup">
         {instruments.isError && (
           <p role="alert" className="form-error">

@@ -545,6 +545,38 @@ describe('bot runs on the operator screen', () => {
     expect(accountsAsked).toContain('order=oldest');
   });
 
+  it('shows how trading keeps up once the market is open, and not during setup', async () => {
+    const { server } = exchange('OPEN');
+    server.on('GET /api/v1/admin/health', {
+      status: 200,
+      json: {
+        writer: { available: true, queueDepth: 0, queueCapacity: 256 },
+        lastMinute: { committed: 0, failed: 0, withinBudget: 0, refused: 0 },
+        outbox: { admitting: true, pendingEvents: 0, oldestPendingMillis: 0 },
+      },
+    });
+    server.on('GET /api/v1/instruments', {
+      status: 200,
+      json: { instruments: [NOVA], feed: { state: 'STALE', lag: 12 } },
+    });
+    const open = renderPage();
+    const health = await screen.findByRole('region', { name: 'Health' });
+    expect(await within(health).findByText('Taking commands')).toBeInTheDocument();
+    // The page hands over the market data feed and the instruments to check the analytics of.
+    expect(await within(health).findByText('Stale · 12 behind')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(server.requests.some((request) => request.url.startsWith(`/api/v1/instruments/${NOVA.instrumentId}/candles`))).toBe(
+        true,
+      ),
+    );
+    open.unmount();
+
+    exchange('SETUP');
+    renderPage();
+    await screen.findByRole('heading', { name: 'Market' });
+    expect(screen.queryByRole('region', { name: 'Health' })).toBeNull();
+  });
+
   it('puts bot runs first once the market is open, and after the setup editor before', async () => {
     exchange('OPEN');
     const open = renderPage();

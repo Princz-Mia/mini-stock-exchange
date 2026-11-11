@@ -352,6 +352,52 @@ tbody th {
   align-items: start;
 }
 
+.operator-side {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.health {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.health-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-3);
+}
+
+.health-row dt {
+  color: var(--muted);
+}
+
+.health-row dd {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-1) var(--space-2);
+  margin: 0;
+  text-align: right;
+}
+
+.health-warn dd .num {
+  font-weight: 600;
+}
+
+.health-tag {
+  background: var(--warn-bg);
+  color: var(--warn-text);
+}
+
+.health-note {
+  margin: 0;
+  font-size: 12px;
+}
+
 .operator-setup {
   display: grid;
   gap: var(--space-4);
