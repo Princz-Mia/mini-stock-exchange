@@ -92,6 +92,11 @@ jobs:
         with:
           version: "0.13.6"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: TEMPORARY simulate an apt mirror outage
+        run: |
+          grep -h '^URIs:' /etc/apt/sources.list.d/*.sources || true
+          printf '0.0.0.0 azure.archive.ubuntu.com\n0.0.0.0 archive.ubuntu.com\n0.0.0.0 security.ubuntu.com\n' | sudo tee -a /etc/hosts
+          fc-list : family | sort -u | head -n 40
       # Playwright installs Chromium's libraries and fonts with apt, so an Ubuntu mirror outage would fail the gate
       # through no fault of the code. Retry with a backoff, then install the browser alone: the runner image ships
       # Google Chrome, so it has the libraries Chromium needs. If one were missing, the browser test could not launch
