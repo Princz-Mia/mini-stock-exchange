@@ -1,6 +1,6 @@
 import type { Feed } from '../api/types';
 
-const LABELS: Record<Feed['state'], string> = {
+export const FEED_LABELS: Record<Feed['state'], string> = {
   LIVE: 'Live',
   CATCHING_UP: 'Catching up',
   STARTING: 'Connecting',
@@ -14,7 +14,7 @@ export function FeedStatus({ feed }: { feed: Feed }) {
   const behind = feed.state !== 'LIVE' && feed.lag > 0 ? ` · ${feed.lag} behind` : '';
   return (
     <span className={`feed feed-${feed.state.toLowerCase()}`} role="status">
-      Market data: {LABELS[feed.state]}
+      Market data: {FEED_LABELS[feed.state]}
       {behind}
     </span>
   );

@@ -10,6 +10,7 @@ import type {
   BotsCreated,
   BotsRequest,
   Candles,
+  HealthSummary,
   Cancellation,
   CsrfToken,
   Identity,
@@ -175,6 +176,9 @@ export const api = {
     request<AccountPage>('GET', `/api/v1/admin/accounts${query({ cursor, limit, order })}`),
 
   botPopulation: () => request<BotPopulation>('GET', '/api/v1/admin/bots'),
+
+  /** How trading is keeping up: the writer, the last minute of commands, and the outbox. */
+  health: () => request<HealthSummary>('GET', '/api/v1/admin/health'),
 
   provisionBots: (bots: BotsRequest, idempotencyKey: string) =>
     request<BotsCreated>('POST', '/api/v1/admin/bots', { body: bots, idempotencyKey }),
