@@ -4,7 +4,7 @@ import { MemoryRouter, useLocation } from 'react-router';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { Candle, Candles, TapeTrade } from '../api/types';
-import { chartState, hiddenSeries, liveSeries, resetChart } from '../test/fakeChart';
+import { chartState, createChart, hiddenSeries, liveSeries, resetChart } from '../test/fakeChart';
 import { fakeServer } from '../test/fakeServer';
 import { PriceChart, readSettings } from './PriceChart';
 
@@ -85,8 +85,11 @@ const values = (kind: string) => liveSeries(kind)?.data.map((point) => (point as
 
 beforeEach(() => {
   resetChart();
-  document.documentElement.style.removeProperty('--buy');
-  document.documentElement.style.removeProperty('--sell');
+  createChart.mockClear();
+  for (const name of ['--buy', '--sell', '--secondary', '--surface', '--muted', '--line']) {
+    document.documentElement.style.removeProperty(name);
+  }
+  delete document.documentElement.dataset.theme;
 });
 
 describe('PriceChart', () => {
@@ -349,6 +352,54 @@ describe('PriceChart, what it leaves out and keeps', () => {
       '#00aa0080',
       '#cc000080',
     ]);
+  });
+});
+
+describe('PriceChart colours', () => {
+  const paint = (colours: Record<string, string>) => {
+    for (const [name, value] of Object.entries(colours)) {
+      document.documentElement.style.setProperty(name, value);
+    }
+  };
+
+  it('takes the new scheme colours when the theme changes, without creating the chart again', async () => {
+    paint({ '--buy': '#00aa00', '--sell': '#cc0000', '--secondary': '#5b3fa0', '--surface': '#ffffff', '--muted': '#615c6e', '--line': '#dedbe5' });
+    fakeServer().on(ROUTE, { status: 200, json: answer(BARS, '7', '7') });
+    renderChart();
+    await waitFor(() => expect(liveSeries('Histogram')?.data).toHaveLength(2));
+    expect(liveSeries('Candlestick')?.options).toMatchObject({ upColor: '#00aa00', downColor: '#cc0000' });
+
+    paint({ '--buy': '#4cc27b', '--sell': '#f0646d', '--secondary': '#9b82e0', '--surface': '#1b1822', '--muted': '#a39fb0', '--line': '#322e3d' });
+    await act(async () => {
+      document.documentElement.dataset.theme = 'dark';
+    });
+
+    await waitFor(() => expect(liveSeries('Candlestick')?.options).toMatchObject({ upColor: '#4cc27b', wickDownColor: '#f0646d' }));
+    const layouts = chartState.options.filter((options) => 'layout' in (options as object));
+    expect(layouts.at(-1)).toEqual({
+      layout: { background: { color: '#1b1822' }, textColor: '#a39fb0' },
+      grid: { vertLines: { color: '#322e3d' }, horzLines: { color: '#322e3d' } },
+    });
+    expect(liveSeries('Candlestick')?.options).toMatchObject({
+      upColor: '#4cc27b',
+      downColor: '#f0646d',
+      borderUpColor: '#4cc27b',
+      borderDownColor: '#f0646d',
+      wickUpColor: '#4cc27b',
+      wickDownColor: '#f0646d',
+    });
+    expect(hiddenSeries().find((series) => series.kind === 'Line')?.options).toMatchObject({ color: '#9b82e0' });
+    expect(hiddenSeries().find((series) => series.kind === 'Area')?.options).toMatchObject({
+      lineColor: '#9b82e0',
+      topColor: '#9b82e066',
+      bottomColor: '#9b82e00a',
+    });
+    // The volume bars are coloured in their data, so they are drawn again in the new colours.
+    expect(liveSeries('Histogram')?.data.map((point) => (point as { color: string }).color)).toEqual([
+      '#4cc27b80',
+      '#4cc27b80',
+    ]);
+    expect(createChart).toHaveBeenCalledTimes(1);
   });
 });
 

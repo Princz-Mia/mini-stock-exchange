@@ -15,6 +15,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
 import { api, pollEvery } from '../api/client';
+import { useScheme } from '../app/theme';
 import type { Candles, TapeTrade } from '../api/types';
 import { groupDigits, utcTime } from '../format';
 import {
@@ -281,40 +282,23 @@ export function PriceChart({
   const series = useRef<Record<Kind, ISeriesApi<SeriesType>> | null>(null);
   const volume = useRef<ISeriesApi<'Histogram'> | null>(null);
   const colours = useRef({ up: '', down: '', neutral: '' });
+  const scheme = useScheme();
 
   useEffect(() => {
     if (host.current === null) {
       return;
     }
-    // The chart draws on a canvas, so it takes its colours from the page's tokens rather than its own defaults.
-    const token = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-    const [up, down, line] = [token('--buy'), token('--sell'), token('--secondary')];
-    colours.current = { up, down, neutral: `${line}80` };
     const created = createChart(host.current, {
       autoSize: true,
-      layout: { background: { color: token('--surface') }, textColor: token('--muted'), attributionLogo: false },
-      grid: { vertLines: { color: token('--line') }, horzLines: { color: token('--line') } },
+      layout: { attributionLogo: false },
       timeScale: { timeVisible: true, secondsVisible: false },
     });
     // All three kinds stay in the top pane and only the chosen one is shown. Removing a series instead would leave
     // the top pane empty for a moment, and the library drops empty panes, which moves the volume up into it.
     series.current = {
-      candle: created.addSeries(CandlestickSeries, {
-        upColor: up,
-        downColor: down,
-        borderUpColor: up,
-        borderDownColor: down,
-        wickUpColor: up,
-        wickDownColor: down,
-      }),
-      line: created.addSeries(LineSeries, { color: line, lineWidth: 2, visible: false }),
-      area: created.addSeries(AreaSeries, {
-        lineColor: line,
-        topColor: `${line}66`,
-        bottomColor: `${line}0a`,
-        lineWidth: 2,
-        visible: false,
-      }),
+      candle: created.addSeries(CandlestickSeries),
+      line: created.addSeries(LineSeries, { lineWidth: 2, visible: false }),
+      area: created.addSeries(AreaSeries, { lineWidth: 2, visible: false }),
     };
     volume.current = created.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceLineVisible: false }, 1);
     const [main, lower] = created.panes();
@@ -331,6 +315,32 @@ export function PriceChart({
       volume.current = null;
     };
   }, []);
+
+  // The chart draws on a canvas, so it takes its colours from the page's tokens rather than its own defaults, and
+  // takes them again when the scheme changes, without being created anew. It runs before the data below, which
+  // colours the volume bars from these.
+  useEffect(() => {
+    if (chart.current === null || series.current === null) {
+      return;
+    }
+    const token = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const [up, down, line] = [token('--buy'), token('--sell'), token('--secondary')];
+    colours.current = { up, down, neutral: `${line}80` };
+    chart.current.applyOptions({
+      layout: { background: { color: token('--surface') }, textColor: token('--muted') },
+      grid: { vertLines: { color: token('--line') }, horzLines: { color: token('--line') } },
+    });
+    series.current.candle.applyOptions({
+      upColor: up,
+      downColor: down,
+      borderUpColor: up,
+      borderDownColor: down,
+      wickUpColor: up,
+      wickDownColor: down,
+    });
+    series.current.line.applyOptions({ color: line });
+    series.current.area.applyOptions({ lineColor: line, topColor: `${line}66`, bottomColor: `${line}0a` });
+  }, [scheme]);
 
   // Candles, a line or an area for bars; the tape is always a line.
   const kind: Kind = shown.kind === 'tape' ? 'line' : settings.type;
@@ -375,7 +385,7 @@ export function PriceChart({
         color: `${bar.close >= bar.open ? up : down}80`,
       })),
     );
-  }, [bars, kind, shown.kind, seen]);
+  }, [bars, kind, shown.kind, seen, scheme]);
 
   // A new instrument, range or bar size starts with everything in view; live updates leave the view alone.
   useEffect(() => {

@@ -13,5 +13,7 @@ export default defineConfig({
     setupFiles: './src/test-setup.ts',
     // Browser tests under e2e/ run with Playwright against a running stack.
     include: ['src/**/*.test.{ts,tsx}'],
+    // CSS is skipped in tests unless named here; the theme tests read the stylesheet itself.
+    css: { include: [/styles\.css/] },
   },
 });

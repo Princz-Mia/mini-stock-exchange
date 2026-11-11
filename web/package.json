@@ -10,7 +10,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --noEmit",
-    "lint": "eslint .",
+    "lint": "eslint . --max-warnings 0 && node check-lint-rules.mjs",
     "test": "vitest run",
     "e2e": "playwright test",
     "api:generate": "openapi-typescript ../api/openapi.yaml --output src/api/schema.ts --immutable",

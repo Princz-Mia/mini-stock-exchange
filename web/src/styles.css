@@ -32,8 +32,13 @@
   background: var(--bg);
 }
 
+/*
+ * The dark scheme: when the system asks for it, unless the light theme is forced, and whenever the dark theme is
+ * forced. Both blocks must hold the same tokens (theme.test.ts checks). A forced theme also sets color-scheme, so form
+ * controls and scrollbars match it.
+ */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --bg: #121017;
     --surface: #1b1822;
     --surface-sunken: #24202d;
@@ -48,6 +53,27 @@
     --warn-bg: #3a2e12;
     --warn-text: #f3d48b;
   }
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #121017;
+  --surface: #1b1822;
+  --surface-sunken: #24202d;
+  --text: #ece9f2;
+  --muted: #a39fb0;
+  --line: #322e3d;
+  --accent: #d1386a;
+  --secondary: #9b82e0;
+  --buy: #4cc27b;
+  --sell: #f0646d;
+  --fill-text: #121017;
+  --warn-bg: #3a2e12;
+  --warn-text: #f3d48b;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -186,8 +212,15 @@ input[aria-invalid='true'] {
   background: var(--surface-sunken);
 }
 
-.user {
+.theme-switch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   margin-left: auto;
+  white-space: nowrap;
+}
+
+.user {
   color: var(--muted);
 }
 
@@ -539,7 +572,8 @@ button.primary.danger:enabled {
   font-size: 13px;
 }
 
-.table-toolbar select {
+.table-toolbar select,
+.theme-switch select {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
@@ -604,7 +638,7 @@ button.chip {
   }
 }
 
-/* Phones: the brand and badge on one row, navigation and the account on the next, and 16px gutters. */
+/* Phones: the brand and badge on one row, navigation and the account on the next, the theme below, and 16px gutters. */
 @media (max-width: 640px) {
   .topbar {
     flex-wrap: wrap;
@@ -621,6 +655,12 @@ button.chip {
   .topbar .user,
   .topbar > button {
     order: 2;
+  }
+
+  /* On a row of its own under the navigation, so the account stays beside it. */
+  .topbar .theme-switch {
+    order: 3;
+    margin-left: 0;
   }
 
   .brand {
