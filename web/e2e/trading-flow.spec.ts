@@ -130,6 +130,15 @@ test.describe.serial('trading through the browser', () => {
     await expect(bids).not.toContainText('101.00');
     await expect(availableCash).toHaveText('99,495.00');
 
+    // The canceled order is under Recent orders, with what had filled; narrowed to NOVA, it is still there.
+    await page.getByRole('tab', { name: 'Recent orders' }).click();
+    const recent = page.getByRole('table', { name: 'Recent orders' }).getByRole('row').nth(1);
+    await expect(recent).toContainText('Canceled · 5 of 6 filled');
+    await expect(recent).toContainText('101.00');
+    await page.getByLabel('Only NOVA').check();
+    await expect(page.getByRole('table', { name: 'Recent orders' }).getByRole('row').nth(1)).toContainText('Canceled');
+    await page.getByRole('tab', { name: /Open orders/ }).click();
+
     // The portfolio agrees: cash, 505 shares marked at the 101.00 last trade, the execution and the canceled order.
     await page.getByRole('link', { name: 'Portfolio' }).click();
     const summary = page.getByRole('region', { name: 'Summary' });

@@ -28,7 +28,7 @@ const PAUSED: Record<Exclude<MarketStatus['state'], 'OPEN'>, { badge: string; re
 
 /**
  * The trading terminal: the selected instrument's live book, tape and chart from the market stream, the order
- * ticket beside them, and the trader's open orders. Public market data and private balances are separate sources
+ * ticket beside them, and the trader's open and recently finished orders. Public market data and private balances are separate sources
  * and are not claimed to be one snapshot; each shows its own freshness.
  */
 export function TerminalPage() {
@@ -108,7 +108,10 @@ export function TerminalPage() {
         </>
       )}
       <div className="terminal-orders">
-        <OwnOrders orders={orders.data?.orders ?? []} />
+        <OwnOrders
+          orders={orders.data?.orders ?? []}
+          instrument={selected === null ? null : { instrumentId: selected.instrumentId, symbol: selected.symbol }}
+        />
       </div>
     </div>
   );
