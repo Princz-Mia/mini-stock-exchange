@@ -1,10 +1,11 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { Candle, Candles, TapeTrade } from '../api/types';
 import { chartState, createChart, hiddenSeries, liveSeries, resetChart } from '../test/fakeChart';
+import { PREFERENCE_KEYS, storeChart } from '../app/preferences';
 import { fakeServer } from '../test/fakeServer';
 import { PriceChart, readSettings } from './PriceChart';
 
@@ -78,7 +79,7 @@ function renderChart(trades: TapeTrade[] | null = [], at = `/terminal?instrument
     </QueryClientProvider>
   );
   const rendered = render(ui(trades));
-  return { client, frame: (tape: TapeTrade[] | null) => rendered.rerender(ui(tape)) };
+  return { client, frame: (tape: TapeTrade[] | null) => rendered.rerender(ui(tape)), unmount: rendered.unmount };
 }
 
 const values = (kind: string) => liveSeries(kind)?.data.map((point) => (point as { value: number }).value);
@@ -90,6 +91,7 @@ beforeEach(() => {
     document.documentElement.style.removeProperty(name);
   }
   delete document.documentElement.dataset.theme;
+  window.localStorage.clear();
 });
 
 describe('PriceChart', () => {
@@ -192,6 +194,77 @@ describe('PriceChart', () => {
     expect(address()).toContain('bars=5m');
     expect(address()).toContain(`instrument=${NOVA}`);
     expect(within(range).getByRole('button', { name: '1 day' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  const pressed = (group: string) =>
+    within(screen.getByRole('group', { name: group }))
+      .getAllByRole('button')
+      .filter((button) => button.getAttribute('aria-pressed') === 'true')
+      .map((button) => button.textContent);
+
+  it('remembers the settings in this browser, for a visit whose address names none', async () => {
+    fakeServer().on(ROUTE, { status: 200, json: answer(BARS, '7', '7') });
+    const first = renderChart();
+    fireEvent.click(within(screen.getByRole('group', { name: 'Chart type' })).getByRole('button', { name: 'Line' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Range' })).getByRole('button', { name: '30 min' }));
+    fireEvent.click(within(screen.getByRole('group', { name: 'Bar size' })).getByRole('button', { name: '5 min' }));
+    expect(window.localStorage.getItem(PREFERENCE_KEYS.chart)).toBe('chart=line&range=30m&bars=5m');
+    first.unmount();
+
+    // Back from another page: the link to the terminal carries only the instrument.
+    renderChart();
+    expect(pressed('Chart type')).toEqual(['Line']);
+    expect(pressed('Range')).toEqual(['30 min']);
+    expect(pressed('Bar size')).toEqual(['5 min']);
+    expect(screen.getByText('5 min bars · last 30 min')).toBeInTheDocument();
+  });
+
+  it('keeps the latest choice when the address loses its settings while the chart stays on screen', async () => {
+    fakeServer().on(ROUTE, { status: 200, json: answer(BARS, '7', '7') });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    // The Terminal link, followed while already on the terminal: same page, no settings in the address.
+    function TerminalLink() {
+      const navigate = useNavigate();
+      return (
+        <button type="button" onClick={() => navigate(`/terminal?instrument=${NOVA}`)}>
+          Terminal link
+        </button>
+      );
+    }
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={[`/terminal?instrument=${NOVA}`]}>
+          <PriceChart instrumentId={NOVA} trades={[]} />
+          <TerminalLink />
+          <Address />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    fireEvent.click(within(screen.getByRole('group', { name: 'Chart type' })).getByRole('button', { name: 'Line' }));
+    expect(address()).toContain('chart=line');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Terminal link' }));
+    expect(address()).not.toContain('chart=');
+    expect(pressed('Chart type')).toEqual(['Line']);
+  });
+
+  it('shows what the address says over what is stored, without changing what is stored', () => {
+    fakeServer().on(ROUTE, { status: 200, json: answer(BARS, '7', '7') });
+    storeChart(new URLSearchParams('chart=area&range=30m&bars=5m'));
+    renderChart([], `/terminal?instrument=${NOVA}&chart=line`);
+    expect(pressed('Chart type')).toEqual(['Line']);
+    // An address naming any setting is followed whole, as a shared link would be.
+    expect(pressed('Range')).toEqual(['2 hours']);
+    expect(window.localStorage.getItem(PREFERENCE_KEYS.chart)).toBe('chart=area&range=30m&bars=5m');
+  });
+
+  it('ignores stored settings it does not know, and narrows a stored bar size to fit', () => {
+    fakeServer().on(ROUTE, { status: 200, json: answer(BARS, '7', '7') });
+    storeChart(new URLSearchParams('chart=pie&range=30m&bars=1h'));
+    renderChart();
+    expect(pressed('Chart type')).toEqual(['Candles']);
+    expect(pressed('Range')).toEqual(['30 min']);
+    expect(pressed('Bar size')).toEqual(['15 min']);
   });
 
   it('offers only bar sizes the range can hold two of, and narrows the bar size to fit', async () => {

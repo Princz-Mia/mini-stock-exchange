@@ -15,6 +15,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
 import { api, pollEvery } from '../api/client';
+import { storeChart, storedChart } from '../app/preferences';
 import { useScheme } from '../app/theme';
 import type { Candles, TapeTrade } from '../api/types';
 import { groupDigits, utcTime } from '../format';
@@ -80,24 +81,38 @@ function pick<T extends string>(value: string | null, allowed: readonly T[], fal
   return allowed.includes(value as T) ? (value as T) : fallback;
 }
 
-/** The chart's settings live in the address, so a reload or a shared link keeps them; anything unknown is ignored. */
+/** The chart's settings as the address carries them; anything unknown is ignored. */
 export function readSettings(params: URLSearchParams): ChartSettings {
   const range = pick(params.get('range'), Object.keys(RANGES) as Range[], DEFAULTS.range);
   const bars = pick(params.get('bars'), Object.keys(BAR_SIZES) as BarSize[], DEFAULTS.bars);
   return { type: pick(params.get('chart'), CHART_TYPES, DEFAULTS.type), range, bars: fittedBarSize(bars, range) };
 }
 
+const SETTING_PARAMS = ['chart', 'range', 'bars'] as const;
+
+/**
+ * The chart's settings. The address wins when it names any, so a reload or a shared link shows what it says;
+ * otherwise this browser's last choice, so coming back to the terminal from elsewhere keeps it. A change goes into
+ * both. A link someone opens changes nothing stored until they choose for themselves.
+ */
 function useChartSettings(): [ChartSettings, (change: Partial<ChartSettings>) => void] {
   const [params, setParams] = useSearchParams();
-  const settings = readSettings(params);
+  // Kept in state as well as stored: the chart can lose its address without being mounted anew (Back, or the
+  // Terminal link while on the terminal), and must then show the latest choice, not the one stored when it mounted.
+  const [remembered, setRemembered] = useState(storedChart);
+  const fromAddress = SETTING_PARAMS.some((name) => params.has(name));
+  const settings = readSettings(fromAddress ? params : remembered);
   const change = (update: Partial<ChartSettings>) => {
     const next = { ...settings, ...update };
+    const chosen = new URLSearchParams({ chart: next.type, range: next.range, bars: fittedBarSize(next.bars, next.range) });
+    storeChart(chosen);
+    setRemembered(chosen);
     setParams(
       (current) => {
         const params = new URLSearchParams(current);
-        params.set('chart', next.type);
-        params.set('range', next.range);
-        params.set('bars', fittedBarSize(next.bars, next.range));
+        for (const [name, value] of chosen) {
+          params.set(name, value);
+        }
         return params;
       },
       { replace: true },
