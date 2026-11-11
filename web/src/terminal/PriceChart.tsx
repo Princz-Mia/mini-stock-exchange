@@ -344,6 +344,9 @@ export function PriceChart({
     chart.current.applyOptions({
       layout: { background: { color: token('--surface') }, textColor: token('--muted') },
       grid: { vertLines: { color: token('--line') }, horzLines: { color: token('--line') } },
+      // The scales' borders are the library's near-black otherwise, in either scheme.
+      rightPriceScale: { borderColor: token('--line') },
+      timeScale: { borderColor: token('--line') },
     });
     series.current.candle.applyOptions({
       upColor: up,

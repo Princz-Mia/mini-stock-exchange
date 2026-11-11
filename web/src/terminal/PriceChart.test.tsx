@@ -452,6 +452,8 @@ describe('PriceChart colours', () => {
     expect(layouts.at(-1)).toEqual({
       layout: { background: { color: '#1b1822' }, textColor: '#a39fb0' },
       grid: { vertLines: { color: '#322e3d' }, horzLines: { color: '#322e3d' } },
+      rightPriceScale: { borderColor: '#322e3d' },
+      timeScale: { borderColor: '#322e3d' },
     });
     expect(liveSeries('Candlestick')?.options).toMatchObject({
       upColor: '#4cc27b',
