@@ -25,7 +25,9 @@ class CommandMetricsTest {
 
 	private final AtomicLong clock = new AtomicLong();
 
-	private final CommandMetrics metrics = new CommandMetrics(meters, clock::get);
+	private final CommandActivity activity = new CommandActivity(clock::get, CommandMetrics.P95_BUDGET);
+
+	private final CommandMetrics metrics = new CommandMetrics(meters, clock::get, activity);
 
 	@Test
 	void aCommittedCommandIsTimedFromAdmissionToItsResult() throws Exception {
@@ -40,6 +42,8 @@ class CommandMetricsTest {
 		result.complete("done");
 
 		assertThat(admitted).isSameAs(result);
+		assertThat(activity.lastMinute()).as("in the health window too, within the budget")
+			.isEqualTo(new CommandActivity.Window(1, 0, 1, 0));
 		Timer timer = timer("place", "committed");
 		assertThat(timer.count()).isEqualTo(1);
 		assertThat(timer.totalTime(TimeUnit.MILLISECONDS)).as("admission included").isEqualTo(120);
@@ -53,6 +57,7 @@ class CommandMetricsTest {
 		result.completeExceptionally(new IllegalStateException("rolled back"));
 
 		assertThat(timer("cancel", "failed").totalTime(TimeUnit.MILLISECONDS)).isEqualTo(5);
+		assertThat(activity.lastMinute()).isEqualTo(new CommandActivity.Window(0, 1, 1, 0));
 		assertThat(meters.find("mse.commands").tag("outcome", "committed").timer()).isNull();
 	}
 
@@ -65,6 +70,7 @@ class CommandMetricsTest {
 		result.complete("late");
 
 		assertThat(timer("place", "committed").totalTime(TimeUnit.MILLISECONDS)).isEqualTo(7_000);
+		assertThat(activity.lastMinute()).as("past the budget").isEqualTo(new CommandActivity.Window(1, 0, 0, 0));
 	}
 
 	@Test
@@ -86,6 +92,7 @@ class CommandMetricsTest {
 		assertThat(meters.get("mse.commands.refused").tag("command", "place").tag("reason", "busy").counter().count())
 			.isEqualTo(1);
 		assertThat(meters.find("mse.commands").timers()).isEmpty();
+		assertThat(activity.lastMinute().refused()).as("in the health window too").isEqualTo(1);
 	}
 
 	@Test
@@ -94,6 +101,7 @@ class CommandMetricsTest {
 		metrics.refused("place", "backlog");
 
 		assertThat(meters.get("mse.commands.refused").tag("reason", "backlog").counter().count()).isEqualTo(2);
+		assertThat(activity.lastMinute()).isEqualTo(new CommandActivity.Window(0, 0, 0, 2));
 	}
 
 	@Test

@@ -124,6 +124,46 @@ class OrderApiIT {
 		assertThat(meters.get("mse.writer.queue.capacity").gauge().value()).isEqualTo(256);
 	}
 
+	/**
+	 * The operator's health summary counts the last minute's commands as they finish, and shows the writer and the
+	 * outbox. Operators only.
+	 */
+	@Test
+	void theOperatorSeesHowTradingKeepsUp() throws Exception {
+		TestBrowser operator = TestBrowser.loggedIn(port, "operator", OPERATOR_PASSWORD);
+		JsonNode before = health(operator);
+		String orderId = orderId(place(trader, UUID.randomUUID(), limit("BUY", 1, "90.00")));
+		assertThat(cancel(trader, UUID.randomUUID(), orderId).statusCode()).isEqualTo(200);
+
+		long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+		JsonNode after = health(operator);
+		while (after.get("lastMinute").get("committed").asLong() < before.get("lastMinute").get("committed").asLong() + 2
+				&& System.nanoTime() < deadline) {
+			Thread.sleep(20);
+			after = health(operator);
+		}
+		JsonNode minute = after.get("lastMinute");
+		assertThat(minute.get("committed").asLong()).isGreaterThanOrEqualTo(before.get("lastMinute").get("committed").asLong() + 2);
+		assertThat(minute.get("withinBudget").asLong()).isBetween(0L, minute.get("committed").asLong() + minute.get("failed").asLong());
+		assertThat(after.get("writer").get("available").asBoolean()).isTrue();
+		assertThat(after.get("writer").get("queueCapacity").asInt()).isEqualTo(256);
+		assertThat(after.get("writer").get("queueDepth").asInt()).isBetween(0, 256);
+		assertThat(after.get("outbox").get("admitting").asBoolean()).isTrue();
+		assertThat(after.get("outbox").get("pendingEvents").isNumber()).isTrue();
+
+		assertThat(trader.get("/api/v1/admin/health").statusCode()).isEqualTo(403);
+		assertThat(new TestBrowser(port).get("/api/v1/admin/health").statusCode()).isEqualTo(401);
+	}
+
+	private static JsonNode health(TestBrowser operator) throws Exception {
+		HttpResponse<String> response = operator.get("/api/v1/admin/health");
+		assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
+		OpenApiContract.get()
+			.assertResponse("GET", "/api/v1/admin/health", 200, response.headers().firstValue("Content-Type").orElse(null),
+					response.body());
+		return JSON.readTree(response.body());
+	}
+
 	@Test
 	void placedOrderCanBeReadBack() throws Exception {
 		HttpResponse<String> placed = place(trader, UUID.randomUUID(), limit("BUY", 5, "99.50"));

@@ -96,9 +96,11 @@ class CommandWriterTest {
 
 		assertThatThrownBy(() -> writer.submit(() -> "refused")).isInstanceOf(WriterBusyException.class);
 		assertThat(writer.queueDepth()).isEqualTo(2);
+		assertThat(writer.queueCapacity()).as("full or empty, the capacity it was made with").isEqualTo(2);
 
 		release.countDown();
 		assertThat(List.of(blocker.get(), first.get(), second.get())).containsExactly("blocker", "first", "second");
+		assertThat(writer.queueCapacity()).isEqualTo(2);
 	}
 
 	@Test

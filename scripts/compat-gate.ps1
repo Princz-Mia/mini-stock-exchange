@@ -600,6 +600,11 @@ try {
             Start-Sleep -Seconds 2
         }
         if (-not ($published -ge $sequence)) { throw "public tape at '$published', bot trade at $sequence" }
+        # While the run trades, the operator's health summary, through the proxy, counts the last minute's commands.
+        $health = Invoke-RestMethod "$base/admin/health" -WebSession $operator
+        Assert-Match 'health: commands in the last minute' '^[1-9][0-9]*$' "$($health.lastMinute.committed)"
+        Assert-Equal 'health: writer available' 'True' "$($health.writer.available)"
+        Assert-Equal 'health: outbox admitting' 'True' "$($health.outbox.admitting)"
         $headers = @{ $csrf.headerName = $csrf.token; 'Idempotency-Key' = [guid]::NewGuid().ToString() }
         [void](Invoke-RestMethod "$base/admin/bot-runs/$($started.runId)/stop" -Method Post -WebSession $operator -Headers $headers)
         $status = ''

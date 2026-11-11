@@ -380,6 +380,13 @@ bot_trading() {
   done
   assert_match "public tape reached bot trade $sequence" '^[0-9]+$' "$published" &&
     [ "$published" -ge "$sequence" ] || { fail "public tape at '$published', bot trade at $sequence"; return 1; }
+  # While the run trades, the operator's health summary, through the proxy, counts the last minute's commands.
+  local health
+  health=$(curl -s -b "$jar" "$base/admin/health")
+  note "health: $health"
+  assert_match 'health: commands in the last minute' '"committed":[1-9]' "$health" &&
+    assert_match 'health: writer available' '"available":true' "$health" &&
+    assert_match 'health: outbox admitting' '"admitting":true' "$health" || return 1
   curl -s -b "$jar" -H "X-CSRF-TOKEN: $(csrf)" -H "Idempotency-Key: $(uuid)" -X POST \
     "$base/admin/bot-runs/$run/stop" >> "$log" 2>&1
   for i in $(seq 1 30); do
