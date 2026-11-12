@@ -11,3 +11,14 @@ class SilentEventSource {
   close() {}
 }
 vi.stubGlobal('EventSource', SilentEventSource);
+
+// jsdom has the dialog element but not its methods. These do what the tests need: open and close, with the events.
+if (typeof HTMLDialogElement.prototype.showModal !== 'function') {
+  HTMLDialogElement.prototype.showModal = function showModal(this: HTMLDialogElement) {
+    this.open = true;
+  };
+  HTMLDialogElement.prototype.close = function close(this: HTMLDialogElement) {
+    this.open = false;
+    this.dispatchEvent(new Event('close'));
+  };
+}

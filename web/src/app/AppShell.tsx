@@ -1,6 +1,12 @@
+import { useEffect, useRef } from 'react';
 import { NavLink, Navigate, Outlet, useLocation } from 'react-router';
 
 import { isOperator, isTrader, useLogout, useSession } from '../auth/session';
+import type { Identity } from '../api/types';
+import { HelpMenu } from '../help/HelpMenu';
+import { Tour } from '../help/Tour';
+import { TOURS } from '../help/tours';
+import { useTour } from '../help/useTour';
 import { ThemeSwitch } from './ThemeSwitch';
 import { useAccountEvents } from './useAccountEvents';
 
@@ -26,29 +32,48 @@ export function AppShell() {
     return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   }
 
+  return <SignedIn identity={session.data} logout={() => logout.mutate()} loggingOut={logout.isPending} />;
+}
+
+/** The frame itself, for a user who is signed in, with the tour on their start page. */
+function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout: () => void; loggingOut: boolean }) {
+  const tour = useTour(identity);
+  const help = useRef<HTMLButtonElement>(null);
+  const shown = useRef(tour.showing);
+  // When a tour closes, focus goes to Help, where it can be found again, rather than to the top of the page.
+  useEffect(() => {
+    if (shown.current !== null && tour.showing === null) {
+      help.current?.focus();
+    }
+    shown.current = tour.showing;
+  }, [tour.showing]);
   return (
     <div className="shell">
       <header className="topbar">
         <span className="brand">Mini Stock Exchange</span>
         <span className="context-badge">Simulation · Virtual funds</span>
         <nav aria-label="Main">
-          {isTrader(session.data) && (
+          {isTrader(identity) && (
             <>
               <NavLink to="/terminal">Terminal</NavLink>
               <NavLink to="/portfolio">Portfolio</NavLink>
             </>
           )}
-          {isOperator(session.data) && <NavLink to="/operator">Operator</NavLink>}
+          {isOperator(identity) && <NavLink to="/operator">Operator</NavLink>}
         </nav>
-        <ThemeSwitch />
-        <span className="user">{session.data.username}</span>
-        <button type="button" className="quiet" onClick={() => logout.mutate()} disabled={logout.isPending}>
+        <div className="topbar-tools">
+          <HelpMenu onTour={tour.replay} button={help} />
+          <ThemeSwitch />
+        </div>
+        <span className="user">{identity.username}</span>
+        <button type="button" className="quiet" onClick={logout} disabled={loggingOut}>
           Log out
         </button>
       </header>
       <main className="content">
         <Outlet />
       </main>
+      {tour.showing !== null && <Tour key={tour.showing} script={TOURS[tour.showing]} onEnd={tour.end} />}
     </div>
   );
 }
