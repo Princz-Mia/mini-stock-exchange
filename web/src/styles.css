@@ -1111,9 +1111,14 @@ dialog.tour p {
   gap: var(--space-2);
 }
 
-/* As tall as a tip's button, with or without one, so figures side by side keep their values on one line. */
+/* As tall as a tip's button, with or without one, so figures side by side keep their labels and values in line. */
 .figure-label {
   min-height: 20px;
+}
+
+/* A figure stretched to a taller neighbour's height keeps its rows at the top rather than spreading them. */
+.summary .figure {
+  align-content: start;
 }
 
 dl.balances dt {
@@ -1125,6 +1130,8 @@ dl.balances dt {
 button.term-tip-button {
   display: inline-grid;
   place-items: center;
+  /* 20 pixels with its border, no taller than a line of text, so a label with a tip is as tall as one without. */
+  box-sizing: border-box;
   width: 20px;
   height: 20px;
   padding: 0;
