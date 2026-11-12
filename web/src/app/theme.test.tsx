@@ -252,6 +252,8 @@ describe('the stylesheet', () => {
       // the meter track on the sunken fill, and no mark beside a selected item's fill.
       '--control-line: #322e3d;',
       '--panel-shadow: none;',
+      // Added with the fill notices: something floating above the page needs a deeper shadow to stand off it.
+      '--float-shadow: 0 4px 20px rgb(0 0 0 / 60%);',
       '--pill-on-page: #24202d;',
       '--control-disabled-bg: #1b1822;',
       '--control-disabled-line: #322e3d;',

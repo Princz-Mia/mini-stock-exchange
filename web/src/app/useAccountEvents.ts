@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 
 import type { StreamFactory, StreamSource } from '../terminal/useMarketStream';
 
@@ -13,11 +13,17 @@ const browserStream: StreamFactory = (url) => new EventSource(url) as unknown as
 
 /**
  * While a trader is signed in, listens for their account's change notifications and refetches their orders and
- * portfolio after each, debounced. Every connection starts with a frame, so a reconnect refetches too. The pages keep
- * polling every five seconds as well, so a lost notification never leaves balances stale for long.
+ * portfolio after each, debounced, then calls `onChange`. Every connection starts with a frame, so a reconnect
+ * refetches too. The pages keep polling every five seconds as well, so a lost notification never leaves balances stale
+ * for long.
  */
-export function useAccountEvents(enabled: boolean, create: StreamFactory = browserStream) {
+export function useAccountEvents(enabled: boolean, create: StreamFactory = browserStream, onChange?: () => void) {
   const client = useQueryClient();
+  // The latest callback, without reconnecting when it changes.
+  const changed = useRef(onChange);
+  useEffect(() => {
+    changed.current = onChange;
+  }, [onChange]);
   useEffect(() => {
     if (!enabled) {
       return undefined;
@@ -30,6 +36,7 @@ export function useAccountEvents(enabled: boolean, create: StreamFactory = brows
         for (const queryKey of PRIVATE_QUERIES) {
           void client.invalidateQueries({ queryKey });
         }
+        changed.current?.();
       }, DEBOUNCE_MS);
     });
     return () => {

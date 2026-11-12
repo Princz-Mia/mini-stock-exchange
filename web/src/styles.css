@@ -15,6 +15,8 @@
   --control-line: #8a8498;
   /* Lifts panels off the page; the tinted page does most of the work. */
   --panel-shadow: 0 1px 2px rgb(28 26 34 / 6%), 0 1px 3px rgb(28 26 34 / 4%);
+  /* Something floating above the page, such as a notice, in either theme. */
+  --float-shadow: 0 4px 16px rgb(28 26 34 / 16%);
   /* A quiet pill that sits on the page itself rather than in a panel, such as the live market data status. */
   --pill-on-page: #ffffff;
   /* A control that cannot be used now: sunken, with a faint outline and muted text, so it does not look live. */
@@ -71,6 +73,7 @@
     --warn-text: #f3d48b;
     --control-line: #322e3d;
     --panel-shadow: none;
+    --float-shadow: 0 4px 20px rgb(0 0 0 / 60%);
     --pill-on-page: #24202d;
     --control-disabled-bg: #1b1822;
     --control-disabled-line: #322e3d;
@@ -98,6 +101,7 @@
   --warn-text: #f3d48b;
   --control-line: #322e3d;
   --panel-shadow: none;
+  --float-shadow: 0 4px 20px rgb(0 0 0 / 60%);
   --pill-on-page: #24202d;
   --control-disabled-bg: #1b1822;
   --control-disabled-line: #322e3d;
@@ -1010,6 +1014,59 @@ button.tab[aria-selected='true'] {
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+/* A resting order filled: a card in the bottom-left corner above the page, until dismissed. */
+.fill-notice {
+  position: fixed;
+  left: var(--space-4);
+  bottom: var(--space-4);
+  z-index: 30;
+  box-sizing: border-box;
+  display: grid;
+  gap: var(--space-3);
+  width: min(360px, calc(100vw - 2 * var(--space-4)));
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: var(--float-shadow);
+  padding: var(--space-4);
+}
+
+/* While a notice shows, the page can scroll its last content clear of it, and focus stops short of it. */
+html.fill-notice-open {
+  scroll-padding-bottom: var(--fill-notice-room);
+}
+
+html.fill-notice-open .content {
+  padding-bottom: calc(var(--space-6) + var(--fill-notice-room));
+}
+
+/* Focused only from script, for a moment, when a notice that had focus goes; a ring around the page would be noise. */
+main.content:focus {
+  outline: none;
+}
+
+.fill-notice-text {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.fill-notice-text ul,
+.fill-notice-text p {
+  margin: 0;
+}
+
+.fill-notice-text ul {
+  padding-left: var(--space-4);
+}
+
+.fill-notice-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
 }
 
 .population p {

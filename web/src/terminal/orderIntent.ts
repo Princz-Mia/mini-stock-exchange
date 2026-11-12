@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { ApiError, api } from '../api/client';
 import type { FieldError, Order, OrderRequest } from '../api/types';
@@ -42,14 +42,28 @@ function sleep(milliseconds: number) {
  * while its outcome is unresolved, a retry resends the stored request under the same key. A timeout is resolved by
  * looking the key up: a committed answer settles it, and a 404 means nothing was committed, so retrying is safe.
  */
-export function useOrderIntent(options: { lookupDelay?: number; newKey?: () => string } = {}) {
+export function useOrderIntent(
+  options: {
+    lookupDelay?: number;
+    newKey?: () => string;
+    /** Each accepted order with the request it answers, as first committed. */
+    onAccepted?: (order: Order, request: OrderRequest) => void;
+  } = {},
+) {
   const lookupDelay = options.lookupDelay ?? 1_000;
   const newKey = options.newKey ?? randomKey;
   const [outcome, setOutcome] = useState<Outcome>({ kind: 'idle' });
   const pending = useRef<Pending | null>(null);
   const inFlight = useRef(false);
+  const accepted = useRef(options.onAccepted);
+  useEffect(() => {
+    accepted.current = options.onAccepted;
+  }, [options.onAccepted]);
 
   const settle = useCallback((next: Outcome) => {
+    if (next.kind === 'accepted' && pending.current !== null) {
+      accepted.current?.(next.order, pending.current.request);
+    }
     if (next.kind === 'accepted' || next.kind === 'rejected' || next.kind === 'invalid') {
       pending.current = null;
     }

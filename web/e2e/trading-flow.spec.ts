@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import AxeBuilder from '@axe-core/playwright';
 import { type APIRequestContext, type APIResponse, type Page, expect, request, test } from '@playwright/test';
 
 import type { CsrfToken, OrderRequest } from '../src/api/types';
@@ -209,7 +210,18 @@ test.describe.serial('trading through the browser', () => {
     await operatorContext.close();
   });
 
-  test('the operator starts a bot run, watches it trade, and stops it', async ({ page }) => {
+  test('the operator starts a bot run, watches it trade, and stops it', async ({ page, browser }) => {
+    // The trader rests a bid above the last trade, in a browser of their own. The book is otherwise empty, so the
+    // market maker's first ask, two ticks above the last trade, sells into it: a bot fills the resting order.
+    const traderContext = await browser.newContext();
+    const trader = await traderContext.newPage();
+    await signIn(trader);
+    const ticket = trader.getByRole('region', { name: 'Order · NOVA' });
+    await ticket.getByLabel('Shares').fill('3');
+    await ticket.getByLabel('Limit price').fill('101.50');
+    await ticket.getByRole('button', { name: 'Buy NOVA' }).click();
+    await expect(trader.getByRole('table', { name: 'Open orders' }).getByRole('row')).toHaveCount(2);
+
     await page.goto('/');
     await page.getByLabel('Username').fill('operator');
     await page.getByLabel('Password').fill(required('E2E_OPERATOR_PASSWORD'));
@@ -229,6 +241,34 @@ test.describe.serial('trading through the browser', () => {
     const current = runs.getByRole('group', { name: 'Current run' });
     await expect(current).toContainText('1 market maker, 1 noise');
     await expect(current).toContainText(/Placed[1-9]/, { timeout: 30_000 });
+
+    // The trader is told, wherever they are, with a link to their portfolio.
+    const notice = trader.getByRole('region', { name: 'Fills' });
+    await expect(notice.getByRole('status')).toContainText(/Bought \d NOVA at 101\.50/, { timeout: 30_000 });
+    await expect(notice.getByRole('status')).toContainText('Bought 3 NOVA at 101.50, the order is filled.', {
+      timeout: 30_000,
+    });
+    // It passes the accessibility rules, and on a phone it fits the screen without the page scrolling sideways.
+    const scan = await new AxeBuilder({ page: trader })
+      .include('.fill-notice')
+      .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
+      .analyze();
+    expect(scan.violations.map((violation) => violation.id)).toEqual([]);
+    await trader.setViewportSize({ width: 390, height: 844 });
+    const box = await notice.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+    expect(await trader.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    await trader.screenshot({ path: 'test-results/screens/phone-fill-notice.png' });
+    await trader.setViewportSize({ width: 1280, height: 800 });
+    await trader.screenshot({ path: 'test-results/screens/laptop-fill-notice.png' });
+    await notice.getByRole('link', { name: 'View in Portfolio' }).click();
+    await expect(notice).toBeHidden();
+    const execution = trader.getByRole('table', { name: 'Executions' }).getByRole('row').nth(1);
+    await expect(execution).toContainText('101.50');
+    await expect(execution).toContainText('Maker');
+    await traderContext.close();
 
     // Nothing on the operator screen scrolls sideways on a phone either.
     await page.setViewportSize({ width: 390, height: 844 });
