@@ -662,6 +662,13 @@ export interface components {
     schemas: {
         /** @example 100.25 */
         readonly Price: string;
+        /**
+         * @description A decimal with exactly two places and a minus sign when negative; no plus sign.
+         * @example 1.03
+         * @example -0.50
+         * @example 0.00
+         */
+        readonly SignedAmount: string;
         readonly Sequence: string;
         /** Format: uuid */
         readonly Uuid: string;
@@ -1145,6 +1152,35 @@ export interface components {
             readonly lastTradeSequence: components["schemas"]["Sequence"];
             readonly sourceCommandSequence: components["schemas"]["Sequence"];
             readonly generatedAt: components["schemas"]["Timestamp"];
+            readonly session: components["schemas"]["SessionFigures"];
+        };
+        /**
+         * @description The instrument's figures since trading began, from the public trade tape, so they need no analytics job. There
+         *     is no opening auction, so the session is measured from the reference price: open is the reference price, and
+         *     change and changePercent are the last trade's price against it, the percentage rounded half-even to two places.
+         *     VWAP is the notional over the volume, rounded half-even to the cent. The trend holds the last trade price of
+         *     each of the last 60 minutes that had a trade, oldest first. Before the first trade, last, change,
+         *     changePercent, high, low and vwap are null, the counts zero and the trend empty. feed is the trade feed's
+         *     state, which the figures come from: while it is behind, so are they, even when the market feed is live.
+         */
+        readonly SessionFigures: {
+            readonly open: components["schemas"]["Price"];
+            readonly last: components["schemas"]["Price"] | null;
+            readonly change: components["schemas"]["SignedAmount"] | null;
+            readonly changePercent: components["schemas"]["SignedAmount"] | null;
+            readonly high: components["schemas"]["Price"] | null;
+            readonly low: components["schemas"]["Price"] | null;
+            /** Format: int64 */
+            readonly volume: number;
+            /** Format: int64 */
+            readonly tradeCount: number;
+            readonly vwap: components["schemas"]["Price"] | null;
+            readonly trend: readonly components["schemas"]["TrendPoint"][];
+            readonly feed: components["schemas"]["Feed"];
+        };
+        readonly TrendPoint: {
+            readonly minute: components["schemas"]["Timestamp"];
+            readonly price: components["schemas"]["Price"];
         };
         /** @enum {string} */
         readonly VenueState: "SETUP" | "OPEN" | "HALTED" | "UNKNOWN";
@@ -1279,6 +1315,7 @@ export interface components {
             readonly lastTradeSequence: components["schemas"]["Sequence"];
             readonly generatedAt: components["schemas"]["Timestamp"];
             readonly feed: components["schemas"]["Feed"];
+            readonly session: components["schemas"]["SessionFigures"];
         };
         /** @description Data of a `heartbeat` event. A live connection does not mean current data; check feed. */
         readonly Heartbeat: {

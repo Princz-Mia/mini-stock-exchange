@@ -20,6 +20,7 @@ export type OrderRequest = Schemas['OrderRequest'];
 export type Order = Schemas['Order'];
 export type Cancellation = Schemas['Cancellation'];
 export type MarketFrame = Schemas['MarketFrame'];
+export type SessionFigures = Schemas['SessionFigures'];
 export type Heartbeat = Schemas['Heartbeat'];
 export type TapeTrade = Schemas['TapeTrade'];
 export type Candles = Schemas['Candles'];

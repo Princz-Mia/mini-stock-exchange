@@ -26,6 +26,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.json.JsonMapper;
 
 import com.mia_princz.mse.contracts.events.MarketSnapshot;
+import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.contracts.events.WireEvents;
 
 @Configuration(proxyBeanMethods = false)
@@ -112,8 +113,16 @@ class ProjectionConfiguration {
 
 	@Bean(initMethod = "start", destroyMethod = "close")
 	@ConditionalOnProperty(name = "mse.trade-feed.enabled", matchIfMissing = true)
-	MarketFeedConsumer tradeFeed(FeedFactory feeds, TradeProjection projection) {
-		return feeds.create(TradeProjection.TOPIC, (payload) -> projection.apply(WireEvents.decodeTrade(payload)));
+	MarketFeedConsumer tradeFeed(FeedFactory feeds, TradeProjection projection, ApplicationEventPublisher events) {
+		return feeds.create(TradeProjection.TOPIC, (payload) -> {
+			TradeExecuted trade = WireEvents.decodeTrade(payload);
+			boolean added = projection.apply(trade);
+			if (added) {
+				// The live frame carries the session figures, which this trade changed; a snapshot may have come first.
+				events.publishEvent(new SnapshotProjected(trade.getInstrumentId()));
+			}
+			return added;
+		});
 	}
 
 	@Bean(initMethod = "start", destroyMethod = "close")

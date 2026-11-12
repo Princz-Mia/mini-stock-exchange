@@ -22,14 +22,14 @@ class MarketEventsConfiguration {
 
 	@Bean(initMethod = "start", destroyMethod = "close")
 	MarketStream marketStream(MarketQueries queries, @Qualifier("marketFeed") ObjectProvider<MarketFeedConsumer> feed,
-			Clock clock, MeterRegistry meters, @Value("${mse.market-events.tick:250ms}") Duration tick,
+			@Qualifier("tradeFeed") ObjectProvider<MarketFeedConsumer> tradeFeed, Clock clock, MeterRegistry meters, @Value("${mse.market-events.tick:250ms}") Duration tick,
 			@Value("${mse.market-events.heartbeat:10s}") Duration heartbeat,
 			@Value("${mse.market-events.slow-limit:15s}") Duration slowLimit,
 			@Value("${mse.market-events.max-streams:1000}") int maxStreams,
 			@Value("${mse.market-events.stream-lifetime:30m}") Duration lifetime) {
 		// A new id per process: a client seeing it change knows the service restarted and replaces everything.
 		UUID bootId = UUID.randomUUID();
-		MarketStream stream = new MarketStream(MarketEventsController.frames(queries, feed, bootId, clock),
+		MarketStream stream = new MarketStream(MarketEventsController.frames(queries, feed, tradeFeed, bootId, clock),
 				() -> new SseEmitter(lifetime.toMillis()),
 				new MarketStream.Settings(tick, heartbeat, slowLimit, maxStreams), clock);
 		Gauge.builder("mse.market.events.streams", stream, MarketStream::openStreams)

@@ -61,7 +61,7 @@ psql_in execution_db "BEGIN;
 
 echo 'Emptying Market Data, Kafka and Flink'
 psql_in market_data_db "TRUNCATE instrument_projection, market_snapshot, processed_event, projection_checkpoint,
-  public_trade, candle_1m"
+  public_trade, instrument_session, session_minute, candle_1m"
 compose rm -sf kafka flink-jobmanager flink-taskmanager > /dev/null
 docker volume rm -f "${name}_kafka-data" "${name}_flink-checkpoints" > /dev/null
 

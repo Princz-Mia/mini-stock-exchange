@@ -10,6 +10,7 @@ import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import org.springframework.beans.factory.ObjectProvider;
@@ -81,7 +82,21 @@ class MarketController {
 
 	record InstrumentView(String instrumentId, String symbol, String venueState, String referencePrice, String tick,
 			long lotSize, long minQuantity, long maxQuantity, String maxPrice, String lastPrice, Quote bestBid,
-			Quote bestAsk, String lastTradeSequence, String sourceCommandSequence, Instant generatedAt) {
+			Quote bestAsk, String lastTradeSequence, String sourceCommandSequence, Instant generatedAt,
+			SessionView session) {
+	}
+
+	record TrendPointView(Instant minute, String price) {
+	}
+
+	/**
+	 * Measured from the reference price, as there is no opening auction: {@code open} is the reference price, and the
+	 * change and its percentage are the last price against it, the percentage rounded half-even to two places. VWAP is
+	 * the notional over the volume, rounded half-even to the cent, as in the candles. {@code feed} is the trade feed's,
+	 * which the figures come from: while it is behind, they are too, even when the market feed is live.
+	 */
+	record SessionView(String open, String last, String change, String changePercent, String high, String low,
+			long volume, long tradeCount, String vwap, List<TrendPointView> trend, Feed feed) {
 	}
 
 	record Instruments(List<InstrumentView> instruments, Feed feed) {
@@ -150,7 +165,13 @@ class MarketController {
 
 	@GetMapping
 	Instruments instruments() {
-		return new Instruments(queries.instruments().stream().map(MarketController::view).toList(), feed(marketFeed));
+		List<MarketQueries.Instrument> listed = queries.instruments();
+		Map<UUID, MarketQueries.Session> sessions = queries
+			.sessions(listed.stream().map(MarketQueries.Instrument::instrumentId).toList());
+		return new Instruments(listed.stream()
+			.map((instrument) -> view(instrument,
+					sessions.getOrDefault(instrument.instrumentId(), MarketQueries.Session.NONE), feed(tradeFeed)))
+			.toList(), feed(marketFeed));
 	}
 
 	@GetMapping("/{instrumentId}/book")
@@ -196,14 +217,44 @@ class MarketController {
 		return problem(ApiException.invalid(ex.getName(), "INVALID_VALUE", ex.getName() + " has an invalid value"));
 	}
 
-	private static InstrumentView view(MarketQueries.Instrument instrument) {
+	private static InstrumentView view(MarketQueries.Instrument instrument, MarketQueries.Session session,
+			Feed tradeFeed) {
 		return new InstrumentView(instrument.instrumentId().toString(), instrument.symbol(), instrument.venueState(),
 				price(instrument.referencePriceCents()), price(instrument.tickCents()), instrument.lotSize(),
 				instrument.minQuantity(), instrument.maxQuantity(), price(instrument.maxPriceCents()),
 				instrument.lastPriceCents() == null ? null : price(instrument.lastPriceCents()),
 				quote(instrument.bestBid()), quote(instrument.bestAsk()),
 				Long.toString(instrument.lastTradeSequence()), Long.toString(instrument.sourceCommandSequence()),
-				instrument.generatedAt());
+				instrument.generatedAt(), session(instrument.referencePriceCents(), session, tradeFeed));
+	}
+
+	static SessionView session(long referenceCents, MarketQueries.Session session, Feed tradeFeed) {
+		Long last = session.lastPriceCents();
+		String change = null;
+		String percent = null;
+		String vwap = null;
+		if (last != null) {
+			long difference = Math.subtractExact(last, referenceCents);
+			change = BigDecimal.valueOf(difference, 2).toPlainString();
+			percent = BigDecimal.valueOf(difference)
+				.movePointRight(2)
+				.divide(BigDecimal.valueOf(referenceCents), 2, RoundingMode.HALF_EVEN)
+				.toPlainString();
+			vwap = session.notionalCents()
+				.divide(BigDecimal.valueOf(session.volume()), 0, RoundingMode.HALF_EVEN)
+				.movePointLeft(2)
+				.setScale(2)
+				.toPlainString();
+		}
+		return new SessionView(price(referenceCents), last == null ? null : price(last), change, percent,
+				session.highCents() == null ? null : price(session.highCents()),
+				session.lowCents() == null ? null : price(session.lowCents()), session.volume(), session.tradeCount(),
+				vwap,
+				session.trend()
+					.stream()
+					.map((point) -> new TrendPointView(point.minute(), price(point.priceCents())))
+					.toList(),
+				tradeFeed);
 	}
 
 	private static CandleView candle(MarketQueries.Candle candle) {
@@ -235,7 +286,7 @@ class MarketController {
 		return BigDecimal.valueOf(cents, 2).toPlainString();
 	}
 
-	private static Feed feed(ObjectProvider<MarketFeedConsumer> provider) {
+	static Feed feed(ObjectProvider<MarketFeedConsumer> provider) {
 		MarketFeedConsumer feed = provider.getIfAvailable();
 		return feed == null ? new Feed("DISABLED", -1) : new Feed(feed.state().name(), feed.lag());
 	}
