@@ -190,7 +190,10 @@ export function PortfolioPage() {
           <strong>{groupDigits(equity)}</strong>
         </div>
         <div className="figure">
-          <span className="muted">Cash</span>
+          {/* The same row as the figures with a tip, so every value lines up. */}
+          <span className="figure-label">
+            <span className="muted">Cash</span>
+          </span>
           <strong>{groupDigits(cash.total)}</strong>
         </div>
         <div className="figure">

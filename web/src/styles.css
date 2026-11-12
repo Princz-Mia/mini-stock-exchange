@@ -1111,6 +1111,11 @@ dialog.tour p {
   gap: var(--space-2);
 }
 
+/* As tall as a tip's button, with or without one, so figures side by side keep their values on one line. */
+.figure-label {
+  min-height: 20px;
+}
+
 dl.balances dt {
   display: flex;
   align-items: center;
