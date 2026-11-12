@@ -96,6 +96,15 @@ class ApiContractIT {
 		TestBrowser trader = TestBrowser.loggedIn(port, "trader", PASSWORD);
 		TestBrowser other = TestBrowser.loggedIn(port, "other", PASSWORD);
 		check(trader.get("/api/v1/me"), "GET", "/api/v1/me", 200);
+		String tour = "/api/v1/me/tour";
+		check(trader.get(tour), "GET", tour, 200);
+		check(trader.put(tour, "{\"seenVersion\":1}"), "PUT", tour, 200);
+		check(trader.put(tour, "{\"seenVersion\":0}"), "PUT", tour, 400);
+		check(new TestBrowser(port).get(tour), "GET", tour, 401);
+		TestBrowser tokenOnly = new TestBrowser(port);
+		tokenOnly.fetchCsrfToken();
+		check(tokenOnly.put(tour, "{\"seenVersion\":1}"), "PUT", tour, 401);
+		check(new TestBrowser(port).put(tour, "{\"seenVersion\":1}"), "PUT", tour, 403);
 
 		String place = "/api/v1/orders";
 		UUID restingKey = UUID.randomUUID();

@@ -124,6 +124,8 @@ class BotTokenIT {
 		TestBrowser client = new TestBrowser(port);
 		assertThat(client.get("/api/v1/market", bearer()).statusCode()).isEqualTo(200);
 		assertThat(client.get("/api/v1/me", bearer()).statusCode()).isEqualTo(403);
+		assertThat(client.get("/api/v1/me/tour", bearer()).statusCode()).isEqualTo(403);
+		assertThat(client.put("/api/v1/me/tour", "{\"seenVersion\":1}", bearer()).statusCode()).isEqualTo(403);
 		assertThat(client.get("/api/v1/admin/accounts", bearer()).statusCode()).isEqualTo(403);
 		assertThat(client.post("/api/v1/admin/market/halt", "", "Authorization", BEARER, "Idempotency-Key",
 				UUID.randomUUID().toString()).statusCode()).isEqualTo(403);

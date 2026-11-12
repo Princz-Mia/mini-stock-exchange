@@ -74,6 +74,19 @@ final class TestBrowser {
 		return send(request);
 	}
 
+	/** Extra headers come as name, value pairs. */
+	HttpResponse<String> put(String path, String json, String... headers) throws Exception {
+		HttpRequest.Builder request = request(path).header("Content-Type", "application/json")
+			.PUT(HttpRequest.BodyPublishers.ofString(json));
+		if (csrfToken != null) {
+			request.header("X-CSRF-TOKEN", csrfToken);
+		}
+		for (int i = 0; i < headers.length; i += 2) {
+			request.header(headers[i], headers[i + 1]);
+		}
+		return send(request);
+	}
+
 	private HttpRequest.Builder request(String path) {
 		HttpRequest.Builder request = HttpRequest.newBuilder(URI.create("http://localhost:" + port + path));
 		if (!cookies.isEmpty()) {
