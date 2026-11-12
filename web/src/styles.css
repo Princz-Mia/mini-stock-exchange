@@ -1127,6 +1127,16 @@ dl.balances dt {
   gap: var(--space-2);
 }
 
+/*
+ * A flex box, not inline: an inline wrapper's line box holds the button on the text's baseline, and with some fonts
+ * (DejaVu Sans, Ubuntu's default) that made it 21 px, a label with a tip taller than one without, and the summary's
+ * labels out of line.
+ */
+.term-tip {
+  display: inline-flex;
+  align-items: center;
+}
+
 button.term-tip-button {
   display: inline-grid;
   place-items: center;
