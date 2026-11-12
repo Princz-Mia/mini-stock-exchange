@@ -49,6 +49,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('preference keys', () => {
+  it('stay as they are: renaming one drops the choice stored in every browser, and the browser test lists the same', () => {
+    expect(PREFERENCE_KEYS).toEqual({ theme: 'mse.theme', chart: 'mse.chart' });
+  });
+});
+
 describe('stored theme', () => {
   it('follows the system until a theme is chosen, and stores following the system as nothing', () => {
     expect(storedTheme()).toBe('system');

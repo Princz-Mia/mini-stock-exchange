@@ -53,7 +53,7 @@ async function scan(page: Page, size: Size, name: string): Promise<void> {
 }
 
 /** The only keys the app may keep in browser storage: display preferences, never credentials or account data. */
-const PREFERENCE_KEYS = ['mse.theme'];
+const PREFERENCE_KEYS = ['mse.theme', 'mse.chart'];
 
 /** Browser storage holds display preferences and nothing else, in every state of every screen. */
 async function storesOnlyPreferences(page: Page, size: Size, name: string): Promise<void> {
@@ -283,6 +283,14 @@ for (const size of SIZES) {
       // The settings are in the address, so a reload keeps them.
       await page.reload();
       await expect(chart(page).getByText('5 min bars · last 30 min')).toBeVisible();
+      // And in this browser, so coming back from another page, whose link carries none, keeps them too.
+      await page.getByRole('link', { name: 'Portfolio' }).click();
+      await openTerminal(page);
+      expect(new URL(page.url()).searchParams.has('chart')).toBe(false);
+      await expect(chart(page).getByText('5 min bars · last 30 min')).toBeVisible();
+      await expect(
+        chart(page).getByRole('group', { name: 'Chart type' }).getByRole('button', { name: 'Area', exact: true }),
+      ).toHaveAttribute('aria-pressed', 'true');
       await capture(page, size, 'terminal-chart-area');
       await page.context().close();
 

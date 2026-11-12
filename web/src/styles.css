@@ -748,9 +748,11 @@ button.chip {
   min-width: 0;
 }
 
+/* Above the chart's canvases, which the library stacks at z-index 1 and 2 with an opaque background. */
 .chart-overlay {
   position: absolute;
   inset: 0;
+  z-index: 10;
   display: grid;
   place-items: center;
   margin: 0;
