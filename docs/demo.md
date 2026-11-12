@@ -51,7 +51,7 @@ Say: the hold, the order and the ledger entries commit in one transaction before
 1. Enter 5 **Shares** and a **Limit price** about a dollar above the best ask, so it reaches past the first ask if that one is small.
 2. Select **Buy NOVA**. It takes the cheapest asks first, each at its own price, until all 5 are filled. The ticket says it filled, and the trades appear at the top of the tape.
 3. Open **Portfolio**:
-   - **Holdings** shows NOVA up by 5 shares;
+   - **Holdings** shows NOVA up by 5 shares, its average cost now between the reference price and what you paid, and its estimated unrealized profit or loss;
    - **Executions** lists the fill, at the price of the order it matched;
    - the summary shows the cash spent.
 

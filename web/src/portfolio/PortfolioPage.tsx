@@ -8,6 +8,8 @@ import { useKeyboardScroll } from '../app/useKeyboardScroll';
 import { groupDigits, groupInteger, utcTime } from '../format';
 import { TermTip } from '../help/TermTip';
 import { toCents } from '../terminal/money';
+import { Moved } from '../terminal/Moved';
+import { directionOf, signed } from '../terminal/session';
 
 /**
  * Private data is refetched every five seconds while the page is open, and when the tab regains focus. Polling stops
@@ -27,6 +29,22 @@ function Mark({ holding }: { holding: Holding }) {
     <span>
       {groupDigits(holding.mark.price)}{' '}
       <span className="muted">last trade{holding.mark.at === null ? '' : ` · ${utcTime(holding.mark.at)}`}</span>
+    </span>
+  );
+}
+
+/** A signed amount with its arrow, and the percentage under it when there is one. */
+function Gain({ amount, percent }: { amount: string; percent?: string }) {
+  return (
+    <span className="gain">
+      <Moved way={directionOf(amount)}>{signed(amount)}</Moved>
+      {/* Spoken between the two; a grid draws no space between its items. */}
+      {percent !== undefined && (
+        <>
+          {' '}
+          <span className="muted">{signed(percent)}%</span>
+        </>
+      )}
     </span>
   );
 }
@@ -177,7 +195,7 @@ export function PortfolioPage() {
       </p>
     );
   }
-  const { cash, holdings, equity } = portfolio.data;
+  const { cash, holdings, equity, costBasis, unrealized, unrealizedPercent } = portfolio.data;
 
   return (
     <div className="stack">
@@ -210,50 +228,98 @@ export function PortfolioPage() {
           </span>
           <strong>{groupDigits(cash.reserved)}</strong>
         </div>
+        <div className="figure">
+          <span className="figure-label">
+            <span className="muted">Estimated unrealized P/L</span>
+            <TermTip terms={['unrealized']} />
+          </span>
+          {unrealized === null || unrealizedPercent === null || costBasis === null ? (
+            <strong>—</strong>
+          ) : (
+            <>
+              <strong>
+                <Moved way={directionOf(unrealized)}>
+                  {signed(unrealized)} ({signed(unrealizedPercent)}%)
+                </Moved>
+              </strong>
+              <span className="muted">Cost {groupDigits(costBasis)}</span>
+            </>
+          )}
+        </div>
       </section>
 
       <section ref={holdingsPanel} className="panel" aria-labelledby="holdings-title">
         <div className="heading-row">
           <h2 id="holdings-title">Holdings</h2>
-          <TermTip terms={['mark']} />
+          <TermTip terms={['mark', 'averageCost']} />
         </div>
         {holdings.length === 0 ? (
           <p className="muted">No holdings.</p>
         ) : (
-          <table aria-label="Holdings">
-            <thead>
-              <tr>
-                <th scope="col">Symbol</th>
-                <th scope="col" className="num">
-                  Shares
-                </th>
-                <th scope="col" className="num">
-                  Available
-                </th>
-                <th scope="col" className="num">
-                  Reserved
-                </th>
-                <th scope="col">Mark</th>
-                <th scope="col" className="num">
-                  Value
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {holdings.map((holding) => (
-                <tr key={holding.instrumentId}>
-                  <th scope="row">{holding.symbol}</th>
-                  <td className="num">{groupInteger(holding.total)}</td>
-                  <td className="num">{groupInteger(holding.available)}</td>
-                  <td className="num">{groupInteger(holding.reserved)}</td>
-                  <td>
-                    <Mark holding={holding} />
-                  </td>
-                  <td className="num">{groupDigits(holding.value)}</td>
+          <>
+            <p className="muted note">
+              Average cost and unrealized P/L are estimates from your own trades, with starting shares at their reference
+              price.
+            </p>
+            <table aria-label="Holdings">
+              <thead>
+                <tr>
+                  <th scope="col">Symbol</th>
+                  <th scope="col" className="num">
+                    Shares
+                  </th>
+                  <th scope="col" className="num">
+                    Available
+                  </th>
+                  <th scope="col" className="num">
+                    Reserved
+                  </th>
+                  <th scope="col">Mark</th>
+                  <th scope="col" className="num">
+                    Change
+                  </th>
+                  <th scope="col" className="num">
+                    Avg cost
+                  </th>
+                  <th scope="col" className="num">
+                    Value
+                  </th>
+                  <th scope="col" className="num">
+                    Weight
+                  </th>
+                  <th scope="col" className="num">
+                    Unrealized P/L
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {holdings.map((holding) => (
+                  <tr key={holding.instrumentId}>
+                    <th scope="row">{holding.symbol}</th>
+                    <td className="num">{groupInteger(holding.total)}</td>
+                    <td className="num">{groupInteger(holding.available)}</td>
+                    <td className="num">{groupInteger(holding.reserved)}</td>
+                    <td>
+                      <Mark holding={holding} />
+                    </td>
+                    <td className="num">
+                      <Moved way={directionOf(holding.changePercent)}>{signed(holding.changePercent)}%</Moved>
+                    </td>
+                    <td className="num">{holding.averageCost === null ? '—' : groupDigits(holding.averageCost)}</td>
+                    <td className="num">{groupDigits(holding.value)}</td>
+                    <td className="num">{holding.weight}%</td>
+                    <td className="num">
+                      {holding.unrealized === null || holding.unrealizedPercent === null ? (
+                        '—'
+                      ) : (
+                        <Gain amount={holding.unrealized} percent={holding.unrealizedPercent} />
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
         )}
       </section>
 

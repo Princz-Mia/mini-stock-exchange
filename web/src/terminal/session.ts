@@ -6,14 +6,15 @@ export type Direction = 'up' | 'down' | 'flat';
 
 /** Which way the last price moved from the reference, or null before the first trade. */
 export function direction(session: SessionFigures): Direction | null {
-  if (session.change === null) {
-    return null;
-  }
-  const cents = toCents(session.change.replace('-', ''));
-  if (cents === 0n) {
+  return session.change === null ? null : directionOf(session.change);
+}
+
+/** Which way a signed amount points: up, down, or flat at zero. */
+export function directionOf(amount: string): Direction {
+  if (toCents(amount.replace('-', '')) === 0n) {
     return 'flat';
   }
-  return session.change.startsWith('-') ? 'down' : 'up';
+  return amount.startsWith('-') ? 'down' : 'up';
 }
 
 // U+FE0E asks for the text form of ▶, which some systems would otherwise draw as a coloured emoji.

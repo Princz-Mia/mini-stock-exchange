@@ -284,11 +284,15 @@ input[aria-invalid='true'] {
   box-shadow: var(--panel-shadow);
   padding: var(--space-4);
   display: grid;
+  /* One column as wide as the panel: a wide table overflows it and scrolls, while headings and notes stay in view. */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-3);
   align-content: start;
   /* A wide table scrolls inside its panel instead of widening the page. */
   min-width: 0;
   overflow-x: auto;
+  /* Text hidden for screen readers is absolutely positioned: the panel clips it instead of the page widening. */
+  position: relative;
 }
 
 .panel-header {
@@ -1371,4 +1375,15 @@ button.term-tip-button::before {
 .glossary dd {
   margin: 0;
   max-width: 68ch;
+}
+
+/* An amount over its percentage, both kept to the right of a numeric cell. */
+.gain {
+  display: inline-grid;
+  justify-items: end;
+}
+
+.note {
+  margin: 0;
+  font-size: 13px;
 }

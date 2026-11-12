@@ -158,6 +158,13 @@ test.describe.serial('trading through the browser', () => {
     const holding = page.getByRole('table', { name: 'Holdings' }).getByRole('row', { name: /NOVA/ });
     await expect(holding).toContainText('505');
     await expect(holding).toContainText('51,005.00');
+    // Up 1% on the reference; 500 starting shares at 100.00 and 5 bought at 101.00 cost 50,505.00, 100.01 a share.
+    await expect(holding).toContainText('up +1.00%');
+    await expect(holding).toContainText('100.01');
+    await expect(holding).toContainText('33.89%');
+    await expect(holding).toContainText('up +500.00 +0.99%');
+    await expect(summary).toContainText('up +500.00 (+0.99%)');
+    await expect(summary).toContainText('Cost 50,505.00');
     const execution = page.getByRole('table', { name: 'Executions' }).getByRole('row').nth(1);
     await expect(execution).toContainText('Buy');
     await expect(execution).toContainText('101.00');

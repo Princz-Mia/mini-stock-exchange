@@ -33,6 +33,18 @@ export const GLOSSARY = {
     term: 'Equity',
     definition: 'Your cash plus every holding at its mark. Reserved amounts are part of it, counted once.',
   },
+  averageCost: {
+    term: 'Average cost',
+    definition:
+      "An estimate of what one share of a holding cost you: shares you started with at the instrument's reference price, and " +
+      'each buy at its price. A sale leaves it unchanged; selling everything starts it afresh.',
+  },
+  unrealized: {
+    term: 'Unrealized P/L',
+    definition:
+      'An estimate of the profit or loss on what you still hold: its value at the mark less what it cost at the average cost. ' +
+      'It becomes real only when you sell.',
+  },
   partial: {
     term: 'Partial fill',
     definition:
