@@ -1061,10 +1061,23 @@ button.tab[aria-selected='true'] {
   box-shadow: 0 4px 12px rgb(0 0 0 / 18%);
 }
 
-.help-list button {
+.help-list button,
+.help-list a {
+  display: block;
+  box-sizing: border-box;
   width: 100%;
   text-align: left;
   border: none;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius);
+  color: var(--text);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.help-list a:hover,
+.help-list button:hover {
+  background: var(--surface-sunken);
 }
 
 /*
@@ -1143,4 +1156,120 @@ dialog.tour p {
     left: 0;
     right: auto;
   }
+}
+
+/* A term with its tip: the "?" sits right after the words it explains. */
+.heading-row,
+.figure-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* As tall as a tip's button, with or without one, so figures side by side keep their labels and values in line. */
+.figure-label {
+  min-height: 20px;
+}
+
+/* A figure stretched to a taller neighbour's height keeps its rows at the top rather than spreading them. */
+.summary .figure {
+  align-content: start;
+}
+
+dl.balances dt {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/*
+ * A flex box, not inline: an inline wrapper's line box holds the button on the text's baseline, and with some fonts
+ * (DejaVu Sans, Ubuntu's default) that made it 21 px, a label with a tip taller than one without, and the summary's
+ * labels out of line.
+ */
+.term-tip {
+  display: inline-flex;
+  align-items: center;
+}
+
+button.term-tip-button {
+  display: inline-grid;
+  place-items: center;
+  /* 20 pixels with its border, no taller than a line of text, so a label with a tip is as tall as one without. */
+  box-sizing: border-box;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--secondary);
+}
+
+button.term-tip-button::before {
+  content: '?';
+}
+
+/* A native popover: above the page, placed under its button by the component. */
+.term-tip-text[popover] {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  box-sizing: border-box;
+  width: min(300px, calc(100vw - 32px));
+  padding: var(--space-3);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 18%);
+  font-size: 13px;
+  font-weight: normal;
+  text-align: left;
+}
+
+.term-tip-entry {
+  display: block;
+}
+
+.term-tip-entry + .term-tip-entry {
+  margin-top: var(--space-2);
+}
+
+/* How this exchange works */
+.how {
+  max-width: 760px;
+}
+
+.how h1 {
+  font-size: 20px;
+}
+
+.how section > p,
+.how li {
+  margin: 0;
+  max-width: 68ch;
+}
+
+.how ul {
+  margin: 0;
+  padding-left: var(--space-6);
+  display: grid;
+  gap: var(--space-1);
+}
+
+.glossary {
+  margin: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.glossary dt {
+  font-weight: 600;
+}
+
+.glossary dd {
+  margin: 0;
+  max-width: 68ch;
 }

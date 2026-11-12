@@ -4,6 +4,7 @@ import { useCallback } from 'react';
 import { api } from '../api/client';
 import type { MarketStatus } from '../api/types';
 import { utcTime } from '../format';
+import { TermTip } from '../help/TermTip';
 import { CommandStatus } from './CommandStatus';
 import { useCommand } from './useCommand';
 
@@ -58,7 +59,10 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
   return (
     <section className="panel market-control" aria-labelledby="market-title">
       <div className="panel-header">
-        <h2 id="market-title">Market</h2>
+        <div className="heading-row">
+          <h2 id="market-title">Market</h2>
+          <TermTip terms={['halted']} />
+        </div>
         <span className={`state-badge state-${market.state.toLowerCase()}`} role="status">
           {STATE_LABELS[market.state]}
         </span>

@@ -112,6 +112,7 @@ describe('terminal', () => {
       'Trading is halted. New orders are paused; you can still cancel open orders.',
     );
     expect(screen.getByText('Trading halted')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'What is halted?' })).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Cancel sell NOVA at 105.00' })).toBeEnabled();
     expect(server.requests.some((request) => request.method === 'POST')).toBe(false);
   });
@@ -128,6 +129,17 @@ describe('terminal', () => {
     }
   });
 
+  it('explains a halt beside its badge, but not a market that has not opened yet', async () => {
+    market().on('GET /api/v1/market', {
+      status: 200,
+      json: { state: 'SETUP', simulationId: 's', openedAt: null, commandSequence: '2' },
+    });
+    renderTerminal();
+    await screen.findByRole('region', { name: 'Order · NOVA' });
+    expect(await screen.findByText('Not open yet')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'What is halted?' })).toBeNull();
+  });
+
   it('takes orders once the market is open', async () => {
     market().on('GET /api/v1/market', {
       status: 200,
@@ -138,6 +150,11 @@ describe('terminal', () => {
     const ticket = await screen.findByRole('region', { name: 'Order · NOVA' });
     await waitFor(() => expect(screen.queryByText('Trading halted')).toBeNull());
     expect(within(ticket).getByRole('button', { name: 'Buy NOVA' })).toBeEnabled();
+    // Tips on the terms the ticket and the orders use; none on a halt that is not happening.
+    expect(within(ticket).getByRole('button', { name: 'What are available and reserved?' })).toBeInTheDocument();
+    expect(within(ticket).getByRole('button', { name: 'What are limit order and protected market order?' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'What is partial fill?' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'What is halted?' })).toBeNull();
   });
 
   it('says the book and tape are not known yet until the first market frame, rather than empty', async () => {

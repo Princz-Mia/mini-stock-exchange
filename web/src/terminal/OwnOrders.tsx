@@ -4,6 +4,7 @@ import { type KeyboardEvent, useId, useRef, useState } from 'react';
 import { ApiError, api, pollEvery } from '../api/client';
 import type { OrderDetail } from '../api/types';
 import { groupDigits, groupInteger, utcTime } from '../format';
+import { TermTip } from '../help/TermTip';
 
 /** How many finished orders the Recent tab shows: those that ended most recently. */
 export const RECENT_ORDERS = 20;
@@ -113,7 +114,10 @@ export function OwnOrders({
   return (
     <section className="panel" aria-labelledby={`${id}-title`}>
       <div className="panel-header">
-        <h2 id={`${id}-title`}>Your orders</h2>
+        <div className="heading-row">
+          <h2 id={`${id}-title`}>Your orders</h2>
+          <TermTip terms={['partial']} />
+        </div>
         {instrument !== null && (
           <label className="inline-check">
             <input type="checkbox" checked={onlyThis} onChange={(event) => setOnlyThis(event.target.checked)} />

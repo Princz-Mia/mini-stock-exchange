@@ -15,6 +15,8 @@ On Linux or macOS, use `./scripts/init-env.sh`. The stack starts with a demo mar
 
 The passwords for `operator` and `trader` are `DEV_OPERATOR_PASSWORD` and `DEV_TRADER_PASSWORD` in `.env`. Use two browser windows, one of them private, so both can be signed in at once: the operator in one, the trader in the other. Open <http://localhost:8080> in both.
 
+On each user's first sign-in a short tour of their screen opens. Select **Skip tour** to go straight on; **Help** in the top bar has it again, with a page on how the exchange works.
+
 ## 0:00 The operator starts the bots
 
 Sign in as `operator`.

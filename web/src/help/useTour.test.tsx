@@ -199,6 +199,21 @@ describe('the first-login tour', () => {
 });
 
 describe('the Help menu', () => {
+  it('opens How this exchange works, for either role', async () => {
+    trader(TOUR_VERSION);
+    openAt('/portfolio');
+    fireEvent.click(await screen.findByRole('button', { name: 'Help' }));
+    fireEvent.click(screen.getByRole('link', { name: 'How this exchange works' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'How this exchange works' })).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/help');
+    expect(screen.queryByRole('link', { name: 'How this exchange works' })).toBeNull();
+
+    // Already on the page: the link still closes the list.
+    fireEvent.click(screen.getByRole('button', { name: 'Help' }));
+    fireEvent.click(screen.getByRole('link', { name: 'How this exchange works' }));
+    expect(screen.queryByRole('link', { name: 'How this exchange works' })).toBeNull();
+  });
+
   it('closes when the page changes, and when focus moves away from it', async () => {
     trader(TOUR_VERSION);
     openAt('/terminal');

@@ -5,6 +5,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 import { isRefusal } from './api/client';
 import { AppShell, RequireRole } from './app/AppShell';
 import { LoginPage } from './auth/LoginPage';
+import { HowItWorks } from './help/HowItWorks';
 import { OperatorPage } from './operator/OperatorPage';
 import { PortfolioPage } from './portfolio/PortfolioPage';
 import { TerminalPage } from './terminal/TerminalPage';
@@ -27,6 +28,7 @@ export function App() {
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route element={<AppShell />}>
+            <Route path="/help" element={<HowItWorks />} />
             <Route element={<RequireRole role="TRADER" />}>
               <Route path="/terminal" element={<TerminalPage />} />
               <Route path="/portfolio" element={<PortfolioPage />} />
