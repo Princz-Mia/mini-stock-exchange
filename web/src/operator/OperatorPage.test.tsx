@@ -8,6 +8,7 @@ import type { BotRun, MarketStatus } from '../api/types';
 import { TOURS } from '../help/tours';
 import { botRun } from '../test/botRun';
 import { signedIn } from '../test/fakeServer';
+import { noTrades } from '../test/fakeStream';
 import { OperatorPage } from './OperatorPage';
 
 const NOVA = {
@@ -26,6 +27,7 @@ const NOVA = {
   lastTradeSequence: '0',
   sourceCommandSequence: '1',
   generatedAt: '2026-11-05T09:00:00Z',
+  session: noTrades('100.00'),
 };
 
 function market(state: MarketStatus['state']): MarketStatus {

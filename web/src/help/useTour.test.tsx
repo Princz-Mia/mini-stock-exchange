@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { App } from '../App';
 import { resetSession } from '../api/client';
 import { signedIn } from '../test/fakeServer';
+import { noTrades } from '../test/fakeStream';
 import { TOUR_VERSION, TOURS } from './tours';
 
 const NOVA = '00000000-0000-0000-0000-000000000001';
@@ -24,6 +25,7 @@ const INSTRUMENT = {
   lastTradeSequence: '0',
   sourceCommandSequence: '1',
   generatedAt: '2026-11-04T12:00:00Z',
+  session: noTrades('100.00'),
 };
 
 const MARKET = { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '9' };

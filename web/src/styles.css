@@ -399,7 +399,7 @@ tbody th {
 /* Terminal: watchlist, market, ticket; open orders across the bottom. Stacks on narrow screens. */
 .terminal {
   display: grid;
-  grid-template-columns: 200px minmax(0, 1fr) 320px;
+  grid-template-columns: 224px minmax(0, 1fr) 320px;
   grid-template-areas:
     'watchlist market ticket'
     'orders orders orders';
@@ -864,11 +864,110 @@ button.chip {
 
 .watchlist-item {
   width: 100%;
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  gap: 2px;
   border: none;
   background: transparent;
   padding: var(--space-2);
+  text-align: left;
+}
+
+/* Symbol, trend line and price on the first line; bid and ask, and the change, on the second. */
+.watchlist-main,
+.watchlist-detail {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.watchlist-main .symbol {
+  flex: 1;
+}
+
+.watchlist-price {
+  min-width: 64px;
+  text-align: right;
+}
+
+.watchlist-detail {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+/* On its own line when bid and ask leave no room, still at the right. */
+.watchlist-detail .change {
+  margin-left: auto;
+}
+
+.watchlist-quotes {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.change-up,
+.sparkline-up {
+  color: var(--buy);
+}
+
+.change-down,
+.sparkline-down {
+  color: var(--sell);
+}
+
+.change-flat,
+.sparkline-flat {
+  color: var(--muted);
+}
+
+.sparkline {
+  flex: none;
+}
+
+/* After the rules above, so it wins: the header above the chart shows the bid and ask, so the stacked watchlist
+   leaves them out. */
+@media (max-width: 1100px) {
+  .watchlist-quotes {
+    display: none;
+  }
+
+  .watchlist-detail {
+    justify-content: flex-end;
+  }
+}
+
+/* The selected instrument's figures above the chart, in a row that wraps, with a note while they are behind. */
+.instrument-figures-wrap {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+}
+
+.instrument-figures-feed {
+  margin: 0;
+}
+
+/* The selected instrument's figures above the chart, in a row that wraps. */
+.instrument-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-6);
+  margin: 0;
+}
+
+.instrument-figures div {
+  display: grid;
+  gap: 2px;
+}
+
+.instrument-figures dt {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.instrument-figures dd {
+  margin: 0;
+  text-align: left;
 }
 
 .watchlist-item[aria-pressed='true'] {

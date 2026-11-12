@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { resetSession } from '../api/client';
 import { TOURS } from '../help/tours';
 import { signedIn } from '../test/fakeServer';
-import { fakeStreams, frame } from '../test/fakeStream';
+import { fakeStreams, frame, noTrades } from '../test/fakeStream';
 import { StreamContext, TerminalPage } from './TerminalPage';
 
 const NOVA = '00000000-0000-0000-0000-000000000001';
@@ -29,6 +29,7 @@ function instrument(instrumentId: string, symbol: string, lastPrice: string | nu
     lastTradeSequence: '0',
     sourceCommandSequence: '1',
     generatedAt: '2026-11-04T12:00:00Z',
+    session: noTrades('100.00'),
   };
 }
 
@@ -203,6 +204,64 @@ describe('terminal', () => {
     expect(screen.getByText('Spread 1.00')).toBeInTheDocument();
     expect(within(screen.getByRole('table', { name: 'Recent trades' })).getByText('Sell')).toBeInTheDocument();
     expect(screen.getByText('Connected')).toBeInTheDocument();
+  });
+
+  it('shows the session figures from the instrument list, then from the live frame once it comes', async () => {
+    market();
+    const streams = renderTerminal();
+    await screen.findByRole('heading', { name: 'NOVA', level: 1 });
+    const figure = (label: string) =>
+      within(document.querySelector<HTMLElement>('.instrument-figures')!).getByText(label).nextElementSibling?.textContent;
+    // Before the frame: the list's figures (no trades yet) and its best bid and ask (none).
+    expect(figure('Change')).toBe('—');
+    expect(figure('Reference')).toBe('100.00');
+    expect(figure('Bid')).toBe('—');
+
+    act(() =>
+      streams.latest()?.emit(
+        'market',
+        frame(NOVA, '6', {
+          session: {
+            ...noTrades('100.00'),
+            last: '98.00',
+            change: '-2.00',
+            changePercent: '-2.00',
+            high: '101.00',
+            low: '98.00',
+            volume: 40,
+            tradeCount: 3,
+            vwap: '99.20',
+          },
+        }),
+      ),
+    );
+
+    expect(figure('Change')).toBe('▼ down −2.00 (−2.00%)');
+    expect(figure('Bid')).toBe('99.50');
+    expect(figure('Ask')).toBe('100.50');
+    expect(figure('Spread')).toBe('1.00');
+    expect(figure('Volume')).toBe('40');
+    expect(figure('VWAP')).toBe('99.20');
+  });
+
+  it('keeps to the polled list when the last frame is older than it, as after the stream dropped', async () => {
+    market();
+    const streams = renderTerminal();
+    await screen.findByRole('heading', { name: 'NOVA', level: 1 });
+    const figure = (label: string) =>
+      within(document.querySelector<HTMLElement>('.instrument-figures')!).getByText(label).nextElementSibling?.textContent;
+
+    // The list is at revision 1; a frame from revision 0 is behind it, whatever figures it carries.
+    act(() =>
+      streams.latest()?.emit(
+        'market',
+        frame(NOVA, '0', { lastPrice: '97.00', session: { ...noTrades('100.00'), last: '97.00', change: '-3.00', changePercent: '-3.00' } }),
+      ),
+    );
+
+    expect(figure('Change')).toBe('—');
+    expect(figure('Bid')).toBe('—');
+    expect(document.querySelector('.last-price')).toHaveTextContent('100.00 ref');
   });
 
   it('switches the stream when another instrument is chosen', async () => {

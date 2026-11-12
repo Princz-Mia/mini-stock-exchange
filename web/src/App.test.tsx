@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { App } from './App';
 import { resetSession } from './api/client';
 import { fakeServer, signedIn } from './test/fakeServer';
+import { noTrades } from './test/fakeStream';
 
 function openAt(path: string) {
   window.history.pushState({}, '', path);
@@ -28,6 +29,7 @@ const INSTRUMENTS = {
       lastTradeSequence: '0',
       sourceCommandSequence: '3',
       generatedAt: '2026-11-04T12:00:00Z',
+      session: noTrades('100.00'),
     },
   ],
   feed: { state: 'STALE', lag: 4 },
