@@ -5,8 +5,12 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -15,6 +19,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import com.mia_princz.mse.execution.trading.domain.CostBasis;
 import com.mia_princz.mse.execution.trading.domain.Price;
 
 /** Read-only queries for the trading API. They never go through the writer and never change anything. */
@@ -39,12 +44,15 @@ class TradingQueries {
 	}
 
 	record Holding(UUID instrumentId, String symbol, long total, long reserved, long markCents, boolean lastTrade,
-			Instant markedAt) {
+			Instant markedAt, long referencePriceCents) {
 	}
 
-	/** Cash and holdings from one snapshot of committed state, with the account version and command it reflects. */
+	/**
+	 * Cash and holdings from one snapshot of committed state, with the account version and command it reflects, and
+	 * each holding's cost basis when asked for.
+	 */
 	record Portfolio(long cashTotalCents, long cashReservedCents, List<Holding> holdings, long accountVersion,
-			long asOfCommandSequence) {
+			long asOfCommandSequence, Map<UUID, CostBasis> costs) {
 	}
 
 	record OwnTrade(UUID tradeId, UUID instrumentId, String symbol, String side, String liquidity, long priceCents,
@@ -282,7 +290,7 @@ class TradingQueries {
 	 * One REPEATABLE READ, read-only transaction, so cash and every holding come from the same committed command:
 	 * a trade committing in between cannot leave the cash of one state beside the shares of another.
 	 */
-	Portfolio portfolio(UUID accountId) {
+	Portfolio portfolio(UUID accountId, boolean withCosts) {
 		return snapshot.execute((status) -> {
 			long[] cash = jdbc.sql("""
 					SELECT c.total_cents, c.reserved_cents, a.version, s.last_command_sequence
@@ -308,11 +316,54 @@ class TradingQueries {
 					return new Holding(row.getObject("instrument_id", UUID.class), row.getString("symbol"),
 							row.getLong("total_quantity"), row.getLong("reserved_quantity"),
 							last != null ? last : row.getLong("reference_price_cents"), last != null,
-							at == null ? null : at.toInstant());
+							at == null ? null : at.toInstant(), row.getLong("reference_price_cents"));
 				})
 				.list();
-			return new Portfolio(cash[0], cash[1], holdings, cash[2], cash[3]);
+			return new Portfolio(cash[0], cash[1], holdings, cash[2], cash[3],
+					withCosts ? costs(accountId) : Map.of());
 		});
+	}
+
+	/**
+	 * Each holding's cost by the average-cost rule, from the account's starting shares and its own trades in sequence
+	 * order, read in the caller's snapshot. Its cost grows with the account's trades, which is why only people's reads
+	 * ask for it. An instrument whose history sells more than it holds has no cost here rather than a wrong one.
+	 */
+	private Map<UUID, CostBasis> costs(UUID accountId) {
+		Map<UUID, CostBasis> costs = new HashMap<>();
+		Set<UUID> unusable = new HashSet<>();
+		jdbc.sql("""
+				SELECT a.instrument_id, 0 AS step, 'START' AS kind, a.amount AS quantity,
+				    i.reference_price_cents AS price_cents
+				FROM initial_allocation a JOIN instrument i ON i.id = a.instrument_id
+				WHERE a.account_id = :account
+				UNION ALL
+				SELECT instrument_id, trade_sequence, 'BUY', quantity, price_cents FROM trades
+				WHERE buyer_account_id = :account
+				UNION ALL
+				SELECT instrument_id, trade_sequence, 'SELL', quantity, price_cents FROM trades
+				WHERE seller_account_id = :account
+				ORDER BY instrument_id, step""")
+			.param("account", accountId)
+			.query((row, index) -> {
+				UUID instrument = row.getObject("instrument_id", UUID.class);
+				CostBasis basis = costs.computeIfAbsent(instrument, (id) -> new CostBasis());
+				long quantity = row.getLong("quantity");
+				try {
+					switch (row.getString("kind")) {
+						case "START" -> basis.started(quantity, row.getLong("price_cents"));
+						case "BUY" -> basis.bought(quantity, row.getLong("price_cents"));
+						default -> basis.sold(quantity);
+					}
+				}
+				catch (IllegalStateException ex) {
+					unusable.add(instrument);
+				}
+				return instrument;
+			})
+			.list();
+		unusable.forEach(costs::remove);
+		return costs;
 	}
 
 	/**
