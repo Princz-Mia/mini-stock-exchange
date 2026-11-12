@@ -919,6 +919,15 @@ button.chip {
   padding: var(--space-2);
 }
 
+/* After every rule that styles an input or a select, so it wins over each one's own background, border and colour. */
+input:disabled,
+select:disabled {
+  background: var(--control-disabled-bg);
+  border-color: var(--control-disabled-line);
+  color: var(--control-disabled-text);
+  cursor: not-allowed;
+}
+
 .hint {
   margin: 0;
   font-size: 12px;
@@ -1019,13 +1028,4 @@ button.tab[aria-selected='true'] {
 .population meter::-moz-meter-bar {
   background: var(--secondary);
   border-radius: 4px;
-}
-
-/* Last, so it wins over each control's own background, border and colour. */
-input:disabled,
-select:disabled {
-  background: var(--control-disabled-bg);
-  border-color: var(--control-disabled-line);
-  color: var(--control-disabled-text);
-  cursor: not-allowed;
 }
