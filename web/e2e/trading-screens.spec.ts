@@ -52,19 +52,51 @@ async function scan(page: Page, size: Size, name: string): Promise<void> {
   expect(found, `${name} at ${size.name} has accessibility violations`).toEqual([]);
 }
 
+/** The only keys the app may keep in browser storage: display preferences, never credentials or account data. */
+const PREFERENCE_KEYS = ['mse.theme'];
+
+/** Browser storage holds display preferences and nothing else, in every state of every screen. */
+async function storesOnlyPreferences(page: Page, size: Size, name: string): Promise<void> {
+  const stored = await page.evaluate(async () => ({
+    local: Object.keys(window.localStorage),
+    session: Object.keys(window.sessionStorage),
+    databases: (await window.indexedDB.databases()).map((database) => database.name ?? ''),
+  }));
+  expect(stored.local.filter((key) => !PREFERENCE_KEYS.includes(key)), `${name} at ${size.name}: localStorage`).toEqual([]);
+  expect(stored.session, `${name} at ${size.name}: sessionStorage`).toEqual([]);
+  expect(stored.databases, `${name} at ${size.name}: IndexedDB`).toEqual([]);
+}
+
+/** Forces a theme the way the theme switch does, or lets the page follow the system again. */
+async function force(page: Page, theme: 'light' | 'dark' | null): Promise<void> {
+  await page.evaluate((chosen) => {
+    if (chosen === null) {
+      delete document.documentElement.dataset.theme;
+    } else {
+      document.documentElement.dataset.theme = chosen;
+    }
+  }, theme);
+}
+
 /**
- * No sideways scrolling, no accessibility violation in either colour scheme (the stylesheet follows the system's), and
- * a screenshot to look at.
+ * No sideways scrolling, nothing stored but preferences, and no accessibility violation in either forced theme, each
+ * forced against the other system scheme so the forced one has to win. Screenshots of the light page and the dark one
+ * go to test-results/screens/ for review.
  */
 async function capture(page: Page, size: Size, name: string): Promise<void> {
   expect(blocked.get(page) ?? [], `${name} at ${size.name}: the content security policy blocked something`).toEqual([]);
   const width = await page.evaluate(() => document.documentElement.scrollWidth);
   expect(width, `${name} at ${size.name} scrolls sideways`).toBeLessThanOrEqual(size.width);
+  await storesOnlyPreferences(page, size, name);
   await page.screenshot({ path: `test-results/screens/${size.name}-${name}.png`, fullPage: true });
-  await scan(page, size, name);
   await page.emulateMedia({ colorScheme: 'dark' });
-  await scan(page, size, `${name}-dark`);
+  await force(page, 'light');
+  await scan(page, size, name);
   await page.emulateMedia({ colorScheme: 'light' });
+  await force(page, 'dark');
+  await page.screenshot({ path: `test-results/screens/${size.name}-${name}-dark.png`, fullPage: true });
+  await scan(page, size, `${name}-dark`);
+  await force(page, null);
 }
 
 /** What the proxy's content security policy blocked on each page; the app should need nothing it forbids. */

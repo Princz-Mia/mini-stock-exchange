@@ -10,6 +10,8 @@ export interface FakeSeries {
   pane: number;
   data: unknown[];
   visible: boolean;
+  /** Every option set so far, the latest winning, as the library merges them. */
+  options: Record<string, unknown>;
 }
 
 export const drawnSeries: FakeSeries[] = [];
@@ -56,7 +58,13 @@ export const createChart = vi.fn(() => {
   const pane = { setStretchFactor: () => undefined };
   return {
     addSeries: (definition: { kind: string }, options?: { visible?: boolean }, paneIndex = 0) => {
-      const series: FakeSeries = { kind: definition.kind, pane: paneIndex, data: [], visible: options?.visible ?? true };
+      const series: FakeSeries = {
+        kind: definition.kind,
+        pane: paneIndex,
+        data: [],
+        visible: options?.visible ?? true,
+        options: { ...options },
+      };
       drawnSeries.push(series);
       return {
         setData: (data: unknown[]) => {
@@ -65,6 +73,7 @@ export const createChart = vi.fn(() => {
         },
         applyOptions: (update: { visible?: boolean }) => {
           series.visible = update.visible ?? series.visible;
+          series.options = { ...series.options, ...update };
         },
       };
     },
