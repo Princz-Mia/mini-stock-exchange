@@ -93,8 +93,19 @@ class BotTokenIT {
 				key.toString()).body()).isEqualTo(placed.body());
 		assertThat(client.get("/api/v1/commands/" + key, bearer()).body()).isEqualTo(placed.body());
 		assertThat(client.get("/api/v1/orders/" + orderId, bearer()).statusCode()).isEqualTo(200);
-		JsonNode cash = JSON.readTree(client.get("/api/v1/portfolio", bearer()).body()).get("cash");
-		assertThat(cash.get("reserved").asString()).isEqualTo("180.00");
+		JsonNode portfolio = JSON.readTree(client.get("/api/v1/portfolio", bearer()).body());
+		assertThat(portfolio.get("cash").get("reserved").asString()).isEqualTo("180.00");
+		// The cost figures are worked out from every trade on each read, so a bot's read leaves them out.
+		assertThat(portfolio.get("costBasis").isNull()).isTrue();
+		portfolio.get("holdings").forEach((holding) -> {
+			assertThat(holding.get("averageCost").isNull()).isTrue();
+			assertThat(holding.get("unrealized").isNull()).isTrue();
+			assertThat(holding.get("weight").isString()).isTrue();
+		});
+		// The trader was funded the same way; a person's read has the cost, so the bot's nulls come from being a bot.
+		JsonNode person = JSON.readTree(TestBrowser.loggedIn(port, "trader", PASSWORD).get("/api/v1/portfolio").body());
+		assertThat(person.get("holdings").get(0).get("averageCost").asString()).isEqualTo("100.00");
+		assertThat(person.get("costBasis").asString()).isEqualTo("10000.00");
 
 		HttpResponse<String> canceled = client.post("/api/v1/orders/" + orderId + "/cancel", "", "Authorization", BEARER,
 				"Idempotency-Key", UUID.randomUUID().toString());
@@ -214,6 +225,10 @@ class BotTokenIT {
 		jdbc.update("""
 				INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
 				VALUES (?, ?, ?, 100, 0)""", account, kind, instrument);
+		// As account setup records them, so a person's read of the same account would have a cost.
+		String allocate = "INSERT INTO initial_allocation (account_id, instrument_id, amount, journal_batch_id) VALUES (?, ?, ?, ?)";
+		jdbc.update(allocate, account, null, 1_000_000, batch);
+		jdbc.update(allocate, account, instrument, 100, batch);
 	}
 
 }

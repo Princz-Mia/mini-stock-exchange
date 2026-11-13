@@ -73,8 +73,8 @@ class PortfolioApiIT {
 			}
 		}
 		int n = NEXT.getAndIncrement();
-		// One instrument per test; the last is kept for the filter test's second instrument.
-		assertThat(n).as("more tests than instruments: add instruments").isLessThan(INSTRUMENTS.size() - 1);
+		// One instrument per test; the last two are kept as second instruments for the filter and sell-out tests.
+		assertThat(n).as("more tests than instruments: add instruments").isLessThan(INSTRUMENTS.size() - 2);
 		instrument = INSTRUMENTS.get(n);
 		new TransactionTemplate(transactionManager).executeWithoutResult((status) -> {
 			fundedTrader("trader" + n);
@@ -98,6 +98,119 @@ class PortfolioApiIT {
 		assertThat(holding.get("mark").get("at").isNull()).isTrue();
 		assertThat(holding.get("value").asString()).isEqualTo("10000.00");
 		assertThat(portfolio.get("equity").asString()).isEqualTo("20000.00");
+		// Starting shares at their reference price: no change, no gain yet, half the equity.
+		assertThat(holding.get("changePercent").asString()).isEqualTo("0.00");
+		assertThat(holding.get("weight").asString()).isEqualTo("50.00");
+		assertThat(holding.get("averageCost").asString()).isEqualTo("100.00");
+		assertThat(holding.get("unrealized").asString()).isEqualTo("0.00");
+		assertThat(holding.get("unrealizedPercent").asString()).isEqualTo("0.00");
+		assertThat(portfolio.get("costBasis").asString()).isEqualTo("10000.00");
+		assertThat(portfolio.get("unrealized").asString()).isEqualTo("0.00");
+	}
+
+	/** Both sides of one trade, by the average-cost rule: the buyer averages in, the seller's average stays. */
+	@Test
+	void costFiguresFollowTheAccountsOwnTrades() throws Exception {
+		place(other, "SELL", 50, "103.00");
+		place(trader, "BUY", 50, "103.00");
+
+		JsonNode buyer = json(trader.get("/api/v1/portfolio"));
+		JsonNode bought = buyer.get("holdings").get(0);
+		assertThat(bought.get("total").asLong()).isEqualTo(150);
+		// (100 x 100.00 + 50 x 103.00) / 150 = 101.00; value 150 x 103.00 = 15,450.00 against a cost of 15,150.00.
+		assertThat(bought.get("averageCost").asString()).isEqualTo("101.00");
+		assertThat(bought.get("unrealized").asString()).isEqualTo("300.00");
+		assertThat(bought.get("unrealizedPercent").asString()).isEqualTo("1.98");
+		assertThat(bought.get("changePercent").asString()).isEqualTo("3.00");
+		// 15,450.00 of equity 4,850.00 cash + 15,450.00 = 20,300.00.
+		assertThat(bought.get("weight").asString()).isEqualTo("76.11");
+		assertThat(buyer.get("costBasis").asString()).isEqualTo("15150.00");
+		assertThat(buyer.get("unrealized").asString()).isEqualTo("300.00");
+		assertThat(buyer.get("unrealizedPercent").asString()).isEqualTo("1.98");
+
+		JsonNode sold = json(other.get("/api/v1/portfolio")).get("holdings").get(0);
+		assertThat(sold.get("total").asLong()).isEqualTo(50);
+		assertThat(sold.get("averageCost").asString()).as("a sale leaves the average alone").isEqualTo("100.00");
+		assertThat(sold.get("unrealized").asString()).isEqualTo("150.00");
+		assertThat(sold.get("unrealizedPercent").asString()).isEqualTo("3.00");
+	}
+
+	/**
+	 * Selling everything resets a holding's cost, and the empty holding, whose row stays, does not cost the account its
+	 * totals. Trades apply in sequence order and only to their own instrument: ordered by price, the buy would come
+	 * before the sale; applied to every holding, the second one's cost would move.
+	 */
+	@Test
+	void sellingOutResetsTheCostAndLeavesTheOtherHoldingsAndTheTotals() throws Exception {
+		UUID second = INSTRUMENTS.get(INSTRUMENTS.size() - 2);
+		new TransactionTemplate(transactionManager)
+			.executeWithoutResult((status) -> fundedTrader("pair", 100L, List.of(instrument, second)));
+		TestBrowser pair = TestBrowser.loggedIn(port, "pair", PASSWORD);
+		place(pair, "SELL", 100, "99.00");
+		place(other, "BUY", 100, "99.00");
+
+		JsonNode out = json(pair.get("/api/v1/portfolio"));
+		JsonNode empty = holding(out, instrument);
+		assertThat(empty.get("total").asLong()).isZero();
+		assertThat(empty.get("averageCost").isNull()).isTrue();
+		assertThat(empty.get("unrealized").isNull()).isTrue();
+		assertThat(empty.get("weight").asString()).isEqualTo("0.00");
+		assertThat(holding(out, second).get("averageCost").asString()).isEqualTo("100.00");
+		assertThat(out.get("costBasis").asString()).isEqualTo("10000.00");
+		assertThat(out.get("unrealized").asString()).isEqualTo("0.00");
+		assertThat(out.get("unrealizedPercent").asString()).isEqualTo("0.00");
+
+		place(other, "SELL", 50, "101.00");
+		place(pair, "BUY", 50, "101.00");
+		JsonNode back = json(pair.get("/api/v1/portfolio"));
+		JsonNode bought = holding(back, instrument);
+		assertThat(bought.get("total").asLong()).isEqualTo(50);
+		assertThat(bought.get("averageCost").asString()).as("the cost started afresh").isEqualTo("101.00");
+		assertThat(bought.get("unrealized").asString()).isEqualTo("0.00");
+		assertThat(holding(back, second).get("averageCost").asString()).isEqualTo("100.00");
+		// 50 x 101.00 + 100 x 100.00; the second instrument has not traded, so it is marked at its reference.
+		assertThat(back.get("costBasis").asString()).isEqualTo("15050.00");
+		assertThat(back.get("unrealized").asString()).isEqualTo("0.00");
+	}
+
+	/** A history that does not account for the shares held gives no estimate rather than a wrong one, and no error. */
+	@Test
+	void aHoldingWhoseHistoryDoesNotAddUpHasNoCostFigures() throws Exception {
+		new TransactionTemplate(transactionManager).executeWithoutResult((status) -> {
+			fundedTrader("damaged", null, List.of(instrument));
+			fundedTrader("undercounted", 60L, List.of(instrument));
+		});
+		// Starting shares on record, but fewer than the 100 held, and no sale beyond them: the cost covers 60 shares.
+		JsonNode undercounted = json(TestBrowser.loggedIn(port, "undercounted", PASSWORD).get("/api/v1/portfolio"));
+		assertThat(undercounted.get("holdings").get(0).get("averageCost").isNull()).isTrue();
+		assertThat(undercounted.get("holdings").get(0).get("unrealized").isNull()).isTrue();
+		assertThat(undercounted.get("costBasis").isNull()).isTrue();
+
+		TestBrowser damaged = TestBrowser.loggedIn(port, "damaged", PASSWORD);
+		place(damaged, "SELL", 5, "101.00");
+		place(other, "BUY", 5, "101.00");
+
+		HttpResponse<String> response = damaged.get("/api/v1/portfolio");
+		assertThat(response.statusCode()).isEqualTo(200);
+		JsonNode portfolio = json(response);
+		JsonNode holding = portfolio.get("holdings").get(0);
+		assertThat(holding.get("total").asLong()).isEqualTo(95);
+		assertThat(holding.get("averageCost").isNull()).isTrue();
+		assertThat(holding.get("unrealized").isNull()).isTrue();
+		assertThat(holding.get("unrealizedPercent").isNull()).isTrue();
+		assertThat(holding.get("changePercent").asString()).isEqualTo("1.00");
+		assertThat(portfolio.get("costBasis").isNull()).isTrue();
+
+		// Selling the rest and buying some back brings the shares held and the shares the history accounts for to the
+		// same 10, but the history still does not add up, so there is still no estimate.
+		place(damaged, "SELL", 95, "99.00");
+		place(other, "BUY", 95, "99.00");
+		place(other, "SELL", 10, "99.00");
+		place(damaged, "BUY", 10, "99.00");
+		JsonNode rebought = json(damaged.get("/api/v1/portfolio"));
+		assertThat(rebought.get("holdings").get(0).get("total").asLong()).isEqualTo(10);
+		assertThat(rebought.get("holdings").get(0).get("averageCost").isNull()).isTrue();
+		assertThat(rebought.get("costBasis").isNull()).isTrue();
 	}
 
 	/** Resting orders move cash and shares from available to reserved; equity counts each once, so it holds. */
@@ -475,7 +588,7 @@ class PortfolioApiIT {
 		jdbc.update("INSERT INTO simulation (id, state, opened_at) VALUES (?, 'OPEN', now())", simulation);
 		jdbc.update("INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'ISSUANCE', 'Issuance')",
 				UUID.randomUUID(), simulation);
-		for (int i = 0; i < 16; i++) {
+		for (int i = 0; i < 18; i++) {
 			UUID id = UUID.randomUUID();
 			jdbc.update(
 					"INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, ?, 10000)",
@@ -484,8 +597,25 @@ class PortfolioApiIT {
 		}
 	}
 
+	private static JsonNode holding(JsonNode portfolio, UUID instrumentId) {
+		for (JsonNode holding : portfolio.get("holdings")) {
+			if (holding.get("instrumentId").asString().equals(instrumentId.toString())) {
+				return holding;
+			}
+		}
+		throw new AssertionError("no holding of " + instrumentId);
+	}
+
 	/** A trader user with an account holding 10,000.00 and 100 shares of this test's instrument, from genesis. */
 	private void fundedTrader(String username) {
+		fundedTrader(username, 100L, List.of(instrument));
+	}
+
+	/**
+	 * 100 shares of each instrument given, with {@code allocated} of each on record as the starting shares: null leaves
+	 * the record out and fewer than 100 undercounts it, as a damaged history would.
+	 */
+	private void fundedTrader(String username, Long allocated, List<UUID> instruments) {
 		UUID user = UUID.randomUUID();
 		UUID account = UUID.randomUUID();
 		UUID batch = UUID.randomUUID();
@@ -501,14 +631,24 @@ class PortfolioApiIT {
 		String post = "INSERT INTO ledger_entry (batch_id, account_id, instrument_id, bucket, delta) VALUES (?, ?, ?, 'AVAILABLE', ?)";
 		jdbc.update(post, batch, issuance, null, -1_000_000);
 		jdbc.update(post, batch, account, null, 1_000_000);
-		jdbc.update(post, batch, issuance, instrument, -100);
-		jdbc.update(post, batch, account, instrument, 100);
 		jdbc.update("""
 				INSERT INTO cash_balance (account_id, account_kind, total_cents, reserved_cents)
 				VALUES (?, 'TRADER', 1000000, 0)""", account);
-		jdbc.update("""
-				INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
-				VALUES (?, 'TRADER', ?, 100, 0)""", account, instrument);
+		// As account setup records them: what the account started with, for the cost basis.
+		String allocate = "INSERT INTO initial_allocation (account_id, instrument_id, amount, journal_batch_id) VALUES (?, ?, ?, ?)";
+		if (allocated != null) {
+			jdbc.update(allocate, account, null, 1_000_000, batch);
+		}
+		for (UUID held : instruments) {
+			jdbc.update(post, batch, issuance, held, -100);
+			jdbc.update(post, batch, account, held, 100);
+			jdbc.update("""
+					INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
+					VALUES (?, 'TRADER', ?, 100, 0)""", account, held);
+			if (allocated != null) {
+				jdbc.update(allocate, account, held, allocated, batch);
+			}
+		}
 	}
 
 }

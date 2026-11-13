@@ -782,6 +782,15 @@ export interface components {
             readonly accountVersion: components["schemas"]["Sequence"];
             /** @description The last command reflected here. */
             readonly asOfCommandSequence: components["schemas"]["Sequence"];
+            /**
+             * @description Estimated: what the shares held cost by the average-cost rule (Holding.averageCost), totalled; 0.00 with
+             *     no shares. Null for a bot's read, and when any holding with shares has a null averageCost.
+             */
+            readonly costBasis: components["schemas"]["Price"] | null;
+            /** @description Estimated, the holdings' value less their cost, totalled. Null when costBasis is. */
+            readonly unrealized: components["schemas"]["SignedAmount"] | null;
+            /** @description unrealized as a percentage of costBasis, rounded half-even to two places. Null when costBasis is. */
+            readonly unrealizedPercent: components["schemas"]["SignedAmount"] | null;
         };
         readonly Cash: {
             readonly total: components["schemas"]["Money"];
@@ -800,6 +809,28 @@ export interface components {
             readonly mark: components["schemas"]["Mark"];
             /** @description total at the mark. */
             readonly value: components["schemas"]["Money"];
+            /** @description The mark against the instrument's reference price, in percent, rounded half-even to two places. */
+            readonly changePercent: components["schemas"]["SignedAmount"];
+            /** @description value as a percentage of equity, rounded half-even to two places; 0.00 when equity is zero. */
+            readonly weight: components["schemas"]["Price"];
+            /**
+             * @description Estimated, not a tax-style cost basis: the cost of one share by the average-cost rule, from the account's
+             *     own trades in sequence order, with starting shares at their reference price. A buy averages in at its
+             *     price; a sale leaves the average alone; selling out resets it. Rounded half-even to the cent. Worked out
+             *     from every trade of the account on each read, so it is null for a bot's read. Also null with no shares
+             *     held, and when the account's history does not account for exactly the shares held, rather than wrong.
+             */
+            readonly averageCost: components["schemas"]["Price"] | null;
+            /**
+             * @description Estimated, value less the shares' cost by the same rule, rounded half-even to the cent. Null when
+             *     averageCost is.
+             */
+            readonly unrealized: components["schemas"]["SignedAmount"] | null;
+            /**
+             * @description unrealized as a percentage of the shares' cost, rounded half-even to two places. Null when averageCost
+             *     is.
+             */
+            readonly unrealizedPercent: components["schemas"]["SignedAmount"] | null;
         };
         readonly Mark: {
             readonly price: components["schemas"]["Price"];
