@@ -20,6 +20,7 @@ import type {
   MarketStatus,
   MarketTransition,
   Order,
+  OrderDetail,
   OrderPage,
   OrderRequest,
   OwnTradePage,
@@ -155,6 +156,9 @@ export const api = {
   /** Committed when it returns; the same key with the same request returns the first answer again. */
   placeOrder: (order: OrderRequest, idempotencyKey: string) =>
     request<Order>('POST', '/api/v1/orders', { body: order, idempotencyKey }),
+
+  /** One of the caller's own orders, in whatever state it is in now. */
+  order: (orderId: string) => request<OrderDetail>('GET', `/api/v1/orders/${orderId}`),
 
   cancelOrder: (orderId: string, idempotencyKey: string) =>
     request<Cancellation>('POST', `/api/v1/orders/${orderId}/cancel`, { idempotencyKey }),

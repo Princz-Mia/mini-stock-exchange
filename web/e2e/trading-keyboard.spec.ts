@@ -107,12 +107,21 @@ test('buy and sell are written out wherever colour marks them', async ({ page })
   for (const screen of ['Terminal', 'Portfolio']) {
     await page.getByRole('link', { name: screen }).click();
     await expect(page.locator('.side-buy, .side-sell').first()).toBeVisible();
-    const marks = await page
-      .locator('.side-buy, .side-sell')
-      .evaluateAll((cells) =>
-        cells.map((cell) => ({ side: cell.classList.contains('side-buy') ? 'Buy' : 'Sell', text: cell.textContent })),
-      );
+    const marks = await page.locator('.side-buy, .side-sell').evaluateAll((cells) =>
+      cells.map((cell) => ({
+        side: cell.classList.contains('side-buy') ? 'Buy' : 'Sell',
+        text: cell.textContent,
+        table: cell.closest('table')?.getAttribute('aria-label') ?? null,
+      })),
+    );
     for (const mark of marks) {
+      // A price in the order book is coloured too, and its table's name says which side it is on.
+      if (mark.table === 'Bids' || mark.table === 'Asks') {
+        expect(mark.table, `a ${mark.side.toLowerCase()}-coloured price in the book`).toBe(
+          mark.side === 'Buy' ? 'Bids' : 'Asks',
+        );
+        continue;
+      }
       expect(mark.text?.trim(), `a ${mark.side.toLowerCase()} marked by colour on the ${screen} screen`).toBe(
         mark.side,
       );

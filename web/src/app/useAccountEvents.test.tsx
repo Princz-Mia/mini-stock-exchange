@@ -24,8 +24,16 @@ function fakeStreams() {
   return { opened, create, send };
 }
 
-function Probe({ enabled, create }: { enabled: boolean; create: (url: string) => StreamSource }) {
-  useAccountEvents(enabled, create);
+function Probe({
+  enabled,
+  create,
+  onChange,
+}: {
+  enabled: boolean;
+  create: (url: string) => StreamSource;
+  onChange?: () => void;
+}) {
+  useAccountEvents(enabled, create, onChange);
   return null;
 }
 
@@ -61,6 +69,39 @@ describe('useAccountEvents', () => {
       ['orders'],
       ['own-trades'],
     ]);
+  });
+
+  it('calls back once after a burst of changes, after the refetch, and with the latest callback', () => {
+    const client = new QueryClient();
+    const steps: string[] = [];
+    vi.spyOn(client, 'invalidateQueries').mockImplementation(() => {
+      steps.push('refetch');
+      return Promise.resolve();
+    });
+    const streams = fakeStreams();
+    const first = vi.fn();
+    const latest = vi.fn(() => {
+      steps.push('callback');
+    });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <Probe enabled create={streams.create} onChange={first} />
+      </QueryClientProvider>,
+    );
+    view.rerender(
+      <QueryClientProvider client={client}>
+        <Probe enabled create={streams.create} onChange={latest} />
+      </QueryClientProvider>,
+    );
+    expect(streams.opened, 'a new callback does not reconnect').toHaveLength(1);
+    streams.send('account', '{"accountVersion":"7"}');
+    streams.send('account', '{"accountVersion":"8"}');
+    act(() => vi.advanceTimersByTime(DEBOUNCE_MS - 1));
+    expect(latest).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(1));
+    expect(latest).toHaveBeenCalledTimes(1);
+    expect(first).not.toHaveBeenCalled();
+    expect(steps).toEqual(['refetch', 'refetch', 'refetch', 'callback']);
   });
 
   it('opens nothing for someone who is not a trader, and closes on leaving', () => {

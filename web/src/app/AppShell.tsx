@@ -7,6 +7,7 @@ import { HelpMenu } from '../help/HelpMenu';
 import { Tour } from '../help/Tour';
 import { TOURS } from '../help/tours';
 import { useTour } from '../help/useTour';
+import { FillNotice, FillWatch, useFillNotices } from './FillNotice';
 import { ThemeSwitch } from './ThemeSwitch';
 import { useAccountEvents } from './useAccountEvents';
 
@@ -15,8 +16,6 @@ export function AppShell() {
   const session = useSession();
   const logout = useLogout();
   const location = useLocation();
-  // A trader's own change notifications, for as long as they are signed in.
-  useAccountEvents(isTrader(session.data));
 
   if (session.isPending) {
     return <p className="page-status">Loading…</p>;
@@ -38,6 +37,10 @@ export function AppShell() {
 /** The frame itself, for a user who is signed in, with the tour on their start page. */
 function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout: () => void; loggingOut: boolean }) {
   const tour = useTour(identity);
+  const trader = isTrader(identity);
+  const notices = useFillNotices();
+  // A trader's own change notifications, for as long as they are signed in; each may bring a fill to tell them about.
+  useAccountEvents(trader, undefined, notices.check);
   const help = useRef<HTMLButtonElement>(null);
   const shown = useRef(tour.showing);
   // When a tour closes, focus goes to Help, where it can be found again, rather than to the top of the page.
@@ -53,7 +56,7 @@ function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout
         <span className="brand">Mini Stock Exchange</span>
         <span className="context-badge">Simulation · Virtual funds</span>
         <nav aria-label="Main">
-          {isTrader(identity) && (
+          {trader && (
             <>
               <NavLink to="/terminal">Terminal</NavLink>
               <NavLink to="/portfolio">Portfolio</NavLink>
@@ -71,8 +74,11 @@ function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout
         </button>
       </header>
       <main className="content">
-        <Outlet />
+        <FillWatch.Provider value={trader ? notices.placed : null}>
+          <Outlet />
+        </FillWatch.Provider>
       </main>
+      {trader && <FillNotice fills={notices.fills} onDismiss={notices.dismiss} held={tour.showing !== null} />}
       {tour.showing !== null && <Tour key={tour.showing} script={TOURS[tour.showing]} onEnd={tour.end} />}
     </div>
   );

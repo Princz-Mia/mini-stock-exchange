@@ -1,9 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resetSession } from '../api/client';
+import { FillWatch } from '../app/FillNotice';
 import { TOURS } from '../help/tours';
 import { signedIn } from '../test/fakeServer';
 import { fakeStreams, frame, noTrades } from '../test/fakeStream';
@@ -89,14 +90,16 @@ function market() {
     .on('GET /api/v1/orders', { status: 200, json: { orders: [OPEN_ORDER], nextCursor: null } });
 }
 
-function renderTerminal(at = '/terminal') {
+function renderTerminal(at = '/terminal', watch: ((order: { orderId: string; filledQuantity: number }) => void) | null = null) {
   const streams = fakeStreams();
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[at]}>
         <StreamContext.Provider value={streams.create}>
-          <TerminalPage />
+          <FillWatch.Provider value={watch}>
+            <TerminalPage />
+          </FillWatch.Provider>
         </StreamContext.Provider>
       </MemoryRouter>
     </QueryClientProvider>,
@@ -302,6 +305,26 @@ describe('terminal', () => {
     await waitFor(() =>
       expect(server.requests.some((request) => request.url.startsWith(`/api/v1/instruments/${ORBIT}/candles?`))).toBe(true),
     );
+  });
+
+  it('tells the fill notices about an order that rests, with what filled on arrival, and not one that is done', async () => {
+    let answer = { state: 'PARTIALLY_FILLED', filledQuantity: 4, workingQuantity: 6, canceledQuantity: 0 };
+    market().on('POST /api/v1/orders', () => ({
+      status: 201,
+      json: { orderId: '00000000-0000-0000-0000-0000000000aa', reason: null, commandSequence: '9', ...answer },
+    }));
+    const watch = vi.fn();
+    renderTerminal('/terminal', watch);
+    fireEvent.change(await screen.findByLabelText('Shares'), { target: { value: '10' } });
+    fireEvent.change(screen.getByLabelText('Limit price'), { target: { value: '100.25' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Buy NOVA' }));
+    await screen.findByText('Partly filled: 4 filled, 6 still working.');
+    expect(watch).toHaveBeenCalledExactlyOnceWith({ orderId: '00000000-0000-0000-0000-0000000000aa', filledQuantity: 4 });
+
+    answer = { state: 'FILLED', filledQuantity: 10, workingQuantity: 0, canceledQuantity: 0 };
+    fireEvent.click(screen.getByRole('button', { name: 'Buy NOVA' }));
+    await screen.findByText('Filled: 10 shares.');
+    expect(watch).toHaveBeenCalledTimes(1);
   });
 
   it('shows the maximum spend beside the available balances, and sends the order with a key', async () => {

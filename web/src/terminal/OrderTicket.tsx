@@ -1,10 +1,11 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useQueryClient } from '@tanstack/react-query';
-import { useEffect } from 'react';
+import { useCallback, useEffect } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { z } from 'zod';
 
 import type { Instrument, Order, OrderRequest, Portfolio } from '../api/types';
+import { useFillWatch } from '../app/FillNotice';
 import { groupDigits, groupInteger } from '../format';
 import { TermTip } from '../help/TermTip';
 import { isPrice, maximumSpend } from './money';
@@ -116,7 +117,17 @@ export function OrderTicket({
   paused?: string | null;
 }) {
   const client = useQueryClient();
-  const intent = useOrderIntent();
+  const watch = useFillWatch();
+  // An order that rests can fill later: the fill notices compare from what filled on arrival, which this ticket shows.
+  const onAccepted = useCallback(
+    (order: Order) => {
+      if (order.state === 'OPEN' || order.state === 'PARTIALLY_FILLED') {
+        watch?.({ orderId: order.orderId, filledQuantity: order.filledQuantity });
+      }
+    },
+    [watch],
+  );
+  const intent = useOrderIntent({ onAccepted });
   const unresolved = isUnresolved(intent.outcome);
   const sending = intent.outcome.kind === 'sending';
   const {

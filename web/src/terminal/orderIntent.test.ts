@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resetSession } from '../api/client';
 import type { OrderRequest } from '../api/types';
@@ -112,6 +112,27 @@ describe('order intent', () => {
     ]);
     expect(sent[1]?.body).toEqual(BUY);
     expect(result.current.outcome.kind).toBe('accepted');
+  });
+
+  it('reports each accepted order with its request, also when a lookup settles it, and nothing refused', async () => {
+    server()
+      .on('POST /api/v1/orders', { status: 201, json: ORDER })
+      .on('GET /api/v1/commands/00000000-0000-0000-0000-000000000002', { status: 201, json: ORDER });
+    const onAccepted = vi.fn();
+    const newKey = keys();
+    const { result } = renderHook(() => useOrderIntent({ newKey, onAccepted, lookupDelay: 1 }));
+    await act(() => result.current.submit(BUY));
+    expect(onAccepted).toHaveBeenCalledWith(ORDER, BUY);
+
+    server()
+      .on('POST /api/v1/orders', { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN' } })
+      .on('GET /api/v1/commands/00000000-0000-0000-0000-000000000002', { status: 201, json: ORDER });
+    await act(() => result.current.submit({ ...BUY, quantity: 3 }));
+    expect(onAccepted).toHaveBeenLastCalledWith(ORDER, { ...BUY, quantity: 3 });
+
+    server().on('POST /api/v1/orders', { status: 422, problem: { status: 422, code: 'INSUFFICIENT_CASH' } });
+    await act(() => result.current.submit(BUY));
+    expect(onAccepted).toHaveBeenCalledTimes(2);
   });
 
   it('resolves a timeout by looking the key up, without sending the order again', async () => {
