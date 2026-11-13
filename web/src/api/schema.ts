@@ -270,7 +270,16 @@ export interface paths {
          */
         readonly put: operations["editInstrument"];
         readonly post?: never;
-        readonly delete?: never;
+        /**
+         * Delete an instrument nothing uses while the market is in SETUP.
+         * @description Operator only. Sequenced on the writer and audited, with an idempotency key: a retry with the same key and
+         *     instrument returns the first answer, even a refusal. Refused while anything refers to the instrument: an
+         *     account given its shares, or an order sent for it, even one refused because the market was not open. Giving
+         *     shares back would need compensating ledger entries, so an instrument in use stays. Publishes the instrument's
+         *     last market snapshot, marked removed. The symbol can be added again, under a new id. Once the market has
+         *     opened, the catalogue is frozen.
+         */
+        readonly delete: operations["deleteInstrument"];
         readonly options?: never;
         readonly head?: never;
         readonly patch?: never;
@@ -710,6 +719,7 @@ export interface components {
             readonly commandSequence?: components["schemas"]["Sequence"];
             readonly commandKey?: components["schemas"]["Uuid"];
             readonly reason?: string;
+            readonly usage?: components["schemas"]["InstrumentUsage"];
         };
         readonly FieldError: {
             readonly field: string;
@@ -914,6 +924,21 @@ export interface components {
             readonly symbol: string;
             readonly referencePrice: components["schemas"]["Price"];
             readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly InstrumentDeleted: {
+            readonly instrumentId: components["schemas"]["Uuid"];
+            readonly symbol: string;
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        /**
+         * @description What keeps an instrument from being deleted. holders names the accounts given its shares (a trader's username,
+         *     or a bot's name), at most 20, in name order; holderCount says how many there are. orderCount counts the orders
+         *     sent for it, refused ones included.
+         */
+        readonly InstrumentUsage: {
+            readonly holders: readonly string[];
+            readonly holderCount: number;
+            readonly orderCount: number;
         };
         readonly AccountRequest: {
             readonly username: string;
@@ -2097,6 +2122,69 @@ export interface operations {
                 };
             };
             /** @description MARKET_NOT_IN_SETUP (committed and audited), or IDEMPOTENCY_CONFLICT. */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly deleteInstrument: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path: {
+                readonly instrumentId: components["schemas"]["Uuid"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Deleted. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["InstrumentDeleted"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description INSTRUMENT_NOT_FOUND (committed and audited when the market exists). */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /**
+             * @description MARKET_NOT_IN_SETUP or INSTRUMENT_IN_USE (both committed and audited), or IDEMPOTENCY_CONFLICT.
+             *     INSTRUMENT_IN_USE carries usage: who holds the instrument and how many orders name it.
+             */
             readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;

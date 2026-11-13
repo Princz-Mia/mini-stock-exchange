@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -22,7 +23,9 @@ import com.mia_princz.mse.execution.trading.application.AccountResult;
 import com.mia_princz.mse.execution.trading.application.AddInstrument;
 import com.mia_princz.mse.execution.trading.application.BotsResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
+import com.mia_princz.mse.execution.trading.application.DeleteInstrument;
 import com.mia_princz.mse.execution.trading.application.EditInstrument;
+import com.mia_princz.mse.execution.trading.application.InstrumentDeletion;
 import com.mia_princz.mse.execution.trading.application.InstrumentEdit;
 import com.mia_princz.mse.execution.trading.application.InstrumentResult;
 import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
@@ -45,6 +48,8 @@ class SetupController {
 
 	static final String INSTRUMENT_EDIT_ROUTE = "PUT /api/v1/admin/instruments/{instrumentId}";
 
+	static final String INSTRUMENT_DELETE_ROUTE = "DELETE /api/v1/admin/instruments/{instrumentId}";
+
 	static final String ACCOUNT_ROUTE = "POST /api/v1/admin/accounts";
 
 	static final String BOTS_ROUTE = "POST /api/v1/admin/bots";
@@ -65,6 +70,12 @@ class SetupController {
 	}
 
 	record InstrumentResponse(String instrumentId, String symbol, String referencePrice, String commandSequence) {
+	}
+
+	record InstrumentDeleted(String instrumentId, String symbol, String commandSequence) {
+	}
+
+	record UsageResponse(List<String> holders, long holderCount, long orderCount) {
 	}
 
 	record HoldingResponse(String instrumentId, long quantity) {
@@ -193,6 +204,37 @@ class SetupController {
 			case UNKNOWN_INSTRUMENT -> throw new ApiException(HttpStatus.NOT_FOUND, "INSTRUMENT_NOT_FOUND",
 					"No such instrument")
 				.with("commandSequence", sequence);
+		};
+	}
+
+	/**
+	 * Deletes an instrument before the market opens, only while nothing refers to it: no account was given its shares
+	 * and no order was sent for it, not even one refused during SETUP. Giving shares back would need compensating
+	 * ledger entries, so an instrument in use stays, and the refusal names its holders.
+	 */
+	@DeleteMapping("/instruments/{instrumentId}")
+	InstrumentDeleted deleteInstrument(@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader,
+			@PathVariable UUID instrumentId, Authentication authentication) {
+		UUID key = CommandCalls.idempotencyKey(keyHeader);
+		UUID operator = queries.userId(authentication.getName()).orElseThrow();
+		CommandKey commandKey = new CommandKey(operator, key, INSTRUMENT_DELETE_ROUTE,
+				CommandCalls.sha256(instrumentId.toString()));
+		InstrumentDeletion result = CommandCalls.await(key, timeout,
+				() -> engine.deleteInstrument(commandKey, new DeleteInstrument(instrumentId, operator)));
+		String sequence = Long.toString(result.commandSequence());
+		return switch (result.status()) {
+			case DELETED -> new InstrumentDeleted(result.instrumentId().toString(), result.symbol(), sequence);
+			case NOT_IN_SETUP -> throw new ApiException(HttpStatus.CONFLICT, "MARKET_NOT_IN_SETUP",
+					"Instruments can only be deleted before the market opens")
+				.with("commandSequence", sequence);
+			case UNKNOWN_INSTRUMENT -> throw new ApiException(HttpStatus.NOT_FOUND, "INSTRUMENT_NOT_FOUND",
+					"No such instrument")
+				.with("commandSequence", sequence);
+			case IN_USE -> throw new ApiException(HttpStatus.CONFLICT, "INSTRUMENT_IN_USE",
+					result.symbol() + " is in use, so it cannot be deleted")
+				.with("commandSequence", sequence)
+				.with("usage", new UsageResponse(result.usage().holders(), result.usage().holderCount(),
+						result.usage().orderCount()));
 		};
 	}
 

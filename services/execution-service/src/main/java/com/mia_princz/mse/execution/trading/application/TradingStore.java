@@ -90,6 +90,24 @@ public interface TradingStore {
 	/** Changes the reference price; the database refuses it once the market has left SETUP. */
 	void updateReferencePrice(UUID simulationId, UUID instrumentId, long referencePriceCents);
 
+	/**
+	 * Everything that refers to the instrument. The holders are named up to {@code holdersNamed}; {@code otherReferences}
+	 * counts ledger entries, trades and bot runs, which come with an allocation or cannot exist in SETUP, but would
+	 * otherwise make the delete fail on a foreign key.
+	 */
+	record InstrumentUsage(List<String> holders, long holderCount, long orderCount, long otherReferences) {
+
+		public boolean inUse() {
+			return holderCount > 0 || orderCount > 0 || otherReferences > 0;
+		}
+
+	}
+
+	InstrumentUsage instrumentUsage(UUID simulationId, UUID instrumentId, int holdersNamed);
+
+	/** Deletes the instrument; the database refuses it once the market has left SETUP, or while anything refers to it. */
+	void deleteInstrument(UUID simulationId, UUID instrumentId);
+
 	/** Whether this user already has an account in the market. */
 	boolean hasAccount(UUID simulationId, UUID ownerUserId);
 
@@ -187,5 +205,11 @@ public interface TradingStore {
 
 	/** Writes the instrument's {@code MarketSnapshot} to the outbox, in the command's transaction. */
 	void insertMarketSnapshot(MarketView view);
+
+	/**
+	 * Writes the instrument's last {@code MarketSnapshot}, which says it was removed, to the outbox. It reads the
+	 * catalogue row, so it runs before the row is deleted, in the same transaction.
+	 */
+	void insertRemovedSnapshot(MarketView view);
 
 }

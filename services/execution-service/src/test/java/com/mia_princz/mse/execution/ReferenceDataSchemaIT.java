@@ -179,6 +179,30 @@ class ReferenceDataSchemaIT {
 		});
 	}
 
+	/** The runtime role may delete an instrument in SETUP that nothing refers to; the database refuses anything else. */
+	@Test
+	void instrumentsAreDeletedOnlyInSetupAndOnlyWhenUnused() {
+		db.inRolledBackTransaction((f) -> {
+			UUID simulation = f.simulation();
+			UUID unused = f.instrument(simulation, "NOVA");
+			UUID held = f.instrument(simulation, "ORBT");
+			f.jdbc.update("""
+					INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
+					VALUES (?, 'BOT', ?, 10, 0)""", f.bot(simulation), held);
+			assertThat(f.jdbc.update("DELETE FROM instrument WHERE id = ?", unused)).isEqualTo(1);
+			assertFails(FOREIGN_KEY_VIOLATION, () -> f.jdbc.update("DELETE FROM instrument WHERE id = ?", held));
+		});
+		for (String state : new String[] { "OPEN", "HALTED" }) {
+			db.inRolledBackTransaction((f) -> {
+				UUID simulation = f.simulation();
+				UUID instrument = f.instrument(simulation, "NOVA");
+				f.jdbc.update("UPDATE simulation SET state = ?, opened_at = now() WHERE id = ?", state, simulation);
+				assertFails(NOT_IN_PREREQUISITE_STATE,
+						() -> f.jdbc.update("DELETE FROM instrument WHERE id = ?", instrument));
+			});
+		}
+	}
+
 	@Test
 	void onlyBotAccountsHoldTokensAndOnlyAsHashes() {
 		db.inRolledBackTransaction((f) -> {

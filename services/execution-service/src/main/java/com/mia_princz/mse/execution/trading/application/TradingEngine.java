@@ -167,6 +167,14 @@ public final class TradingEngine {
 		return submit(() -> processEditInstrument(key, command));
 	}
 
+	/**
+	 * Deletes an instrument nothing uses while the market is in SETUP, and publishes its last snapshot, which says it
+	 * was removed. Its book, symbol and tape leave the engine only after the command has committed.
+	 */
+	public CompletableFuture<InstrumentDeletion> deleteInstrument(CommandKey key, DeleteInstrument command) {
+		return submit(() -> processDeleteInstrument(key, command));
+	}
+
 	/** Gives a trader their account and starting endowment while the market is in SETUP. */
 	public CompletableFuture<AccountResult> provisionAccount(CommandKey key, ProvisionAccount command) {
 		return submit(() -> processProvision(key, command));
@@ -386,6 +394,72 @@ public final class TradingEngine {
 				sequence);
 		return remember(key, 200, new InstrumentEdit(InstrumentEdit.Status.UPDATED, command.instrumentId(),
 				symbol.get(), cents, sequence));
+	}
+
+	/** Without a market there is no instrument to delete, and nothing to commit the answer to. */
+	private InstrumentDeletion processDeleteInstrument(CommandKey key, DeleteInstrument command) {
+		if (simulationId == null) {
+			return new InstrumentDeletion(InstrumentDeletion.Status.UNKNOWN_INSTRUMENT, command.instrumentId(), null,
+					null, 0);
+		}
+		InstrumentDeletion deletion;
+		try {
+			deletion = transactions.inTransaction(() -> deleteInstrumentInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+		if (deletion.status() == InstrumentDeletion.Status.DELETED) {
+			// On this thread, so the next order for it finds no book and is refused before any transaction. Removing is
+			// idempotent, so a replayed answer changes nothing.
+			books.remove(command.instrumentId());
+			symbols.remove(command.instrumentId());
+			tapes.remove(command.instrumentId());
+		}
+		return deletion;
+	}
+
+	/**
+	 * An unknown instrument is answered as such in any state; a known one is deleted only in SETUP and only while
+	 * nothing refers to it. Its removed snapshot is written before the row goes, as it reads the row.
+	 */
+	private InstrumentDeletion deleteInstrumentInTransaction(CommandKey key, DeleteInstrument command) {
+		Market market = store.lockMarket();
+		if (market.writerEpoch() != writerEpoch) {
+			throw new StaleWriterException();
+		}
+		Optional<TradingStore.StoredResult<InstrumentDeletion>> prior = store.findResult(simulationId, key,
+				InstrumentDeletion.class);
+		if (prior.isPresent()) {
+			return replay(key, prior.get());
+		}
+		long sequence = store.nextCommandSequence(simulationId);
+		Optional<String> symbol = store.instrumentSymbol(simulationId, command.instrumentId());
+		InstrumentDeletion.Status refusal = symbol.isEmpty() ? InstrumentDeletion.Status.UNKNOWN_INSTRUMENT
+				: !"SETUP".equals(market.state()) ? InstrumentDeletion.Status.NOT_IN_SETUP : null;
+		InstrumentDeletion.Usage usage = null;
+		if (refusal == null) {
+			TradingStore.InstrumentUsage found = store.instrumentUsage(simulationId, command.instrumentId(),
+					InstrumentDeletion.HOLDERS_NAMED);
+			if (found.inUse()) {
+				refusal = InstrumentDeletion.Status.IN_USE;
+				usage = new InstrumentDeletion.Usage(found.holders(), found.holderCount(), found.orderCount());
+			}
+		}
+		if (refusal != null) {
+			store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_DELETE", "NOT_ALLOWED",
+					key.idempotencyKey(), sequence);
+			return remember(key, refusal == InstrumentDeletion.Status.UNKNOWN_INSTRUMENT ? 404 : 409,
+					new InstrumentDeletion(refusal, command.instrumentId(), symbol.orElse(null), usage, sequence));
+		}
+		// Nothing has traded or rests in SETUP, so the last public state is an empty market.
+		store.insertRemovedSnapshot(new TradingStore.MarketView(simulationId, command.instrumentId(), market, List.of(),
+				List.of(), List.of(), sequence, clock.instant()));
+		store.deleteInstrument(simulationId, command.instrumentId());
+		store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_DELETE", "APPLIED", key.idempotencyKey(),
+				sequence);
+		return remember(key, 200, new InstrumentDeletion(InstrumentDeletion.Status.DELETED, command.instrumentId(),
+				symbol.get(), null, sequence));
 	}
 
 	private AccountResult processProvision(CommandKey key, ProvisionAccount command) {
@@ -861,6 +935,7 @@ public final class TradingEngine {
 			case MarketTransition transition -> transition.commandSequence();
 			case InstrumentResult instrument -> instrument.commandSequence();
 			case InstrumentEdit edit -> edit.commandSequence();
+			case InstrumentDeletion deletion -> deletion.commandSequence();
 			case AccountResult account -> account.commandSequence();
 			case BotsResult bots -> bots.commandSequence();
 			case BotRunResult run -> run.commandSequence();
