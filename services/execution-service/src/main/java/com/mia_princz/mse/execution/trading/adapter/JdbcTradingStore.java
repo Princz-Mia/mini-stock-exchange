@@ -229,10 +229,11 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void updateReferencePrice(UUID simulationId, UUID instrumentId, long referencePriceCents) {
-		expectOne(jdbc.sql("UPDATE instrument SET reference_price_cents = ? WHERE simulation_id = ? AND id = ?")
-			.params(referencePriceCents, simulationId, instrumentId)
-			.update(), "update reference price");
+	public void updateInstrument(UUID simulationId, UUID instrumentId, long referencePriceCents, String displayName) {
+		expectOne(jdbc.sql("""
+				UPDATE instrument SET reference_price_cents = ?, display_name = ? WHERE simulation_id = ? AND id = ?""")
+			.params(referencePriceCents, displayName, simulationId, instrumentId)
+			.update(), "update instrument");
 	}
 
 	@Override
@@ -434,10 +435,12 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void insertInstrument(UUID simulationId, UUID instrumentId, String symbol, long referencePriceCents) {
+	public void insertInstrument(UUID simulationId, UUID instrumentId, String symbol, String displayName,
+			long referencePriceCents) {
 		expectOne(jdbc.sql("""
-				INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, ?, ?)""")
-			.params(instrumentId, simulationId, symbol, referencePriceCents)
+				INSERT INTO instrument (id, simulation_id, symbol, display_name, reference_price_cents)
+				VALUES (?, ?, ?, ?, ?)""")
+			.params(instrumentId, simulationId, symbol, displayName, referencePriceCents)
 			.update(), "insert instrument");
 	}
 
@@ -694,11 +697,13 @@ public final class JdbcTradingStore implements TradingStore {
 
 	private void insertSnapshot(MarketView view, boolean removed) {
 		MarketSnapshot.Builder snapshot = jdbc.sql("""
-				SELECT symbol, reference_price_cents, tick_cents, lot_size, rule_version, last_trade_sequence
+				SELECT symbol, display_name, reference_price_cents, tick_cents, lot_size, rule_version,
+				    last_trade_sequence
 				FROM instrument WHERE id = ? AND simulation_id = ?""")
 			.params(view.instrumentId(), view.simulationId())
 			.query((row, index) -> MarketSnapshot.newBuilder()
 				.setSymbol(row.getString("symbol"))
+				.setDisplayName(row.getString("display_name"))
 				.setLastTradeSequence(row.getLong("last_trade_sequence"))
 				.setRules(new MarketRules(row.getInt("rule_version"), row.getLong("reference_price_cents"),
 						row.getLong("tick_cents"), row.getLong("lot_size"), Quantity.MIN_SHARES, Quantity.MAX_SHARES,

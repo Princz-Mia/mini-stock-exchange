@@ -3,10 +3,15 @@ package com.mia_princz.mse.execution.trading.application;
 import java.util.Objects;
 import java.util.UUID;
 
+import com.mia_princz.mse.execution.trading.domain.DisplayName;
 import com.mia_princz.mse.execution.trading.domain.Price;
 
-/** An operator adds an instrument while the market is in SETUP. The ID is chosen before the command runs. */
-public record AddInstrument(UUID instrumentId, String symbol, Price referencePrice, UUID actorUserId) {
+/**
+ * An operator adds an instrument while the market is in SETUP. The ID is chosen before the command runs. The display
+ * name is null for none.
+ */
+public record AddInstrument(UUID instrumentId, String symbol, DisplayName displayName, Price referencePrice,
+		UUID actorUserId) {
 
 	public AddInstrument {
 		Objects.requireNonNull(instrumentId, "instrumentId");

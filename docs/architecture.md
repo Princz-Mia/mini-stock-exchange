@@ -138,7 +138,7 @@ stateDiagram-v2
 ```
 
 **In each state:**
-- **SETUP:** instruments, trader accounts and bots are configured. An instrument's reference price can still be changed, and an instrument nothing uses yet can be deleted: no account was given its shares and no order named it. Nothing trades. Once the market opens, the catalogue is frozen; a database trigger refuses a price change or a delete outside SETUP too.
+- **SETUP:** instruments, trader accounts and bots are configured. An instrument's reference price and display name can still be changed, and an instrument nothing uses yet can be deleted: no account was given its shares and no order named it. Nothing trades. Once the market opens, the catalogue is frozen; a database trigger refuses a change or a delete outside SETUP too.
 - **HALTED:** keeps the books. Cancels are accepted, new orders aren't.
 
 ## Data

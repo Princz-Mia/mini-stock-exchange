@@ -87,8 +87,11 @@ public interface TradingStore {
 	/** The instrument's symbol, if this market has it. */
 	Optional<String> instrumentSymbol(UUID simulationId, UUID instrumentId);
 
-	/** Changes the reference price; the database refuses it once the market has left SETUP. */
-	void updateReferencePrice(UUID simulationId, UUID instrumentId, long referencePriceCents);
+	/**
+	 * Sets the fields an operator edits, the display name null for none; the database refuses it once the market has
+	 * left SETUP.
+	 */
+	void updateInstrument(UUID simulationId, UUID instrumentId, long referencePriceCents, String displayName);
 
 	/**
 	 * Everything that refers to the instrument. The holders are named up to {@code holdersNamed}; {@code otherReferences}
@@ -157,7 +160,9 @@ public interface TradingStore {
 	void insertGenesis(UUID simulationId, UUID accountId, String accountKind, long commandSequence, long cashCents,
 			List<ProvisionAccount.Holding> holdings);
 
-	void insertInstrument(UUID simulationId, UUID instrumentId, String symbol, long referencePriceCents);
+	/** The display name is null for none. */
+	void insertInstrument(UUID simulationId, UUID instrumentId, String symbol, String displayName,
+			long referencePriceCents);
 
 	Available available(UUID accountId, UUID instrumentId);
 

@@ -23,6 +23,7 @@ import com.mia_princz.mse.execution.trading.application.TransactionRunner.Commit
 import com.mia_princz.mse.execution.trading.domain.BookDelta;
 import com.mia_princz.mse.execution.trading.domain.BookOrder;
 import com.mia_princz.mse.execution.trading.domain.DepthLevel;
+import com.mia_princz.mse.execution.trading.domain.DisplayName;
 import com.mia_princz.mse.execution.trading.domain.Fill;
 import com.mia_princz.mse.execution.trading.domain.MatchPlan;
 import com.mia_princz.mse.execution.trading.domain.OrderBook;
@@ -160,8 +161,8 @@ public final class TradingEngine {
 	}
 
 	/**
-	 * Changes an instrument's reference price while the market is in SETUP, and publishes its snapshot with the new
-	 * price. Books do not hold the reference price, so nothing in memory changes.
+	 * Sets an instrument's reference price and display name while the market is in SETUP, and publishes its snapshot
+	 * with them. Books hold neither, so nothing in memory changes.
 	 */
 	public CompletableFuture<InstrumentEdit> editInstrument(CommandKey key, EditInstrument command) {
 		return submit(() -> processEditInstrument(key, command));
@@ -334,16 +335,19 @@ public final class TradingEngine {
 			store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_ADD", "NOT_ALLOWED", key.idempotencyKey(),
 					sequence);
 			return new AddedInstrument(remember(key, 409, new InstrumentResult(refusal, null, command.symbol(),
-					command.referencePrice().cents(), sequence)), false, market.maxFillsPerCommand());
+					name(command.displayName()), command.referencePrice().cents(), sequence)), false,
+					market.maxFillsPerCommand());
 		}
-		store.insertInstrument(simulationId, command.instrumentId(), command.symbol(), command.referencePrice().cents());
+		store.insertInstrument(simulationId, command.instrumentId(), command.symbol(), name(command.displayName()),
+				command.referencePrice().cents());
 		// The catalogue changed, so the new instrument's public state is published at this sequence.
 		snapshot(market, command.instrumentId(), new OrderBook(market.maxFillsPerCommand()), BookDelta.none(),
 				sequence);
 		store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_ADD", "APPLIED", key.idempotencyKey(),
 				sequence);
 		return new AddedInstrument(remember(key, 201, new InstrumentResult(InstrumentResult.Status.CREATED,
-				command.instrumentId(), command.symbol(), command.referencePrice().cents(), sequence)), true,
+				command.instrumentId(), command.symbol(), name(command.displayName()), command.referencePrice().cents(),
+				sequence)), true,
 				market.maxFillsPerCommand());
 	}
 
@@ -351,7 +355,7 @@ public final class TradingEngine {
 	private InstrumentEdit processEditInstrument(CommandKey key, EditInstrument command) {
 		if (simulationId == null) {
 			return new InstrumentEdit(InstrumentEdit.Status.UNKNOWN_INSTRUMENT, command.instrumentId(), null,
-					command.referencePrice().cents(), 0);
+					name(command.displayName()), command.referencePrice().cents(), 0);
 		}
 		try {
 			return transactions.inTransaction(() -> editInstrumentInTransaction(key, command));
@@ -374,6 +378,7 @@ public final class TradingEngine {
 		}
 		long sequence = store.nextCommandSequence(simulationId);
 		long cents = command.referencePrice().cents();
+		String displayName = name(command.displayName());
 		Optional<String> symbol = store.instrumentSymbol(simulationId, command.instrumentId());
 		InstrumentEdit.Status refusal = symbol.isEmpty() ? InstrumentEdit.Status.UNKNOWN_INSTRUMENT
 				: !"SETUP".equals(market.state()) ? InstrumentEdit.Status.NOT_IN_SETUP : null;
@@ -381,9 +386,10 @@ public final class TradingEngine {
 			store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_EDIT", "NOT_ALLOWED",
 					key.idempotencyKey(), sequence);
 			return remember(key, refusal == InstrumentEdit.Status.UNKNOWN_INSTRUMENT ? 404 : 409,
-					new InstrumentEdit(refusal, command.instrumentId(), symbol.orElse(null), cents, sequence));
+					new InstrumentEdit(refusal, command.instrumentId(), symbol.orElse(null), displayName, cents,
+							sequence));
 		}
-		store.updateReferencePrice(simulationId, command.instrumentId(), cents);
+		store.updateInstrument(simulationId, command.instrumentId(), cents, displayName);
 		OrderBook book = books.get(command.instrumentId());
 		if (book == null) {
 			throw new IllegalStateException("No book for instrument " + command.instrumentId());
@@ -393,7 +399,11 @@ public final class TradingEngine {
 		store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_EDIT", "APPLIED", key.idempotencyKey(),
 				sequence);
 		return remember(key, 200, new InstrumentEdit(InstrumentEdit.Status.UPDATED, command.instrumentId(),
-				symbol.get(), cents, sequence));
+				symbol.get(), displayName, cents, sequence));
+	}
+
+	private static String name(DisplayName displayName) {
+		return displayName == null ? null : displayName.value();
 	}
 
 	/** Without a market there is no instrument to delete, and nothing to commit the answer to. */
