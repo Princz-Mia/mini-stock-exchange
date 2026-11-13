@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { App } from '../App';
 import { resetSession } from '../api/client';
+import { GLOSSARY } from '../help/glossary';
 import { signedIn } from '../test/fakeServer';
 
 const PORTFOLIO = {
@@ -16,6 +17,11 @@ const PORTFOLIO = {
       reserved: 3,
       mark: { price: '101.00', source: 'LAST_TRADE', at: '2026-11-04T12:30:05Z' },
       value: '9696.00',
+      changePercent: '1.00',
+      weight: '43.87',
+      averageCost: '101.50',
+      unrealized: '-48.00',
+      unrealizedPercent: '-0.49',
     },
     {
       instrumentId: '00000000-0000-0000-0000-000000000002',
@@ -25,11 +31,19 @@ const PORTFOLIO = {
       reserved: 0,
       mark: { price: '40.00', source: 'REFERENCE', at: null },
       value: '2000.00',
+      changePercent: '0.00',
+      weight: '9.05',
+      averageCost: '1250.00',
+      unrealized: '-60500.00',
+      unrealizedPercent: '-96.80',
     },
   ],
   equity: '22100.00',
   accountVersion: '7',
   asOfCommandSequence: '42',
+  costBasis: '11744.00',
+  unrealized: '-48.00',
+  unrealizedPercent: '-0.41',
 };
 
 function trade(n: number) {
@@ -66,7 +80,7 @@ describe('portfolio page', () => {
     for (const term of ['equity', 'available', 'reserved']) {
       expect(within(summary).getByRole('button', { name: `What is ${term}?` })).toBeInTheDocument();
     }
-    expect(screen.getByRole('button', { name: 'What is mark?' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'What are mark and average cost?' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'What is partial fill?' })).toBeInTheDocument();
     const nova = screen.getByRole('row', { name: /NOVA/ });
     expect(within(nova).getByText(/last trade · 12:30:05 UTC/)).toBeInTheDocument();
@@ -74,6 +88,100 @@ describe('portfolio page', () => {
     const orbit = screen.getByRole('row', { name: /ORBIT/ });
     expect(within(orbit).getByText('reference')).toBeInTheDocument();
     expect(await screen.findByText('No executions yet.')).toBeInTheDocument();
+  });
+
+  it('shows each holding against its reference, its weight, and the estimated cost and unrealized P/L, with totals', async () => {
+    signedIn()
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    window.history.pushState({}, '', '/portfolio');
+    render(<App />);
+
+    const table = await screen.findByRole('table', { name: 'Holdings' });
+    const headers = within(table)
+      .getAllByRole('columnheader')
+      .map((header) => header.textContent);
+    expect(headers).toEqual([
+      'Symbol',
+      'Shares',
+      'Available',
+      'Reserved',
+      'Mark',
+      'Change',
+      'Avg cost',
+      'Value',
+      'Weight',
+      'Unrealized P/L',
+    ]);
+    const cells = (symbol: string) =>
+      within(screen.getByRole('row', { name: new RegExp(symbol) }))
+        .getAllByRole('cell')
+        .map((cell) => cell.textContent);
+    expect(cells('NOVA').slice(4)).toEqual(['▲ up +1.00%', '101.50', '9,696.00', '43.87%', '▼ down −48.00 −0.49%']);
+    expect(cells('ORBIT').slice(4)).toEqual([
+      '▶︎ unchanged, 0.00%',
+      '1,250.00',
+      '2,000.00',
+      '9.05%',
+      '▼ down −60,500.00 −96.80%',
+    ]);
+    expect(screen.getByText(/are estimates from your own trades/)).toBeInTheDocument();
+
+    const summary = screen.getByRole('region', { name: 'Summary' });
+    expect(within(summary).getByRole('button', { name: 'What is unrealized p/l?' })).toBeInTheDocument();
+    expect(within(summary).getByText(/−48\.00 \(−0\.41%\)/)).toHaveTextContent('▼ down −48.00 (−0.41%)');
+    // The arrows are for the eye; the words say the same to a screen reader.
+    for (const arrow of [...within(table).getAllByText(/^[▲▼▶]/), ...within(summary).getAllByText('▼')]) {
+      expect(arrow).toHaveAttribute('aria-hidden', 'true');
+    }
+    expect(within(summary).getByText('Cost 11,744.00')).toBeInTheDocument();
+  });
+
+  it.each(['costBasis', 'unrealized', 'unrealizedPercent'])('writes a dash for the totals without %s', async (field) => {
+    signedIn()
+      .on('GET /api/v1/portfolio', { status: 200, json: { ...PORTFOLIO, [field]: null } })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    window.history.pushState({}, '', '/portfolio');
+    render(<App />);
+    const summary = await screen.findByRole('region', { name: 'Summary' });
+    const figure = within(summary).getByText('Estimated unrealized P/L').closest('.figure')!;
+    expect(figure.querySelector('strong')).toHaveTextContent(/^—$/);
+    expect(within(summary).queryByText(/^Cost /)).toBeNull();
+  });
+
+  it('explains average cost and unrealized P/L by the rule the server uses', () => {
+    expect(GLOSSARY.averageCost.definition).toContain("at the instrument's reference price");
+    expect(GLOSSARY.averageCost.definition).toContain('A sale leaves it unchanged; selling everything starts it afresh.');
+    expect(GLOSSARY.unrealized.definition).toContain('its value at the mark less what it cost at the average cost');
+    expect(GLOSSARY.unrealized.definition).toContain('It becomes real only when you sell.');
+  });
+
+  it('writes a dash where the cost of a holding cannot be worked out, and for the totals then', async () => {
+    const unknown = {
+      ...PORTFOLIO,
+      holdings: [{ ...PORTFOLIO.holdings[0], averageCost: null, unrealized: null, unrealizedPercent: null }],
+      costBasis: null,
+      unrealized: null,
+      unrealizedPercent: null,
+    };
+    signedIn()
+      .on('GET /api/v1/portfolio', { status: 200, json: unknown })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    window.history.pushState({}, '', '/portfolio');
+    render(<App />);
+
+    const row = await screen.findByRole('row', { name: /NOVA/ });
+    const cells = within(row)
+      .getAllByRole('cell')
+      .map((cell) => cell.textContent);
+    expect(cells.slice(5)).toEqual(['—', '9,696.00', '43.87%', '—']);
+    const summary = screen.getByRole('region', { name: 'Summary' });
+    const figure = within(summary).getByText('Estimated unrealized P/L').closest('.figure')!;
+    expect(figure.querySelector('strong')).toHaveTextContent(/^—$/);
+    expect(within(summary).queryByText(/^Cost /)).toBeNull();
   });
 
   it('pages the executions with the cursor, page size and order it was given, one page on screen at a time', async () => {

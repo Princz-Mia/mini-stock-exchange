@@ -175,6 +175,11 @@ describe('InstrumentFigures', () => {
     expect(screen.queryByRole('status')).toBeNull();
   });
 
+  it('says an unchanged price is unchanged, with its own arrow', () => {
+    render(<InstrumentFigures session={traded('0.00', '0.00')} bid="101.00" ask="101.05" />);
+    expect(figures().Change).toBe('▶︎ unchanged, 0.00 (0.00%)');
+  });
+
   it('writes dashes for what is not known yet', () => {
     render(<InstrumentFigures session={noTrades('100.00')} bid={null} ask="101.05" />);
     expect(figures()).toMatchObject({ Change: '—', Bid: '—', Spread: '—', High: '—', Volume: '0', VWAP: '—' });

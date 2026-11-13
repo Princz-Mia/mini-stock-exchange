@@ -44,11 +44,19 @@ const PORTFOLIO = {
       reserved: 10,
       mark: { price: '100.00', source: 'REFERENCE', at: null },
       value: '10000.00',
+      changePercent: '0.00',
+      weight: '50.00',
+      averageCost: '100.00',
+      unrealized: '0.00',
+      unrealizedPercent: '0.00',
     },
   ],
   equity: '20000.00',
   accountVersion: '1',
   asOfCommandSequence: '1',
+  costBasis: '10000.00',
+  unrealized: '0.00',
+  unrealizedPercent: '0.00',
 };
 
 const OPEN_ORDER = {

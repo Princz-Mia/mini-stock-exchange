@@ -45,6 +45,9 @@ function trader(seen: number | 'fails') {
         equity: '10000.00',
         accountVersion: '1',
         asOfCommandSequence: '1',
+        costBasis: '0.00',
+        unrealized: '0.00',
+        unrealizedPercent: '0.00',
       },
     })
     .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } })

@@ -3,7 +3,8 @@ import type { ReactNode } from 'react';
 import type { SessionFigures } from '../api/types';
 import { FEED_LABELS } from '../app/FeedStatus';
 import { groupDigits, groupInteger } from '../format';
-import { arrow, direction, signed, spread } from './session';
+import { Moved } from './Moved';
+import { direction, signed, spread } from './session';
 
 /**
  * The selected instrument's figures since trading began, above the chart: the change against the reference price with
@@ -28,11 +29,9 @@ export function InstrumentFigures({
       session.change === null || session.changePercent === null || way === null ? (
         '—'
       ) : (
-        <span className={`change change-${way}`}>
-          <span aria-hidden="true">{arrow(way)} </span>
-          <span className="visually-hidden">{way === 'flat' ? 'unchanged,' : way}</span>{' '}
+        <Moved way={way}>
           {signed(session.change)} ({signed(session.changePercent)}%)
-        </span>
+        </Moved>
       ),
     ],
     ['Bid', price(bid)],
