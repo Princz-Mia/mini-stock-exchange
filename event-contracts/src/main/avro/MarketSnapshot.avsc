@@ -9,8 +9,9 @@
     {"name": "instrumentId", "type": {"type": "string", "logicalType": "uuid"}},
     {"name": "symbol", "type": "string"},
     {"name": "venueState", "type": {
-      "type": "enum", "name": "VenueState", "symbols": ["SETUP", "OPEN", "HALTED", "UNKNOWN"], "default": "UNKNOWN",
-      "doc": "UNKNOWN is what an older reader sees for a state added later."
+      "type": "enum", "name": "VenueState", "symbols": ["SETUP", "OPEN", "HALTED", "UNKNOWN", "CLOSED"],
+      "default": "UNKNOWN",
+      "doc": "UNKNOWN is what an older reader sees for a state added later. CLOSED (version 2): the simulation has ended."
     }},
     {"name": "rules", "type": {
       "type": "record", "name": "MarketRules",
@@ -52,6 +53,14 @@
     {"name": "lastTrade", "type": ["null", "PublicTrade"], "default": null, "doc": "Null before the first trade."},
     {"name": "lastTradeSequence", "type": "long", "doc": "0 before the first trade."},
     {"name": "sourceCommandSequence", "type": "long", "doc": "The command this state follows; a higher value replaces a lower one."},
-    {"name": "generatedAt", "type": {"type": "long", "logicalType": "timestamp-micros"}}
+    {"name": "generatedAt", "type": {"type": "long", "logicalType": "timestamp-micros"}},
+    {"name": "removed", "type": "boolean", "default": false,
+      "doc": "Version 2. True when the instrument was deleted during setup: a reader drops it. Its last snapshot on the compacted topic, so it may be the only one left for its key."},
+    {"name": "displayName", "type": ["null", "string"], "default": null,
+      "doc": "Version 2. A name to show beside the symbol; null for none, and from writers before version 2."},
+    {"name": "opensAt", "type": ["null", {"type": "long", "logicalType": "timestamp-micros"}], "default": null,
+      "doc": "Version 2. When the simulation opens or opened; null when not set."},
+    {"name": "closesAt", "type": ["null", {"type": "long", "logicalType": "timestamp-micros"}], "default": null,
+      "doc": "Version 2. When the simulation closes or closed; null when not set."}
   ]
 }

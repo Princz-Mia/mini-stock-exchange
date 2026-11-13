@@ -4,21 +4,29 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Stream;
 
 import org.apache.avro.Schema;
 import org.apache.avro.SchemaCompatibility;
 import org.apache.avro.SchemaCompatibility.SchemaCompatibilityType;
 import org.apache.avro.generic.GenericData;
+import org.apache.avro.generic.GenericDatumReader;
+import org.apache.avro.generic.GenericDatumWriter;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.message.BinaryMessageEncoder;
+import org.apache.avro.io.BinaryEncoder;
+import org.apache.avro.io.DecoderFactory;
+import org.apache.avro.io.EncoderFactory;
 import org.apache.avro.message.MissingSchemaException;
 import org.junit.jupiter.api.Test;
 
@@ -71,35 +79,124 @@ class RetainedWritersTest {
 
 	@Test
 	void everyRetainedWriterDecodesIntoTheCurrentClass() {
-		assertThat(RetainedWriters.verifyEveryWriterDecodes()).isEqualTo(RetainedWriters.all().size()).isEqualTo(3);
+		assertThat(RetainedWriters.verifyEveryWriterDecodes()).isEqualTo(RetainedWriters.all().size()).isEqualTo(4);
 	}
 
 	/**
-	 * How an older writer is read: until a schema actually changes, the stand-in is today's trade schema with its fields
-	 * in reverse order. Avro resolves fields by name, so it is compatible, but its fingerprint differs: a decoder that
-	 * knew only the current schema would refuse it.
+	 * A snapshot written by version 1, still on the compacted topic, decodes into today's class: what it had comes
+	 * through, and what version 2 added takes its default, so it is not removed and has no display name or times. A
+	 * decoder that knew only the current schema would refuse it.
 	 */
 	@Test
-	void aPayloadFromAnOlderWriterDecodesIntoTheCurrentClass() throws IOException {
-		Schema current = TradeExecuted.getClassSchema();
-		List<Schema.Field> reversed = new ArrayList<>();
-		for (Schema.Field field : current.getFields()) {
-			reversed.add(0, new Schema.Field(field, field.schema()));
-		}
-		Schema older = Schema.createRecord(current.getName(), current.getDoc(), current.getNamespace(), false, reversed);
-		assertThat(RetainedWriters.fingerprint(older)).isNotEqualTo(RetainedWriters.fingerprint(current));
-		assertThat(compatible(current, older)).isTrue();
+	void aSnapshotFromTheFirstWriterDecodesIntoTheCurrentClass() throws IOException {
+		Schema older = RetainedWriters.of("MarketSnapshot").get(0).schema();
+		assertThat(RetainedWriters.fingerprint(older)).isNotEqualTo(RetainedWriters.fingerprint(MarketSnapshot.getClassSchema()));
 
 		GenericRecord sample = (GenericRecord) WriterSamples.sample(older, new int[] { 1 });
 		ByteBuffer encoded = new BinaryMessageEncoder<GenericRecord>(WriterSamples.model(), older).encode(sample);
-		TradeExecuted decoded = TradeExecuted.createDecoder(WireEvents.store(List.of(older))).decode(encoded.duplicate());
-		assertThat(decoded.getSymbol()).isEqualTo(sample.get("symbol"));
-		assertThat(decoded.getTradeSequence()).isEqualTo(sample.get("tradeSequence"));
-		assertThat(decoded.getExecutedAt()).isEqualTo(sample.get("executedAt"));
+		MarketSnapshot decoded = MarketSnapshot.createDecoder(WireEvents.store(List.of(older))).decode(encoded.duplicate());
+		assertThat(decoded.getSymbol()).isEqualTo(sample.get("symbol").toString());
 		assertThat(decoded.getInstrumentId()).isEqualTo(sample.get("instrumentId"));
-		assertThatThrownBy(() -> TradeExecuted.getDecoder().decode(encoded.duplicate()))
-			.as("without the older writer")
+		assertThat(decoded.getSourceCommandSequence()).isEqualTo(sample.get("sourceCommandSequence"));
+		assertThat(decoded.getRemoved()).isFalse();
+		assertThat(decoded.getDisplayName()).isNull();
+		assertThat(decoded.getOpensAt()).isNull();
+		assertThat(decoded.getClosesAt()).isNull();
+		assertThatThrownBy(() -> MarketSnapshot.getDecoder().decode(encoded.duplicate()))
+			.as("without the first writer")
 			.isInstanceOf(MissingSchemaException.class);
+	}
+
+	/**
+	 * The decode check notices a field added later whose default says something: with removed defaulting to true, a
+	 * version 1 snapshot really decodes as removed, and the check refuses it.
+	 */
+	@Test
+	void theDecodeCheckNoticesADefaultThatSaysSomething() throws IOException {
+		Schema older = RetainedWriters.of("MarketSnapshot").get(0).schema();
+		Schema reader = withDefault(MarketSnapshot.getClassSchema(), "removed", true);
+		GenericRecord written = (GenericRecord) WriterSamples.sample(older, new int[] { 1 });
+		ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+		BinaryEncoder encoder = EncoderFactory.get().binaryEncoder(bytes, null);
+		new GenericDatumWriter<GenericRecord>(older, WriterSamples.model()).write(written, encoder);
+		encoder.flush();
+		GenericRecord decoded = new GenericDatumReader<GenericRecord>(older, reader, WriterSamples.model())
+			.read(null, DecoderFactory.get().binaryDecoder(bytes.toByteArray(), null));
+
+		assertThat(decoded.get("removed")).isEqualTo(true);
+		assertThatThrownBy(() -> WriterSamples.compare("snapshot", decoded, written))
+			.hasMessageContaining("snapshot.removed (added later)");
+	}
+
+	/**
+	 * Every field a later writer added defaults to nothing, so a payload from before it never says more than its writer
+	 * did: null, false, zero or empty. Enums and records are judged on their own.
+	 */
+	@Test
+	void everyFieldAddedLaterDefaultsToNothing() {
+		int checked = 0;
+		for (String type : RetainedWriters.CURRENT.keySet()) {
+			List<RetainedWriters.Writer> writers = RetainedWriters.of(type);
+			for (int i = 1; i < writers.size(); i++) {
+				Schema before = writers.get(i - 1).schema();
+				for (Schema.Field field : writers.get(i).schema().getFields()) {
+					Object nothing = WriterSamples.nothing(field.schema());
+					if (before.getField(field.name()) == null && nothing != WriterSamples.NO_NEUTRAL) {
+						WriterSamples.compare(writers.get(i).fileName() + " " + field.name(),
+								WriterSamples.model().getDefaultValue(field), nothing);
+						checked++;
+					}
+				}
+			}
+		}
+		assertThat(checked).as("fields added since the first writers").isEqualTo(4);
+		assertThatThrownBy(() -> WriterSamples.compare("removed", true, WriterSamples.nothing(Schema.create(Schema.Type.BOOLEAN))))
+			.hasMessageContaining("removed");
+	}
+
+	/** An enum keeps its symbols in order and only gains them at the end, so a symbol never changes its position. */
+	@Test
+	void enumSymbolsAreOnlyEverAppended() {
+		for (String type : RetainedWriters.CURRENT.keySet()) {
+			List<RetainedWriters.Writer> writers = RetainedWriters.of(type);
+			for (int i = 1; i < writers.size(); i++) {
+				Map<String, List<String>> before = enums(writers.get(i - 1).schema(), new HashMap<>());
+				Map<String, List<String>> after = enums(writers.get(i).schema(), new HashMap<>());
+				String file = writers.get(i).fileName();
+				before.forEach((name, symbols) -> assertThat(after.get(name))
+					.as("%s in %s", name, file)
+					.startsWith(symbols.toArray(String[]::new)));
+			}
+		}
+		assertThat(enums(MarketSnapshot.getClassSchema(), new HashMap<>()).get("com.mia_princz.mse.contracts.events.VenueState"))
+			.containsExactly("SETUP", "OPEN", "HALTED", "UNKNOWN", "CLOSED");
+	}
+
+	private static Map<String, List<String>> enums(Schema schema, Map<String, List<String>> found) {
+		switch (schema.getType()) {
+			case ENUM -> found.put(schema.getFullName(), schema.getEnumSymbols());
+			case RECORD -> {
+				if (found.putIfAbsent(schema.getFullName(), List.of()) == null) {
+					schema.getFields().forEach((field) -> enums(field.schema(), found));
+				}
+			}
+			case UNION -> schema.getTypes().forEach((branch) -> enums(branch, found));
+			case ARRAY -> enums(schema.getElementType(), found);
+			case MAP -> enums(schema.getValueType(), found);
+			default -> {
+			}
+		}
+		found.values().removeIf(List::isEmpty);
+		return found;
+	}
+
+	private static Schema withDefault(Schema schema, String name, Object value) {
+		List<Schema.Field> fields = new ArrayList<>();
+		for (Schema.Field field : schema.getFields()) {
+			fields.add(field.name().equals(name) ? new Schema.Field(field.name(), field.schema(), field.doc(), value)
+					: new Schema.Field(field, field.schema()));
+		}
+		return Schema.createRecord(schema.getName(), schema.getDoc(), schema.getNamespace(), false, fields);
 	}
 
 	/** A retained file that no longer matches its published fingerprint is refused when the catalogue loads. */
