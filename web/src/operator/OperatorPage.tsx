@@ -25,7 +25,9 @@ export function OperatorPage() {
   if (market.isPending) {
     return <p className="page-status">Loading the market…</p>;
   }
-  if (market.isError) {
+  // Only when there is nothing to show: a failed poll after a good read keeps the page, and every form's unconfirmed
+  // command with its key and Retry, on screen with the last known state.
+  if (market.data === undefined) {
     return (
       <p role="alert" className="page-status">
         The exchange is not reachable right now.
@@ -38,6 +40,11 @@ export function OperatorPage() {
   return (
     <div className="operator">
       <div className="operator-side">
+        {market.isError && (
+          <p role="alert" className="form-error">
+            The exchange is not answering, so the market state shown may be out of date.
+          </p>
+        )}
         <MarketControl market={market.data} instruments={listed.length} />
         {!editable && (
           <HealthPanel

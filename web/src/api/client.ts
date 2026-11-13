@@ -15,6 +15,8 @@ import type {
   CsrfToken,
   Identity,
   InstrumentCreated,
+  InstrumentEdited,
+  InstrumentEditRequest,
   InstrumentRequest,
   Instruments,
   MarketStatus,
@@ -175,6 +177,10 @@ export const api = {
 
   addInstrument: (instrument: InstrumentRequest, idempotencyKey: string) =>
     request<InstrumentCreated>('POST', '/api/v1/admin/instruments', { body: instrument, idempotencyKey }),
+
+  /** Only while the market is being set up. The instrument list shows the new price once market data has it. */
+  editInstrument: (instrumentId: string, edit: InstrumentEditRequest, idempotencyKey: string) =>
+    request<InstrumentEdited>('PUT', `/api/v1/admin/instruments/${instrumentId}`, { body: edit, idempotencyKey }),
 
   provisionAccount: (account: AccountRequest, idempotencyKey: string) =>
     request<AccountCreated>('POST', '/api/v1/admin/accounts', { body: account, idempotencyKey }),
