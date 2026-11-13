@@ -9,6 +9,7 @@ import { TOURS } from '../help/tours';
 import { botRun } from '../test/botRun';
 import { signedIn } from '../test/fakeServer';
 import { noTrades } from '../test/fakeStream';
+import { inUseMessage } from './InstrumentSetup';
 import { OperatorPage } from './OperatorPage';
 
 const NOVA = {
@@ -125,6 +126,7 @@ describe('the operator screen', () => {
     const table = screen.getByRole('table', { name: 'Instruments' });
     expect(within(table).queryByRole('textbox')).toBeNull();
     expect(within(table).queryByRole('button', { name: 'Save new price for NOVA' })).toBeNull();
+    expect(within(table).queryByRole('button', { name: 'Delete NOVA' })).toBeNull();
     expect(within(table).queryByRole('columnheader', { name: 'New price' })).toBeNull();
   });
 
@@ -334,8 +336,199 @@ describe('the operator screen', () => {
     const table = await screen.findByRole('table', { name: 'Instruments' });
     expect(within(table).getByRole('rowheader', { name: 'NOVA' })).toBeInTheDocument();
     expect(within(table).queryByRole('textbox')).toBeNull();
+    expect(within(table).queryByRole('button', { name: 'Delete NOVA' })).toBeNull();
     expect(within(table).queryByRole('columnheader', { name: 'New price' })).toBeNull();
+    expect(within(table).queryByRole('columnheader', { name: 'Delete' })).toBeNull();
     expect(screen.queryByText(/Reference prices can be changed/)).toBeNull();
+  });
+
+  it('deletes an instrument only once confirmed, under a key, and moves on to adding', async () => {
+    const { server } = exchange('SETUP');
+    server.on(`DELETE /api/v1/admin/instruments/${NOVA.instrumentId}`, {
+      status: 200,
+      json: { instrumentId: NOVA.instrumentId, symbol: 'NOVA', commandSequence: '9' },
+    });
+    renderPage();
+    const deletes = () => server.requests.filter((request) => request.method === 'DELETE');
+
+    // Asking first: Delete becomes Confirm and Keep, and Keep changes nothing.
+    fireEvent.click(await button('Delete NOVA'));
+    expect(screen.getByRole('button', { name: 'Confirm delete of NOVA' })).toHaveFocus();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep NOVA' }));
+    expect(await button('Delete NOVA')).toHaveFocus();
+    expect(deletes()).toHaveLength(0);
+
+    const listReads = server.requests.filter((request) => request.url === '/api/v1/instruments').length;
+    fireEvent.click(await button('Delete NOVA'));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm delete of NOVA' }));
+
+    // Said by the panel, which stays when the row goes once market data drops it.
+    const panel = screen.getByRole('region', { name: 'Instruments' });
+    expect(await within(panel).findByText('NOVA is deleted. The list drops it once market data has it.')).toHaveAttribute(
+      'role',
+      'status',
+    );
+    expect(deletes()).toHaveLength(1);
+    expect(deletes()[0]?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(deletes()[0]?.body).toBeUndefined();
+    const table = screen.getByRole('table', { name: 'Instruments' });
+    expect(within(table).getByText('Deleted')).toBeInTheDocument();
+    expect(within(table).queryByRole('button', { name: 'Delete NOVA' })).toBeNull();
+    expect(within(table).queryByRole('textbox', { name: 'New price for NOVA' })).toBeNull();
+    // The row's controls are gone, so focus goes to the add form.
+    expect(screen.getByRole('textbox', { name: 'Symbol' })).toHaveFocus();
+    await waitFor(() =>
+      expect(server.requests.filter((request) => request.url === '/api/v1/instruments').length).toBeGreaterThan(listReads),
+    );
+  });
+
+  it('explains an instrument in use with its holders, keeps it, and tries again under a new key', async () => {
+    const { server } = exchange('SETUP');
+    let answers = 0;
+    server.on(`DELETE /api/v1/admin/instruments/${NOVA.instrumentId}`, () => {
+      answers += 1;
+      return {
+        status: 409,
+        problem: {
+          status: 409,
+          code: 'INSTRUMENT_IN_USE',
+          detail: 'NOVA is in use, so it cannot be deleted',
+          commandSequence: '9',
+          usage: { holders: ['bot-0001', 'trader'], holderCount: 1_025, orderCount: answers },
+        },
+      };
+    });
+    renderPage();
+
+    fireEvent.click(await button('Delete NOVA'));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm delete of NOVA' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(
+      "NOVA can't be deleted: it is in use. Its shares were given to bot-0001, trader and 1,023 more, as listed " +
+        'under Accounts. An order names it. Orders sent before the market opens are refused, but kept on record. ' +
+        'Taking shares or orders back would need correcting entries in the ledger, so an instrument in use stays.',
+    );
+    const again = await button('Delete NOVA');
+    expect(again).toBeEnabled();
+    expect(again).toHaveFocus();
+    expect(again).toHaveAccessibleDescription(alert.textContent ?? '');
+    expect(screen.getByRole('textbox', { name: 'New price for NOVA' })).toBeEnabled();
+
+    fireEvent.click(again);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm delete of NOVA' }));
+    expect(await screen.findByText(/2 orders name it\./)).toBeInTheDocument();
+    const keys = server.requests
+      .filter((request) => request.method === 'DELETE')
+      .map((request) => request.headers['Idempotency-Key']);
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  it('retries an unconfirmed delete under its own key, with the row locked until then', async () => {
+    const { server } = exchange('SETUP');
+    let busy = true;
+    server.on(`DELETE /api/v1/admin/instruments/${NOVA.instrumentId}`, () =>
+      busy
+        ? { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY', detail: 'busy' } }
+        : { status: 200, json: { instrumentId: NOVA.instrumentId, symbol: 'NOVA', commandSequence: '9' } },
+    );
+    renderPage();
+
+    fireEvent.click(await button('Delete NOVA'));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm delete of NOVA' }));
+    expect(await screen.findByText(/Not confirmed/)).toBeInTheDocument();
+    expect(await button('Delete NOVA')).toBeDisabled();
+    // The row's price waits for the delete's final answer too.
+    expect(screen.getByRole('textbox', { name: 'New price for NOVA' })).toBeDisabled();
+
+    busy = false;
+    fireEvent.click(await button('Retry'));
+    expect(await screen.findByText(/NOVA is deleted\./)).toBeInTheDocument();
+    const keys = server.requests
+      .filter((request) => request.method === 'DELETE')
+      .map((request) => request.headers['Idempotency-Key']);
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it('leaves focus where the user moved it while a delete was sending', async () => {
+    const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
+    const { server } = exchange('SETUP', [NOVA, ORBT]);
+    server.on(`DELETE /api/v1/admin/instruments/${NOVA.instrumentId}`, {
+      status: 200,
+      json: { instrumentId: NOVA.instrumentId, symbol: 'NOVA', commandSequence: '9' },
+    });
+    renderPage();
+
+    fireEvent.click(await button('Delete NOVA'));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm delete of NOVA' }));
+    const elsewhere = screen.getByRole('textbox', { name: 'New price for ORBT' });
+    elsewhere.focus();
+
+    expect(await screen.findByText(/NOVA is deleted\./)).toBeInTheDocument();
+    expect(elsewhere).toHaveFocus();
+  });
+
+  it('runs one command at a time in a row, each described by its own words', async () => {
+    const { server } = exchange('SETUP');
+    let priceBusy = true;
+    server
+      .on(`PUT /api/v1/admin/instruments/${NOVA.instrumentId}`, () =>
+        priceBusy
+          ? { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY', detail: 'busy' } }
+          : {
+              status: 400,
+              problem: {
+                status: 400,
+                code: 'VALIDATION_FAILED',
+                detail: 'The request is invalid',
+                errors: [{ field: 'referencePrice', code: 'INVALID_PRICE', message: 'Reference price must be a price in cents' }],
+              },
+            },
+      )
+      .on(`DELETE /api/v1/admin/instruments/${NOVA.instrumentId}`, {
+        status: 409,
+        problem: {
+          status: 409,
+          code: 'INSTRUMENT_IN_USE',
+          detail: 'NOVA is in use, so it cannot be deleted',
+          usage: { holders: ['trader'], holderCount: 1, orderCount: 0 },
+        },
+      });
+    renderPage();
+
+    // An unconfirmed save holds the delete back, so a deleted row never offers to retry a save.
+    const field = await screen.findByRole('textbox', { name: 'New price for NOVA' });
+    fireEvent.change(field, { target: { value: '1x' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save new price for NOVA' }));
+    expect(await screen.findByText(/Not confirmed/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete NOVA' })).toBeDisabled();
+
+    priceBusy = false;
+    fireEvent.click(await button('Retry'));
+    expect(await screen.findByText('Reference price must be a price in cents')).toBeInTheDocument();
+    fireEvent.click(await button('Delete NOVA'));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm delete of NOVA' }));
+    expect(await screen.findByText(/NOVA can't be deleted/)).toBeInTheDocument();
+
+    // Both refusals show, and each control is described by its own.
+    expect(field).toHaveAccessibleDescription('Reference price must be a price in cents');
+    expect(await button('Delete NOVA')).toHaveAccessibleDescription(/^NOVA can't be deleted: it is in use\./);
+    expect(await button('Delete NOVA')).not.toHaveAccessibleDescription(/Reference price/);
+  });
+
+  it('says plainly what keeps an instrument, whatever the mix of holders and orders', () => {
+    expect(inUseMessage('ORBT', { holders: [], holderCount: 0, orderCount: 3 })).toBe(
+      "ORBT can't be deleted: it is in use. 3 orders name it. Orders sent before the market opens are refused, but " +
+        'kept on record. Taking shares or orders back would need correcting entries in the ledger, so an instrument ' +
+        'in use stays.',
+    );
+    expect(inUseMessage('ORBT', { holders: [], holderCount: 0, orderCount: 1_500 })).toContain('1,500 orders name it.');
+    expect(inUseMessage('ORBT', { holders: ['trader'], holderCount: 1, orderCount: 0 })).toBe(
+      "ORBT can't be deleted: it is in use. Its shares were given to trader, as listed under Accounts. Taking " +
+        'shares or orders back would need correcting entries in the ledger, so an instrument in use stays.',
+    );
   });
 
   it('funds a trader with the default endowment for every instrument', async () => {

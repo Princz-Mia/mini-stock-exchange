@@ -484,6 +484,9 @@ for (const size of SIZES) {
       await expect(field).toBeVisible();
       await expect(instruments.getByText('Reference prices can be changed until the market opens.', { exact: false })).toBeVisible();
       await capture(page, size, 'operator-setup');
+      // The panel scrolls a table too wide for it; the setup row must fit instead, controls included.
+      const fits = () => instruments.evaluate((panel) => panel.scrollWidth <= panel.clientWidth);
+      expect(await fits(), `the instruments panel scrolls sideways at ${size.name}`).toBe(true);
 
       await field.fill('120.5x');
       await instruments.getByRole('button', { name: 'Save new price for NOVA' }).click();
@@ -503,6 +506,59 @@ for (const size of SIZES) {
       await expect(field).toBeFocused();
       expect(edits).toEqual([{ referencePrice: '120.5x' }, { referencePrice: '120.50' }]);
       await capture(page, size, 'operator-setup-saved');
+      await page.context().close();
+    });
+
+    test('the setup editor, with a delete confirmed and refused as in use', async ({ browser }) => {
+      // As above, the market reads as SETUP and the delete is answered in the browser, so the live market is left as it
+      // is. The holders are the ones the live market has.
+      const deletes: string[] = [];
+      const page = await at(browser, size, 'operator', async (fresh) => {
+        await fresh.route(/\/api\/v1\/market$/, (route) =>
+          route.fulfill({
+            json: { state: 'SETUP', simulationId: '10000000-0000-0000-0000-000000000001', openedAt: null, commandSequence: '7' },
+          }),
+        );
+        await fresh.route(/\/api\/v1\/admin\/instruments\/[0-9a-f-]+$/, (route) => {
+          if (route.request().method() !== 'DELETE') {
+            return route.fallback();
+          }
+          deletes.push(route.request().url());
+          return route.fulfill({
+            status: 409,
+            contentType: 'application/problem+json',
+            body: JSON.stringify({
+              status: 409,
+              code: 'INSTRUMENT_IN_USE',
+              detail: 'NOVA is in use, so it cannot be deleted',
+              commandSequence: '8',
+              usage: { holders: ['bot-0001', 'bot-0002', 'counterparty', 'trader'], holderCount: 4, orderCount: 0 },
+            }),
+          });
+        });
+      });
+      await page.getByRole('link', { name: 'Operator' }).click();
+      const instruments = page.getByRole('region', { name: 'Instruments' });
+      await instruments.getByRole('button', { name: 'Delete NOVA' }).click();
+      const confirm = instruments.getByRole('button', { name: 'Confirm delete of NOVA' });
+      await expect(confirm).toBeFocused();
+      await expect(instruments.getByRole('button', { name: 'Keep NOVA' })).toBeVisible();
+      await capture(page, size, 'operator-setup-confirm');
+      expect(
+        await instruments.evaluate((panel) => panel.scrollWidth <= panel.clientWidth),
+        `the instruments panel scrolls sideways at ${size.name} while confirming`,
+      ).toBe(true);
+
+      await confirm.click();
+      await expect(instruments.getByRole('alert')).toHaveText(
+        "NOVA can't be deleted: it is in use. Its shares were given to bot-0001, bot-0002, counterparty, trader, as " +
+          'listed under Accounts. Taking shares or orders back would need correcting entries in the ledger, so an ' +
+          'instrument in use stays.',
+      );
+      // Confirm went away with the answer; focus is back on Delete, which the refusal describes.
+      await expect(instruments.getByRole('button', { name: 'Delete NOVA' })).toBeFocused();
+      expect(deletes).toHaveLength(1);
+      await capture(page, size, 'operator-setup-in-use');
       await page.context().close();
     });
 

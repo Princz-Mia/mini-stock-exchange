@@ -2,8 +2,8 @@ import { useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, type RefObject, useCallback, useEffect, useId, useRef, useState } from 'react';
 
 import { api } from '../api/client';
-import type { Instrument, InstrumentRequest } from '../api/types';
-import { groupDigits } from '../format';
+import type { Instrument, InstrumentRequest, InstrumentUsage } from '../api/types';
+import { groupDigits, groupInteger } from '../format';
 import { CommandStatus } from './CommandStatus';
 import { type CommandOutcome, useCommand } from './useCommand';
 
@@ -21,7 +21,7 @@ export const DEFAULT_INSTRUMENTS: readonly InstrumentRequest[] = [
  * control loses focus to the page, so keyboard and screen reader users would lose their place. Focus the user has
  * moved elsewhere in the meantime stays where it is.
  */
-function useFocusOnAnswer(kind: CommandOutcome<unknown>['kind'], field: RefObject<HTMLInputElement | null>) {
+function useFocusOnAnswer(kind: CommandOutcome<unknown>['kind'], field: RefObject<HTMLElement | null>) {
   useEffect(() => {
     const lost = document.activeElement === null || document.activeElement === document.body;
     if ((kind === 'done' || kind === 'refused') && lost) {
@@ -31,10 +31,40 @@ function useFocusOnAnswer(kind: CommandOutcome<unknown>['kind'], field: RefObjec
 }
 
 /**
- * One instrument and, while the market is being set up, a field to change its reference price. Each row sends its own
- * command under its own key, so an unconfirmed save on one row is retried without touching the others.
+ * Why an instrument in use stays, with who holds it and how many orders name it. Orders sent before the market opens
+ * are refused, but kept on record, so even those count.
  */
-function InstrumentRow({ instrument, editable }: { instrument: Instrument; editable: boolean }) {
+export function inUseMessage(symbol: string, usage: InstrumentUsage): string {
+  const parts = [`${symbol} can't be deleted: it is in use.`];
+  if (usage.holderCount > 0) {
+    const more = usage.holderCount - usage.holders.length;
+    parts.push(
+      `Its shares were given to ${usage.holders.join(', ')}${more > 0 ? ` and ${groupInteger(more)} more` : ''}, ` +
+        'as listed under Accounts.',
+    );
+  }
+  if (usage.orderCount > 0) {
+    const orders = usage.orderCount === 1 ? 'An order names it.' : `${groupInteger(usage.orderCount)} orders name it.`;
+    parts.push(`${orders} Orders sent before the market opens are refused, but kept on record.`);
+  }
+  parts.push('Taking shares or orders back would need correcting entries in the ledger, so an instrument in use stays.');
+  return parts.join(' ');
+}
+
+/**
+ * One instrument and, while the market is being set up, a field to change its reference price and a way to delete it,
+ * confirmed first. Each row sends its own commands under their own keys, so an unconfirmed save or delete on one row is
+ * retried without touching the others.
+ */
+function InstrumentRow({
+  instrument,
+  editable,
+  onDeleted,
+}: {
+  instrument: Instrument;
+  editable: boolean;
+  onDeleted: (symbol: string) => void;
+}) {
   const client = useQueryClient();
   const [price, setPrice] = useState('');
   const send = useCallback(
@@ -49,8 +79,48 @@ function InstrumentRow({ instrument, editable }: { instrument: Instrument; edita
   const command = useCommand(send);
   const field = useRef<HTMLInputElement>(null);
   useFocusOnAnswer(command.outcome.kind, field);
-  const outcomeId = useId();
+  const priceOutcomeId = useId();
+  const removalOutcomeId = useId();
   const refused = command.outcome.kind === 'refused';
+
+  const sendDelete = useCallback(
+    async (instrumentId: string, key: string) => {
+      const deleted = await api.deleteInstrument(instrumentId, key);
+      void client.invalidateQueries({ queryKey: ['instruments'] });
+      return deleted;
+    },
+    [client],
+  );
+  const removal = useCommand(sendDelete);
+  const [confirming, setConfirming] = useState(false);
+  const deleteButton = useRef<HTMLButtonElement>(null);
+  const confirmButton = useRef<HTMLButtonElement>(null);
+  const wasConfirming = useRef(false);
+  // Confirming swaps the buttons, so focus follows: to Confirm when asked, and back to Delete when kept.
+  useEffect(() => {
+    if (confirming) {
+      confirmButton.current?.focus();
+    } else if (wasConfirming.current) {
+      deleteButton.current?.focus();
+    }
+    wasConfirming.current = confirming;
+  }, [confirming]);
+  useFocusOnAnswer(removal.outcome.kind, deleteButton);
+  const deleted = removal.outcome.kind === 'done';
+  useEffect(() => {
+    if (deleted) {
+      onDeleted(instrument.symbol);
+    }
+  }, [deleted, onDeleted, instrument.symbol]);
+  // One command at a time per row: a delete waits for a price save's final answer, and the other way round, so a
+  // deleted row never offers to retry a save.
+  const saving = command.outcome.kind === 'sending' || command.unresolved;
+  const deleting = removal.outcome.kind === 'sending' || removal.unresolved;
+  const deleteRefused = removal.outcome.kind === 'refused';
+  const removalOutcome =
+    removal.outcome.kind === 'refused' && removal.outcome.problem?.usage
+      ? { ...removal.outcome, message: inUseMessage(instrument.symbol, removal.outcome.problem.usage) }
+      : removal.outcome;
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -62,15 +132,20 @@ function InstrumentRow({ instrument, editable }: { instrument: Instrument; edita
       <tr>
         <th scope="row">{instrument.symbol}</th>
         <td className="num">{groupDigits(instrument.referencePrice)}</td>
-        {editable && (
+        {editable && deleted && (
+          <td colSpan={2} className="muted">
+            Deleted
+          </td>
+        )}
+        {editable && !deleted && (
           <td>
             <form onSubmit={submit} className="price-edit">
-              <fieldset disabled={command.outcome.kind === 'sending' || command.unresolved}>
+              <fieldset disabled={saving || deleting}>
                 <input
                   ref={field}
                   aria-label={`New price for ${instrument.symbol}`}
                   aria-invalid={refused || undefined}
-                  aria-describedby={refused ? outcomeId : undefined}
+                  aria-describedby={refused ? priceOutcomeId : undefined}
                   value={price}
                   onChange={(event) => setPrice(event.target.value)}
                   inputMode="decimal"
@@ -83,18 +158,67 @@ function InstrumentRow({ instrument, editable }: { instrument: Instrument; edita
             </form>
           </td>
         )}
+        {editable && !deleted && (
+          <td>
+            {confirming ? (
+              <div className="row-actions">
+                <button
+                  ref={confirmButton}
+                  type="button"
+                  className="primary danger"
+                  aria-label={`Confirm delete of ${instrument.symbol}`}
+                  onClick={() => {
+                    setConfirming(false);
+                    void removal.run(instrument.instrumentId);
+                  }}
+                >
+                  Confirm delete
+                </button>
+                <button
+                  type="button"
+                  className="quiet"
+                  aria-label={`Keep ${instrument.symbol}`}
+                  onClick={() => setConfirming(false)}
+                >
+                  Keep
+                </button>
+              </div>
+            ) : (
+              <button
+                ref={deleteButton}
+                type="button"
+                className="quiet"
+                aria-label={`Delete ${instrument.symbol}`}
+                aria-describedby={deleteRefused ? removalOutcomeId : undefined}
+                disabled={saving || deleting}
+                onClick={() => setConfirming(true)}
+              >
+                Delete
+              </button>
+            )}
+          </td>
+        )}
       </tr>
-      {command.outcome.kind !== 'idle' && (
+      {(command.outcome.kind !== 'idle' || (removal.outcome.kind !== 'idle' && !deleted)) && (
         <tr className="row-outcome">
-          <td id={outcomeId} colSpan={editable ? 3 : 2}>
-            <CommandStatus
-              outcome={command.outcome}
-              done={(edited) =>
-                `${edited.symbol}'s reference price is now ${groupDigits(edited.referencePrice)}. ` +
-                'The list shows it once market data has it.'
-              }
-              onRetry={() => void command.retry()}
-            />
+          <td colSpan={editable ? 4 : 2}>
+            {/* Each control is described by its own command's words only. */}
+            <div id={priceOutcomeId}>
+              <CommandStatus
+                outcome={command.outcome}
+                done={(edited) =>
+                  `${edited.symbol}'s reference price is now ${groupDigits(edited.referencePrice)}. ` +
+                  'The list shows it once market data has it.'
+                }
+                onRetry={() => void command.retry()}
+              />
+            </div>
+            {/* A done delete is said by the panel, as this row goes once market data drops it. */}
+            <div id={removalOutcomeId}>
+              {!deleted && (
+                <CommandStatus outcome={removalOutcome} done={() => ''} onRetry={() => void removal.retry()} />
+              )}
+            </div>
           </td>
         </tr>
       )}
@@ -102,7 +226,7 @@ function InstrumentRow({ instrument, editable }: { instrument: Instrument; edita
   );
 }
 
-/** The catalogue and, while the market is being set up, a form to add to it and a field to reprice each entry. */
+/** The catalogue and, while the market is being set up, a form to add to it and a way to reprice or delete each entry. */
 export function InstrumentSetup({ instruments, editable }: { instruments: readonly Instrument[]; editable: boolean }) {
   const client = useQueryClient();
   const [symbol, setSymbol] = useState('');
@@ -118,6 +242,15 @@ export function InstrumentSetup({ instruments, editable }: { instruments: readon
   const command = useCommand(send);
   const symbolField = useRef<HTMLInputElement>(null);
   useFocusOnAnswer(command.outcome.kind, symbolField);
+  // Said here rather than in the row, which goes once market data drops it. The row loses its controls, and focus with
+  // them, so focus goes to the add form, the next thing to do here, unless the user has moved it meanwhile.
+  const [deletedSymbol, setDeletedSymbol] = useState<string | null>(null);
+  const announceDeleted = useCallback((gone: string) => {
+    setDeletedSymbol(gone);
+    if (document.activeElement === null || document.activeElement === document.body) {
+      symbolField.current?.focus();
+    }
+  }, []);
   const listed = new Set(instruments.map((instrument) => instrument.symbol));
   const suggestions = DEFAULT_INSTRUMENTS.filter((suggestion) => !listed.has(suggestion.symbol));
 
@@ -132,7 +265,7 @@ export function InstrumentSetup({ instruments, editable }: { instruments: readon
       {instruments.length === 0 ? (
         <p className="muted">No instruments yet.</p>
       ) : (
-        <table aria-label="Instruments">
+        <table aria-label="Instruments" className="setup-table">
           <thead>
             <tr>
               <th scope="col">Symbol</th>
@@ -140,19 +273,34 @@ export function InstrumentSetup({ instruments, editable }: { instruments: readon
                 Reference price
               </th>
               {editable && <th scope="col">New price</th>}
+              {editable && (
+                <th scope="col">
+                  <span className="visually-hidden">Delete</span>
+                </th>
+              )}
             </tr>
           </thead>
           <tbody>
             {instruments.map((instrument) => (
-              <InstrumentRow key={instrument.instrumentId} instrument={instrument} editable={editable} />
+              <InstrumentRow
+                key={instrument.instrumentId}
+                instrument={instrument}
+                editable={editable}
+                onDeleted={announceDeleted}
+              />
             ))}
           </tbody>
         </table>
       )}
+      {deletedSymbol !== null && (
+        <p role="status" className="outcome outcome-ok">
+          {deletedSymbol} is deleted. The list drops it once market data has it.
+        </p>
+      )}
       {editable && instruments.length > 0 && (
         <p className="muted hint">
           Reference prices can be changed until the market opens. Starting shares already granted are valued at the
-          new price.
+          new price. An instrument can be deleted until an account is given its shares or an order names it.
         </p>
       )}
       {editable ? (

@@ -5,8 +5,8 @@ import { type APIRequestContext, type APIResponse, type Page, expect, request, t
 
 import type { CsrfToken, OrderRequest } from '../src/api/types';
 
-// Runs against a fresh stack whose only addition is the counterparty's login (seed-users.sql). The operator sets up
-// the market through the API: NOVA at 100.00, and the dev trader and the counterparty with 100,000.00 and 500 shares
+// Runs after operator-setup.spec.ts, which leaves the market in SETUP with no instruments, on a stack whose only other
+// addition is the counterparty's login (seed-users.sql). The operator sets up the market through the API: NOVA at 100.00, and the dev trader and the counterparty with 100,000.00 and 500 shares
 // each. The amounts below follow from that, so the test runs once per stack. Two bots are provisioned too: the last
 // test runs them from the operator screen, after the trader's amounts are checked.
 
