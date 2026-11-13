@@ -8,7 +8,9 @@ RUN sed -i 's/^distributionSha256Sum=.*/distributionSha256Sum=80ffca22aed9e8b971
 COPY event-contracts event-contracts
 COPY analytics-job analytics-job
 ENV JAVA17_HOME=/opt/java/openjdk
-RUN --mount=type=cache,target=/root/.m2 sh -c '\
+# The three Java images share this cache and build in parallel: locked, so one cannot read a Maven download
+# another is still writing.
+RUN --mount=type=cache,target=/root/.m2,sharing=locked sh -c '\
     sh ./mvnw -B -ntp -f event-contracts/pom.xml -DskipTests install && \
     sh ./mvnw -B -ntp -f analytics-job/pom.xml verify'
 

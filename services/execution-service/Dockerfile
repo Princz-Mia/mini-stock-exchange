@@ -7,7 +7,9 @@ COPY .mvn .mvn
 RUN sed -i 's/^distributionSha256Sum=.*/distributionSha256Sum=80ffca22aed9e8b9713a232f3394fd81d7f20322df75efdb2b047dbd3e3a23bb/' .mvn/wrapper/maven-wrapper.properties
 COPY event-contracts event-contracts
 COPY services/execution-service services/execution-service
-RUN --mount=type=cache,target=/root/.m2 sh -c '\
+# The three Java images share this cache and build in parallel: locked, so one cannot read a Maven download
+# another is still writing.
+RUN --mount=type=cache,target=/root/.m2,sharing=locked sh -c '\
     sh ./mvnw -B -ntp -f event-contracts/pom.xml -DskipTests install && \
     sh ./mvnw -B -ntp -f services/execution-service/pom.xml -DskipTests package && \
     java -Djarmode=tools -jar services/execution-service/target/execution-service-0.1.0.jar extract --layers --destination /out'
