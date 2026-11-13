@@ -19,6 +19,7 @@ function instrument(id: string, symbol: string): Instrument {
   return {
     instrumentId: id,
     symbol,
+    displayName: null,
     venueState: 'OPEN',
     referencePrice: '100.00',
     tick: '0.01',

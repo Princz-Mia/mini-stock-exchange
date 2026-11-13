@@ -21,6 +21,7 @@ import org.springframework.context.annotation.Import;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
+import com.mia_princz.mse.contracts.events.MarketSnapshot;
 import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.marketdata.projection.SnapshotProjection;
 import com.mia_princz.mse.marketdata.projection.TradeProjection;
@@ -114,6 +115,24 @@ class MarketApiIT {
 		assertThat(trend.get(0).get("price").asString()).isEqualTo("200.10");
 		assertThat(trend.get(59).get("minute").asString()).isEqualTo("2026-11-12T09:09:00Z");
 		assertThat(trend.get(59).get("price").asString()).isEqualTo("200.69");
+	}
+
+	/** The display name is served with the instrument and its book, null for none. */
+	@Test
+	void instrumentsAndBooksCarryTheirDisplayName() throws Exception {
+		UUID named = UUID.randomUUID();
+		UUID plain = UUID.randomUUID();
+		MarketSnapshot snapshot = Snapshots.untraded(named, 4);
+		snapshot.setDisplayName("Orbité Labs");
+		snapshots.apply(snapshot);
+		snapshots.apply(Snapshots.untraded(plain, 4));
+
+		JsonNode instruments = json(get("/api/v1/instruments"), 200).get("instruments");
+		assertThat(find(instruments, named).get("displayName").asString()).isEqualTo("Orbité Labs");
+		assertThat(find(instruments, plain).get("displayName").isNull()).isTrue();
+		assertThat(json(get("/api/v1/instruments/" + named + "/book"), 200).get("displayName").asString())
+			.isEqualTo("Orbité Labs");
+		assertThat(json(get("/api/v1/instruments/" + plain + "/book"), 200).get("displayName").isNull()).isTrue();
 	}
 
 	/** An instrument deleted during setup leaves the list, and every read of it says it does not exist. */

@@ -43,7 +43,8 @@ class MarketEventsController {
 			Instant executedAt) {
 	}
 
-	record MarketFrame(String bootId, String instrumentId, String symbol, String venueState,
+	/** {@code displayName} is null for none. */
+	record MarketFrame(String bootId, String instrumentId, String symbol, String displayName, String venueState,
 			String sourceCommandSequence, List<MarketController.Quote> bids, List<MarketController.Quote> asks,
 			String lastPrice, List<TapeView> recentTrades, String lastTradeSequence, Instant generatedAt,
 			MarketController.Feed feed, MarketController.SessionView session) {
@@ -108,7 +109,8 @@ class MarketEventsController {
 	private static MarketFrame marketFrame(UUID bootId, UUID instrumentId, MarketQueries.Live live,
 			MarketQueries.Session session, ObjectProvider<MarketFeedConsumer> marketFeed,
 			ObjectProvider<MarketFeedConsumer> tradeFeed) {
-		return new MarketFrame(bootId.toString(), instrumentId.toString(), live.symbol(), live.venueState(),
+		return new MarketFrame(bootId.toString(), instrumentId.toString(), live.symbol(), live.displayName(),
+				live.venueState(),
 				Long.toString(live.sourceCommandSequence()),
 				live.bids().stream().map(MarketEventsController::quote).toList(),
 				live.asks().stream().map(MarketEventsController::quote).toList(),
