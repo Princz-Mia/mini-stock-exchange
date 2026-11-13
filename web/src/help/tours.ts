@@ -88,7 +88,7 @@ export const TOURS: Record<TourRole, TourScript> = {
       {
         anchor: 'section[aria-labelledby="instruments-title"]',
         title: 'Instruments',
-        body: 'The symbols to trade and their reference prices, fixed once the market opens.',
+        body: 'The symbols to trade and their reference prices. A price can be changed until the market opens.',
       },
       {
         anchor: 'section[aria-labelledby="accounts-title"]',

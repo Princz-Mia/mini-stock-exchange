@@ -450,6 +450,62 @@ for (const size of SIZES) {
       await page.context().close();
     });
 
+    test('the setup editor, with a reference price refused and saved', async ({ browser }) => {
+      // The live market is open by now, so the market reads as SETUP here and the edit is answered in the browser:
+      // first refused, then saved. Nothing reaches Execution, so the live market is left as it is.
+      const edits: unknown[] = [];
+      const page = await at(browser, size, 'operator', async (fresh) => {
+        await fresh.route(/\/api\/v1\/market$/, (route) =>
+          route.fulfill({
+            json: { state: 'SETUP', simulationId: '10000000-0000-0000-0000-000000000001', openedAt: null, commandSequence: '7' },
+          }),
+        );
+        await fresh.route(/\/api\/v1\/admin\/instruments\/[0-9a-f-]+$/, (route) => {
+          edits.push(route.request().postDataJSON());
+          return edits.length === 1
+            ? route.fulfill({
+                status: 400,
+                contentType: 'application/problem+json',
+                body: JSON.stringify({
+                  status: 400,
+                  code: 'VALIDATION_FAILED',
+                  detail: 'The request is invalid',
+                  errors: [{ field: 'referencePrice', code: 'INVALID_PRICE', message: 'Reference price must be a price in cents' }],
+                }),
+              })
+            : route.fulfill({
+                json: { instrumentId: 'x', symbol: 'NOVA', referencePrice: '120.50', commandSequence: '8' },
+              });
+        });
+      });
+      await page.getByRole('link', { name: 'Operator' }).click();
+      const instruments = page.getByRole('region', { name: 'Instruments' });
+      const field = instruments.getByRole('textbox', { name: 'New price for NOVA' });
+      await expect(field).toBeVisible();
+      await expect(instruments.getByText('Reference prices can be changed until the market opens.', { exact: false })).toBeVisible();
+      await capture(page, size, 'operator-setup');
+
+      await field.fill('120.5x');
+      await instruments.getByRole('button', { name: 'Save new price for NOVA' }).click();
+      await expect(instruments.getByRole('alert')).toHaveText('Reference price must be a price in cents');
+      await expect(field).toHaveValue('120.5x');
+      // Sending disabled the field; once answered, focus is back on it to correct the price.
+      await expect(field).toBeFocused();
+      await expect(field).toHaveAttribute('aria-invalid', 'true');
+      await capture(page, size, 'operator-setup-refused');
+
+      await field.fill('120.50');
+      await instruments.getByRole('button', { name: 'Save new price for NOVA' }).click();
+      await expect(instruments.getByRole('status')).toHaveText(
+        "NOVA's reference price is now 120.50. The list shows it once market data has it.",
+      );
+      await expect(field).toHaveValue('');
+      await expect(field).toBeFocused();
+      expect(edits).toEqual([{ referencePrice: '120.5x' }, { referencePrice: '120.50' }]);
+      await capture(page, size, 'operator-setup-saved');
+      await page.context().close();
+    });
+
     test('the operator screen, and the exchange unreachable', async ({ browser }) => {
       const page = await at(browser, size, 'operator');
       await expect(page.getByRole('heading', { name: 'Market' })).toBeVisible();

@@ -826,6 +826,26 @@ button.chip {
   gap: var(--space-2);
 }
 
+/* A reference price changed in place: the field and its Save side by side in the row, wrapping under on a phone. */
+.price-edit fieldset {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+.price-edit input {
+  width: 8rem;
+  min-width: 0;
+}
+
+.row-outcome td {
+  padding-top: 0;
+}
+
 .chart-credit {
   margin: 0;
   font-size: 12px;
