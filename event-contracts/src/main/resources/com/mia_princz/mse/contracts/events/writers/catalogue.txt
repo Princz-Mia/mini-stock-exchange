@@ -4,3 +4,4 @@
 TradeExecuted 1 2724d10c6d9e42ab
 CandleUpdated 1 59661622b31f660f
 MarketSnapshot 1 f95ced2d707d4ea2
+MarketSnapshot 2 97723f6805e15bad

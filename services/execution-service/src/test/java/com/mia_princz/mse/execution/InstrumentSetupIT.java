@@ -80,6 +80,11 @@ class InstrumentSetupIT {
 		assertThat(snapshot.getSymbol()).isEqualTo("NOVA");
 		assertThat(snapshot.getVenueState()).isEqualTo(VenueState.SETUP);
 		assertThat(snapshot.getRules().getReferencePriceCents()).isEqualTo(10_000);
+		// Written with the event's second version, whose added fields nothing sets yet: their defaults.
+		assertThat(snapshot.getRemoved()).isFalse();
+		assertThat(snapshot.getDisplayName()).isNull();
+		assertThat(snapshot.getOpensAt()).isNull();
+		assertThat(snapshot.getClosesAt()).isNull();
 		assertThat(engine.depth(novaId, Side.BUY).get(5, TimeUnit.SECONDS)).isEmpty();
 
 		// The same key and body repeat the answer; the same key with another body is a conflict.

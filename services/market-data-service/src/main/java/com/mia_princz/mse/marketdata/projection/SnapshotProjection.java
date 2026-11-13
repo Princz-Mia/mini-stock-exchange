@@ -11,6 +11,7 @@ import tools.jackson.databind.json.JsonMapper;
 import com.mia_princz.mse.contracts.events.BookLevel;
 import com.mia_princz.mse.contracts.events.MarketSnapshot;
 import com.mia_princz.mse.contracts.events.PublicTrade;
+import com.mia_princz.mse.contracts.events.VenueState;
 
 /**
  * Applies market snapshots to the instrument and market projections. A snapshot replaces the instrument's row only
@@ -67,12 +68,27 @@ public final class SnapshotProjection {
 				    source_command_sequence = EXCLUDED.source_command_sequence,
 				    generated_at = EXCLUDED.generated_at, projected_at = now()
 				WHERE market_snapshot.source_command_sequence < EXCLUDED.source_command_sequence""")
-			.params(snapshot.getInstrumentId(), snapshot.getSimulationId(), snapshot.getVenueState().name(),
+			.params(snapshot.getInstrumentId(), snapshot.getSimulationId(), venueState(snapshot.getVenueState()),
 					levels(snapshot.getBids()), levels(snapshot.getAsks()), trades(snapshot.getRecentTrades()),
 					last == null ? null : last.getPriceCents(), snapshot.getLastTradeSequence(),
 					snapshot.getSourceCommandSequence(), Timestamp.from(snapshot.getGeneratedAt()))
 			.update();
 		return replaced == 1;
+	}
+
+	/**
+	 * The venue state as stored and served. Every state the event can carry is named here, so a state added to the
+	 * schema does not compile until it is decided. CLOSED is in the event from its second version, ahead of the
+	 * simulations that end: until the API and this projection's CHECK say CLOSED, it is shown as UNKNOWN, as a reader
+	 * of the first version sees it.
+	 */
+	static String venueState(VenueState state) {
+		return switch (state) {
+			case SETUP -> "SETUP";
+			case OPEN -> "OPEN";
+			case HALTED -> "HALTED";
+			case UNKNOWN, CLOSED -> "UNKNOWN";
+		};
 	}
 
 	private String levels(List<BookLevel> levels) {

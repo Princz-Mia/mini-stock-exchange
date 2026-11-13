@@ -47,6 +47,31 @@ final class WriterSamples {
 		return MODEL;
 	}
 
+	/** Stands for a type with no value that says nothing, such as an enum or a record. */
+	static final Object NO_NEUTRAL = new Object();
+
+	/**
+	 * The value of a type that says nothing: null for a union with null, false, zero, empty; {@link #NO_NEUTRAL} for an
+	 * enum, a record or a value with a logical type, whose default has to be judged on its own.
+	 */
+	static Object nothing(Schema schema) {
+		if (schema.getLogicalType() != null) {
+			return NO_NEUTRAL;
+		}
+		return switch (schema.getType()) {
+			case UNION -> schema.getTypes().stream().anyMatch((branch) -> branch.getType() == Schema.Type.NULL) ? null
+					: NO_NEUTRAL;
+			case BOOLEAN -> false;
+			case INT -> 0;
+			case LONG -> 0L;
+			case FLOAT -> 0f;
+			case DOUBLE -> 0d;
+			case STRING -> "";
+			case ARRAY -> List.of();
+			default -> NO_NEUTRAL;
+		};
+	}
+
 	/** Encodes a sample with the writer, decodes it as the current type, and compares every shared field. */
 	static void check(RetainedWriters.Writer writer) throws IOException {
 		GenericRecord sample = (GenericRecord) sample(writer.schema(), new int[] { 1 });
@@ -112,7 +137,12 @@ final class WriterSamples {
 		};
 	}
 
-	/** Every field the writer had and the reader still has must carry the writer's value. */
+	/**
+	 * Every field the writer had and the reader still has must carry the writer's value. Every field the reader added
+	 * since must read as nothing: null, false, zero or empty. That is checked against the field's type, not its declared
+	 * default, which decoding fills in by definition: an old payload must never say something its writer did not, such
+	 * as an instrument being removed.
+	 */
 	static void compare(String path, Object decoded, Object written) {
 		if (written instanceof IndexedRecord writtenRecord) {
 			if (!(decoded instanceof IndexedRecord decodedRecord)) {
@@ -123,6 +153,15 @@ final class WriterSamples {
 				if (readerField != null) {
 					compare(path + "." + field.name(), decodedRecord.get(readerField.pos()),
 							writtenRecord.get(field.pos()));
+				}
+			}
+			for (Schema.Field readerField : decodedRecord.getSchema().getFields()) {
+				if (writtenRecord.getSchema().getField(readerField.name()) == null) {
+					Object nothing = nothing(readerField.schema());
+					if (nothing != NO_NEUTRAL) {
+						compare(path + "." + readerField.name() + " (added later)", decodedRecord.get(readerField.pos()),
+								nothing);
+					}
 				}
 			}
 			return;

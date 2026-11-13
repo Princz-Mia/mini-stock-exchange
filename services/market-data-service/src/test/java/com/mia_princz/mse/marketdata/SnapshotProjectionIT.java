@@ -11,6 +11,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import com.mia_princz.mse.contracts.events.MarketSnapshot;
+import com.mia_princz.mse.contracts.events.VenueState;
 import com.mia_princz.mse.marketdata.projection.SnapshotProjection;
 
 /** The projection rules on their own: newer replaces, everything else is a no-op. The feed is off. */
@@ -70,6 +71,33 @@ class SnapshotProjectionIT {
 		assertThat(projection.apply(Snapshots.snapshot(instrument, 4, 7))).isFalse();
 
 		assertThat(bidLevels(instrument)).isEqualTo(2);
+	}
+
+	/** A state the API does not have yet is shown as UNKNOWN, not refused by the table's CHECK. */
+	@Test
+	void aClosedVenueIsShownAsUnknownUntilTheApiHasIt() {
+		UUID instrument = UUID.randomUUID();
+		MarketSnapshot closed = Snapshots.snapshot(instrument, 3, 1);
+		closed.setVenueState(VenueState.CLOSED);
+
+		assertThat(projection.apply(closed)).isTrue();
+
+		assertThat(jdbc.queryForObject("SELECT venue_state FROM market_snapshot WHERE instrument_id = ?", String.class,
+				instrument)).isEqualTo("UNKNOWN");
+	}
+
+	/** The fields added in the event's second version change nothing in the projection yet. */
+	@Test
+	void theAddedFieldsAreAcceptedAndChangeNothingYet() {
+		UUID instrument = UUID.randomUUID();
+		MarketSnapshot named = Snapshots.snapshot(instrument, 3, 1);
+		named.setDisplayName("Nova Dynamics");
+
+		assertThat(projection.apply(named)).isTrue();
+
+		assertThat(jdbc.queryForObject("SELECT symbol FROM instrument_projection WHERE instrument_id = ?",
+				String.class, instrument)).isEqualTo("NOVA");
+		assertThat(sequence(instrument)).isEqualTo(3);
 	}
 
 	private long sequence(UUID instrument) {
