@@ -7,6 +7,7 @@ import type { MarketStatus } from '../api/types';
 import { FeedStatus } from '../app/FeedStatus';
 import { groupDigits } from '../format';
 import { TermTip } from '../help/TermTip';
+import { InstrumentFigures } from './InstrumentFigures';
 import { OrderBook } from './OrderBook';
 import { OrderTicket } from './OrderTicket';
 import { OwnOrders } from './OwnOrders';
@@ -52,6 +53,21 @@ export function TerminalPage() {
   const selected = list.find((instrument) => instrument.instrumentId === selectedId) ?? null;
   const stream = useMarketStream(selected?.instrumentId ?? null, create === undefined ? {} : { create });
   const frame = stream.frame;
+  // The newer of the live frame and the polled list, by market revision: a stream that dropped leaves its last frame
+  // behind the list. The header's price, figures, bid and ask all come from the same one, so they never disagree.
+  const latest =
+    selected === null
+      ? null
+      : frame !== null && BigInt(frame.sourceCommandSequence) >= BigInt(selected.sourceCommandSequence)
+        ? { lastPrice: frame.lastPrice, session: frame.session, bid: frame.bids[0]?.price, ask: frame.asks[0]?.price }
+        : {
+            lastPrice: selected.lastPrice,
+            session: selected.session,
+            bid: selected.bestBid?.price,
+            ask: selected.bestAsk?.price,
+          };
+  // The snapshot's last price, or the trade feed's while the snapshot has none yet.
+  const lastPrice = latest === null ? null : (latest.lastPrice ?? latest.session.last);
 
   if (instruments.isPending) {
     return <p className="page-status">Loading markets…</p>;
@@ -86,7 +102,7 @@ export function TerminalPage() {
             <div className="market-header">
               <h1>{selected.symbol}</h1>
               <span className="last-price num">
-                {frame?.lastPrice != null ? groupDigits(frame.lastPrice) : `${groupDigits(selected.referencePrice)} ref`}
+                {lastPrice !== null ? groupDigits(lastPrice) : `${groupDigits(selected.referencePrice)} ref`}
               </span>
               {paused !== null && (
                 <>
@@ -99,6 +115,9 @@ export function TerminalPage() {
                 {TRANSPORT_LABELS[stream.transport]}
               </span>
             </div>
+            {latest !== null && (
+              <InstrumentFigures session={latest.session} bid={latest.bid ?? null} ask={latest.ask ?? null} />
+            )}
             <PriceChart instrumentId={selected.instrumentId} trades={frame?.recentTrades ?? null} />
             <div className="market-split">
               <OrderBook bids={frame?.bids ?? []} asks={frame?.asks ?? []} waiting={frame === null} />

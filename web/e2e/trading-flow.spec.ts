@@ -118,6 +118,16 @@ test.describe.serial('trading through the browser', () => {
     await expect(bids.getByRole('row').filter({ hasText: '101.00' })).toContainText('1');
     await expect(asks).not.toContainText('101.00');
     await expect(page.getByRole('table', { name: 'Recent trades' }).getByRole('row').nth(1)).toContainText('101.00');
+    // The session figures above the chart and in the watchlist: 5 shares at 101.00, 1.00 above the reference price.
+    const figures = page.locator('.instrument-figures');
+    await expect(figures.getByText('Volume', { exact: true }).locator('xpath=following-sibling::dd')).toHaveText('5');
+    await expect(figures.getByText('Change', { exact: true }).locator('xpath=following-sibling::dd')).toHaveText(
+      '▲ up +1.00 (+1.00%)',
+    );
+    await expect(page.getByRole('region', { name: 'Watchlist' }).getByRole('button', { name: /^NOVA/ })).toHaveAccessibleName(
+      /up \+1\.00%$/,
+      { timeout: 15_000 },
+    );
     // 100,000.00 − 505.00 paid − 101.00 still reserved for the working share.
     await expect(availableCash).toHaveText('99,394.00');
     await expect(ticket.getByRole('definition').nth(1)).toHaveText('505');

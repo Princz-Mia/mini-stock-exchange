@@ -167,6 +167,14 @@ for (const size of SIZES) {
       const page = await at(browser, size, 'trader');
       await openTerminal(page);
       await expect(page.getByRole('status').filter({ hasText: 'Connected' })).toBeVisible();
+      // The watchlist's bid and ask beside the chart; stacked under it, below 1100 pixels, the header has them instead.
+      const quotes = page.getByRole('region', { name: 'Watchlist' }).locator('.watchlist-quotes').first();
+      if (size.width > 1100) {
+        await expect(quotes).toBeVisible();
+      } else {
+        await expect(quotes).toBeHidden();
+      }
+      await expect(page.locator('.instrument-figures').getByText('Bid', { exact: true })).toBeVisible();
       // Both sides of the book fit inside its panel: a table that only fits by scrolling within the panel hides the
       // asks, while the page itself still looks fine.
       const book = await page.getByRole('region', { name: 'Order book' }).boundingBox();
