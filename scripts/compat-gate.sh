@@ -304,7 +304,10 @@ published() {
     grep -o '"lastTradeSequence":"[0-9]*"' | grep -o '[0-9]*'
 }
 tape_reaches() { [ "$(published)" -ge "$1" ] 2>/dev/null; }
-feed_state() { curl -s -m 10 "$api/instruments" | grep -o '"feed":{"state":"[A-Z_]*"' | grep -o '[A-Z_]*"$' | tr -d '"'; }
+# The listing's own trade feed. Each instrument's session figures carry a feed too, and come first: the listing's is last.
+feed_state() {
+  curl -s -m 10 "$api/instruments" | grep -o '"feed":{"state":"[A-Z_]*"' | tail -n 1 | grep -o '[A-Z_]*"$' | tr -d '"'
+}
 feed_is() { [ "$(feed_state)" = "$1" ]; }
 trades_behind() { curl -s -m 10 "$api/instruments/$1/candles" | grep -o '"tradesBehind":[0-9-]*' | cut -d: -f2; }
 candles_behind() { [ "$(trades_behind "$1")" -gt 0 ] 2>/dev/null; }
