@@ -221,6 +221,21 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public Optional<String> instrumentSymbol(UUID simulationId, UUID instrumentId) {
+		return jdbc.sql("SELECT symbol FROM instrument WHERE simulation_id = ? AND id = ?")
+			.params(simulationId, instrumentId)
+			.query(String.class)
+			.optional();
+	}
+
+	@Override
+	public void updateReferencePrice(UUID simulationId, UUID instrumentId, long referencePriceCents) {
+		expectOne(jdbc.sql("UPDATE instrument SET reference_price_cents = ? WHERE simulation_id = ? AND id = ?")
+			.params(referencePriceCents, simulationId, instrumentId)
+			.update(), "update reference price");
+	}
+
+	@Override
 	public boolean hasAccount(UUID simulationId, UUID ownerUserId) {
 		return jdbc.sql("SELECT EXISTS (SELECT 1 FROM account WHERE simulation_id = ? AND owner_user_id = ?)")
 			.params(simulationId, ownerUserId)
@@ -566,8 +581,13 @@ public final class JdbcTradingStore implements TradingStore {
 				SELECT route, request_hash, response_body::text AS body FROM command_result
 				WHERE simulation_id = ? AND principal_id = ? AND idempotency_key = ?""")
 			.params(simulationId, key.principalId(), key.idempotencyKey())
-			.query((row, index) -> new StoredResult<>(row.getString("route"), row.getBytes("request_hash"),
-					json.readValue(row.getString("body"), type)))
+			.query((row, index) -> {
+				String route = row.getString("route");
+				byte[] hash = row.getBytes("request_hash");
+				// Another route's answer need not fit this route's type; the caller refuses it as a conflict.
+				return new StoredResult<>(route, hash,
+						key.sameRequest(route, hash) ? json.readValue(row.getString("body"), type) : null);
+			})
 			.optional();
 	}
 

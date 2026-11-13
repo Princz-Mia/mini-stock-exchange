@@ -253,6 +253,29 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/instruments/{instrumentId}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        /**
+         * Change an instrument's reference price while the market is in SETUP.
+         * @description Operator only. The body holds every field an operator may change. Sequenced on the writer and audited, with an
+         *     idempotency key: a retry with the same key, instrument and body returns the first answer, even a refusal. The
+         *     same price is applied like any other. Publishes the instrument's market snapshot with the new price. Starting
+         *     shares already granted are valued at the new price. Once the market has opened, the catalogue is frozen.
+         */
+        readonly put: operations["editInstrument"];
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/accounts": {
         readonly parameters: {
             readonly query?: never;
@@ -878,6 +901,15 @@ export interface components {
             readonly referencePrice: components["schemas"]["Price"];
         };
         readonly InstrumentCreated: {
+            readonly instrumentId: components["schemas"]["Uuid"];
+            readonly symbol: string;
+            readonly referencePrice: components["schemas"]["Price"];
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly InstrumentEditRequest: {
+            readonly referencePrice: components["schemas"]["Price"];
+        };
+        readonly InstrumentEdited: {
             readonly instrumentId: components["schemas"]["Uuid"];
             readonly symbol: string;
             readonly referencePrice: components["schemas"]["Price"];
@@ -2001,6 +2033,70 @@ export interface operations {
                 content?: never;
             };
             /** @description MARKET_NOT_IN_SETUP or SYMBOL_TAKEN (both committed and audited), or IDEMPOTENCY_CONFLICT. */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly editInstrument: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path: {
+                readonly instrumentId: components["schemas"]["Uuid"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["InstrumentEditRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Changed. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["InstrumentEdited"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description INSTRUMENT_NOT_FOUND (committed and audited when the market exists). */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description MARKET_NOT_IN_SETUP (committed and audited), or IDEMPOTENCY_CONFLICT. */
             readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;

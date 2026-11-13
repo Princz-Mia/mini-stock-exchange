@@ -159,6 +159,14 @@ public final class TradingEngine {
 		return submit(() -> processAddInstrument(key, command));
 	}
 
+	/**
+	 * Changes an instrument's reference price while the market is in SETUP, and publishes its snapshot with the new
+	 * price. Books do not hold the reference price, so nothing in memory changes.
+	 */
+	public CompletableFuture<InstrumentEdit> editInstrument(CommandKey key, EditInstrument command) {
+		return submit(() -> processEditInstrument(key, command));
+	}
+
 	/** Gives a trader their account and starting endowment while the market is in SETUP. */
 	public CompletableFuture<AccountResult> provisionAccount(CommandKey key, ProvisionAccount command) {
 		return submit(() -> processProvision(key, command));
@@ -329,6 +337,55 @@ public final class TradingEngine {
 		return new AddedInstrument(remember(key, 201, new InstrumentResult(InstrumentResult.Status.CREATED,
 				command.instrumentId(), command.symbol(), command.referencePrice().cents(), sequence)), true,
 				market.maxFillsPerCommand());
+	}
+
+	/** Without a market there is no instrument to edit, and nothing to commit the answer to. */
+	private InstrumentEdit processEditInstrument(CommandKey key, EditInstrument command) {
+		if (simulationId == null) {
+			return new InstrumentEdit(InstrumentEdit.Status.UNKNOWN_INSTRUMENT, command.instrumentId(), null,
+					command.referencePrice().cents(), 0);
+		}
+		try {
+			return transactions.inTransaction(() -> editInstrumentInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+	}
+
+	/** An unknown instrument is answered as such in any state; a known one is edited only in SETUP. */
+	private InstrumentEdit editInstrumentInTransaction(CommandKey key, EditInstrument command) {
+		Market market = store.lockMarket();
+		if (market.writerEpoch() != writerEpoch) {
+			throw new StaleWriterException();
+		}
+		Optional<TradingStore.StoredResult<InstrumentEdit>> prior = store.findResult(simulationId, key,
+				InstrumentEdit.class);
+		if (prior.isPresent()) {
+			return replay(key, prior.get());
+		}
+		long sequence = store.nextCommandSequence(simulationId);
+		long cents = command.referencePrice().cents();
+		Optional<String> symbol = store.instrumentSymbol(simulationId, command.instrumentId());
+		InstrumentEdit.Status refusal = symbol.isEmpty() ? InstrumentEdit.Status.UNKNOWN_INSTRUMENT
+				: !"SETUP".equals(market.state()) ? InstrumentEdit.Status.NOT_IN_SETUP : null;
+		if (refusal != null) {
+			store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_EDIT", "NOT_ALLOWED",
+					key.idempotencyKey(), sequence);
+			return remember(key, refusal == InstrumentEdit.Status.UNKNOWN_INSTRUMENT ? 404 : 409,
+					new InstrumentEdit(refusal, command.instrumentId(), symbol.orElse(null), cents, sequence));
+		}
+		store.updateReferencePrice(simulationId, command.instrumentId(), cents);
+		OrderBook book = books.get(command.instrumentId());
+		if (book == null) {
+			throw new IllegalStateException("No book for instrument " + command.instrumentId());
+		}
+		// The catalogue changed, so the instrument's public state is published again at this sequence.
+		snapshot(market, command.instrumentId(), book, BookDelta.none(), sequence);
+		store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_EDIT", "APPLIED", key.idempotencyKey(),
+				sequence);
+		return remember(key, 200, new InstrumentEdit(InstrumentEdit.Status.UPDATED, command.instrumentId(),
+				symbol.get(), cents, sequence));
 	}
 
 	private AccountResult processProvision(CommandKey key, ProvisionAccount command) {
@@ -803,6 +860,7 @@ public final class TradingEngine {
 			case CancelResult cancel -> cancel.commandSequence();
 			case MarketTransition transition -> transition.commandSequence();
 			case InstrumentResult instrument -> instrument.commandSequence();
+			case InstrumentEdit edit -> edit.commandSequence();
 			case AccountResult account -> account.commandSequence();
 			case BotsResult bots -> bots.commandSequence();
 			case BotRunResult run -> run.commandSequence();

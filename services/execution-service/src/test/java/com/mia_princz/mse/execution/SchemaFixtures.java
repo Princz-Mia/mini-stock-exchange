@@ -28,6 +28,8 @@ final class SchemaFixtures {
 
 	static final String INSUFFICIENT_PRIVILEGE = "42501";
 
+	static final String NOT_IN_PREREQUISITE_STATE = "55000";
+
 	final JdbcTemplate jdbc;
 
 	private final TransactionTemplate transactions;
