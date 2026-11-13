@@ -3,6 +3,7 @@ package com.mia_princz.mse.execution;
 import static com.mia_princz.mse.execution.SchemaFixtures.CHECK_VIOLATION;
 import static com.mia_princz.mse.execution.SchemaFixtures.FOREIGN_KEY_VIOLATION;
 import static com.mia_princz.mse.execution.SchemaFixtures.INSUFFICIENT_PRIVILEGE;
+import static com.mia_princz.mse.execution.SchemaFixtures.NOT_IN_PREREQUISITE_STATE;
 import static com.mia_princz.mse.execution.SchemaFixtures.UNIQUE_VIOLATION;
 import static com.mia_princz.mse.execution.SchemaFixtures.assertFails;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -144,6 +145,37 @@ class ReferenceDataSchemaIT {
 			f.jdbc.update("UPDATE instrument SET last_trade_sequence = 1 WHERE id = ?", instrument);
 			f.jdbc.update("UPDATE account SET version = 1 WHERE id = ?", account);
 			assertThat(f.jdbc.queryForObject("SELECT state FROM simulation", String.class)).isEqualTo("OPEN");
+		});
+	}
+
+	@Test
+	void referencePricesChangeOnlyInSetup() {
+		db.inRolledBackTransaction((f) -> {
+			UUID simulation = f.simulation();
+			UUID instrument = f.instrument(simulation, "NOVA");
+			assertThat(f.jdbc.update("UPDATE instrument SET reference_price_cents = 12050 WHERE id = ?", instrument))
+				.isEqualTo(1);
+			// The price it already has: the trigger checks the state, not whether the value changed.
+			assertThat(f.jdbc.update("UPDATE instrument SET reference_price_cents = 12050 WHERE id = ?", instrument))
+				.isEqualTo(1);
+			assertFails(CHECK_VIOLATION,
+					() -> f.jdbc.update("UPDATE instrument SET reference_price_cents = 0 WHERE id = ?", instrument));
+		});
+		for (String state : new String[] { "OPEN", "HALTED" }) {
+			db.inRolledBackTransaction((f) -> {
+				UUID simulation = f.simulation();
+				UUID instrument = f.instrument(simulation, "NOVA");
+				f.jdbc.update("UPDATE simulation SET state = ?, opened_at = now() WHERE id = ?", state, simulation);
+				// Trading still advances the instrument's own counter.
+				f.jdbc.update("UPDATE instrument SET last_trade_sequence = 1 WHERE id = ?", instrument);
+				assertFails(NOT_IN_PREREQUISITE_STATE, () -> f.jdbc
+					.update("UPDATE instrument SET reference_price_cents = 10000 WHERE id = ?", instrument));
+			});
+		}
+		db.inRolledBackTransaction((f) -> {
+			UUID instrument = f.instrument(f.simulation(), "NOVA");
+			assertFails(INSUFFICIENT_PRIVILEGE,
+					() -> f.jdbc.update("UPDATE instrument SET tick_cents = 5 WHERE id = ?", instrument));
 		});
 	}
 

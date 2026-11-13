@@ -86,6 +86,22 @@ class SnapshotProjectionIT {
 				instrument)).isEqualTo("UNKNOWN");
 	}
 
+	/** An operator's edit during setup reaches the instrument; a late copy of the old price does not undo it. */
+	@Test
+	void aNewerReferencePriceReplacesTheStoredOne() {
+		UUID instrument = UUID.randomUUID();
+		MarketSnapshot added = Snapshots.snapshot(instrument, 4, 0);
+		MarketSnapshot edited = Snapshots.snapshot(instrument, 7, 0);
+		edited.getRules().setReferencePriceCents(12_050);
+		projection.apply(added);
+
+		assertThat(projection.apply(edited)).isTrue();
+		assertThat(projection.apply(Snapshots.snapshot(instrument, 5, 0))).isFalse();
+
+		assertThat(jdbc.queryForObject("SELECT reference_price_cents FROM instrument_projection WHERE instrument_id = ?",
+				Long.class, instrument)).isEqualTo(12_050);
+	}
+
 	/** The fields added in the event's second version change nothing in the projection yet. */
 	@Test
 	void theAddedFieldsAreAcceptedAndChangeNothingYet() {

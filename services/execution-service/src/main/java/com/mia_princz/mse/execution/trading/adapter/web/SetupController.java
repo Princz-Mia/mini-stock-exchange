@@ -11,6 +11,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -21,6 +22,8 @@ import com.mia_princz.mse.execution.trading.application.AccountResult;
 import com.mia_princz.mse.execution.trading.application.AddInstrument;
 import com.mia_princz.mse.execution.trading.application.BotsResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
+import com.mia_princz.mse.execution.trading.application.EditInstrument;
+import com.mia_princz.mse.execution.trading.application.InstrumentEdit;
 import com.mia_princz.mse.execution.trading.application.InstrumentResult;
 import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
 import com.mia_princz.mse.execution.trading.application.ProvisionBots;
@@ -39,6 +42,8 @@ import com.mia_princz.mse.execution.trading.domain.Price;
 class SetupController {
 
 	static final String INSTRUMENT_ROUTE = "POST /api/v1/admin/instruments";
+
+	static final String INSTRUMENT_EDIT_ROUTE = "PUT /api/v1/admin/instruments/{instrumentId}";
 
 	static final String ACCOUNT_ROUTE = "POST /api/v1/admin/accounts";
 
@@ -162,6 +167,32 @@ class SetupController {
 			case SYMBOL_TAKEN -> throw new ApiException(HttpStatus.CONFLICT, "SYMBOL_TAKEN",
 					"An instrument with symbol " + result.symbol() + " already exists")
 				.with("commandSequence", Long.toString(result.commandSequence()));
+		};
+	}
+
+	/**
+	 * Changes an instrument's reference price before the market opens. Every account's starting shares are valued at
+	 * the new price, since nothing has traded yet.
+	 */
+	@PutMapping("/instruments/{instrumentId}")
+	InstrumentResponse editInstrument(@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader,
+			@PathVariable UUID instrumentId, @RequestBody InstrumentEditBody body, Authentication authentication) {
+		UUID key = CommandCalls.idempotencyKey(keyHeader);
+		InstrumentEditBody.Valid edit = body.validate(instrumentId);
+		UUID operator = queries.userId(authentication.getName()).orElseThrow();
+		CommandKey commandKey = new CommandKey(operator, key, INSTRUMENT_EDIT_ROUTE, edit.hash());
+		EditInstrument command = new EditInstrument(instrumentId, edit.referencePrice(), operator);
+		InstrumentEdit result = CommandCalls.await(key, timeout, () -> engine.editInstrument(commandKey, command));
+		String sequence = Long.toString(result.commandSequence());
+		return switch (result.status()) {
+			case UPDATED -> new InstrumentResponse(result.instrumentId().toString(), result.symbol(),
+					new Price(result.referencePriceCents()).format(), sequence);
+			case NOT_IN_SETUP -> throw new ApiException(HttpStatus.CONFLICT, "MARKET_NOT_IN_SETUP",
+					"Instruments can only be changed before the market opens")
+				.with("commandSequence", sequence);
+			case UNKNOWN_INSTRUMENT -> throw new ApiException(HttpStatus.NOT_FOUND, "INSTRUMENT_NOT_FOUND",
+					"No such instrument")
+				.with("commandSequence", sequence);
 		};
 	}
 

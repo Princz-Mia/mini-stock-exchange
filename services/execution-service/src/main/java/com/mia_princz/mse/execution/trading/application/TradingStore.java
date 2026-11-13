@@ -42,7 +42,10 @@ public interface TradingStore {
 	record Trade(UUID id, long tradeSequence) {
 	}
 
-	/** The first committed result of a command, stored with the request it answered. */
+	/**
+	 * The first committed result of a command, stored with the request it answered. The result is read only when the
+	 * key's route and hash match, and is null otherwise: another route's answer is a conflict, whatever its shape.
+	 */
 	record StoredResult<T>(String route, byte[] requestHash, T result) {
 	}
 
@@ -80,6 +83,12 @@ public interface TradingStore {
 	List<Instrument> instruments(UUID simulationId);
 
 	boolean symbolTaken(UUID simulationId, String symbol);
+
+	/** The instrument's symbol, if this market has it. */
+	Optional<String> instrumentSymbol(UUID simulationId, UUID instrumentId);
+
+	/** Changes the reference price; the database refuses it once the market has left SETUP. */
+	void updateReferencePrice(UUID simulationId, UUID instrumentId, long referencePriceCents);
 
 	/** Whether this user already has an account in the market. */
 	boolean hasAccount(UUID simulationId, UUID ownerUserId);

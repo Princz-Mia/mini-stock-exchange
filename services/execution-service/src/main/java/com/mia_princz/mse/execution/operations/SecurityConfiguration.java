@@ -140,6 +140,8 @@ class SecurityConfiguration {
 						"/api/v1/admin/accounts", "/api/v1/admin/bots", "/api/v1/admin/bot-runs",
 						"/api/v1/admin/bot-runs/*/stop", "/api/v1/admin/bots/*/revoke-token")
 				.hasRole("OPERATOR")
+				.requestMatchers(HttpMethod.PUT, "/api/v1/admin/instruments/*")
+				.hasRole("OPERATOR")
 				.requestMatchers(HttpMethod.POST, TRADING_COMMANDS)
 				.hasRole("TRADER")
 				.requestMatchers(HttpMethod.GET, TRADING_READS)
