@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Instrument } from '../api/types';
 import { botRun } from '../test/botRun';
+import { noTrades } from '../test/fakeStream';
 import { seeded } from '../test/seeded';
 import {
   activeRun,
@@ -31,6 +32,7 @@ function instrument(id: string, symbol: string): Instrument {
     lastTradeSequence: '0',
     sourceCommandSequence: '1',
     generatedAt: '2026-11-06T10:00:00Z',
+    session: noTrades('100.00'),
   };
 }
 

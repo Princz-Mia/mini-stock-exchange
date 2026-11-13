@@ -21,6 +21,7 @@ import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
+import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.marketdata.projection.SnapshotProjection;
 import com.mia_princz.mse.marketdata.projection.CandleProjection;
 import com.mia_princz.mse.marketdata.projection.TradeProjection;
@@ -75,6 +76,8 @@ class ApiContractIT {
 		for (long sequence = 1; sequence <= 3; sequence++) {
 			trades.apply(Trades.trade(instrument, sequence));
 		}
+		// The last trade below the reference price, so the session's change and percentage are negative.
+		trades.apply(TradeExecuted.newBuilder(Trades.trade(instrument, 4)).setPriceCents(9_050).build());
 		String book = "/api/v1/instruments/{instrumentId}/book";
 		String tape = "/api/v1/instruments/{instrumentId}/trades";
 
@@ -100,6 +103,7 @@ class ApiContractIT {
 	void streamAndItsEventsMatchTheContract() throws Exception {
 		UUID instrument = UUID.randomUUID();
 		snapshots.apply(Snapshots.snapshot(instrument, 1, 3));
+		trades.apply(Trades.trade(instrument, 1));
 		String events = "/api/v1/market-events";
 
 		check(events, events + "?instrumentId=" + UUID.randomUUID(), 404);

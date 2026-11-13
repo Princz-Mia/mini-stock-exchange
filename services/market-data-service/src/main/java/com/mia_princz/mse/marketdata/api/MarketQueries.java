@@ -4,13 +4,18 @@ import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.stream.IntStream;
 
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -43,9 +48,23 @@ class MarketQueries {
 	}
 
 	/** Everything a live frame shows, from one row: the complete public state of the instrument. */
-	record Live(UUID instrumentId, String symbol, String venueState, List<Level> bids, List<Level> asks,
-			Long lastPriceCents, List<TapeTrade> recentTrades, long lastTradeSequence, long sourceCommandSequence,
-			Instant generatedAt) {
+	record Live(UUID instrumentId, String symbol, String venueState, long referencePriceCents, List<Level> bids,
+			List<Level> asks, Long lastPriceCents, List<TapeTrade> recentTrades, long lastTradeSequence,
+			long sourceCommandSequence, Instant generatedAt) {
+	}
+
+	/** How many minutes with trades the trend line covers, newest last. */
+	static final int TREND_MINUTES = 60;
+
+	record TrendPoint(Instant minute, long priceCents) {
+	}
+
+	/** An instrument's figures since trading began; all but the trend are null or zero before its first trade. */
+	record Session(long tradeCount, long volume, BigDecimal notionalCents, Long highCents, Long lowCents,
+			Long lastPriceCents, List<TrendPoint> trend) {
+
+		static final Session NONE = new Session(0, 0, BigDecimal.ZERO, null, null, null, List.of());
+
 	}
 
 	private final JdbcClient jdbc;
@@ -71,6 +90,55 @@ class MarketQueries {
 			.list();
 	}
 
+	/** A live frame's market row and session figures, read together. */
+	record LiveSession(Live live, Session session) {
+	}
+
+	/**
+	 * The session figures of each instrument asked for, with no entry for one that has not traded. The figures and the
+	 * trend come from two statements in one repeatable-read transaction, so they come from the same moment.
+	 */
+	@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+	Map<UUID, Session> sessions(Collection<UUID> instrumentIds) {
+		if (instrumentIds.isEmpty()) {
+			return Map.of();
+		}
+		UUID[] ids = instrumentIds.toArray(UUID[]::new);
+		Map<UUID, List<TrendPoint>> trends = new HashMap<>();
+		jdbc.sql("""
+				SELECT instrument_id, minute_start, last_price_cents FROM (
+				    SELECT instrument_id, minute_start, last_price_cents,
+				        row_number() OVER (PARTITION BY instrument_id ORDER BY minute_start DESC) AS age
+				    FROM session_minute WHERE instrument_id = ANY(:ids)) recent
+				WHERE age <= :minutes
+				ORDER BY instrument_id, minute_start""")
+			.param("ids", ids)
+			.param("minutes", TREND_MINUTES)
+			.query((row, index) -> trends.computeIfAbsent(row.getObject("instrument_id", UUID.class), (id) -> new ArrayList<>())
+				.add(new TrendPoint(row.getTimestamp("minute_start").toInstant(), row.getLong("last_price_cents"))))
+			.list();
+		Map<UUID, Session> sessions = new HashMap<>();
+		jdbc.sql("""
+				SELECT instrument_id, trade_count, volume, notional_cents, high_cents, low_cents, last_price_cents
+				FROM instrument_session WHERE instrument_id = ANY(:ids)""")
+			.param("ids", ids)
+			.query((row, index) -> {
+				UUID id = row.getObject("instrument_id", UUID.class);
+				return sessions.put(id, new Session(row.getLong("trade_count"), row.getLong("volume"),
+						row.getBigDecimal("notional_cents"), row.getLong("high_cents"), row.getLong("low_cents"),
+						row.getLong("last_price_cents"), List.copyOf(trends.getOrDefault(id, List.of()))));
+			})
+			.list();
+		return sessions;
+	}
+
+	/** The market row and the session figures from one moment, so the frame's last price and figures agree. */
+	@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+	Optional<LiveSession> liveSession(UUID instrumentId) {
+		return live(instrumentId).map((live) -> new LiveSession(live,
+				sessions(List.of(instrumentId)).getOrDefault(instrumentId, Session.NONE)));
+	}
+
 	Optional<Book> book(UUID instrumentId, int depth) {
 		return jdbc.sql("""
 				SELECT i.symbol, m.venue_state, m.bids::text AS bids, m.asks::text AS asks, m.source_command_sequence,
@@ -86,14 +154,15 @@ class MarketQueries {
 
 	Optional<Live> live(UUID instrumentId) {
 		return jdbc.sql("""
-				SELECT i.symbol, m.venue_state, m.bids::text AS bids, m.asks::text AS asks, m.last_price_cents,
-				    m.recent_trades::text AS recent_trades, m.last_trade_sequence, m.source_command_sequence,
-				    m.generated_at
+				SELECT i.symbol, m.venue_state, i.reference_price_cents, m.bids::text AS bids, m.asks::text AS asks,
+				    m.last_price_cents, m.recent_trades::text AS recent_trades, m.last_trade_sequence,
+				    m.source_command_sequence, m.generated_at
 				FROM market_snapshot m JOIN instrument_projection i ON i.instrument_id = m.instrument_id
 				WHERE m.instrument_id = ?""")
 			.param(instrumentId)
 			.query((row, index) -> new Live(instrumentId, row.getString("symbol"), row.getString("venue_state"),
-					levels(row.getString("bids"), Integer.MAX_VALUE), levels(row.getString("asks"), Integer.MAX_VALUE),
+					row.getLong("reference_price_cents"), levels(row.getString("bids"), Integer.MAX_VALUE),
+					levels(row.getString("asks"), Integer.MAX_VALUE),
 					row.getObject("last_price_cents", Long.class), tape(row.getString("recent_trades")),
 					row.getLong("last_trade_sequence"), row.getLong("source_command_sequence"),
 					row.getTimestamp("generated_at").toInstant()))

@@ -52,7 +52,7 @@ Invoke-Compose @('exec', '-T', 'postgres', 'rm', '-f', '/tmp/restore.dump')
 Invoke-Sql 'execution_db' 'BEGIN; ALTER TABLE outbox DISABLE TRIGGER outbox_published_once; UPDATE outbox SET published_at = NULL; ALTER TABLE outbox ENABLE TRIGGER outbox_published_once; COMMIT;'
 
 'Emptying Market Data, Kafka and Flink'
-Invoke-Sql 'market_data_db' 'TRUNCATE instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, candle_1m'
+Invoke-Sql 'market_data_db' 'TRUNCATE instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, instrument_session, session_minute, candle_1m'
 Invoke-Compose @('rm', '-sf', 'kafka', 'flink-jobmanager', 'flink-taskmanager') | Out-Null
 & docker volume rm -f "${name}_kafka-data" "${name}_flink-checkpoints" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'removing the Kafka and Flink volumes failed' }

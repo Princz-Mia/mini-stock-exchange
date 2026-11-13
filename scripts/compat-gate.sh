@@ -304,7 +304,10 @@ published() {
     grep -o '"lastTradeSequence":"[0-9]*"' | grep -o '[0-9]*'
 }
 tape_reaches() { [ "$(published)" -ge "$1" ] 2>/dev/null; }
-feed_state() { curl -s -m 10 "$api/instruments" | grep -o '"feed":{"state":"[A-Z_]*"' | grep -o '[A-Z_]*"$' | tr -d '"'; }
+# The listing's own trade feed. Each instrument's session figures carry a feed too, and come first: the listing's is last.
+feed_state() {
+  curl -s -m 10 "$api/instruments" | grep -o '"feed":{"state":"[A-Z_]*"' | tail -n 1 | grep -o '[A-Z_]*"$' | tr -d '"'
+}
 feed_is() { [ "$(feed_state)" = "$1" ]; }
 trades_behind() { curl -s -m 10 "$api/instruments/$1/candles" | grep -o '"tradesBehind":[0-9-]*' | cut -d: -f2; }
 candles_behind() { [ "$(trades_behind "$1")" -gt 0 ] 2>/dev/null; }
@@ -312,6 +315,11 @@ candles_current() { [ "$(trades_behind "$1")" = 0 ]; }
 outbox_pending() { execution_sql 'SELECT count(*) FROM outbox WHERE published_at IS NULL'; }
 outbox_drained() { [ "$(outbox_pending)" = 0 ]; }
 totals="SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quantity) || ' ' || max(trade_sequence)"
+# The session figures Market Data keeps with the tape, worked out from the tape itself: count, shares, notional,
+# high, low and the last price by sequence. Equal after every rebuild: the counts double if instrument_session is
+# left out of a wipe while the tape is replayed into it.
+session_from_tape="SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quantity) || ' ' || max(price_cents) || ' ' || min(price_cents) || ' ' || (array_agg(price_cents ORDER BY trade_sequence DESC))[1] FROM public_trade"
+session_kept="SELECT trade_count || ' ' || volume || ' ' || notional_cents || ' ' || high_cents || ' ' || low_cents || ' ' || last_price_cents FROM instrument_session"
 totals_match() {
   [ "$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")" = \
     "$(market_data_sql "$totals FROM public_trade WHERE instrument_id = '$(nova)'")" ]
@@ -523,7 +531,7 @@ dashboard() {
 }
 
 # Recovery steps: every projection table Market Data derives (service_identity is configuration, not derived).
-projections="instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, candle_1m"
+projections="instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, instrument_session, session_minute, candle_1m"
 feeds_live() { # all three Market Data feeds caught up and in contact with Kafka
   [ "$(compose exec -T market-data-service curl -fsS http://localhost:8080/actuator/prometheus 2>/dev/null |
     grep -c '^mse_feed_live{.*} 1')" = 3 ]
@@ -538,6 +546,9 @@ caught_up() { # nothing waiting in the outbox, every trade public with the same 
   assert_equal "NOVA's public trades: count, shares, notional, last sequence" \
     "$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")" \
     "$(market_data_sql "$totals FROM public_trade WHERE instrument_id = '$(nova)'")" || return 1
+  assert_equal "NOVA's session figures: as its public trades add up" \
+    "$(market_data_sql "$session_from_tape WHERE instrument_id = '$(nova)'")" \
+    "$(market_data_sql "$session_kept WHERE instrument_id = '$(nova)'")" || return 1
   retry 120 candles_current "$(nova)" ||
     { fail "candles still '$(trades_behind "$(nova)")' trades behind"; return 1; }
   reconciled

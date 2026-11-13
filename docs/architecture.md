@@ -171,6 +171,7 @@ erDiagram
 
 **In `market_data_db`:**
 - `instrument_projection`, `market_snapshot` (depth and quotes), `public_trade` and `candle_1m`;
+- `instrument_session` and `session_minute`, each instrument's figures since trading began, kept with the public trades;
 - `processed_event`, for deduplication, and `projection_checkpoint`, the Kafka offsets.
 
 All of it is derived and can be rebuilt from Kafka.

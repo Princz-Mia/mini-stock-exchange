@@ -106,7 +106,7 @@ Market Data's database is derived from Kafka. To rebuild it, for example after a
 1. `docker compose stop market-data-service`.
 2. Empty its projections:
    ```bash
-   docker compose exec postgres psql -U postgres -d market_data_db -c "TRUNCATE instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, candle_1m"
+   docker compose exec postgres psql -U postgres -d market_data_db -c "TRUNCATE instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, instrument_session, session_minute, candle_1m"
    ```
 3. `docker compose up -d --wait market-data-service`.
 

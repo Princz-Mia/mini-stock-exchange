@@ -276,8 +276,13 @@ function Assert-Reconciled {
 }
 
 # Recovery steps: every projection table Market Data derives (service_identity is configuration, not derived).
-$projections = 'instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, candle_1m'
+$projections = 'instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, instrument_session, session_minute, candle_1m'
 $tradeTotals = "SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quantity) || ' ' || max(trade_sequence)"
+# The session figures Market Data keeps with the tape, worked out from the tape itself: count, shares, notional,
+# high, low and the last price by sequence. Equal after every rebuild: the counts double if instrument_session is
+# left out of a wipe while the tape is replayed into it.
+$sessionFromTape = "SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quantity) || ' ' || max(price_cents) || ' ' || min(price_cents) || ' ' || (array_agg(price_cents ORDER BY trade_sequence DESC))[1] FROM public_trade"
+$sessionKept = "SELECT trade_count || ' ' || volume || ' ' || notional_cents || ' ' || high_cents || ' ' || low_cents || ' ' || last_price_cents FROM instrument_session"
 
 function Test-FeedsLive {
     # All three Market Data feeds caught up and in contact with Kafka.
@@ -300,6 +305,9 @@ function Assert-CaughtUp {
     Assert-Equal "NOVA's public trades: count, shares, notional, last sequence" `
         (Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$nova'") `
         (Get-MarketDataValue "$tradeTotals FROM public_trade WHERE instrument_id = '$nova'")
+    Assert-Equal "NOVA's session figures: as its public trades add up" `
+        (Get-MarketDataValue "$sessionFromTape WHERE instrument_id = '$nova'") `
+        (Get-MarketDataValue "$sessionKept WHERE instrument_id = '$nova'")
     if (-not (Wait-Until 120 { (Get-TradesBehind $nova) -eq 0 })) { throw "candles still '$(Get-TradesBehind $nova)' trades behind" }
     Assert-Reconciled
 }

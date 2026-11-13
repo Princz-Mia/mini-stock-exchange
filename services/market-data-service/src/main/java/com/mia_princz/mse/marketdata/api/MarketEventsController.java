@@ -46,7 +46,7 @@ class MarketEventsController {
 	record MarketFrame(String bootId, String instrumentId, String symbol, String venueState,
 			String sourceCommandSequence, List<MarketController.Quote> bids, List<MarketController.Quote> asks,
 			String lastPrice, List<TapeView> recentTrades, String lastTradeSequence, Instant generatedAt,
-			MarketController.Feed feed) {
+			MarketController.Feed feed, MarketController.SessionView session) {
 	}
 
 	record Heartbeat(String bootId, MarketController.Feed feed, Instant at) {
@@ -88,24 +88,13 @@ class MarketEventsController {
 
 	/** The frames the stream sends, built from the projections and the feed's current state. */
 	static MarketStream.Frames frames(MarketQueries queries, ObjectProvider<MarketFeedConsumer> marketFeed,
-			UUID bootId, Clock clock) {
+			ObjectProvider<MarketFeedConsumer> tradeFeed, UUID bootId, Clock clock) {
 		return new MarketStream.Frames() {
 
 			@Override
 			public Optional<Object> frame(UUID instrumentId) {
-				return queries.live(instrumentId)
-					.map((live) -> new MarketFrame(bootId.toString(), instrumentId.toString(), live.symbol(),
-							live.venueState(), Long.toString(live.sourceCommandSequence()),
-							live.bids().stream().map(MarketEventsController::quote).toList(),
-							live.asks().stream().map(MarketEventsController::quote).toList(),
-							live.lastPriceCents() == null ? null : MarketController.price(live.lastPriceCents()),
-							live.recentTrades()
-								.stream()
-								.map((trade) -> new TapeView(trade.tradeId().toString(),
-										Long.toString(trade.tradeSequence()), MarketController.price(trade.priceCents()),
-										trade.quantity(), trade.aggressorSide(), trade.executedAt()))
-								.toList(),
-							Long.toString(live.lastTradeSequence()), live.generatedAt(), feed(marketFeed)));
+				return queries.liveSession(instrumentId)
+					.map((both) -> marketFrame(bootId, instrumentId, both.live(), both.session(), marketFeed, tradeFeed));
 			}
 
 			@Override
@@ -114,6 +103,24 @@ class MarketEventsController {
 			}
 
 		};
+	}
+
+	private static MarketFrame marketFrame(UUID bootId, UUID instrumentId, MarketQueries.Live live,
+			MarketQueries.Session session, ObjectProvider<MarketFeedConsumer> marketFeed,
+			ObjectProvider<MarketFeedConsumer> tradeFeed) {
+		return new MarketFrame(bootId.toString(), instrumentId.toString(), live.symbol(), live.venueState(),
+				Long.toString(live.sourceCommandSequence()),
+				live.bids().stream().map(MarketEventsController::quote).toList(),
+				live.asks().stream().map(MarketEventsController::quote).toList(),
+				live.lastPriceCents() == null ? null : MarketController.price(live.lastPriceCents()),
+				live.recentTrades()
+					.stream()
+					.map((trade) -> new TapeView(trade.tradeId().toString(), Long.toString(trade.tradeSequence()),
+							MarketController.price(trade.priceCents()), trade.quantity(), trade.aggressorSide(),
+							trade.executedAt()))
+					.toList(),
+				Long.toString(live.lastTradeSequence()), live.generatedAt(), feed(marketFeed),
+				MarketController.session(live.referencePriceCents(), session, feed(tradeFeed)));
 	}
 
 	private static MarketController.Quote quote(MarketQueries.Level level) {

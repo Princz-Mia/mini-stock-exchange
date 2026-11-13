@@ -1,4 +1,4 @@
-import type { MarketFrame } from '../api/types';
+import type { MarketFrame, SessionFigures } from '../api/types';
 import type { StreamFactory, StreamSource } from '../terminal/useMarketStream';
 
 /** A controllable stand-in for EventSource: tests see which URLs were opened and push events into them. */
@@ -37,6 +37,23 @@ export function fakeStreams() {
   return { opened, create, latest: () => opened[opened.length - 1] };
 }
 
+/** Session figures before any trade, measured from the given reference price. */
+export function noTrades(open: string): SessionFigures {
+  return {
+    open,
+    last: null,
+    change: null,
+    changePercent: null,
+    high: null,
+    low: null,
+    volume: 0,
+    tradeCount: 0,
+    vwap: null,
+    trend: [],
+    feed: { state: 'LIVE', lag: 0 },
+  };
+}
+
 /** A market frame for tests, with a one-level book on each side; override what a test cares about. */
 export function frame(instrumentId: string, revision: string, overrides: Partial<MarketFrame> = {}): MarketFrame {
   return {
@@ -52,6 +69,7 @@ export function frame(instrumentId: string, revision: string, overrides: Partial
     lastTradeSequence: '1',
     generatedAt: '2026-11-04T12:00:00Z',
     feed: { state: 'LIVE', lag: 0 },
+    session: noTrades('100.00'),
     ...overrides,
   };
 }
