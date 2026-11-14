@@ -235,7 +235,7 @@ login_flow() {
 }
 
 browser_flow() {
-  # Users have no API, so the counterparty's login is inserted; the test sets up the market as the operator.
+  # The counterparty's login is inserted; the test sets up the market as the operator.
   compose cp web/e2e/seed-users.sql postgres:/tmp/seed-users.sql >> "$log" 2>&1 &&
     compose exec -T -e PGPASSWORD="$execution_owner_password" postgres psql -h 127.0.0.1 -q -U execution_owner       -d execution_db -v counterparty_password="$counterparty_password" -f /tmp/seed-users.sql >> "$log" 2>&1 &&
     (cd web && npx playwright install chromium &&

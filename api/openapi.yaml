@@ -553,6 +553,54 @@ paths:
         '504':
           $ref: '#/components/responses/OutcomeUnknown'
 
+  /api/v1/admin/traders:
+    post:
+      tags: [execution]
+      operationId: addTrader
+      summary: Add a trader login, optionally with its account and starting endowment, while the market is in SETUP.
+      description: |
+        Operator only. Sequenced on the writer and audited (TRADER_ADD), with an idempotency key: a retry with the
+        same key returns the first answer, even a refusal. The password is hashed before the command is queued and
+        is never stored or returned in any other form; it is not part of the request the key is checked against, so a
+        retry answers the stored result whatever password it carries. With cash, and optionally holdings, the trader
+        also gets an account funded from the issuance account in one balanced genesis batch, by the rules of POST
+        /api/v1/admin/accounts: holdings need cash, and cash of 0.00 needs a holding. With neither, only the login is
+        added, and it can be funded later in SETUP. Logins outlive the simulation they were added in.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TraderRequest' }
+      responses:
+        '201':
+          description: Added, and funded when an endowment was given.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TraderAdded' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '409':
+          description: |
+            MARKET_NOT_IN_SETUP or USERNAME_TAKEN (taken whatever its case; both committed and audited), or
+            IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: UNKNOWN_INSTRUMENT (committed and audited).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
   /api/v1/admin/bots:
     get:
       tags: [execution]
@@ -1614,6 +1662,49 @@ components:
         accountId: { $ref: '#/components/schemas/Uuid' }
         username: { type: string }
         cash: { $ref: '#/components/schemas/Money' }
+        holdings:
+          type: array
+          items: { $ref: '#/components/schemas/Endowment' }
+        commandSequence: { $ref: '#/components/schemas/Sequence' }
+
+    TraderRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      dependentRequired:
+        holdings: [cash]
+      properties:
+        username:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9._-]{2,31}$'
+          description: 3 to 32 lower-case letters, digits, '.', '-' or '_', starting with a letter or digit; unique ignoring case.
+        password:
+          type: string
+          format: password
+          writeOnly: true
+          minLength: 12
+          maxLength: 64
+          description: 12 to 64 characters and at most 72 bytes in UTF-8, not the username and not only spaces. Stored only as a bcrypt hash.
+        cash:
+          $ref: '#/components/schemas/Money'
+          description: The trader's starting cash, which gives them an account now. Required with holdings; left out with no holdings, only the login is added.
+        holdings:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/Endowment' }
+
+    TraderAdded:
+      type: object
+      additionalProperties: false
+      required: [username, accountId, cash, holdings, commandSequence]
+      properties:
+        username: { type: string }
+        accountId:
+          description: The trader's account in this simulation, or null when added without one.
+          oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }]
+        cash:
+          description: The starting cash, or null when added without an account.
+          oneOf: [{ $ref: '#/components/schemas/Money' }, { type: 'null' }]
         holdings:
           type: array
           items: { $ref: '#/components/schemas/Endowment' }

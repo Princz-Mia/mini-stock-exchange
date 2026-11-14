@@ -1,7 +1,6 @@
 -- The browser test's counterparty, a second trader to trade against the dev trader, and a newcomer for the tour.
--- There is no API for creating users, by design, so the gate inserts these logins into its throwaway execution_db as
--- execution_owner. Everything with money in it (instruments, accounts, endowments, opening) goes through the operator
--- API in the test.
+-- The gate inserts these logins into its throwaway execution_db as execution_owner. Everything with money in it
+-- (instruments, accounts, endowments, opening) goes through the operator API in the test.
 -- The password comes from psql: -v counterparty_password=...
 -- It is stored as bcrypt, like every other login; the service accepts no other form. pgcrypto makes the hash in a
 -- scratch schema that is dropped afterwards, so nothing of it stays in the database.

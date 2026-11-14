@@ -111,6 +111,12 @@ public interface TradingStore {
 	/** Deletes the instrument; the database refuses it once the market has left SETUP, or while anything refers to it. */
 	void deleteInstrument(UUID simulationId, UUID instrumentId);
 
+	/** Whether any login has this username, ignoring case. */
+	boolean usernameTaken(String username);
+
+	/** A trader login, with its password already hashed. */
+	void insertTraderUser(UUID userId, String username, String passwordHash);
+
 	/** Whether this user already has an account in the market. */
 	boolean hasAccount(UUID simulationId, UUID ownerUserId);
 

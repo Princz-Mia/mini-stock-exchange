@@ -546,7 +546,7 @@ try {
     }
 
     Step 'Browser: trading, halt, resume, bot runs and every screen' {
-        # Users have no API, so the counterparty's login is inserted; the test sets up the market as the operator.
+        # The counterparty's login is inserted; the test sets up the market as the operator.
         Invoke-Checked 'docker' ($compose + @('cp', 'web/e2e/seed-users.sql', 'postgres:/tmp/seed-users.sql'))
         Invoke-Checked 'docker' ($compose + @('exec', '-T', '-e', "PGPASSWORD=$($passwords.execution_owner)", 'postgres', 'psql', '-h', '127.0.0.1', '-q',
             '-U', 'execution_owner', '-d', 'execution_db', '-v', "counterparty_password=$counterpartyPassword", '-f', '/tmp/seed-users.sql'))
