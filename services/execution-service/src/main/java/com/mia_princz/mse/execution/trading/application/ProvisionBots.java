@@ -7,7 +7,7 @@ import java.util.UUID;
 /**
  * An operator creates funded bot accounts while the market is in SETUP, each with the same endowment and its own API
  * token. Bots are numbered in the order they are created: bot-0001, bot-0002 and so on. They are all tagged with the
- * strategy given, or left untagged when it is null.
+ * strategy given.
  */
 public record ProvisionBots(int count, long cashCents, List<ProvisionAccount.Holding> holdings, BotStrategy strategy,
 		UUID actorUserId) {
@@ -19,6 +19,7 @@ public record ProvisionBots(int count, long cashCents, List<ProvisionAccount.Hol
 	public static final int MAX_POPULATION = 1_000;
 
 	public ProvisionBots {
+		Objects.requireNonNull(strategy, "strategy");
 		Objects.requireNonNull(actorUserId, "actorUserId");
 		holdings = List.copyOf(holdings);
 		if (count < 1 || count > MAX_PER_COMMAND) {

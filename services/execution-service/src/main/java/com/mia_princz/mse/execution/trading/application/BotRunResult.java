@@ -6,8 +6,19 @@ import java.util.UUID;
  * The outcome of starting or stopping a bot run. Refusals are committed and stored like any result, so a retry with
  * the same key answers the same way; {@code NO_MARKET} is the one answer given before any market exists, so nothing
  * is stored for it.
+ *
+ * @param shortfall for {@code NOT_ENOUGH_BOTS}, the first strategy, in assignment order, with fewer bots tagged than
+ * the run asked for; null otherwise, and in answers stored before runs assigned bots by tag
  */
-public record BotRunResult(Status status, UUID runId, int bots, long commandSequence) {
+public record BotRunResult(Status status, UUID runId, int bots, long commandSequence, Shortfall shortfall) {
+
+	public BotRunResult(Status status, UUID runId, int bots, long commandSequence) {
+		this(status, runId, bots, commandSequence, null);
+	}
+
+	/** A strategy the run asked for more bots of than are tagged with it. */
+	public record Shortfall(String strategy, int requested, int available) {
+	}
 
 	public enum Status {
 

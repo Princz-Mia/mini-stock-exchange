@@ -1,5 +1,5 @@
-import type { BotRun, BotRunRequest, Instrument, MarketStatus } from '../api/types';
-import { utcTime } from '../format';
+import type { BotPopulation, BotRun, BotRunRequest, Instrument, MarketStatus } from '../api/types';
+import { groupInteger, utcTime } from '../format';
 
 export const STATUS_LABELS: Record<BotRun['status'], string> = {
   STARTING: 'Starting',
@@ -53,11 +53,47 @@ export function activeRun(runs: readonly BotRun[]): BotRun | undefined {
 export function startBlocked(
   market: MarketStatus['state'],
   active: BotRun | undefined,
-  population: number | undefined,
+  byStrategy: ByStrategy | undefined,
 ): string | null {
   if (market !== 'OPEN' && market !== 'HALTED') return 'Bots trade only once the market has opened.';
   if (active !== undefined) return 'A run is active; one runs at a time. Stop it first.';
-  if (population === 0) return 'There are no bots; they are created during setup.';
+  if (byStrategy === undefined) return null;
+  const tagged = byStrategy.marketMakers + byStrategy.noise + byStrategy.momentum;
+  if (tagged + byStrategy.untagged === 0) return 'There are no bots; they are created during setup.';
+  if (tagged === 0) return 'No bot has a strategy, and runs use only bots tagged with one.';
+  return null;
+}
+
+type ByStrategy = BotPopulation['byStrategy'];
+
+/** The form's counts to start from: every bot tagged with a strategy runs it. */
+export function taggedSplit(byStrategy: ByStrategy | undefined): Pick<RunForm, 'marketMakers' | 'noise' | 'momentum'> {
+  return {
+    marketMakers: String(byStrategy?.marketMakers ?? 0),
+    noise: String(byStrategy?.noise ?? 0),
+    momentum: String(byStrategy?.momentum ?? 0),
+  };
+}
+
+/**
+ * Why the counts typed cannot run: the first strategy, in assignment order, asked for more bots than are tagged with
+ * it, as the exchange would refuse it. Counts that are not whole numbers are left to the form's own check.
+ */
+export function shortfallText(form: RunForm, byStrategy: ByStrategy | undefined): string | null {
+  if (byStrategy === undefined) return null;
+  const strategies: [keyof RunForm & keyof ByStrategy, string, string][] = [
+    ['marketMakers', 'market maker', 'market makers'],
+    ['noise', 'noise bot', 'noise bots'],
+    ['momentum', 'momentum bot', 'momentum bots'],
+  ];
+  for (const [field, one, many] of strategies) {
+    const text = (form[field] as string).trim();
+    const tagged = byStrategy[field];
+    if (WHOLE.test(text) && Number(text) > tagged) {
+      if (tagged === 0) return `No bot is tagged as a ${one}.`;
+      return `Only ${groupInteger(tagged)} ${tagged === 1 ? one : many} ${tagged === 1 ? 'exists' : 'exist'}.`;
+    }
+  }
   return null;
 }
 
@@ -93,13 +129,6 @@ export interface RunForm {
   durationMinutes: string;
   /** Ticked instruments; every listed one by default. */
   instrumentIds: readonly string[];
-}
-
-/** A starting split for a population: a fifth market makers, a fifth momentum, the rest noise. */
-export function suggestedSplit(population: number): Pick<RunForm, 'marketMakers' | 'noise' | 'momentum'> {
-  const makers = Math.floor(population / 5);
-  const momentum = Math.floor(population / 5);
-  return { marketMakers: String(makers), noise: String(population - makers - momentum), momentum: String(momentum) };
 }
 
 const WHOLE = /^\d{1,9}$/;

@@ -1,13 +1,12 @@
 """How a population of bots is split between the strategies when it is provisioned."""
 
-# In the order they are provisioned: runs that assign bots by creation order take market makers
-# first, then noise, then momentum, so the tags and those runs agree.
+# In the order they are provisioned, which is also the order runs assign strategies in.
 STRATEGIES = ("MARKET_MAKER", "NOISE", "MOMENTUM")
 
 
 def strategy_split(bots: int) -> dict[str, int]:
-    """A fifth each to market makers and momentum, rounded down, and the rest noise, as the
-    operator screen suggests for a run (20 bots give 4, 12 and 4). There is always at least one
+    """A fifth each to market makers and momentum, rounded down, and the rest noise (20 bots
+    give 4, 12 and 4). There is always at least one
     market maker, so two or more bots include a market maker and a noise bot, and a single bot is a
     market maker. Every strategy is listed, in provisioning order, even with no bots."""
     if bots < 0:

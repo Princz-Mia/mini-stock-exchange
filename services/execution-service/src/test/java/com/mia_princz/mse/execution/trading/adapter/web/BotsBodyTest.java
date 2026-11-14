@@ -1,21 +1,25 @@
 package com.mia_princz.mse.execution.trading.adapter.web;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
 /**
- * The request hash for creating bots. The demo seed resumes with fixed keys, so without a strategy the hash is exactly
- * the one keys had before bots had tags.
+ * The request for creating bots. The strategy is required, and the hash appends it last, as it did while it was
+ * optional, so tagged requests stored then still replay.
  */
 class BotsBodyTest {
 
 	@Test
-	void withoutAStrategyTheHashIsTheEarlierOne() {
-		BotsBody.Valid plain = new BotsBody(3, "500.00", List.of(), null).validate();
-		assertThat(plain.hash()).isEqualTo(CommandCalls.sha256("3|50000|"));
+	void aStrategyIsRequired() {
+		assertThatThrownBy(() -> new BotsBody(3, "500.00", List.of(), null).validate())
+			.isInstanceOfSatisfying(ApiException.class,
+					(refused) -> assertThat(refused.toProblem().getProperties().get("errors"))
+						.isEqualTo(List.of(new ApiException.FieldError("strategy", "REQUIRED",
+								"strategy is required: MARKET_MAKER, NOISE or MOMENTUM"))));
 	}
 
 	@Test

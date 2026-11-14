@@ -387,8 +387,8 @@ export interface paths {
         readonly put?: never;
         /**
          * Start a bot run while the market is open or halted. One run runs at a time.
-         * @description Operator only, with an idempotency key; sequenced on the writer and audited. Bot accounts are assigned in
-         *     creation order: market makers first, then noise, then momentum. Without a seed one is chosen; without
+         * @description Operator only, with an idempotency key; sequenced on the writer and audited. Each strategy is run by the
+         *     oldest bots tagged with it; untagged bots are never assigned. Without a seed one is chosen; without
          *     instrumentIds the bots trade every listed instrument; without durationMinutes the run lasts until stopped.
          */
         readonly post: operations["startBotRun"];
@@ -721,6 +721,7 @@ export interface components {
             readonly commandKey?: components["schemas"]["Uuid"];
             readonly reason?: string;
             readonly usage?: components["schemas"]["InstrumentUsage"];
+            readonly shortfall?: components["schemas"]["BotShortfall"];
         };
         readonly FieldError: {
             readonly field: string;
@@ -976,8 +977,14 @@ export interface components {
             readonly count: number;
             readonly cash: components["schemas"]["Money"];
             readonly holdings?: readonly components["schemas"]["Endowment"][];
-            /** @description The tag every bot in the batch carries. Left out, they are untagged. */
-            readonly strategy?: components["schemas"]["BotStrategy"];
+            /** @description The tag every bot in the batch carries; runs assign each strategy to bots tagged with it. */
+            readonly strategy: components["schemas"]["BotStrategy"];
+        };
+        /** @description A strategy a bot run asked for more bots of than are tagged with it. */
+        readonly BotShortfall: {
+            readonly strategy: components["schemas"]["BotStrategy"];
+            readonly requested: number;
+            readonly available: number;
         };
         /**
          * @description The kind of trader a bot plays in a run. A bot is tagged once, when it is created, and keeps it.
@@ -998,8 +1005,8 @@ export interface components {
         };
         readonly BotsCreated: {
             readonly created: number;
-            /** @description The tag the new bots carry; null for none, and in answers stored before bots had tags. */
-            readonly strategy: components["schemas"]["BotStrategy"] | null;
+            /** @description The tag every new bot carries, as the request gave it. */
+            readonly strategy: components["schemas"]["BotStrategy"];
             readonly firstBot: string;
             readonly lastBot: string;
             /** @description Bots in the market after this command. */
@@ -2628,7 +2635,10 @@ export interface operations {
                     readonly "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            /** @description NOT_ENOUGH_BOTS or UNKNOWN_INSTRUMENT (committed and audited). */
+            /**
+             * @description NOT_ENOUGH_BOTS, with `shortfall` naming the first strategy, in assignment order, that has fewer bots
+             *     tagged than asked for, or UNKNOWN_INSTRUMENT (both committed and audited).
+             */
             readonly 422: {
                 headers: {
                     readonly [name: string]: unknown;

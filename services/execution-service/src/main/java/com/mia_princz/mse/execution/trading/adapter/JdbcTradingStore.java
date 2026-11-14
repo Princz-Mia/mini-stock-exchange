@@ -298,9 +298,11 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public List<UUID> botAccountIds(UUID simulationId) {
-		return jdbc.sql("SELECT id FROM account WHERE simulation_id = ? AND kind = 'BOT' ORDER BY created_at, id")
-			.param(simulationId)
+	public List<UUID> botAccountIds(UUID simulationId, BotStrategy strategy) {
+		return jdbc.sql("""
+				SELECT id FROM account WHERE simulation_id = ? AND kind = 'BOT' AND bot_strategy = ?
+				ORDER BY created_at, id""")
+			.params(simulationId, strategy.name())
 			.query(UUID.class)
 			.list();
 	}
@@ -366,7 +368,7 @@ public final class JdbcTradingStore implements TradingStore {
 		expectOne(jdbc.sql("""
 				INSERT INTO account (id, simulation_id, kind, display_name, bot_strategy, created_at)
 				VALUES (?, ?, 'BOT', ?, ?, clock_timestamp())""")
-			.params(accountId, simulationId, displayName, strategy == null ? null : strategy.name())
+			.params(accountId, simulationId, displayName, strategy.name())
 			.update(), "insert bot account");
 	}
 

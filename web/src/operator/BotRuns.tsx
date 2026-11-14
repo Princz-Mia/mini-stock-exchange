@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
 
 import { api, pollEvery } from '../api/client';
-import type { BotRun, BotRunRequest, Instrument, MarketStatus } from '../api/types';
+import type { BotPopulation, BotRun, BotRunRequest, Instrument, MarketStatus } from '../api/types';
 import { type Column, PagedTable } from '../app/PagedTable';
 import { usePagedList } from '../app/paging';
 import { groupInteger, utcTime } from '../format';
@@ -12,12 +12,14 @@ import {
   type RunForm,
   runRequest,
   STATUS_LABELS,
+  shortfallText,
   startBlocked,
   statusClass,
   strategiesText,
-  suggestedSplit,
+  taggedSplit,
   workerText,
 } from './runView';
+import { populationText } from './strategies';
 import { CommandStatus } from './CommandStatus';
 import { useCommand } from './useCommand';
 
@@ -76,7 +78,7 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
         <StartForm
           market={market}
           instruments={instruments}
-          population={population.data?.population}
+          population={population.data}
           blocked={runs.isError ? 'The bot runs could not be loaded.' : null}
         />
       )}
@@ -206,7 +208,7 @@ function StartForm({
 }: {
   market: MarketStatus['state'];
   instruments: readonly Instrument[];
-  population: number | undefined;
+  population: BotPopulation | undefined;
   blocked: string | null;
 }) {
   const client = useQueryClient();
@@ -224,12 +226,13 @@ function StartForm({
   );
   const command = useCommand(send);
   const form: RunForm = {
-    ...suggestedSplit(population ?? 0),
+    ...taggedSplit(population?.byStrategy),
     ...DEFAULTS,
     instrumentIds: instruments.map((item) => item.instrumentId),
     ...typed,
   };
-  const blocked = unavailable ?? startBlocked(market, undefined, population);
+  const blocked =
+    unavailable ?? startBlocked(market, undefined, population?.byStrategy) ?? shortfallText(form, population?.byStrategy);
   const field = (name: keyof Omit<RunForm, 'instrumentIds'>) => ({
     value: form[name],
     onChange: (event: { target: { value: string } }) => setTyped({ ...typed, [name]: event.target.value }),
@@ -310,9 +313,12 @@ function StartForm({
           </fieldset>
         )}
         <p className="muted hint">
-          {population !== undefined && `${groupInteger(population)} bots exist. `}
-          Market makers are assigned first, then noise, then momentum bots, in the order the bots were created. The
-          same seed and observations give the same decisions.
+          {population !== undefined &&
+            population.population > 0 &&
+            `${groupInteger(population.population)} ${population.population === 1 ? 'bot exists' : 'bots exist'}: ` +
+              `${populationText(population.byStrategy)}. `}
+          Each strategy is run by the oldest bots tagged with it; untagged bots never run. The same seed and
+          observations give the same decisions.
         </p>
         {blocked !== null && (
           <p id="start-blocked" className="muted">

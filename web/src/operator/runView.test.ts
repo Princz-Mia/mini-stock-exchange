@@ -9,11 +9,16 @@ import {
   averageRate,
   type RunForm,
   runRequest,
+  shortfallText,
   startBlocked,
   strategiesText,
-  suggestedSplit,
+  taggedSplit,
   workerText,
 } from './runView';
+
+function tagged(marketMakers: number, noise: number, momentum: number, untagged = 0) {
+  return { marketMakers, noise, momentum, untagged };
+}
 
 function instrument(id: string, symbol: string): Instrument {
   return {
@@ -79,11 +84,15 @@ describe('the bot run view', () => {
   });
 
   it('says why a run cannot start: the market first, then the active run, then the bots', () => {
-    expect(startBlocked('SETUP', botRun(), 0)).toBe('Bots trade only once the market has opened.');
-    expect(startBlocked('NOT_SET_UP', undefined, 5)).toBe('Bots trade only once the market has opened.');
-    expect(startBlocked('OPEN', botRun(), 0)).toBe('A run is active; one runs at a time. Stop it first.');
-    expect(startBlocked('HALTED', undefined, 0)).toBe('There are no bots; they are created during setup.');
-    expect(startBlocked('OPEN', undefined, 3)).toBeNull();
+    expect(startBlocked('SETUP', botRun(), tagged(0, 0, 0))).toBe('Bots trade only once the market has opened.');
+    expect(startBlocked('NOT_SET_UP', undefined, tagged(1, 3, 1))).toBe('Bots trade only once the market has opened.');
+    expect(startBlocked('OPEN', botRun(), tagged(0, 0, 0))).toBe('A run is active; one runs at a time. Stop it first.');
+    expect(startBlocked('HALTED', undefined, tagged(0, 0, 0))).toBe('There are no bots; they are created during setup.');
+    expect(startBlocked('OPEN', undefined, tagged(0, 0, 0, 4))).toBe(
+      'No bot has a strategy, and runs use only bots tagged with one.',
+    );
+    expect(startBlocked('OPEN', undefined, tagged(0, 3, 0))).toBeNull();
+    expect(startBlocked('OPEN', undefined, tagged(0, 0, 1, 7))).toBeNull();
     expect(startBlocked('HALTED', undefined, undefined)).toBeNull();
   });
 
@@ -99,17 +108,38 @@ describe('the bot run view', () => {
     );
   });
 
-  it('suggests a split that uses every bot, a fifth each to makers and momentum', () => {
-    expect(suggestedSplit(10)).toEqual({ marketMakers: '2', noise: '6', momentum: '2' });
-    expect(suggestedSplit(2)).toEqual({ marketMakers: '0', noise: '2', momentum: '0' });
+  it('starts from every tagged bot running its strategy, leaving untagged bots out', () => {
+    expect(taggedSplit(tagged(4, 12, 4, 3))).toEqual({ marketMakers: '4', noise: '12', momentum: '4' });
+    expect(taggedSplit(tagged(1, 0, 0))).toEqual({ marketMakers: '1', noise: '0', momentum: '0' });
+    expect(taggedSplit(undefined)).toEqual({ marketMakers: '0', noise: '0', momentum: '0' });
+  });
+
+  it('blocks a strategy asked for beyond its tagged bots, naming the first in assignment order', () => {
+    const counts = (marketMakers: string, noise: string, momentum: string) => form({ marketMakers, noise, momentum });
+    expect(shortfallText(counts('2', '12', '4'), tagged(2, 12, 4))).toBeNull();
+    expect(shortfallText(counts('3', '12', '4'), tagged(2, 12, 4))).toBe('Only 2 market makers exist.');
+    expect(shortfallText(counts('2', '13', '5'), tagged(2, 12, 4))).toBe('Only 12 noise bots exist.');
+    expect(shortfallText(counts('0', '1', '2'), tagged(0, 1, 1))).toBe('Only 1 momentum bot exists.');
+    expect(shortfallText(counts('1', '0', '0'), tagged(0, 5, 0, 9))).toBe('No bot is tagged as a market maker.');
+    expect(shortfallText(counts('1', '1', '1'), tagged(1, 1, 0))).toBe('No bot is tagged as a momentum bot.');
+    expect(shortfallText(counts('1', '2000', '0'), tagged(1, 1999, 0))).toBe('Only 1,999 noise bots exist.');
+    // A count that is not a whole number is the form's to explain when it is sent.
+    expect(shortfallText(counts('x', '', '9.5'), tagged(0, 0, 0))).toBeNull();
+    expect(shortfallText(counts('5', '5', '5'), undefined)).toBeNull();
+  });
+
+  it('never blocks counts within the tagged population, and always blocks one beyond it', () => {
     const draw = seeded(2026);
     for (let i = 0; i < 500; i++) {
-      const population = draw(1001);
-      const split = suggestedSplit(population);
-      const counts = [split.marketMakers, split.noise, split.momentum].map(Number);
-      expect(counts.reduce((sum, count) => sum + count, 0)).toBe(population);
-      expect(Number(split.marketMakers)).toBe(Number(split.momentum));
-      expect(counts.every((count) => count >= 0)).toBe(true);
+      const population = tagged(draw(50), draw(50), draw(50), draw(5));
+      const within = form({
+        marketMakers: String(draw(population.marketMakers + 1)),
+        noise: String(draw(population.noise + 1)),
+        momentum: String(draw(population.momentum + 1)),
+      });
+      expect(shortfallText(within, population)).toBeNull();
+      const field = (['marketMakers', 'noise', 'momentum'] as const)[draw(3)]!;
+      expect(shortfallText({ ...within, [field]: String(population[field] + 1) }, population)).not.toBeNull();
     }
   });
 

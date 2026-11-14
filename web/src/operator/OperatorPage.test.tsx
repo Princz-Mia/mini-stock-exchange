@@ -979,9 +979,10 @@ describe('bot runs on the operator screen', () => {
   const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
   const runs = () => screen.findByRole('region', { name: 'Bot runs' });
 
-  it('starts a run with the suggested split, sending only what the exchange needs', async () => {
+  it('starts a run with every tagged bot on its strategy, sending only what the exchange needs', async () => {
     const { server, state } = exchange('OPEN', [NOVA, ORBT]);
-    state.bots = 10;
+    state.tagged = { marketMakers: 2, noise: 6, momentum: 2 };
+    state.bots = 1;
     server.on('POST /api/v1/admin/bot-runs', () => {
       state.runs = [botRun({ status: 'STARTING', worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null } })];
       return { status: 201, json: { runId: botRun().runId, bots: 10, commandSequence: '9' } };
@@ -993,6 +994,9 @@ describe('bot runs on the operator screen', () => {
     expect(within(form).getByLabelText('Noise')).toHaveValue('6');
     expect(within(form).getByLabelText('Momentum')).toHaveValue('2');
     expect(within(form).getByRole('checkbox', { name: 'ORBT' })).toBeChecked();
+    expect(
+      within(form).getByText(/11 bots exist: 2 market makers · 6 noise · 2 momentum · 1 untagged\. Each strategy is run by/),
+    ).toBeInTheDocument();
     fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
 
     expect(await screen.findByRole('status', { name: 'Run status: Starting' })).toBeInTheDocument();
@@ -1011,10 +1015,15 @@ describe('bot runs on the operator screen', () => {
 
   it('starts on the chosen instruments only, and never sends an empty choice', async () => {
     const { server, state } = exchange('OPEN', [NOVA, ORBT]);
-    state.bots = 3;
+    state.tagged = { marketMakers: 0, noise: 3, momentum: 0 };
     server.on('POST /api/v1/admin/bot-runs', {
       status: 422,
-      problem: { status: 422, code: 'NOT_ENOUGH_BOTS', detail: 'The run needs 5 bots; 3 exist' },
+      problem: {
+        status: 422,
+        code: 'NOT_ENOUGH_BOTS',
+        detail: 'The run asks for 3 noise bots; 2 are tagged',
+        shortfall: { strategy: 'NOISE', requested: 3, available: 2 },
+      },
     });
     renderPage();
 
@@ -1026,15 +1035,23 @@ describe('bot runs on the operator screen', () => {
     expect(server.requests.some((request) => request.method === 'POST')).toBe(false);
 
     fireEvent.click(within(form).getByRole('checkbox', { name: 'NOVA' }));
+    // More noise bots than are tagged as noise is blocked before anything is sent, and says so.
     fireEvent.change(within(form).getByLabelText('Noise'), { target: { value: '5' } });
+    const start = within(form).getByRole('button', { name: 'Start run' });
+    expect(start).toBeDisabled();
+    expect(start).toHaveAccessibleDescription('Only 3 noise bots exist.');
+    fireEvent.change(within(form).getByLabelText('Noise'), { target: { value: '3' } });
     fireEvent.change(within(form).getByLabelText('Seed'), { target: { value: '42' } });
-    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    expect(start).toBeEnabled();
+    fireEvent.click(start);
 
-    expect(await within(form).findByText('The run needs 5 bots; 3 exist')).toBeInTheDocument();
+    // The exchange counts again when it starts the run, and its answer is shown in its words.
+    expect(await within(form).findByText('The run asks for 3 noise bots; 2 are tagged')).toBeInTheDocument();
     expect(within(form).queryByText('Choose at least one instrument.')).toBeNull();
-    const sent = server.requests.find((request) => request.method === 'POST' && request.url.endsWith('/bot-runs'));
-    expect(sent?.body).toMatchObject({ noise: 5, seed: 42, instrumentIds: [NOVA.instrumentId] });
-    expect(within(form).getByLabelText('Noise')).toHaveValue('5');
+    const sent = server.requests.filter((request) => request.method === 'POST' && request.url.endsWith('/bot-runs'));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.body).toMatchObject({ noise: 3, seed: 42, instrumentIds: [NOVA.instrumentId] });
+    expect(within(form).getByLabelText('Noise')).toHaveValue('3');
   });
 
   it('cannot start before the market opens, and says why', async () => {
@@ -1049,6 +1066,25 @@ describe('bot runs on the operator screen', () => {
     renderPage();
     const start = await button('Start run');
     await waitFor(() => expect(start).toHaveAccessibleDescription('There are no bots; they are created during setup.'));
+    expect(start).toBeDisabled();
+  });
+
+  it('counts a single bot as one', async () => {
+    const { state } = exchange('OPEN');
+    state.tagged = { marketMakers: 1, noise: 0, momentum: 0 };
+    renderPage();
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    expect(await within(form).findByText(/^1 bot exists: 1 market maker\. Each strategy/)).toBeInTheDocument();
+  });
+
+  it('cannot start when no bot has a strategy, and says why', async () => {
+    const { state } = exchange('OPEN');
+    state.bots = 5;
+    renderPage();
+    const start = await button('Start run');
+    await waitFor(() =>
+      expect(start).toHaveAccessibleDescription('No bot has a strategy, and runs use only bots tagged with one.'),
+    );
     expect(start).toBeDisabled();
   });
 

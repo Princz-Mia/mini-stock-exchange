@@ -10,7 +10,9 @@ import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
@@ -59,12 +61,25 @@ class BotRunIT {
 		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
 		String nova = instrument(operator, "NOVA", "100.00");
 		String zeta = instrument(operator, "ZETA", "20.00");
-		HttpResponse<String> provisioned = operator.post("/api/v1/admin/bots", """
-				{"count":4,"cash":"10000.00","holdings":[{"instrumentId":"%s","quantity":50}]}""".formatted(nova),
-				"Idempotency-Key", UUID.randomUUID().toString());
-		assertThat(provisioned.statusCode()).as(provisioned.body()).isEqualTo(201);
-		List<UUID> bots = jdbc.queryForList("SELECT id FROM account WHERE kind = 'BOT' ORDER BY created_at, id",
-				UUID.class);
+		// Tags out of assignment order: two noise bots, then a momentum bot, then a market maker. An untagged bot,
+		// made before tags were required, is older than all of them and never runs.
+		provision(operator, nova, 2, "NOISE");
+		provision(operator, nova, 1, "MOMENTUM");
+		provision(operator, nova, 1, "MARKET_MAKER");
+		UUID simulation = jdbc.queryForObject("SELECT id FROM simulation", UUID.class);
+		jdbc.update("INSERT INTO account (id, simulation_id, kind, display_name, created_at) VALUES (?, ?, 'BOT', ?, ?)",
+				UUID.randomUUID(), simulation, "untagged", Timestamp.from(Instant.parse("2026-01-01T00:00:00Z")));
+		Map<String, UUID> bots = new HashMap<>();
+		jdbc.query("SELECT display_name, id FROM account WHERE kind = 'BOT'",
+				(row) -> {
+					bots.put(row.getString("display_name"), row.getObject("id", UUID.class));
+				});
+		UUID noise1 = bots.get("bot-0001");
+		UUID noise2 = bots.get("bot-0002");
+		// The second noise bot is made the older one, so creation time disagrees with name, insertion and storage order.
+		asOwner("UPDATE account SET created_at = created_at - interval '1 hour' WHERE id = ?", noise2);
+		UUID momentum = bots.get("bot-0003");
+		UUID maker = bots.get("bot-0004");
 		assertThat(runs(operator)).isEmpty();
 
 		// Before the market opens, a start is a committed refusal.
@@ -86,16 +101,48 @@ class BotRunIT {
 		assertThat(fields(start(operator, UUID.randomUUID(), "{\"noise\":1,\"commandsPerSecond\":\"1.5\"}")))
 			.containsExactly("commandsPerSecond");
 
-		// More bots than exist, or an instrument the market lacks, are committed refusals.
+		// More bots of a strategy than are tagged with it, or an instrument the market lacks, are committed refusals.
+		// The refusal names the first strategy short, in assignment order, although five bots exist for five asked.
 		UUID tooManyKey = UUID.randomUUID();
-		assertThat(code(start(operator, tooManyKey, run(2, 2, 1, "1.00")), 422)).isEqualTo("NOT_ENOUGH_BOTS");
+		HttpResponse<String> tooMany = start(operator, tooManyKey, run(2, 2, 1, "1.00"));
+		assertThat(code(tooMany, 422)).isEqualTo("NOT_ENOUGH_BOTS");
+		CONTRACT.assertResponse("POST", RUNS, 422, tooMany.headers().firstValue("Content-Type").orElse(null),
+				tooMany.body());
+		assertThat(JSON.readTree(tooMany.body()).get("shortfall").toString())
+			.isEqualTo("{\"strategy\":\"MARKET_MAKER\",\"requested\":2,\"available\":1}");
+		assertThat(JSON.readTree(tooMany.body()).get("detail").asString())
+			.isEqualTo("The run asks for 2 market makers; 1 is tagged");
+		assertThat(start(operator, tooManyKey, run(2, 2, 1, "1.00")).body()).as("replayed").isEqualTo(tooMany.body());
+		// An answer stored before runs assigned bots by tag has no shortfall, and replays with the earlier detail.
+		// Stored answers are append-only, so the same refusal is stored again under another key without one.
+		UUID earlierKey = UUID.randomUUID();
+		asOwner("""
+				INSERT INTO command_result (simulation_id, principal_id, idempotency_key, route, request_hash,
+				    response_status, response_body, command_sequence)
+				SELECT simulation_id, principal_id, ?, route, request_hash, response_status, response_body - 'shortfall',
+				    command_sequence + 1000000 FROM command_result WHERE idempotency_key = ?""", earlierKey, tooManyKey);
+		HttpResponse<String> earlier = start(operator, earlierKey, run(2, 2, 1, "1.00"));
+		assertThat(code(earlier, 422)).isEqualTo("NOT_ENOUGH_BOTS");
+		assertThat(JSON.readTree(earlier.body()).has("shortfall")).isFalse();
+		assertThat(JSON.readTree(earlier.body()).get("detail").asString())
+			.isEqualTo("The run asks for more bots than the market has");
+		// Short of both market makers and noise bots: the market makers are named, as they are assigned first.
+		assertThat(JSON.readTree(start(operator, UUID.randomUUID(), run(2, 3, 1, "1.00")).body()).get("shortfall")
+			.toString()).isEqualTo("{\"strategy\":\"MARKET_MAKER\",\"requested\":2,\"available\":1}");
+		HttpResponse<String> tooNoisy = start(operator, UUID.randomUUID(), run(1, 3, 1, "1.00"));
+		assertThat(code(tooNoisy, 422)).isEqualTo("NOT_ENOUGH_BOTS");
+		assertThat(JSON.readTree(tooNoisy.body()).get("shortfall").toString())
+			.isEqualTo("{\"strategy\":\"NOISE\",\"requested\":3,\"available\":2}");
+		assertThat(JSON.readTree(start(operator, UUID.randomUUID(), run(1, 2, 2, "1.00")).body()).get("shortfall")
+			.get("strategy")
+			.asString()).isEqualTo("MOMENTUM");
 		UUID unknownKey = UUID.randomUUID();
 		assertThat(code(start(operator, unknownKey, """
 				{"noise":1,"commandsPerSecond":"1.00","instrumentIds":["%s"]}""".formatted(UUID.randomUUID())), 422))
 			.isEqualTo("UNKNOWN_INSTRUMENT");
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM bot_run", Long.class)).isZero();
 
-		// A run: market makers take the oldest bots, then noise, then momentum.
+		// A run: each strategy takes the oldest bots tagged with it.
 		UUID firstKey = UUID.randomUUID();
 		String firstBody = """
 				{"marketMakers":1,"noise":2,"momentum":1,"seed":42,"commandsPerSecond":"2.50","maxOrderQuantity":7,
@@ -109,8 +156,8 @@ class BotRunIT {
 		UUID firstRun = UUID.fromString(first.get("runId").asString());
 		assertThat(jdbc.queryForList("SELECT account_id || ' ' || strategy FROM bot_assignment WHERE run_id = ?",
 				String.class, firstRun))
-			.containsExactlyInAnyOrder(bots.get(0) + " MARKET_MAKER", bots.get(1) + " NOISE", bots.get(2) + " NOISE",
-					bots.get(3) + " MOMENTUM");
+			.containsExactlyInAnyOrder(maker + " MARKET_MAKER", noise1 + " NOISE", noise2 + " NOISE",
+					momentum + " MOMENTUM");
 		assertThat(jdbc.queryForObject("SELECT start_sequence FROM bot_run WHERE id = ?", Long.class, firstRun))
 			.isEqualTo(Long.parseLong(first.get("commandSequence").asString()));
 
@@ -164,11 +211,11 @@ class BotRunIT {
 		// Without a seed one is chosen; without instruments the run trades them all; a run with a time limit gives
 		// way once its time is up, and is recorded as stopped at its end.
 		HttpResponse<String> timed = start(operator, UUID.randomUUID(),
-				"{\"noise\":2,\"commandsPerSecond\":\"0.50\",\"durationMinutes\":1}");
+				"{\"noise\":1,\"commandsPerSecond\":\"0.50\",\"durationMinutes\":1}");
 		assertThat(timed.statusCode()).as(timed.body()).isEqualTo(201);
 		UUID timedRun = UUID.fromString(JSON.readTree(timed.body()).get("runId").asString());
 		assertThat(jdbc.queryForList("SELECT account_id FROM bot_assignment WHERE run_id = ?", UUID.class, timedRun))
-			.as("the oldest bots").containsExactlyInAnyOrder(bots.get(0), bots.get(1));
+			.as("the oldest noise bot, never the untagged one").containsExactly(noise2);
 		JsonNode timedView = runs(operator).get(0);
 		assertThat(timedView.get("runId").asString()).isEqualTo(timedRun.toString());
 		assertThat(Long.parseLong(timedView.get("config").get("seed").asString())).isNotNegative();
@@ -251,6 +298,19 @@ class BotRunIT {
 				    rejected = 1, in_flight = 2 WHERE id = ?""", worker, Timestamp.from(Instant.now().plus(lease)), run);
 	}
 
+	/** Writes what the runtime role may not: when a bot was made, or an answer stored by an earlier release. */
+	private void asOwner(String sql, Object... parameters) throws Exception {
+		String url = TestcontainersConfiguration.jdbcUrl(postgres, "execution_db");
+		try (Connection owner = DriverManager.getConnection(url, "execution_owner",
+				TestcontainersConfiguration.EXECUTION_OWNER_PASSWORD);
+				PreparedStatement statement = owner.prepareStatement(sql)) {
+			for (int i = 0; i < parameters.length; i++) {
+				statement.setObject(i + 1, parameters[i]);
+			}
+			assertThat(statement.executeUpdate()).isEqualTo(1);
+		}
+	}
+
 	/** Moves a run into the past; only the owner role may change when a run started. */
 	private Instant rewind(UUID run, Duration by) throws Exception {
 		String url = TestcontainersConfiguration.jdbcUrl(postgres, "execution_db");
@@ -267,6 +327,14 @@ class BotRunIT {
 				return result.getTimestamp(1).toInstant();
 			}
 		}
+	}
+
+	private static void provision(TestBrowser operator, String instrument, int count, String strategy)
+			throws Exception {
+		HttpResponse<String> provisioned = operator.post("/api/v1/admin/bots", """
+				{"count":%d,"cash":"10000.00","holdings":[{"instrumentId":"%s","quantity":50}],"strategy":"%s"}"""
+			.formatted(count, instrument, strategy), "Idempotency-Key", UUID.randomUUID().toString());
+		assertThat(provisioned.statusCode()).as(provisioned.body()).isEqualTo(201);
 	}
 
 	private static String run(int marketMakers, int noise, int momentum, String rate) {

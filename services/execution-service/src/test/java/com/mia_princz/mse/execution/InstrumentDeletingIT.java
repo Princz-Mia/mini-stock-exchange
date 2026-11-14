@@ -107,7 +107,7 @@ class InstrumentDeletingIT {
 			.formatted(heli), "Idempotency-Key", UUID.randomUUID().toString());
 		assertThat(code(funded, 422)).isEqualTo("UNKNOWN_INSTRUMENT");
 		HttpResponse<String> bots = operator.post("/api/v1/admin/bots", """
-				{"count":1,"cash":"1000.00","holdings":[{"instrumentId":"%s","quantity":10}]}""".formatted(heli),
+				{"count":1,"cash":"1000.00","holdings":[{"instrumentId":"%s","quantity":10}],"strategy":"NOISE"}""".formatted(heli),
 				"Idempotency-Key", UUID.randomUUID().toString());
 		assertThat(code(bots, 422)).isEqualTo("UNKNOWN_INSTRUMENT");
 
@@ -126,7 +126,7 @@ class InstrumentDeletingIT {
 			.formatted(nova), "Idempotency-Key", UUID.randomUUID().toString());
 		assertThat(funded.statusCode()).as(funded.body()).isEqualTo(201);
 		bots = operator.post("/api/v1/admin/bots", """
-				{"count":22,"cash":"1000.00","holdings":[{"instrumentId":"%s","quantity":10}]}""".formatted(nova),
+				{"count":22,"cash":"1000.00","holdings":[{"instrumentId":"%s","quantity":10}],"strategy":"NOISE"}""".formatted(nova),
 				"Idempotency-Key", UUID.randomUUID().toString());
 		assertThat(bots.statusCode()).as(bots.body()).isEqualTo(201);
 		UUID heldKey = UUID.randomUUID();

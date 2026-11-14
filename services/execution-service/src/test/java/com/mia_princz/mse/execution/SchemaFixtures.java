@@ -81,6 +81,14 @@ final class SchemaFixtures {
 		return id;
 	}
 
+	/** A bot tagged with a strategy, as every bot made through the API is. */
+	UUID bot(UUID simulation, String strategy) {
+		UUID id = UUID.randomUUID();
+		jdbc.update("INSERT INTO account (id, simulation_id, kind, display_name, bot_strategy) VALUES (?, ?, 'BOT', 'Bot', ?)",
+				id, simulation, strategy);
+		return id;
+	}
+
 	UUID issuance(UUID simulation) {
 		UUID id = UUID.randomUUID();
 		jdbc.update("INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'ISSUANCE', 'Issuance')",

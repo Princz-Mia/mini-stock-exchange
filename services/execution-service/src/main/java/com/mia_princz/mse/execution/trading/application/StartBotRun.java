@@ -7,7 +7,7 @@ import java.util.UUID;
 
 /**
  * An operator starts a bot run: how many bots run each strategy, the seed, the pace and limits, and for how long.
- * Bot accounts are assigned in creation order: market makers first, then noise, then momentum.
+ * Each strategy is run by bots tagged with it, oldest first; untagged bots are never assigned.
  *
  * @param commandsPerSecondHundredths the run's trading commands per second across all its bots, in hundredths
  * @param duration null to run until stopped
@@ -24,6 +24,15 @@ public record StartBotRun(UUID runId, int marketMakers, int noise, int momentum,
 		if (marketMakers < 0 || noise < 0 || momentum < 0 || marketMakers + noise + momentum < 1) {
 			throw new IllegalArgumentException("a run needs at least one bot");
 		}
+	}
+
+	/** How many bots the run asks for with this strategy. */
+	public int count(BotStrategy strategy) {
+		return switch (strategy) {
+			case MARKET_MAKER -> marketMakers;
+			case NOISE -> noise;
+			case MOMENTUM -> momentum;
+		};
 	}
 
 	public int bots() {

@@ -146,6 +146,11 @@ class BotProvisioningIT {
 
 		// Invalid requests are refused before the writer, with every problem listed.
 		assertThat(fields(bots(operator, UUID.randomUUID(), 0, "-1.00"))).containsExactlyInAnyOrder("count", "cash");
+		// A batch without a strategy would never run, so the strategy is required.
+		HttpResponse<String> untagged = operator.post(BOTS, "{\"count\":1,\"cash\":\"1.00\",\"holdings\":[]}",
+				"Idempotency-Key", UUID.randomUUID().toString());
+		assertThat(fields(untagged)).containsExactly("strategy");
+		assertThat(JSON.readTree(untagged.body()).get("errors").get(0).get("code").asString()).isEqualTo("REQUIRED");
 		assertThat(fields(bots(operator, UUID.randomUUID(), 101, "1.00"))).containsExactly("count");
 		assertThat(fields(bots(operator, UUID.randomUUID(), 1, "0.00"))).containsExactly("cash");
 		TestBrowser trader = TestBrowser.loggedIn(port, "trader", PASSWORD);
@@ -233,7 +238,7 @@ class BotProvisioningIT {
 
 	private static HttpResponse<String> bots(TestBrowser browser, UUID key, int count, String cash,
 			String... holdings) throws Exception {
-		String body = "{\"count\":%d,\"cash\":\"%s\",\"holdings\":[%s]}".formatted(count, cash,
+		String body = "{\"count\":%d,\"cash\":\"%s\",\"holdings\":[%s],\"strategy\":\"NOISE\"}".formatted(count, cash,
 				String.join(",", holdings));
 		return browser.post(BOTS, body, "Idempotency-Key", key.toString());
 	}

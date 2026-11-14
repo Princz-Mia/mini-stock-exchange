@@ -697,8 +697,8 @@ paths:
       operationId: startBotRun
       summary: Start a bot run while the market is open or halted. One run runs at a time.
       description: |
-        Operator only, with an idempotency key; sequenced on the writer and audited. Bot accounts are assigned in
-        creation order: market makers first, then noise, then momentum. Without a seed one is chosen; without
+        Operator only, with an idempotency key; sequenced on the writer and audited. Each strategy is run by the
+        oldest bots tagged with it; untagged bots are never assigned. Without a seed one is chosen; without
         instrumentIds the bots trade every listed instrument; without durationMinutes the run lasts until stopped.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -724,7 +724,9 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
         '422':
-          description: NOT_ENOUGH_BOTS or UNKNOWN_INSTRUMENT (committed and audited).
+          description: |
+            NOT_ENOUGH_BOTS, with `shortfall` naming the first strategy, in assignment order, that has fewer bots
+            tagged than asked for, or UNKNOWN_INSTRUMENT (both committed and audited).
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1252,6 +1254,7 @@ components:
         commandKey: { $ref: '#/components/schemas/Uuid' }
         reason: { type: string }
         usage: { $ref: '#/components/schemas/InstrumentUsage' }
+        shortfall: { $ref: '#/components/schemas/BotShortfall' }
     FieldError:
       type: object
       additionalProperties: false
@@ -1619,7 +1622,7 @@ components:
     BotsRequest:
       type: object
       additionalProperties: false
-      required: [count, cash]
+      required: [count, cash, strategy]
       properties:
         count: { type: integer, minimum: 1, maximum: 100 }
         cash: { $ref: '#/components/schemas/Money' }
@@ -1629,7 +1632,17 @@ components:
           items: { $ref: '#/components/schemas/Endowment' }
         strategy:
           $ref: '#/components/schemas/BotStrategy'
-          description: The tag every bot in the batch carries. Left out, they are untagged.
+          description: The tag every bot in the batch carries; runs assign each strategy to bots tagged with it.
+
+    BotShortfall:
+      type: object
+      additionalProperties: false
+      required: [strategy, requested, available]
+      description: A strategy a bot run asked for more bots of than are tagged with it.
+      properties:
+        strategy: { $ref: '#/components/schemas/BotStrategy' }
+        requested: { type: integer, minimum: 1 }
+        available: { type: integer, minimum: 0 }
 
     BotStrategy:
       type: string
@@ -1662,8 +1675,8 @@ components:
       properties:
         created: { type: integer, minimum: 1 }
         strategy:
-          description: The tag the new bots carry; null for none, and in answers stored before bots had tags.
-          oneOf: [{ $ref: '#/components/schemas/BotStrategy' }, { type: 'null' }]
+          $ref: '#/components/schemas/BotStrategy'
+          description: The tag every new bot carries, as the request gave it.
         firstBot: { type: string }
         lastBot: { type: string }
         population:
