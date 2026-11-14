@@ -142,6 +142,8 @@ class SecurityConfiguration {
 				.hasRole("OPERATOR")
 				.requestMatchers(HttpMethod.PUT, "/api/v1/admin/instruments/*")
 				.hasRole("OPERATOR")
+				.requestMatchers(HttpMethod.DELETE, "/api/v1/admin/instruments/*")
+				.hasRole("OPERATOR")
 				.requestMatchers(HttpMethod.POST, TRADING_COMMANDS)
 				.hasRole("TRADER")
 				.requestMatchers(HttpMethod.GET, TRADING_READS)

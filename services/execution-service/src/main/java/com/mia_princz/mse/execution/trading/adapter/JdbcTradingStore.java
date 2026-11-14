@@ -236,6 +236,42 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public InstrumentUsage instrumentUsage(UUID simulationId, UUID instrumentId, int holdersNamed) {
+		String holders = """
+				WITH holder AS (
+				    SELECT account_id FROM initial_allocation WHERE instrument_id = :instrument
+				    UNION SELECT account_id FROM position WHERE instrument_id = :instrument)
+				""";
+		List<String> named = jdbc.sql(holders + """
+				SELECT a.display_name FROM holder h JOIN account a ON a.id = h.account_id
+				ORDER BY a.display_name, a.id LIMIT :limit""")
+			.param("instrument", instrumentId)
+			.param("limit", holdersNamed)
+			.query(String.class)
+			.list();
+		return jdbc.sql(holders + """
+				SELECT (SELECT count(*) FROM holder) AS holders,
+				    (SELECT count(*) FROM orders WHERE simulation_id = :simulation AND instrument_id = :instrument)
+				        AS orders,
+				    (SELECT count(*) FROM ledger_entry WHERE instrument_id = :instrument)
+				        + (SELECT count(*) FROM trades WHERE simulation_id = :simulation AND instrument_id = :instrument)
+				        + (SELECT count(*) FROM bot_run_instrument
+				           WHERE simulation_id = :simulation AND instrument_id = :instrument) AS others""")
+			.param("instrument", instrumentId)
+			.param("simulation", simulationId)
+			.query((row, index) -> new InstrumentUsage(named, row.getLong("holders"), row.getLong("orders"),
+					row.getLong("others")))
+			.single();
+	}
+
+	@Override
+	public void deleteInstrument(UUID simulationId, UUID instrumentId) {
+		expectOne(jdbc.sql("DELETE FROM instrument WHERE simulation_id = ? AND id = ?")
+			.params(simulationId, instrumentId)
+			.update(), "delete instrument");
+	}
+
+	@Override
 	public boolean hasAccount(UUID simulationId, UUID ownerUserId) {
 		return jdbc.sql("SELECT EXISTS (SELECT 1 FROM account WHERE simulation_id = ? AND owner_user_id = ?)")
 			.params(simulationId, ownerUserId)
@@ -648,6 +684,15 @@ public final class JdbcTradingStore implements TradingStore {
 
 	@Override
 	public void insertMarketSnapshot(MarketView view) {
+		insertSnapshot(view, false);
+	}
+
+	@Override
+	public void insertRemovedSnapshot(MarketView view) {
+		insertSnapshot(view, true);
+	}
+
+	private void insertSnapshot(MarketView view, boolean removed) {
 		MarketSnapshot.Builder snapshot = jdbc.sql("""
 				SELECT symbol, reference_price_cents, tick_cents, lot_size, rule_version, last_trade_sequence
 				FROM instrument WHERE id = ? AND simulation_id = ?""")
@@ -674,6 +719,7 @@ public final class JdbcTradingStore implements TradingStore {
 			.setLastTrade(recent.isEmpty() ? null : recent.getFirst())
 			.setSourceCommandSequence(view.commandSequence())
 			.setGeneratedAt(view.generatedAt())
+			.setRemoved(removed)
 			.build();
 		byte[] payload;
 		try {
