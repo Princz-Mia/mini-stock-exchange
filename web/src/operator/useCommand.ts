@@ -1,13 +1,17 @@
 import { useCallback, useRef, useState } from 'react';
 
 import { ApiError } from '../api/client';
+import type { Problem } from '../api/types';
 
 export type CommandOutcome<T> =
   | { kind: 'idle' }
   | { kind: 'sending' }
   | { kind: 'done'; result: T }
-  /** Answered with a reason: committed refusals and invalid requests alike. A new attempt gets a new key. */
-  | { kind: 'refused'; code: string; message: string }
+  /**
+   * Answered with a reason: committed refusals and invalid requests alike. A new attempt gets a new key. The problem is
+   * kept for refusals that carry more than words, such as the holders of an instrument in use.
+   */
+  | { kind: 'refused'; code: string; message: string; problem: Problem | null }
   /** No final answer (busy, timed out, unreachable). Retrying resends the same request under the same key. */
   | { kind: 'unresolved' };
 
@@ -44,7 +48,7 @@ export function useCommand<A, T>(send: (args: A, key: string) => Promise<T>, new
       } catch (error) {
         if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
           pending.current = null;
-          setOutcome({ kind: 'refused', code: error.code ?? 'REFUSED', message: describe(error) });
+          setOutcome({ kind: 'refused', code: error.code ?? 'REFUSED', message: describe(error), problem: error.problem });
         } else {
           setOutcome({ kind: 'unresolved' });
         }

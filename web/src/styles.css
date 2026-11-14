@@ -846,6 +846,31 @@ button.chip {
   padding-top: 0;
 }
 
+/* Deleting asks first: Confirm delete and Keep take the Delete button's place in the row. */
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* On a phone the instrument row has four columns to fit: a narrower price field, tighter cells, and the confirm pair
+   stacked, so the panel never scrolls sideways. */
+@media (max-width: 640px) {
+  .setup-table th,
+  .setup-table td {
+    padding-inline: var(--space-1);
+  }
+
+  .setup-table .price-edit input {
+    width: 5rem;
+  }
+
+  .setup-table .row-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
 .chart-credit {
   margin: 0;
   font-size: 12px;
