@@ -21,6 +21,7 @@ import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
+import com.mia_princz.mse.contracts.events.MarketSnapshot;
 import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.marketdata.projection.SnapshotProjection;
 import com.mia_princz.mse.marketdata.projection.CandleProjection;
@@ -70,7 +71,10 @@ class ApiContractIT {
 	@Test
 	void marketReadsMatchTheContract() throws Exception {
 		UUID instrument = UUID.randomUUID();
-		snapshots.apply(Snapshots.snapshot(instrument, 3, 2));
+		// One with a display name and one without, so both branches of the field are checked.
+		MarketSnapshot named = Snapshots.snapshot(instrument, 3, 2);
+		named.setDisplayName("Orbité Labs");
+		snapshots.apply(named);
 		// Before its first trade: no last price, an empty tape and no book.
 		snapshots.apply(Snapshots.untraded(UUID.randomUUID(), 1));
 		for (long sequence = 1; sequence <= 3; sequence++) {
@@ -102,7 +106,9 @@ class ApiContractIT {
 	@Test
 	void streamAndItsEventsMatchTheContract() throws Exception {
 		UUID instrument = UUID.randomUUID();
-		snapshots.apply(Snapshots.snapshot(instrument, 1, 3));
+		MarketSnapshot named = Snapshots.snapshot(instrument, 1, 3);
+		named.setDisplayName("Nova Dynamics");
+		snapshots.apply(named);
 		trades.apply(Trades.trade(instrument, 1));
 		String events = "/api/v1/market-events";
 

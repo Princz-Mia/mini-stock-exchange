@@ -82,11 +82,15 @@ class MarketEventsIT {
 			assertThat(first.data().get("bids").get(0).get("price").asString()).isEqualTo("100.00");
 			assertThat(first.data().get("recentTrades").get(0).get("aggressorSide").asString()).isEqualTo("BUY");
 			assertThat(first.data().get("bootId").asString()).isNotBlank();
+			assertThat(first.data().get("displayName").isNull()).isTrue();
 
-			publish(Snapshots.snapshot(instrument, 2, 5));
+			MarketSnapshot named = Snapshots.snapshot(instrument, 2, 5);
+			named.setDisplayName("Nova Dynamics");
+			publish(named);
 
 			Event second = marketAt(received, 1, 2);
 			assertThat(second.data().get("bids").size()).as("the whole new book").isEqualTo(5);
+			assertThat(second.data().get("displayName").asString()).isEqualTo("Nova Dynamics");
 			assertThat(second.data().get("bootId").asString()).isEqualTo(first.data().get("bootId").asString());
 		}
 	}

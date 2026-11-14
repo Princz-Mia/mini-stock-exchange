@@ -2005,11 +2005,14 @@ components:
     Instrument:
       type: object
       additionalProperties: false
-      required: [instrumentId, symbol, venueState, referencePrice, tick, lotSize, minQuantity, maxQuantity, maxPrice,
-        lastPrice, bestBid, bestAsk, lastTradeSequence, sourceCommandSequence, generatedAt, session]
+      required: [instrumentId, symbol, displayName, venueState, referencePrice, tick, lotSize, minQuantity, maxQuantity,
+        maxPrice, lastPrice, bestBid, bestAsk, lastTradeSequence, sourceCommandSequence, generatedAt, session]
       properties:
         instrumentId: { $ref: '#/components/schemas/Uuid' }
         symbol: { type: string, pattern: '^[A-Z]{1,8}$' }
+        displayName:
+          description: Shown beside the symbol; null for none.
+          oneOf: [{ $ref: '#/components/schemas/DisplayName' }, { type: 'null' }]
         venueState: { $ref: '#/components/schemas/VenueState' }
         referencePrice:
           $ref: '#/components/schemas/Price'
@@ -2084,10 +2087,13 @@ components:
     Book:
       type: object
       additionalProperties: false
-      required: [instrumentId, symbol, venueState, bids, asks, sourceCommandSequence, generatedAt, feed]
+      required: [instrumentId, symbol, displayName, venueState, bids, asks, sourceCommandSequence, generatedAt, feed]
       properties:
         instrumentId: { $ref: '#/components/schemas/Uuid' }
         symbol: { type: string }
+        displayName:
+          description: Shown beside the symbol; null for none.
+          oneOf: [{ $ref: '#/components/schemas/DisplayName' }, { type: 'null' }]
         venueState: { $ref: '#/components/schemas/VenueState' }
         bids:
           type: array
@@ -2254,12 +2260,15 @@ components:
       type: object
       additionalProperties: false
       description: Data of a `market` event. Replaces the previous frame entirely.
-      required: [bootId, instrumentId, symbol, venueState, sourceCommandSequence, bids, asks, lastPrice, recentTrades,
-        lastTradeSequence, generatedAt, feed, session]
+      required: [bootId, instrumentId, symbol, displayName, venueState, sourceCommandSequence, bids, asks, lastPrice,
+        recentTrades, lastTradeSequence, generatedAt, feed, session]
       properties:
         bootId: { $ref: '#/components/schemas/Uuid' }
         instrumentId: { $ref: '#/components/schemas/Uuid' }
         symbol: { type: string }
+        displayName:
+          description: Shown beside the symbol; null for none.
+          oneOf: [{ $ref: '#/components/schemas/DisplayName' }, { type: 'null' }]
         venueState: { $ref: '#/components/schemas/VenueState' }
         sourceCommandSequence: { $ref: '#/components/schemas/Sequence' }
         bids:

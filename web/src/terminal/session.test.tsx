@@ -69,6 +69,7 @@ describe('session figures, written out', () => {
 const instrument = (session: SessionFigures, overrides: Partial<Instrument> = {}): Instrument => ({
   instrumentId: '00000000-0000-0000-0000-000000000001',
   symbol: 'NOVA',
+  displayName: null,
   venueState: 'OPEN',
   referencePrice: '100.00',
   tick: '0.01',

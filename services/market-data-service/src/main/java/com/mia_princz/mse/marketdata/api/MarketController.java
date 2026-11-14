@@ -80,8 +80,9 @@ class MarketController {
 	record Quote(String price, long quantity, int orderCount) {
 	}
 
-	record InstrumentView(String instrumentId, String symbol, String venueState, String referencePrice, String tick,
-			long lotSize, long minQuantity, long maxQuantity, String maxPrice, String lastPrice, Quote bestBid,
+	/** {@code displayName} is null for none, here and in {@link Book}. */
+	record InstrumentView(String instrumentId, String symbol, String displayName, String venueState,
+			String referencePrice, String tick, long lotSize, long minQuantity, long maxQuantity, String maxPrice, String lastPrice, Quote bestBid,
 			Quote bestAsk, String lastTradeSequence, String sourceCommandSequence, Instant generatedAt,
 			SessionView session) {
 	}
@@ -103,8 +104,8 @@ class MarketController {
 	}
 
 	/** {@code sourceCommandSequence} is the market revision: a higher one is newer. */
-	record Book(String instrumentId, String symbol, String venueState, List<Quote> bids, List<Quote> asks,
-			String sourceCommandSequence, Instant generatedAt, Feed feed) {
+	record Book(String instrumentId, String symbol, String displayName, String venueState, List<Quote> bids,
+			List<Quote> asks, String sourceCommandSequence, Instant generatedAt, Feed feed) {
 	}
 
 	record TradeView(String tradeId, String tradeSequence, String price, long quantity, Instant executedAt) {
@@ -180,7 +181,8 @@ class MarketController {
 			throw ApiException.invalid("depth", "OUT_OF_RANGE", "depth must be between 1 and " + MAX_DEPTH);
 		}
 		MarketQueries.Book book = queries.book(instrumentId, depth).orElseThrow(MarketController::notFound);
-		return new Book(book.instrumentId().toString(), book.symbol(), book.venueState(), quotes(book.bids()),
+		return new Book(book.instrumentId().toString(), book.symbol(), book.displayName(), book.venueState(),
+				quotes(book.bids()),
 				quotes(book.asks()), Long.toString(book.sourceCommandSequence()), book.generatedAt(), feed(marketFeed));
 	}
 
@@ -219,7 +221,8 @@ class MarketController {
 
 	private static InstrumentView view(MarketQueries.Instrument instrument, MarketQueries.Session session,
 			Feed tradeFeed) {
-		return new InstrumentView(instrument.instrumentId().toString(), instrument.symbol(), instrument.venueState(),
+		return new InstrumentView(instrument.instrumentId().toString(), instrument.symbol(), instrument.displayName(),
+				instrument.venueState(),
 				price(instrument.referencePriceCents()), price(instrument.tickCents()), instrument.lotSize(),
 				instrument.minQuantity(), instrument.maxQuantity(), price(instrument.maxPriceCents()),
 				instrument.lastPriceCents() == null ? null : price(instrument.lastPriceCents()),

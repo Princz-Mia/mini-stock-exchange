@@ -1238,6 +1238,8 @@ export interface components {
         readonly Instrument: {
             readonly instrumentId: components["schemas"]["Uuid"];
             readonly symbol: string;
+            /** @description Shown beside the symbol; null for none. */
+            readonly displayName: components["schemas"]["DisplayName"] | null;
             readonly venueState: components["schemas"]["VenueState"];
             /** @description Shown before the first trade; never executable liquidity. */
             readonly referencePrice: components["schemas"]["Price"];
@@ -1294,6 +1296,8 @@ export interface components {
         readonly Book: {
             readonly instrumentId: components["schemas"]["Uuid"];
             readonly symbol: string;
+            /** @description Shown beside the symbol; null for none. */
+            readonly displayName: components["schemas"]["DisplayName"] | null;
             readonly venueState: components["schemas"]["VenueState"];
             readonly bids: readonly components["schemas"]["Quote"][];
             readonly asks: readonly components["schemas"]["Quote"][];
@@ -1409,6 +1413,8 @@ export interface components {
             readonly bootId: components["schemas"]["Uuid"];
             readonly instrumentId: components["schemas"]["Uuid"];
             readonly symbol: string;
+            /** @description Shown beside the symbol; null for none. */
+            readonly displayName: components["schemas"]["DisplayName"] | null;
             readonly venueState: components["schemas"]["VenueState"];
             readonly sourceCommandSequence: components["schemas"]["Sequence"];
             readonly bids: readonly components["schemas"]["Quote"][];

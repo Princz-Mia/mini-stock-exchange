@@ -16,9 +16,10 @@ import com.mia_princz.mse.contracts.events.VenueState;
 /**
  * Applies market snapshots to the instrument and market projections. A snapshot replaces the instrument's row only
  * when its source command sequence is higher than the stored one, so duplicates, redeliveries and late arrivals
- * change nothing. A snapshot that says the instrument was removed deletes both rows under the same rule, and after a
- * removal it is the event id, not the sequence, that stops a redelivered add. Each event id is recorded in the same
- * transaction. Callers run each batch in one transaction.
+ * change nothing. The display name is replaced with the rest, so a newer snapshot without one clears it. A snapshot
+ * that says the instrument was removed deletes both rows under the same rule, and after a removal it is the event id,
+ * not the sequence, that stops a redelivered add. Each event id is recorded in the same transaction. Callers run each
+ * batch in one transaction.
  */
 public final class SnapshotProjection {
 
@@ -46,18 +47,19 @@ public final class SnapshotProjection {
 		}
 		var rules = snapshot.getRules();
 		jdbc.sql("""
-				INSERT INTO instrument_projection (instrument_id, simulation_id, symbol, rule_version,
+				INSERT INTO instrument_projection (instrument_id, simulation_id, symbol, display_name, rule_version,
 				    reference_price_cents, tick_cents, lot_size, min_quantity, max_quantity, max_price_cents,
 				    source_command_sequence)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (instrument_id) DO UPDATE SET
-				    symbol = EXCLUDED.symbol, rule_version = EXCLUDED.rule_version,
+				    symbol = EXCLUDED.symbol, display_name = EXCLUDED.display_name, rule_version = EXCLUDED.rule_version,
 				    reference_price_cents = EXCLUDED.reference_price_cents, tick_cents = EXCLUDED.tick_cents,
 				    lot_size = EXCLUDED.lot_size, min_quantity = EXCLUDED.min_quantity,
 				    max_quantity = EXCLUDED.max_quantity, max_price_cents = EXCLUDED.max_price_cents,
 				    source_command_sequence = EXCLUDED.source_command_sequence, updated_at = now()
 				WHERE instrument_projection.source_command_sequence < EXCLUDED.source_command_sequence""")
-			.params(snapshot.getInstrumentId(), snapshot.getSimulationId(), snapshot.getSymbol(), rules.getRuleVersion(),
+			.params(snapshot.getInstrumentId(), snapshot.getSimulationId(), snapshot.getSymbol(),
+					snapshot.getDisplayName(), rules.getRuleVersion(),
 					rules.getReferencePriceCents(), rules.getTickCents(), rules.getLotSize(), rules.getMinQuantity(),
 					rules.getMaxQuantity(), rules.getMaxPriceCents(), snapshot.getSourceCommandSequence())
 			.update();

@@ -60,6 +60,7 @@ export function frame(instrumentId: string, revision: string, overrides: Partial
     bootId: '00000000-0000-0000-0000-0000000000b0',
     instrumentId,
     symbol: 'NOVA',
+    displayName: null,
     venueState: 'OPEN',
     sourceCommandSequence: revision,
     bids: [{ price: '99.50', quantity: 10, orderCount: 1 }],

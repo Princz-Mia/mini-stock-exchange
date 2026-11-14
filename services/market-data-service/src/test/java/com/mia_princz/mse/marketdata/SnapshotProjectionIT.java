@@ -106,18 +106,31 @@ class SnapshotProjectionIT {
 				Long.class, instrument)).isEqualTo(12_050);
 	}
 
-	/** The display name, added in the event's second version, changes nothing in the projection yet. */
+	/**
+	 * The display name is projected with the rest of the catalogue entry: a newer snapshot replaces it, and one without a
+	 * name, as Execution writes after the name is removed, clears it. A late copy of an older name changes nothing.
+	 */
 	@Test
-	void theDisplayNameIsAcceptedAndChangesNothingYet() {
+	void theDisplayNameFollowsTheNewestSnapshot() {
 		UUID instrument = UUID.randomUUID();
-		MarketSnapshot named = Snapshots.snapshot(instrument, 3, 1);
+		projection.apply(Snapshots.untraded(instrument, 3));
+		assertThat(displayName(instrument)).as("a snapshot without one, as the first version has").isNull();
+
+		MarketSnapshot named = Snapshots.untraded(instrument, 5);
 		named.setDisplayName("Nova Dynamics");
-
 		assertThat(projection.apply(named)).isTrue();
+		assertThat(displayName(instrument)).isEqualTo("Nova Dynamics");
 
-		assertThat(jdbc.queryForObject("SELECT symbol FROM instrument_projection WHERE instrument_id = ?",
-				String.class, instrument)).isEqualTo("NOVA");
-		assertThat(sequence(instrument)).isEqualTo(3);
+		MarketSnapshot late = Snapshots.untraded(instrument, 4);
+		late.setDisplayName("Nova");
+		assertThat(projection.apply(late)).isFalse();
+		MarketSnapshot sameSequence = Snapshots.untraded(instrument, 5);
+		sameSequence.setDisplayName("Nova");
+		assertThat(projection.apply(sameSequence)).isFalse();
+		assertThat(displayName(instrument)).isEqualTo("Nova Dynamics");
+
+		assertThat(projection.apply(Snapshots.untraded(instrument, 7))).isTrue();
+		assertThat(displayName(instrument)).as("removed in Execution, so cleared").isNull();
 	}
 
 	/** An instrument deleted during setup leaves both projections, its market first. */
@@ -226,6 +239,11 @@ class SnapshotProjectionIT {
 	private long rows(String table, UUID instrument) {
 		return jdbc.queryForObject("SELECT count(*) FROM " + table + " WHERE instrument_id = ?", Long.class,
 				instrument);
+	}
+
+	private String displayName(UUID instrument) {
+		return jdbc.queryForObject("SELECT display_name FROM instrument_projection WHERE instrument_id = ?",
+				String.class, instrument);
 	}
 
 	private long sequence(UUID instrument) {

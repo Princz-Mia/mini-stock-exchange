@@ -30,13 +30,14 @@ class MarketQueries {
 	record Level(long priceCents, long quantity, int orderCount) {
 	}
 
-	record Instrument(UUID instrumentId, String symbol, String venueState, long referencePriceCents, long tickCents,
-			long lotSize, long minQuantity, long maxQuantity, long maxPriceCents, Long lastPriceCents, Level bestBid,
-			Level bestAsk, long lastTradeSequence, long sourceCommandSequence, Instant generatedAt) {
+	/** {@code displayName} is null for none, here and in {@link Book} and {@link Live}. */
+	record Instrument(UUID instrumentId, String symbol, String displayName, String venueState, long referencePriceCents,
+			long tickCents, long lotSize, long minQuantity, long maxQuantity, long maxPriceCents, Long lastPriceCents,
+			Level bestBid, Level bestAsk, long lastTradeSequence, long sourceCommandSequence, Instant generatedAt) {
 	}
 
-	record Book(UUID instrumentId, String symbol, String venueState, List<Level> bids, List<Level> asks,
-			long sourceCommandSequence, Instant generatedAt) {
+	record Book(UUID instrumentId, String symbol, String displayName, String venueState, List<Level> bids,
+			List<Level> asks, long sourceCommandSequence, Instant generatedAt) {
 	}
 
 	record Trade(UUID tradeId, long tradeSequence, long priceCents, long quantity, Instant executedAt) {
@@ -48,8 +49,8 @@ class MarketQueries {
 	}
 
 	/** Everything a live frame shows, from one row: the complete public state of the instrument. */
-	record Live(UUID instrumentId, String symbol, String venueState, long referencePriceCents, List<Level> bids,
-			List<Level> asks, Long lastPriceCents, List<TapeTrade> recentTrades, long lastTradeSequence,
+	record Live(UUID instrumentId, String symbol, String displayName, String venueState, long referencePriceCents,
+			List<Level> bids, List<Level> asks, Long lastPriceCents, List<TapeTrade> recentTrades, long lastTradeSequence,
 			long sourceCommandSequence, Instant generatedAt) {
 	}
 
@@ -75,13 +76,14 @@ class MarketQueries {
 
 	List<Instrument> instruments() {
 		return jdbc.sql("""
-				SELECT i.instrument_id, i.symbol, m.venue_state, i.reference_price_cents, i.tick_cents, i.lot_size,
+				SELECT i.instrument_id, i.symbol, i.display_name, m.venue_state, i.reference_price_cents, i.tick_cents,
+				    i.lot_size,
 				    i.min_quantity, i.max_quantity, i.max_price_cents, m.last_price_cents, m.bids -> 0 AS best_bid,
 				    m.asks -> 0 AS best_ask, m.last_trade_sequence, m.source_command_sequence, m.generated_at
 				FROM instrument_projection i JOIN market_snapshot m ON m.instrument_id = i.instrument_id
 				ORDER BY i.symbol""")
 			.query((row, index) -> new Instrument(row.getObject("instrument_id", UUID.class), row.getString("symbol"),
-					row.getString("venue_state"), row.getLong("reference_price_cents"), row.getLong("tick_cents"),
+					row.getString("display_name"), row.getString("venue_state"), row.getLong("reference_price_cents"), row.getLong("tick_cents"),
 					row.getLong("lot_size"), row.getLong("min_quantity"), row.getLong("max_quantity"),
 					row.getLong("max_price_cents"), row.getObject("last_price_cents", Long.class),
 					level(row.getString("best_bid")), level(row.getString("best_ask")),
@@ -141,12 +143,13 @@ class MarketQueries {
 
 	Optional<Book> book(UUID instrumentId, int depth) {
 		return jdbc.sql("""
-				SELECT i.symbol, m.venue_state, m.bids::text AS bids, m.asks::text AS asks, m.source_command_sequence,
-				    m.generated_at
+				SELECT i.symbol, i.display_name, m.venue_state, m.bids::text AS bids, m.asks::text AS asks,
+				    m.source_command_sequence, m.generated_at
 				FROM market_snapshot m JOIN instrument_projection i ON i.instrument_id = m.instrument_id
 				WHERE m.instrument_id = ?""")
 			.param(instrumentId)
-			.query((row, index) -> new Book(instrumentId, row.getString("symbol"), row.getString("venue_state"),
+			.query((row, index) -> new Book(instrumentId, row.getString("symbol"), row.getString("display_name"),
+					row.getString("venue_state"),
 					levels(row.getString("bids"), depth), levels(row.getString("asks"), depth),
 					row.getLong("source_command_sequence"), row.getTimestamp("generated_at").toInstant()))
 			.optional();
@@ -154,13 +157,15 @@ class MarketQueries {
 
 	Optional<Live> live(UUID instrumentId) {
 		return jdbc.sql("""
-				SELECT i.symbol, m.venue_state, i.reference_price_cents, m.bids::text AS bids, m.asks::text AS asks,
+				SELECT i.symbol, i.display_name, m.venue_state, i.reference_price_cents, m.bids::text AS bids,
+				    m.asks::text AS asks,
 				    m.last_price_cents, m.recent_trades::text AS recent_trades, m.last_trade_sequence,
 				    m.source_command_sequence, m.generated_at
 				FROM market_snapshot m JOIN instrument_projection i ON i.instrument_id = m.instrument_id
 				WHERE m.instrument_id = ?""")
 			.param(instrumentId)
-			.query((row, index) -> new Live(instrumentId, row.getString("symbol"), row.getString("venue_state"),
+			.query((row, index) -> new Live(instrumentId, row.getString("symbol"), row.getString("display_name"),
+					row.getString("venue_state"),
 					row.getLong("reference_price_cents"), levels(row.getString("bids"), Integer.MAX_VALUE),
 					levels(row.getString("asks"), Integer.MAX_VALUE),
 					row.getObject("last_price_cents", Long.class), tape(row.getString("recent_trades")),
