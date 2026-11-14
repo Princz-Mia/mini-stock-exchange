@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { type FormEvent, useCallback, useState } from 'react';
+import { type FormEvent, useCallback, useId, useRef, useState } from 'react';
 
 import { api } from '../api/client';
 import type { AccountRequest, AccountSummary, Instrument } from '../api/types';
@@ -8,7 +8,8 @@ import { usePagedList } from '../app/paging';
 import { groupDigits, groupInteger } from '../format';
 import { toCents } from '../terminal/money';
 import { CommandStatus } from './CommandStatus';
-import { DEFAULT_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
+import { EXAMPLE_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
+import { refusedFields, refusedHoldings, useFocusOnRefusal } from './refusals';
 import { strategyTag } from './strategies';
 import { useCommand } from './useCommand';
 
@@ -115,7 +116,7 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
     defaults: { size: 25, order: 'oldest' },
   });
   const [username, setUsername] = useState('');
-  const [cash, setCash] = useState(DEFAULT_CASH);
+  const [cash, setCash] = useState('');
   const [shares, setShares] = useState<ShareInputs>({});
   const send = useCallback(async (request: AccountRequest, key: string) => {
     const created = await api.provisionAccount(request, key);
@@ -124,10 +125,23 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
     return created;
   }, [client]);
   const command = useCommand(send);
+  const form = useRef<HTMLFormElement>(null);
+  const outcomeId = useId();
+  // The holdings last sent, which a refusal's fields point into.
+  const [sent, setSent] = useState<readonly { instrumentId: string }[]>([]);
+  const invalid = refusedFields(command.outcome);
+  const invalidShares = refusedHoldings(invalid, sent);
+  useFocusOnRefusal(command.outcome.kind, form);
+  const marked = (field: string) => ({
+    'aria-invalid': invalid.has(field) || undefined,
+    'aria-describedby': invalid.has(field) ? outcomeId : undefined,
+  });
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    void command.run({ username: username.trim(), cash: cash.trim(), holdings: holdingsFrom(instruments, shares) });
+    const holdings = holdingsFrom(instruments, shares);
+    setSent(holdings);
+    void command.run({ username: username.trim(), cash: cash.trim(), holdings });
   };
 
   return (
@@ -142,22 +156,39 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
         noun="accounts"
       />
       {editable ? (
-        <form onSubmit={submit} className="setup-form" aria-label="Fund a trader">
+        <form ref={form} onSubmit={submit} className="setup-form" aria-label="Fund a trader">
           <fieldset disabled={command.outcome.kind === 'sending' || command.unresolved}>
             <div className="field-row">
               <label>
                 Trader's username
-                <input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="off" />
+                <input
+                  value={username}
+                  onChange={(event) => setUsername(event.target.value)}
+                  autoComplete="off"
+                  {...marked('username')}
+                />
               </label>
               <label>
                 Cash
-                <input value={cash} onChange={(event) => setCash(event.target.value)} inputMode="decimal" />
+                <input
+                  value={cash}
+                  onChange={(event) => setCash(event.target.value)}
+                  inputMode="decimal"
+                  placeholder={`e.g. ${EXAMPLE_CASH}`}
+                  {...marked('cash')}
+                />
               </label>
             </div>
-            <ShareFields instruments={instruments} shares={shares} onChange={setShares} />
+            <ShareFields
+              instruments={instruments}
+              shares={shares}
+              onChange={setShares}
+              invalid={invalidShares}
+              describedBy={outcomeId}
+            />
             <p className="muted hint">
-              Starts from the default endowment: 100,000.00 and 1,000 shares of each instrument. Set shares to 0 to
-              leave an instrument out. Only existing traders can be funded, once each.
+              Enter the cash and the shares of each instrument this trader starts with; a blank or 0 gives none of
+              that instrument. Only existing traders can be funded, once each.
             </p>
             <button type="submit" className="primary">
               Fund account
@@ -167,11 +198,13 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
       ) : (
         <p className="muted">Endowments are frozen once the market opens; nothing is granted after that.</p>
       )}
-      <CommandStatus
-        outcome={command.outcome}
-        done={(created) => `Funded ${created.username} with ${groupDigits(created.cash)}.`}
-        onRetry={() => void command.retry()}
-      />
+      <div id={outcomeId}>
+        <CommandStatus
+          outcome={command.outcome}
+          done={(created) => `Funded ${created.username} with ${groupDigits(created.cash)}.`}
+          onRetry={() => void command.retry()}
+        />
+      </div>
     </section>
   );
 }
