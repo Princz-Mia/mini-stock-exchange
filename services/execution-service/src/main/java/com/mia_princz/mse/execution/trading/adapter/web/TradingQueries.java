@@ -112,6 +112,32 @@ class TradingQueries {
 	record AccountPosition(Instant createdAt, UUID id) {
 	}
 
+	/** A trader login, and whether it has an account in the market. */
+	record TraderLogin(UUID id, String username, Instant createdAt, boolean funded) {
+	}
+
+	/**
+	 * Every trader login, wherever it came from, in creation order either way, in keyset pages; with {@code funded}
+	 * only those that have, or have not, an account in the market.
+	 */
+	List<TraderLogin> traders(Boolean funded, AccountPosition after, int limit, PageOrder order) {
+		String hasAccount = "EXISTS (SELECT 1 FROM account a WHERE a.owner_user_id = u.id)";
+		return jdbc.sql("""
+				SELECT u.id, u.username, u.created_at, %1$s AS funded
+				FROM app_user u
+				WHERE u.role = 'TRADER'%2$s%3$s
+				ORDER BY u.created_at %4$s, u.id %4$s LIMIT :limit""".formatted(hasAccount,
+				funded == null ? "" : funded ? " AND " + hasAccount : " AND NOT " + hasAccount,
+				after == null ? "" : " AND (u.created_at, u.id) " + order.after() + " (:afterAt, :afterId)",
+				order.direction()))
+			.param("afterAt", after == null ? null : Timestamp.from(after.createdAt()))
+			.param("afterId", after == null ? null : after.id())
+			.param("limit", limit)
+			.query((row, index) -> new TraderLogin(row.getObject("id", UUID.class), row.getString("username"),
+					row.getTimestamp("created_at").toInstant(), row.getBoolean("funded")))
+			.list();
+	}
+
 	/** Every trading account with its initial allocation, in creation order either way, in keyset pages. */
 	List<AccountSummary> accounts(AccountPosition after, int limit, PageOrder order) {
 		record Row(UUID id, String name, String kind, Instant createdAt, String token, String strategy) {

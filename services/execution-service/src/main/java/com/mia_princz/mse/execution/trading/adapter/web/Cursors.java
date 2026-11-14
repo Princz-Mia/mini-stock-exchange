@@ -39,6 +39,20 @@ final class Cursors {
 		return new TradingQueries.AccountPosition(instant(parts[0]), uuid(parts[1]));
 	}
 
+	/** A page of trader logins, under the {@code funded} filter it was issued with (none when null). */
+	static String traders(TradingQueries.AccountPosition position, PageOrder order, Boolean funded) {
+		return encode(order, traderFilter(funded), position.createdAt() + "|" + position.id());
+	}
+
+	static TradingQueries.AccountPosition traders(String cursor, PageOrder order, Boolean funded) {
+		String[] parts = decode(cursor, order, traderFilter(funded), PageOrder.OLDEST);
+		return new TradingQueries.AccountPosition(instant(parts[0]), uuid(parts[1]));
+	}
+
+	private static String traderFilter(Boolean funded) {
+		return funded == null ? "" : "funded=" + funded;
+	}
+
 	static String trades(TradingQueries.TradePosition position, PageOrder order, HistoryFilter filter) {
 		return encode(order, filter.fingerprint(), position.commandSequence() + "|" + position.tradeSequence());
 	}

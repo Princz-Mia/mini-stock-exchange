@@ -554,6 +554,33 @@ paths:
           $ref: '#/components/responses/OutcomeUnknown'
 
   /api/v1/admin/traders:
+    get:
+      tags: [execution]
+      operationId: listTraders
+      summary: Every trader login, oldest first unless order=newest. Operator only.
+      description: |
+        Wherever each login came from: added during setup or seeded from configuration. With funded=false, only the
+        logins still without an account in this market, which setup can fund; with funded=true, only those with one.
+        A cursor keeps the filter it was issued with.
+      parameters:
+        - name: funded
+          in: query
+          required: false
+          schema: { type: boolean }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Order'
+      responses:
+        '200':
+          description: One page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TraderPage' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator. No body.
     post:
       tags: [execution]
       operationId: addTrader
@@ -1692,6 +1719,28 @@ components:
           type: array
           maxItems: 50
           items: { $ref: '#/components/schemas/Endowment' }
+
+    TraderPage:
+      type: object
+      additionalProperties: false
+      required: [traders, nextCursor]
+      properties:
+        traders:
+          type: array
+          maxItems: 200
+          items: { $ref: '#/components/schemas/TraderSummary' }
+        nextCursor:
+          type: [string, 'null']
+
+    TraderSummary:
+      type: object
+      additionalProperties: false
+      required: [username, funded]
+      properties:
+        username: { type: string }
+        funded:
+          type: boolean
+          description: Whether the trader has an account in this market.
 
     TraderAdded:
       type: object

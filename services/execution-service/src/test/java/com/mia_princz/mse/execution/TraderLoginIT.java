@@ -86,9 +86,39 @@ class TraderLoginIT {
 		assertThat(JSON.readTree(omarSession.get("/api/v1/me").body()).get("roles").toString()).contains("TRADER");
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM account WHERE display_name = 'omar'", Long.class))
 			.isZero();
+		// The list shows every trader login, the configured one included; the unfunded ones are those setup can fund.
+		HttpResponse<String> everyone = operator.get(TRADERS);
+		CONTRACT.assertResponse("GET", TRADERS, 200, everyone.headers().firstValue("Content-Type").orElse(null),
+				everyone.body());
+		assertThat(listed(everyone)).containsExactly("trader false", "maria true", "omar false");
+		assertThat(listed(operator.get(TRADERS + "?funded=false"))).containsExactly("trader false", "omar false");
+		assertThat(listed(operator.get(TRADERS + "?funded=true"))).containsExactly("maria true");
+		assertThat(listed(operator.get(TRADERS + "?order=newest"))).containsExactly("omar false", "maria true",
+				"trader false");
+		// A page at a time, the filter kept by the cursor; a cursor from another filter is refused.
+		JsonNode first = JSON.readTree(operator.get(TRADERS + "?funded=false&limit=1").body());
+		assertThat(first.get("traders").get(0).get("username").asString()).isEqualTo("trader");
+		String next = first.get("nextCursor").asString();
+		JsonNode second = JSON.readTree(operator.get(TRADERS + "?funded=false&limit=1&cursor=" + next).body());
+		assertThat(second.get("traders").get(0).get("username").asString()).isEqualTo("omar");
+		assertThat(second.get("nextCursor").isNull()).isTrue();
+		assertThat(fields(operator.get(TRADERS + "?funded=true&limit=1&cursor=" + next)))
+			.containsExactly("cursor INVALID_CURSOR");
+		assertThat(fields(operator.get(TRADERS + "?limit=1&cursor=" + next))).containsExactly("cursor INVALID_CURSOR");
+		String unfiltered = JSON.readTree(operator.get(TRADERS + "?limit=1").body()).get("nextCursor").asString();
+		assertThat(fields(operator.get(TRADERS + "?funded=false&limit=1&cursor=" + unfiltered)))
+			.containsExactly("cursor INVALID_CURSOR");
+		// Newest first, a page at a time.
+		JsonNode newest = JSON.readTree(operator.get(TRADERS + "?order=newest&limit=2").body());
+		assertThat(newest.get("traders").get(1).get("username").asString()).isEqualTo("maria");
+		assertThat(listed(operator.get(TRADERS + "?order=newest&limit=2&cursor=" + newest.get("nextCursor").asString())))
+			.containsExactly("trader false");
+		assertThat(omarSession.get(TRADERS).statusCode()).as("traders cannot list them").isEqualTo(403);
+
 		HttpResponse<String> funded = operator.post("/api/v1/admin/accounts",
 				"{\"username\":\"omar\",\"cash\":\"1000.00\"}", "Idempotency-Key", UUID.randomUUID().toString());
 		assertThat(funded.statusCode()).as(funded.body()).isEqualTo(201);
+		assertThat(listed(operator.get(TRADERS + "?funded=false"))).containsExactly("trader false");
 
 		// The same key repeats the first answer whatever password it carries: no second user, no new hash.
 		String hashBefore = jdbc.queryForObject("SELECT password_hash FROM app_user WHERE username = 'maria'",
@@ -166,6 +196,15 @@ class TraderLoginIT {
 			body.append(",\"holdings\":[{\"instrumentId\":\"%s\",\"quantity\":%d}]".formatted(instrumentId, quantity));
 		}
 		return body.append('}').toString();
+	}
+
+	private static List<String> listed(HttpResponse<String> page) {
+		assertThat(page.statusCode()).as(page.body()).isEqualTo(200);
+		List<String> traders = new ArrayList<>();
+		JSON.readTree(page.body())
+			.get("traders")
+			.forEach((trader) -> traders.add(trader.get("username").asString() + " " + trader.get("funded").asBoolean()));
+		return traders;
 	}
 
 	private static String code(HttpResponse<String> problem, int status) {

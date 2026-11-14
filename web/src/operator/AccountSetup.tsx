@@ -2,11 +2,12 @@ import { useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, useCallback, useId, useRef, useState } from 'react';
 
 import { api } from '../api/client';
-import type { AccountRequest, AccountSummary, Instrument } from '../api/types';
+import type { AccountRequest, AccountSummary, Instrument, TraderSummary } from '../api/types';
 import { type Column, PagedTable } from '../app/PagedTable';
 import { usePagedList } from '../app/paging';
 import { groupDigits, groupInteger } from '../format';
 import { toCents } from '../terminal/money';
+import { AddTraderForm } from './AddTraderForm';
 import { CommandStatus } from './CommandStatus';
 import { EXAMPLE_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
 import { refusedFields, refusedHoldings, useFocusOnRefusal } from './refusals';
@@ -103,7 +104,48 @@ const ACCOUNT_COLUMNS: readonly Column<AccountSummary>[] = [
   { key: 'token', header: 'Token', cell: (account) => (account.kind === 'BOT' ? <BotToken account={account} /> : '—') },
 ];
 
-/** Funded accounts, traders and bots, with what they started with and, during setup, a form to fund a trader. */
+/**
+ * Trader logins still without an account in this market, a page at a time, each with Fund, which picks it in the
+ * funding form below. Logins have no limit, so the list pages rather than offering every name in a menu.
+ */
+function UnfundedTraders({ onFund, busy }: { onFund: (username: string) => void; busy: boolean }) {
+  const traders = usePagedList({
+    table: 'traders',
+    queryKey: ['traders'],
+    fetch: async (cursor, { size, order }) => {
+      const page = await api.traders(cursor, size, order, false);
+      return { rows: page.traders, nextCursor: page.nextCursor };
+    },
+    defaults: { size: 10, order: 'oldest' },
+  });
+  const columns: readonly Column<TraderSummary>[] = [
+    { key: 'username', header: 'Trader', rowHeader: true, cell: (trader) => trader.username },
+    {
+      key: 'fund',
+      header: <span className="visually-hidden">Actions</span>,
+      cell: (trader) => (
+        <button type="button" className="quiet" onClick={() => onFund(trader.username)} disabled={busy}>
+          Fund <span className="visually-hidden">{trader.username}</span>
+        </button>
+      ),
+    },
+  ];
+  return (
+    <PagedTable
+      label="Traders without an account"
+      list={traders}
+      columns={columns}
+      rowKey={(trader) => trader.username}
+      empty="Every trader has an account."
+      noun="traders"
+    />
+  );
+}
+
+/**
+ * Funded accounts, traders and bots, with what they started with and, during setup, forms to add a trader and to
+ * fund one that has no account yet.
+ */
 export function AccountSetup({ instruments, editable }: { instruments: readonly Instrument[]; editable: boolean }) {
   const client = useQueryClient();
   const accounts = usePagedList({
@@ -122,9 +164,21 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
     const created = await api.provisionAccount(request, key);
     setUsername('');
     void client.invalidateQueries({ queryKey: ['accounts'] });
+    void client.invalidateQueries({ queryKey: ['traders'] });
     return created;
   }, [client]);
   const command = useCommand(send);
+  const cashField = useRef<HTMLInputElement>(null);
+  // Fund in the list picks the trader here, and moves on to their cash. While a funding is sending, or waits for a
+  // retry under its key, the form shows the trader being funded, so Fund waits too.
+  const fundingBusy = command.outcome.kind === 'sending' || command.unresolved;
+  const fund = (trader: string) => {
+    if (fundingBusy) {
+      return;
+    }
+    setUsername(trader);
+    cashField.current?.focus();
+  };
   const form = useRef<HTMLFormElement>(null);
   const outcomeId = useId();
   // The holdings last sent, which a refusal's fields point into.
@@ -155,6 +209,14 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
         empty="No accounts yet."
         noun="accounts"
       />
+      {editable && (
+        <>
+          <h3>Add a trader</h3>
+          <AddTraderForm instruments={instruments} />
+          <h3>Traders without an account</h3>
+          <UnfundedTraders onFund={fund} busy={fundingBusy} />
+        </>
+      )}
       {editable ? (
         <form ref={form} onSubmit={submit} className="setup-form" aria-label="Fund a trader">
           <fieldset disabled={command.outcome.kind === 'sending' || command.unresolved}>
@@ -171,6 +233,7 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
               <label>
                 Cash
                 <input
+                  ref={cashField}
                   value={cash}
                   onChange={(event) => setCash(event.target.value)}
                   inputMode="decimal"
@@ -187,8 +250,9 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
               describedBy={outcomeId}
             />
             <p className="muted hint">
-              Enter the cash and the shares of each instrument this trader starts with; a blank or 0 gives none of
-              that instrument. Only existing traders can be funded, once each.
+              Pick a trader without an account above, or type their username, then enter the cash and the shares
+              of each instrument they start with; a blank or 0 gives none of that instrument. Each trader is funded
+              once.
             </p>
             <button type="submit" className="primary">
               Fund account

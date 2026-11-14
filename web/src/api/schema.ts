@@ -316,7 +316,13 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        readonly get?: never;
+        /**
+         * Every trader login, oldest first unless order=newest. Operator only.
+         * @description Wherever each login came from: added during setup or seeded from configuration. With funded=false, only the
+         *     logins still without an account in this market, which setup can fund; with funded=true, only those with one.
+         *     A cursor keeps the filter it was issued with.
+         */
+        readonly get: operations["listTraders"];
         readonly put?: never;
         /**
          * Add a trader login, optionally with its account and starting endowment, while the market is in SETUP.
@@ -1010,6 +1016,15 @@ export interface components {
             /** @description The trader's starting cash, which gives them an account now. Required with holdings; left out with no holdings, only the login is added. */
             readonly cash?: components["schemas"]["Money"];
             readonly holdings?: readonly components["schemas"]["Endowment"][];
+        };
+        readonly TraderPage: {
+            readonly traders: readonly components["schemas"]["TraderSummary"][];
+            readonly nextCursor: string | null;
+        };
+        readonly TraderSummary: {
+            readonly username: string;
+            /** @description Whether the trader has an account in this market. */
+            readonly funded: boolean;
         };
         readonly TraderAdded: {
             readonly username: string;
@@ -2397,6 +2412,51 @@ export interface operations {
             };
             readonly 503: components["responses"]["Unavailable"];
             readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly listTraders: {
+        readonly parameters: {
+            readonly query?: {
+                readonly funded?: boolean;
+                readonly limit?: components["parameters"]["Limit"];
+                /**
+                 * @description The nextCursor of the previous page. Opaque. Refused under an order or filters other than the ones it came
+                 *     from.
+                 */
+                readonly cursor?: components["parameters"]["Cursor"];
+                /** @description Which end of the list pages start from. Without it, the operation's own default, named in its summary. */
+                readonly order?: components["parameters"]["Order"];
+            };
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description One page. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["TraderPage"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     readonly addTrader: {

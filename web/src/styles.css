@@ -600,6 +600,25 @@ button.primary.danger:enabled {
   color: var(--fill-text);
 }
 
+/* The password beside its Show, Generate and Copy buttons, wrapping under the field on a phone. */
+.password-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  align-items: end;
+}
+
+.password-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* Present while empty, so a screen reader hears it when it fills in. */
+.copy-status {
+  margin: 0;
+}
+
 /* The examples inside empty fields: readable, at the muted text's contrast, and never mistaken for a value. */
 input::placeholder {
   color: var(--muted);
@@ -626,7 +645,8 @@ input::placeholder {
   align-items: end;
 }
 
-.field-row label {
+.field-row label,
+.password-row label {
   display: grid;
   gap: var(--space-1);
   min-width: 120px;
