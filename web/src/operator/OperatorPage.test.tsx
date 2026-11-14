@@ -746,25 +746,38 @@ describe('the operator screen', () => {
     );
   });
 
-  it('funds a trader with the default endowment for every instrument', async () => {
-    const { server } = exchange('SETUP');
+  it('funds a trader with exactly what was typed into fields that start empty', async () => {
+    const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
+    const HELI = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000003', symbol: 'HELI' };
+    const { server } = exchange('SETUP', [NOVA, ORBT, HELI]);
     server.on('POST /api/v1/admin/accounts', {
       status: 201,
-      json: { accountId: 'a', username: 'trader', cash: '100000.00', holdings: [], commandSequence: '9' },
+      json: { accountId: 'a', username: 'trader', cash: '25000.00', holdings: [], commandSequence: '9' },
     });
     renderPage();
 
+    // Nothing is filled in for the operator; the usual values show only as examples.
     const form = await screen.findByRole('form', { name: 'Fund a trader' });
-    expect(await within(form).findByLabelText('NOVA shares')).toHaveValue('1000');
+    const cash = within(form).getByLabelText('Cash');
+    const nova = await within(form).findByLabelText('NOVA shares');
+    expect(cash).toHaveValue('');
+    expect(cash).toHaveAttribute('placeholder', 'e.g. 100000.00');
+    expect(nova).toHaveValue('');
+    expect(nova).toHaveAttribute('placeholder', 'e.g. 1000');
+    expect(within(form).getByLabelText('ORBT shares')).toHaveValue('');
     fireEvent.change(within(form).getByLabelText("Trader's username"), { target: { value: 'trader' } });
+    fireEvent.change(cash, { target: { value: '25000.00' } });
+    fireEvent.change(nova, { target: { value: '300' } });
+    fireEvent.change(within(form).getByLabelText('HELI shares'), { target: { value: '0' } });
     fireEvent.click(within(form).getByRole('button', { name: 'Fund account' }));
 
-    expect(await screen.findByText('Funded trader with 100,000.00.')).toBeInTheDocument();
+    expect(await screen.findByText('Funded trader with 25,000.00.')).toBeInTheDocument();
+    // ORBT was left blank and HELI set to 0, so the trader gets none of either.
     expect(server.requests.find((request) => request.url === '/api/v1/admin/accounts' && request.method === 'POST')?.body)
       .toEqual({
         username: 'trader',
-        cash: '100000.00',
-        holdings: [{ instrumentId: NOVA.instrumentId, quantity: 1000 }],
+        cash: '25000.00',
+        holdings: [{ instrumentId: NOVA.instrumentId, quantity: 300 }],
       });
   });
 
@@ -849,7 +862,7 @@ describe('the operator screen', () => {
     expect(within(bot).queryByRole('button', { name: /Revoke/ })).toBeNull();
   });
 
-  it('creates noise bots with the default endowment and shows the new population', async () => {
+  it('creates noise bots with the endowment typed and shows the new population', async () => {
     const { server, state } = exchange('SETUP');
     server.on('POST /api/v1/admin/bots', () => {
       state.tagged.noise = 10;
@@ -869,8 +882,19 @@ describe('the operator screen', () => {
 
     const form = await screen.findByRole('form', { name: 'Create bots' });
     expect(await screen.findByText('0 of 1,000 bots')).toBeInTheDocument();
-    expect(within(form).getByLabelText('Number of bots')).toHaveValue('10');
-    expect(await within(form).findByLabelText('NOVA shares')).toHaveValue('1000');
+    // The fields start empty, with examples, and the batch is what the operator typed.
+    const count = within(form).getByLabelText('Number of bots');
+    const cash = within(form).getByLabelText('Cash each');
+    const nova = await within(form).findByLabelText('NOVA shares');
+    expect([count, cash, nova].map((field) => (field as HTMLInputElement).value)).toEqual(['', '', '']);
+    expect([count, cash, nova].map((field) => field.getAttribute('placeholder'))).toEqual([
+      'e.g. 10',
+      'e.g. 100000.00',
+      'e.g. 1000',
+    ]);
+    fireEvent.change(count, { target: { value: '10' } });
+    fireEvent.change(cash, { target: { value: '100000.00' } });
+    fireEvent.change(nova, { target: { value: '1000' } });
     const strategy = within(form).getByRole('group', { name: 'Strategy' });
     expect(within(strategy).getAllByRole('radio').map((radio) => radio.getAttribute('value'))).toEqual([
       'MARKET_MAKER',
@@ -922,6 +946,7 @@ describe('the operator screen', () => {
     expect(await screen.findByText('12 noise · 4 momentum · 2 untagged')).toBeInTheDocument();
     const form = await screen.findByRole('form', { name: 'Create bots' });
     fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '1' } });
+    fireEvent.change(within(form).getByLabelText('Cash each'), { target: { value: '50000.00' } });
     fireEvent.click(within(form).getByRole('radio', { name: 'Market maker' }));
     expect(within(form).getByRole('radio', { name: 'Noise' })).not.toBeChecked();
     fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
@@ -931,9 +956,71 @@ describe('the operator screen', () => {
     ).toBeInTheDocument();
     expect(await screen.findByText('1 market maker · 12 noise · 4 momentum · 2 untagged')).toBeInTheDocument();
     const sent = server.requests.find((request) => request.url === '/api/v1/admin/bots' && request.method === 'POST');
-    expect(sent?.body).toMatchObject({ count: 1, strategy: 'MARKET_MAKER' });
+    expect(sent?.body).toEqual({ count: 1, cash: '50000.00', holdings: [], strategy: 'MARKET_MAKER' });
     // The choice stays for the next batch.
     expect(within(form).getByRole('radio', { name: 'Market maker' })).toBeChecked();
+  });
+
+  it('marks the fields a refused batch names, describes them by the refusal and focuses the first', async () => {
+    const { server } = exchange('SETUP');
+    server.on('POST /api/v1/admin/bots', {
+      status: 400,
+      problem: {
+        status: 400,
+        code: 'VALIDATION_FAILED',
+        detail: 'The bot request is invalid',
+        errors: [
+          { field: 'count', code: 'OUT_OF_RANGE', message: 'count must be between 1 and 100' },
+          { field: 'cash', code: 'INVALID_AMOUNT', message: 'Amount must be a fixed-scale decimal such as 100.25' },
+        ],
+      },
+    });
+    renderPage();
+
+    // Nothing typed: the exchange names both blank fields.
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
+    const message = 'count must be between 1 and 100; Amount must be a fixed-scale decimal such as 100.25';
+    expect(await screen.findByText(message)).toBeInTheDocument();
+    const count = within(form).getByLabelText('Number of bots');
+    const cash = within(form).getByLabelText('Cash each');
+    for (const field of [count, cash]) {
+      expect(field).toHaveAttribute('aria-invalid', 'true');
+      expect(field).toHaveAccessibleDescription(message);
+    }
+    expect(within(form).getByLabelText('NOVA shares')).not.toHaveAttribute('aria-invalid');
+    await waitFor(() => expect(count).toHaveFocus());
+  });
+
+  it("marks the instrument whose shares a refused funding names, by the holdings sent", async () => {
+    const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
+    const { server } = exchange('SETUP', [NOVA, ORBT]);
+    server.on('POST /api/v1/admin/accounts', {
+      status: 400,
+      problem: {
+        status: 400,
+        code: 'VALIDATION_FAILED',
+        detail: 'The account request is invalid',
+        errors: [{ field: 'holdings[0].quantity', code: 'OUT_OF_RANGE', message: 'quantity must be between 1 and 1000000' }],
+      },
+    });
+    renderPage();
+
+    // NOVA is left blank, so the first holding sent is ORBT's.
+    const form = await screen.findByRole('form', { name: 'Fund a trader' });
+    fireEvent.change(within(form).getByLabelText("Trader's username"), { target: { value: 'trader' } });
+    fireEvent.change(within(form).getByLabelText('Cash'), { target: { value: '1.00' } });
+    fireEvent.change(await within(form).findByLabelText('ORBT shares'), { target: { value: '00' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Fund account' }));
+
+    expect(await screen.findByText('quantity must be between 1 and 1000000')).toBeInTheDocument();
+    const orbt = within(form).getByLabelText('ORBT shares');
+    expect(orbt).toHaveAttribute('aria-invalid', 'true');
+    expect(orbt).toHaveAccessibleDescription('quantity must be between 1 and 1000000');
+    expect(within(form).getByLabelText('NOVA shares')).not.toHaveAttribute('aria-invalid');
+    expect(within(form).getByLabelText('Cash')).not.toHaveAttribute('aria-invalid');
+    expect(orbt).toHaveValue('00');
+    await waitFor(() => expect(orbt).toHaveFocus());
   });
 
   it("shows a refused bot request in the exchange's words and keeps the input", async () => {

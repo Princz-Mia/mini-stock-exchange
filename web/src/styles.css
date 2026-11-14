@@ -600,6 +600,12 @@ button.primary.danger:enabled {
   color: var(--fill-text);
 }
 
+/* The examples inside empty fields: readable, at the muted text's contrast, and never mistaken for a value. */
+input::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
 .setup-form button[type='submit'] {
   justify-self: start;
 }

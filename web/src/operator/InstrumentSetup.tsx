@@ -5,6 +5,7 @@ import { api } from '../api/client';
 import type { Instrument, InstrumentEdited, InstrumentEditRequest, InstrumentRequest, InstrumentUsage } from '../api/types';
 import { groupDigits, groupInteger } from '../format';
 import { CommandStatus } from './CommandStatus';
+import { refusedFields } from './refusals';
 import { type CommandOutcome, useCommand } from './useCommand';
 
 /** The default starting scenario, offered as quick fills; the operator still adds each one. */
@@ -49,11 +50,6 @@ export function inUseMessage(symbol: string, usage: InstrumentUsage): string {
   }
   parts.push('Taking shares or orders back would need correcting entries in the ledger, so an instrument in use stays.');
   return parts.join(' ');
-}
-
-/** The fields a refusal names, so each can be marked invalid and focused. */
-function refusedFields(outcome: CommandOutcome<unknown>): ReadonlySet<string> {
-  return new Set(outcome.kind === 'refused' ? (outcome.problem?.errors ?? []).map((error) => error.field) : []);
 }
 
 /**

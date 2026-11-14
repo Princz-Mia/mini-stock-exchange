@@ -1,15 +1,14 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { type FormEvent, useCallback, useState } from 'react';
+import { type FormEvent, useCallback, useId, useRef, useState } from 'react';
 
 import { api } from '../api/client';
 import type { BotsRequest, BotStrategy, Instrument } from '../api/types';
 import { groupInteger } from '../format';
 import { CommandStatus } from './CommandStatus';
-import { DEFAULT_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
+import { EXAMPLE_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
+import { refusedFields, refusedHoldings, useFocusOnRefusal } from './refusals';
 import { DEFAULT_STRATEGY, populationText, STRATEGIES, strategyNoun } from './strategies';
 import { useCommand } from './useCommand';
-
-export const DEFAULT_BOTS = '10';
 
 /**
  * The bot population by strategy and, during setup, a form to create more. Every bot in one command gets the same
@@ -18,9 +17,9 @@ export const DEFAULT_BOTS = '10';
 export function BotSetup({ instruments, editable }: { instruments: readonly Instrument[]; editable: boolean }) {
   const client = useQueryClient();
   const population = useQuery({ queryKey: ['bots'], queryFn: api.botPopulation });
-  const [count, setCount] = useState(DEFAULT_BOTS);
+  const [count, setCount] = useState('');
   const [strategy, setStrategy] = useState<BotStrategy>(DEFAULT_STRATEGY);
-  const [cash, setCash] = useState(DEFAULT_CASH);
+  const [cash, setCash] = useState('');
   const [shares, setShares] = useState<ShareInputs>({});
   const send = useCallback(
     async (request: BotsRequest, key: string) => {
@@ -32,15 +31,23 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
     [client],
   );
   const command = useCommand(send);
+  const form = useRef<HTMLFormElement>(null);
+  const outcomeId = useId();
+  // The holdings last sent, which a refusal's fields point into.
+  const [sent, setSent] = useState<readonly { instrumentId: string }[]>([]);
+  const invalid = refusedFields(command.outcome);
+  const invalidShares = refusedHoldings(invalid, sent);
+  useFocusOnRefusal(command.outcome.kind, form);
+  const marked = (field: string) => ({
+    'aria-invalid': invalid.has(field) || undefined,
+    'aria-describedby': invalid.has(field) ? outcomeId : undefined,
+  });
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    void command.run({
-      count: Number(count.trim()),
-      cash: cash.trim(),
-      holdings: holdingsFrom(instruments, shares),
-      strategy,
-    });
+    const holdings = holdingsFrom(instruments, shares);
+    setSent(holdings);
+    void command.run({ count: Number(count.trim()), cash: cash.trim(), holdings, strategy });
   };
 
   const limits = population.data;
@@ -66,16 +73,28 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
         </div>
       )}
       {editable ? (
-        <form onSubmit={submit} className="setup-form" aria-label="Create bots">
+        <form ref={form} onSubmit={submit} className="setup-form" aria-label="Create bots">
           <fieldset disabled={command.outcome.kind === 'sending' || command.unresolved}>
             <div className="field-row">
               <label>
                 Number of bots
-                <input value={count} onChange={(event) => setCount(event.target.value)} inputMode="numeric" />
+                <input
+                  value={count}
+                  onChange={(event) => setCount(event.target.value)}
+                  inputMode="numeric"
+                  placeholder="e.g. 10"
+                  {...marked('count')}
+                />
               </label>
               <label>
                 Cash each
-                <input value={cash} onChange={(event) => setCash(event.target.value)} inputMode="decimal" />
+                <input
+                  value={cash}
+                  onChange={(event) => setCash(event.target.value)}
+                  inputMode="decimal"
+                  placeholder={`e.g. ${EXAMPLE_CASH}`}
+                  {...marked('cash')}
+                />
               </label>
             </div>
             <fieldset className="choices strategies">
@@ -99,11 +118,18 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
                 </div>
               ))}
             </fieldset>
-            <ShareFields instruments={instruments} shares={shares} onChange={setShares} />
+            <ShareFields
+              instruments={instruments}
+              shares={shares}
+              onChange={setShares}
+              invalid={invalidShares}
+              describedBy={outcomeId}
+            />
             <p className="muted hint">
               {limits !== undefined &&
                 `Up to ${groupInteger(limits.maxPerCommand)} at a time, ${groupInteger(remaining ?? 0)} more in all. `}
-              Each bot in a batch gets the same strategy and endowment, and its own token for the simulator.
+              Each bot in a batch gets the same strategy and endowment, and its own token for the simulator; a
+              blank or 0 gives none of that instrument. Create a batch of 1 to give one bot its own.
             </p>
             {full && (
               <p id="bots-full" className="muted">
@@ -118,15 +144,17 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
       ) : (
         <p className="muted">Bots are created before the market opens; the population is fixed after that.</p>
       )}
-      <CommandStatus
-        outcome={command.outcome}
-        done={(created) =>
-          `Created ${created.firstBot} to ${created.lastBot}` +
-          ` as ${strategyNoun(created.strategy, created.created)}` +
-          `. ${groupInteger(created.population)} bots in all.`
-        }
-        onRetry={() => void command.retry()}
-      />
+      <div id={outcomeId}>
+        <CommandStatus
+          outcome={command.outcome}
+          done={(created) =>
+            `Created ${created.firstBot} to ${created.lastBot}` +
+            ` as ${strategyNoun(created.strategy, created.created)}` +
+            `. ${groupInteger(created.population)} bots in all.`
+          }
+          onRetry={() => void command.retry()}
+        />
+      </div>
     </section>
   );
 }
