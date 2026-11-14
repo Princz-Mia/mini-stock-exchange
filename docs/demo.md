@@ -22,7 +22,7 @@ On each user's first sign-in a short tour of their screen opens. Select **Skip t
 Sign in as `operator`.
 
 1. Point out the **Market** panel: the market is open, with the time it opened and the last command's sequence number.
-2. In **Bot runs**, set **Market makers** to 4, **Noise** to 12 and **Momentum** to 4, and **Commands per second** to 20.00.
+2. In **Bot runs**, the counts start at every bot on its strategy: **Market makers** 4, **Noise** 12 and **Momentum** 4. Set **Commands per second** to 20.00.
 3. Select **Start run**. The run turns **Running** once the simulator picks it up, and its placed and cancelled counts start to climb.
 
 Say: each bot is an ordinary client with its own token, and the run's seed makes its decisions repeatable.

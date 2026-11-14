@@ -250,10 +250,11 @@ test.describe.serial('trading through the browser', () => {
     const runs = page.getByRole('region', { name: 'Bot runs' });
     const form = runs.getByRole('form', { name: 'Start a bot run' });
 
-    // The two bots from setup: one market maker to quote, one noise bot to trade against it.
-    await form.getByLabel('Market makers').fill('1');
-    await form.getByLabel('Noise').fill('1');
-    await form.getByLabel('Momentum').fill('0');
+    // The two bots from setup, each on the strategy it is tagged with: one market maker to quote, one noise bot to
+    // trade against it. The form starts there.
+    await expect(form.getByLabel('Market makers')).toHaveValue('1');
+    await expect(form.getByLabel('Noise')).toHaveValue('1');
+    await expect(form.getByLabel('Momentum')).toHaveValue('0');
     await form.getByLabel('Seed').fill('11');
     await form.getByRole('button', { name: 'Start run' }).click();
 

@@ -45,7 +45,7 @@ class BotRunSchemaIT {
 					simulation, f.instrument(simulation, "NOVA"));
 			for (String strategy : new String[] { "MARKET_MAKER", "NOISE", "MOMENTUM" }) {
 				f.jdbc.update("INSERT INTO bot_assignment (run_id, account_id, account_kind, strategy) VALUES (?, ?, 'BOT', ?)",
-						run, f.bot(simulation), strategy);
+						run, f.bot(simulation, strategy), strategy);
 			}
 			// The worker reports, and confirms a stop.
 			f.jdbc.update("""
@@ -117,7 +117,7 @@ class BotRunSchemaIT {
 			UUID run = run(f, simulation, "1.00");
 			assertFails(CHECK_VIOLATION, () -> f.jdbc.update(
 					"INSERT INTO bot_assignment (run_id, account_id, account_kind, strategy) VALUES (?, ?, 'BOT', 'ARBITRAGE')",
-					run, f.bot(simulation)));
+					run, f.bot(simulation, "NOISE")));
 		});
 		db.inRolledBackTransaction((f) -> {
 			UUID simulation = f.simulation();
@@ -125,6 +125,26 @@ class BotRunSchemaIT {
 			assertFails(FOREIGN_KEY_VIOLATION,
 					() -> f.jdbc.update("INSERT INTO bot_run_instrument (run_id, simulation_id, instrument_id) VALUES (?, ?, ?)",
 							run, simulation, UUID.randomUUID()));
+		});
+	}
+
+	@Test
+	void aBotRunsOnlyTheStrategyItIsTaggedWith() {
+		String assign = "INSERT INTO bot_assignment (run_id, account_id, account_kind, strategy) VALUES (?, ?, 'BOT', ?)";
+		db.inRolledBackTransaction((f) -> {
+			UUID simulation = f.simulation();
+			UUID run = run(f, simulation, "1.00");
+			assertFails(FOREIGN_KEY_VIOLATION, () -> f.jdbc.update(assign, run, f.bot(simulation, "NOISE"), "MOMENTUM"));
+		});
+		db.inRolledBackTransaction((f) -> {
+			UUID simulation = f.simulation();
+			UUID run = run(f, simulation, "1.00");
+			assertFails(FOREIGN_KEY_VIOLATION, () -> f.jdbc.update(assign, run, f.bot(simulation), "NOISE"));
+		});
+		db.inRolledBackTransaction((f) -> {
+			UUID simulation = f.simulation();
+			UUID run = run(f, simulation, "1.00");
+			f.jdbc.update(assign, run, f.bot(simulation, "MOMENTUM"), "MOMENTUM");
 		});
 	}
 

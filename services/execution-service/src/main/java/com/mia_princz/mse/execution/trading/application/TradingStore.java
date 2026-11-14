@@ -118,8 +118,8 @@ public interface TradingStore {
 
 	int botCount(UUID simulationId);
 
-	/** Every bot account, oldest first. */
-	List<UUID> botAccountIds(UUID simulationId);
+	/** The bot accounts tagged with a strategy, oldest first. */
+	List<UUID> botAccountIds(UUID simulationId, BotStrategy strategy);
 
 	/** The run whose desired state is RUNNING, if any; {@code endsAt} is null for a run without a time limit. */
 	record RunningBotRun(UUID id, Instant endsAt) {
@@ -142,7 +142,7 @@ public interface TradingStore {
 
 	void requestBotRunStop(UUID runId, Instant at);
 
-	/** {@code strategy} is null for an untagged bot. */
+	/** Every bot is created with its strategy; bots made untagged before it was required keep a null one. */
 	void insertBotAccount(UUID simulationId, UUID accountId, String displayName, BotStrategy strategy);
 
 	/** Stores a bot's token hash; the token itself is never stored. */

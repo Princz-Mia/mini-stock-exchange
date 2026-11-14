@@ -69,10 +69,13 @@ class SimulatorControlIT {
 		TestBrowser simulator = new TestBrowser(port);
 		String nova = instrument(operator, "NOVA", "100.00");
 		String zeta = instrument(operator, "ZETA", "20.00");
-		HttpResponse<String> provisioned = operator.post("/api/v1/admin/bots", """
-				{"count":3,"cash":"10000.00","holdings":[{"instrumentId":"%s","quantity":50}]}""".formatted(nova),
-				"Idempotency-Key", UUID.randomUUID().toString());
-		assertThat(provisioned.statusCode()).as(provisioned.body()).isEqualTo(201);
+		// Tagged out of assignment order: momentum, then noise, then a market maker.
+		for (String strategy : new String[] { "MOMENTUM", "NOISE", "MARKET_MAKER" }) {
+			HttpResponse<String> provisioned = operator.post("/api/v1/admin/bots", """
+					{"count":1,"cash":"10000.00","holdings":[{"instrumentId":"%s","quantity":50}],"strategy":"%s"}"""
+				.formatted(nova, strategy), "Idempotency-Key", UUID.randomUUID().toString());
+			assertThat(provisioned.statusCode()).as(provisioned.body()).isEqualTo(201);
+		}
 		List<UUID> bots = jdbc.queryForList("SELECT id FROM account WHERE kind = 'BOT' ORDER BY created_at, id",
 				UUID.class);
 
@@ -118,8 +121,9 @@ class SimulatorControlIT {
 		List<String> assigned = new ArrayList<>();
 		run.get("bots").forEach((bot) -> assigned.add(bot.get("accountId").asString() + " "
 				+ bot.get("strategy").asString() + " " + bot.get("credentialRef").asString()));
-		assertThat(assigned).containsExactly(bots.get(0) + " MARKET_MAKER " + bots.get(0) + ".token",
-				bots.get(1) + " NOISE " + bots.get(1) + ".token", bots.get(2) + " MOMENTUM " + bots.get(2) + ".token");
+		// Each bot runs the strategy it is tagged with, and the list stays in creation order.
+		assertThat(assigned).containsExactly(bots.get(0) + " MOMENTUM " + bots.get(0) + ".token",
+				bots.get(1) + " NOISE " + bots.get(1) + ".token", bots.get(2) + " MARKET_MAKER " + bots.get(2) + ".token");
 
 		// The first heartbeat takes the lease; a retry, or lower totals, change nothing.
 		Instant before = Instant.now();
@@ -162,7 +166,7 @@ class SimulatorControlIT {
 		assertThat(operator.post("/api/v1/admin/bot-runs/" + first + "/stop", "", "Idempotency-Key",
 				UUID.randomUUID().toString()).statusCode()).isEqualTo(200);
 		UUID second = start(operator, """
-				{"noise":2,"commandsPerSecond":"1.00","durationMinutes":1,"instrumentIds":["%s"]}""".formatted(zeta));
+				{"noise":1,"momentum":1,"commandsPerSecond":"1.00","durationMinutes":1,"instrumentIds":["%s"]}""".formatted(zeta));
 		JsonNode stopping = assignment(simulator).get("run");
 		assertThat(stopping.get("runId").asString()).isEqualTo(first.toString());
 		assertThat(stopping.get("desiredState").asString()).isEqualTo("STOPPED");

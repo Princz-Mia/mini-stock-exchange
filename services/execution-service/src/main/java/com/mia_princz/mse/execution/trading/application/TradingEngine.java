@@ -4,6 +4,8 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -558,7 +560,7 @@ public final class TradingEngine {
 			store.insertAudit(simulationId, command.actorUserId(), "BOT_PROVISION", "NOT_ALLOWED", key.idempotencyKey(),
 					sequence);
 			int status = refusal == BotsResult.Status.UNKNOWN_INSTRUMENT ? 422 : 409;
-			return remember(key, status, new BotsResult(refusal, 0, null, null, population, strategy(command), sequence));
+			return remember(key, status, new BotsResult(refusal, 0, null, null, population, command.strategy().name(), sequence));
 		}
 		for (int number = population + 1; number <= population + command.count(); number++) {
 			UUID account = UUID.randomUUID();
@@ -570,11 +572,7 @@ public final class TradingEngine {
 				sequence);
 		return remember(key, 201, new BotsResult(BotsResult.Status.CREATED, command.count(),
 				ProvisionBots.name(population + 1), ProvisionBots.name(population + command.count()),
-				population + command.count(), strategy(command), sequence));
-	}
-
-	private static String strategy(ProvisionBots command) {
-		return command.strategy() == null ? null : command.strategy().name();
+				population + command.count(), command.strategy().name(), sequence));
 	}
 
 	private TokenRevocation processRevoke(CommandKey key, RevokeBotToken command) {
@@ -632,7 +630,8 @@ public final class TradingEngine {
 
 	/**
 	 * A run whose time is up still reads as running until something replaces it; starting the next one records it as
-	 * stopped at its end. Bots are assigned in creation order, liquidity providers first.
+	 * stopped at its end. Each strategy is run by the oldest bots tagged with it, liquidity providers first; untagged
+	 * bots are never assigned. A strategy with too few tagged bots refuses the run, naming the first one short.
 	 */
 	private BotRunResult startRunInTransaction(CommandKey key, StartBotRun command) {
 		Market market = store.lockMarket();
@@ -648,7 +647,16 @@ public final class TradingEngine {
 		Instant now = clock.instant();
 		BotRunResult.Status refusal = null;
 		Optional<TradingStore.RunningBotRun> running = store.runningBotRun(simulationId);
-		List<UUID> bots = store.botAccountIds(simulationId);
+		Map<BotStrategy, List<UUID>> tagged = new EnumMap<>(BotStrategy.class);
+		for (BotStrategy strategy : BotStrategy.values()) {
+			tagged.put(strategy, store.botAccountIds(simulationId, strategy));
+		}
+		BotRunResult.Shortfall shortfall = Arrays.stream(BotStrategy.values())
+			.filter((strategy) -> command.count(strategy) > tagged.get(strategy).size())
+			.findFirst()
+			.map((strategy) -> new BotRunResult.Shortfall(strategy.name(), command.count(strategy),
+					tagged.get(strategy).size()))
+			.orElse(null);
 		List<UUID> instruments = command.instrumentIds().isEmpty()
 				? store.instruments(simulationId).stream().map(TradingStore.Instrument::id).toList()
 				: command.instrumentIds();
@@ -658,7 +666,7 @@ public final class TradingEngine {
 		else if (running.isPresent() && (running.get().endsAt() == null || running.get().endsAt().isAfter(now))) {
 			refusal = BotRunResult.Status.RUN_ACTIVE;
 		}
-		else if (command.bots() > bots.size()) {
+		else if (shortfall != null) {
 			refusal = BotRunResult.Status.NOT_ENOUGH_BOTS;
 		}
 		else if (instruments.isEmpty() || !instruments.stream().allMatch(books::containsKey)) {
@@ -667,7 +675,8 @@ public final class TradingEngine {
 		if (refusal != null) {
 			store.insertAudit(simulationId, command.actorUserId(), "BOT_RUN_START", "NOT_ALLOWED", key.idempotencyKey(),
 					sequence);
-			BotRunResult refused = new BotRunResult(refusal, null, 0, sequence);
+			BotRunResult refused = new BotRunResult(refusal, null, 0, sequence,
+					refusal == BotRunResult.Status.NOT_ENOUGH_BOTS ? shortfall : null);
 			return remember(key, refused.httpStatus(), refused);
 		}
 		running.ifPresent((expired) -> store.requestBotRunStop(expired.id(), expired.endsAt()));
@@ -677,15 +686,10 @@ public final class TradingEngine {
 		for (UUID instrument : instruments) {
 			store.insertBotRunInstrument(command.runId(), simulationId, instrument);
 		}
-		int next = 0;
-		for (int i = 0; i < command.marketMakers(); i++) {
-			store.insertBotAssignment(command.runId(), bots.get(next++), "MARKET_MAKER");
-		}
-		for (int i = 0; i < command.noise(); i++) {
-			store.insertBotAssignment(command.runId(), bots.get(next++), "NOISE");
-		}
-		for (int i = 0; i < command.momentum(); i++) {
-			store.insertBotAssignment(command.runId(), bots.get(next++), "MOMENTUM");
+		for (BotStrategy strategy : BotStrategy.values()) {
+			for (UUID bot : tagged.get(strategy).subList(0, command.count(strategy))) {
+				store.insertBotAssignment(command.runId(), bot, strategy.name());
+			}
 		}
 		store.insertAudit(simulationId, command.actorUserId(), "BOT_RUN_START", "APPLIED", key.idempotencyKey(),
 				sequence);

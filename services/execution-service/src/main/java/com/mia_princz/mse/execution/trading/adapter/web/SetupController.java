@@ -87,7 +87,7 @@ class SetupController {
 			String commandSequence) {
 	}
 
-	/** {@code strategy} is the tag the new bots carry, null for none. */
+	/** {@code strategy} is the tag every new bot carries. */
 	record BotsResponse(int created, String firstBot, String lastBot, int population, String strategy,
 			String commandSequence) {
 	}

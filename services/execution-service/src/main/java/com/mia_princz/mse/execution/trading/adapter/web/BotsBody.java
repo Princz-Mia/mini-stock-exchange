@@ -9,20 +9,18 @@ import com.mia_princz.mse.execution.trading.application.BotStrategy;
 import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
 import com.mia_princz.mse.execution.trading.application.ProvisionBots;
 
-/** The JSON body for creating bots: how many, the endowment each one gets, and optionally their strategy. */
+/** The JSON body for creating bots: how many, their strategy, and the endowment each one gets. */
 record BotsBody(Integer count, String cash, List<Endowments.HoldingBody> holdings, String strategy) {
 
-	/** {@code strategy} is null for untagged bots. */
 	record Valid(int count, long cashCents, List<ProvisionAccount.Holding> holdings, String canonical,
 			BotStrategy strategy) {
 
 		/**
-		 * Without a strategy, the hash is the one keys had before bots had tags, so the seed's stored answers replay as
-		 * before. A strategy, when given, is appended last; its name can't be read as part of the endowment.
+		 * The strategy is appended last, as it was while it was optional, so tagged requests stored then still replay;
+		 * its name can't be read as part of the endowment.
 		 */
 		byte[] hash() {
-			String request = count + "|" + canonical;
-			return CommandCalls.sha256(strategy == null ? request : request + "|" + strategy.name());
+			return CommandCalls.sha256(count + "|" + canonical + "|" + strategy.name());
 		}
 
 	}
@@ -35,7 +33,11 @@ record BotsBody(Integer count, String cash, List<Endowments.HoldingBody> holding
 		}
 		Endowments.Endowment endowment = Endowments.parse(cash, holdings, errors);
 		BotStrategy tag = null;
-		if (strategy != null) {
+		if (strategy == null) {
+			errors.add(new ApiException.FieldError("strategy", "REQUIRED",
+					"strategy is required: MARKET_MAKER, NOISE or MOMENTUM"));
+		}
+		else {
 			try {
 				tag = BotStrategy.valueOf(strategy);
 			}

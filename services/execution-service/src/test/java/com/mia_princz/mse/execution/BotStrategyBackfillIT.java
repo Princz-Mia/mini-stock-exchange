@@ -1,11 +1,13 @@
 package com.mia_princz.mse.execution;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -21,10 +23,10 @@ import org.junit.jupiter.api.Test;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
 /**
- * The migration that tags bots made before tags existed, run as a deployment would meet it: the schema up to the
- * version before, bots in it, then the migration. It needs its own server, so no Spring context runs the migrations
- * first. A deployment holds one simulation, so each case gets its own database, copied from the empty one the init
- * script made, with the same owner and schema grants.
+ * The migrations that tag bots made before tags existed, and then check that runs assign bots by tag, run as a
+ * deployment would meet them: the schema up to the version before, data in it, then the migration. It needs its own
+ * server, so no Spring context runs the migrations first. A deployment holds one simulation, so each case gets its own
+ * database, copied from the empty one the init script made, with the same owner and schema grants.
  */
 class BotStrategyBackfillIT {
 
@@ -100,6 +102,59 @@ class BotStrategyBackfillIT {
 				"MOMENTUM");
 	}
 
+	@Test
+	void runsStartedBeforeRunsAssignedByTagKeepTheirAssignments() throws Exception {
+		String url = database("runs_before_tags");
+		migrate(url, "21");
+		String assign = "INSERT INTO bot_assignment (run_id, account_id, account_kind, strategy) VALUES (?, ?, 'BOT', ?)";
+		UUID run = UUID.randomUUID();
+		UUID noise = UUID.randomUUID();
+		try (Connection owner = owner(url)) {
+			UUID simulation = UUID.randomUUID();
+			UUID user = UUID.randomUUID();
+			execute(owner, "INSERT INTO simulation (id, state) VALUES (?, 'SETUP')", simulation);
+			execute(owner, "INSERT INTO app_user (id, username, password_hash, role) VALUES (?, 'operator', '{noop}x', 'OPERATOR')",
+					user);
+			execute(owner, """
+					INSERT INTO account (id, simulation_id, kind, display_name, bot_strategy)
+					VALUES (?, ?, 'BOT', 'bot-0001', 'NOISE')""", noise, simulation);
+			execute(owner, """
+					INSERT INTO bot_run (id, simulation_id, desired_state, seed, commands_per_second, max_order_quantity,
+					    max_position, started_by, started_at, start_sequence, stop_requested_at)
+					VALUES (?, ?, 'STOPPED', 7, 1.00, 10, 100, ?, now(), 1, now())""", run, simulation, user);
+			// Assigned by creation order, as runs were then: the oldest bot made the market, whatever its tag says.
+			execute(owner, assign, run, noise, "MARKET_MAKER");
+		}
+
+		migrate(url, "22");
+
+		try (Connection owner = owner(url)) {
+			try (ResultSet rows = owner.createStatement().executeQuery("SELECT strategy FROM bot_assignment")) {
+				assertThat(rows.next()).isTrue();
+				assertThat(rows.getString(1)).as("kept as it was").isEqualTo("MARKET_MAKER");
+			}
+			// A new assignment must follow the tag.
+			UUID next = UUID.randomUUID();
+			execute(owner, """
+					INSERT INTO bot_run (id, simulation_id, desired_state, seed, commands_per_second, max_order_quantity,
+					    max_position, started_by, started_at, start_sequence)
+					SELECT ?, simulation_id, 'RUNNING', 7, 1.00, 10, 100, started_by, now(), 2 FROM bot_run WHERE id = ?""",
+					next, run);
+			assertThatThrownBy(() -> execute(owner, assign, next, noise, "MARKET_MAKER"))
+				.isInstanceOfSatisfying(SQLException.class, (refused) -> assertThat(refused.getSQLState()).isEqualTo("23503"));
+			execute(owner, assign, next, noise, "NOISE");
+		}
+	}
+
+	private static void execute(Connection connection, String sql, Object... parameters) throws SQLException {
+		try (PreparedStatement statement = connection.prepareStatement(sql)) {
+			for (int i = 0; i < parameters.length; i++) {
+				statement.setObject(i + 1, parameters[i]);
+			}
+			statement.executeUpdate();
+		}
+	}
+
 	private static List<Bot> inOrder(int count) {
 		List<Bot> bots = new ArrayList<>();
 		for (int n = 1; n <= count; n++) {
@@ -113,12 +168,7 @@ class BotStrategyBackfillIT {
 	 * tags, and returns each account's tag in the order runs pick accounts.
 	 */
 	private static Map<String, String> backfill(String database, List<Bot> bots) throws Exception {
-		try (Connection admin = DriverManager.getConnection(TestcontainersConfiguration.jdbcUrl(postgres, "postgres"),
-				postgres.getUsername(), postgres.getPassword())) {
-			admin.createStatement()
-				.execute("CREATE DATABASE " + database + " TEMPLATE execution_db OWNER " + OWNER);
-		}
-		String url = TestcontainersConfiguration.jdbcUrl(postgres, database);
+		String url = database(database);
 		migrate(url, "20");
 
 		UUID simulation = UUID.randomUUID();
@@ -144,6 +194,15 @@ class BotStrategyBackfillIT {
 			}
 		}
 		return tags;
+	}
+
+	/** A fresh database with the init script's owner and schema grants, and its URL. */
+	private static String database(String name) throws SQLException {
+		try (Connection admin = DriverManager.getConnection(TestcontainersConfiguration.jdbcUrl(postgres, "postgres"),
+				postgres.getUsername(), postgres.getPassword())) {
+			admin.createStatement().execute("CREATE DATABASE " + name + " TEMPLATE execution_db OWNER " + OWNER);
+		}
+		return TestcontainersConfiguration.jdbcUrl(postgres, name);
 	}
 
 	private static Connection owner(String url) throws Exception {

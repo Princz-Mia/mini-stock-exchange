@@ -84,10 +84,9 @@ class BotStrategyIT {
 		assertThat(noise.statusCode()).as(noise.body()).isEqualTo(201);
 		HttpResponse<String> momentum = bots(operator, UUID.randomUUID(), 1, "50000.00", "MOMENTUM", holding(orbt, 100));
 		assertThat(momentum.statusCode()).as(momentum.body()).isEqualTo(201);
-		// Without a strategy, as before tags existed: untagged, and the answer says so.
-		HttpResponse<String> plain = bots(operator, UUID.randomUUID(), 1, "1000.00", null);
-		assertThat(plain.statusCode()).as(plain.body()).isEqualTo(201);
-		assertThat(JSON.readTree(plain.body()).get("strategy").isNull()).isTrue();
+		// A bot made untagged, before a strategy was required; only the database can make one now.
+		jdbc.update("INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'BOT', 'bot-0007')",
+				UUID.randomUUID(), jdbc.queryForObject("SELECT id FROM simulation", UUID.class));
 
 		// Each bot carries its batch's tag, and its own genesis batch with its batch's endowment.
 		Map<String, String> tags = new LinkedHashMap<>();
@@ -107,11 +106,10 @@ class BotStrategyIT {
 		assertThat(endowment("bot-0001")).containsExactly("CASH 10000000", "NOVA 500", "ORBT 500");
 		assertThat(endowment("bot-0004")).containsExactly("CASH 2000000", "NOVA 50");
 		assertThat(endowment("bot-0006")).containsExactly("CASH 5000000", "ORBT 100");
-		assertThat(endowment("bot-0007")).containsExactly("CASH 100000");
 		assertThat(jdbc.queryForObject("""
 				SELECT count(*) FROM journal_batch WHERE cause = 'GENESIS'
 				AND command_sequence IN (SELECT command_sequence FROM command_result WHERE route = 'POST /api/v1/admin/bots')""",
-				Long.class)).as("one genesis batch per bot").isEqualTo(7);
+				Long.class)).as("one genesis batch per bot made through the API").isEqualTo(6);
 		// Every batch balances, cash and each instrument on its own: what the bots got, issuance gave.
 		assertThat(jdbc.queryForObject("""
 				SELECT count(*) FROM (
@@ -138,13 +136,13 @@ class BotStrategyIT {
 					account.get("strategy").isNull() ? null : account.get("strategy").asString()));
 		assertThat(listed).containsExactlyEntriesOf(expected);
 
-		// The strategy is part of the request: the same key with another, or none, is a conflict.
+		// The strategy is part of the request: the same key with another is a conflict, and none is refused.
 		assertThat(bots(operator, makersKey, 2, "100000.00", "MARKET_MAKER", holding(nova, 500), holding(orbt, 500))
 			.body()).isEqualTo(makers.body());
 		assertThat(code(bots(operator, makersKey, 2, "100000.00", "NOISE", holding(nova, 500), holding(orbt, 500)), 409))
 			.isEqualTo("IDEMPOTENCY_CONFLICT");
-		assertThat(code(bots(operator, makersKey, 2, "100000.00", null, holding(nova, 500), holding(orbt, 500)), 409))
-			.isEqualTo("IDEMPOTENCY_CONFLICT");
+		assertThat(code(bots(operator, makersKey, 2, "100000.00", null, holding(nova, 500), holding(orbt, 500)), 400))
+			.isEqualTo("VALIDATION_FAILED");
 
 		// An unknown strategy is refused before the writer, next to any other problem.
 		HttpResponse<String> invalid = bots(operator, UUID.randomUUID(), 0, "1.00", "SCALPER");

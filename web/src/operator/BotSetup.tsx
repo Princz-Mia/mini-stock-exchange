@@ -122,7 +122,7 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
         outcome={command.outcome}
         done={(created) =>
           `Created ${created.firstBot} to ${created.lastBot}` +
-          (created.strategy === null ? '' : ` as ${strategyNoun(created.strategy, created.created)}`) +
+          ` as ${strategyNoun(created.strategy, created.created)}` +
           `. ${groupInteger(created.population)} bots in all.`
         }
         onRetry={() => void command.retry()}

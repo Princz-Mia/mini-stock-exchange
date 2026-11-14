@@ -138,7 +138,7 @@ stateDiagram-v2
 ```
 
 **In each state:**
-- **SETUP:** instruments, trader accounts and bots are configured. Each batch of bots can carry a strategy tag (market maker, noise or momentum), fixed once the bot exists. An instrument's reference price and display name can still be changed, and an instrument nothing uses yet can be deleted: no account was given its shares and no order named it. Nothing trades. Once the market opens, the catalogue is frozen; a database trigger refuses a change or a delete outside SETUP too.
+- **SETUP:** instruments, trader accounts and bots are configured. Each batch of bots is tagged with a strategy (market maker, noise or momentum), fixed once the bot exists. An instrument's reference price and display name can still be changed, and an instrument nothing uses yet can be deleted: no account was given its shares and no order named it. Nothing trades. Once the market opens, the catalogue is frozen; a database trigger refuses a change or a delete outside SETUP too.
 - **HALTED:** keeps the books. Cancels are accepted, new orders aren't.
 
 ## Data
@@ -161,11 +161,13 @@ erDiagram
   simulation ||--o{ audit_log : "records operator actions"
   simulation ||--o{ bot_run : runs
   bot_run ||--o{ bot_assignment : assigns
+  account ||--o{ bot_assignment : "runs its tagged strategy in"
 ```
 
 **In `execution_db`:**
 - **The ledger:** append-only `ledger_entry` rows in `journal_batch`es, each summing to zero per asset, with available and reserved buckets.
 - **Balances and positions:** `cash_balance` and `position` are the ledger's running totals, and the startup reconciliation compares them with it.
+- **Bot runs:** each strategy in a run is assigned to the oldest bots tagged with it, and a foreign key from `bot_assignment` to the bot's tag refuses any other assignment.
 - **Answers and events:** `command_result` stores each idempotency key's answer, and `outbox` holds every event ever published.
 - **Sessions** are `spring_session` rows.
 

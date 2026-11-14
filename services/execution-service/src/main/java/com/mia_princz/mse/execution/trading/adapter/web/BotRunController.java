@@ -111,8 +111,7 @@ class BotRunController {
 					"Bots run only while the market is open or halted");
 			case RUN_ACTIVE -> new ApiException(HttpStatus.CONFLICT, "RUN_ACTIVE",
 					"A bot run is already running; stop it first");
-			case NOT_ENOUGH_BOTS -> new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "NOT_ENOUGH_BOTS",
-					"The run asks for more bots than the market has");
+			case NOT_ENOUGH_BOTS -> notEnoughBots(result.shortfall());
 			case UNKNOWN_INSTRUMENT -> new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_INSTRUMENT",
 					"The run names an instrument this market does not have");
 			case NOT_FOUND -> new ApiException(HttpStatus.NOT_FOUND, "RUN_NOT_FOUND", "No such bot run");
@@ -121,6 +120,28 @@ class BotRunController {
 		};
 		return result.commandSequence() > 0 ? refused.with("commandSequence", Long.toString(result.commandSequence()))
 				: refused;
+	}
+
+	/** Names the strategy that fell short; an answer stored before runs assigned by tag has none to name. */
+	private static ApiException notEnoughBots(BotRunResult.Shortfall shortfall) {
+		if (shortfall == null) {
+			return new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "NOT_ENOUGH_BOTS",
+					"The run asks for more bots than the market has");
+		}
+		return new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "NOT_ENOUGH_BOTS",
+				"The run asks for %s; %d %s tagged".formatted(bots(shortfall.strategy(), shortfall.requested()),
+						shortfall.available(), shortfall.available() == 1 ? "is" : "are"))
+			.with("shortfall", shortfall);
+	}
+
+	/** "1 market maker", "3 noise bots". */
+	private static String bots(String strategy, int count) {
+		String one = switch (strategy) {
+			case "MARKET_MAKER" -> "market maker";
+			case "NOISE" -> "noise bot";
+			default -> "momentum bot";
+		};
+		return count + " " + one + (count == 1 ? "" : "s");
 	}
 
 	record Instrument(String instrumentId, String symbol) {
