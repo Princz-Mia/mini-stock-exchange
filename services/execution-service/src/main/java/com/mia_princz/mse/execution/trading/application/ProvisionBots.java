@@ -6,9 +6,11 @@ import java.util.UUID;
 
 /**
  * An operator creates funded bot accounts while the market is in SETUP, each with the same endowment and its own API
- * token. Bots are numbered in the order they are created: bot-0001, bot-0002 and so on.
+ * token. Bots are numbered in the order they are created: bot-0001, bot-0002 and so on. They are all tagged with the
+ * strategy given, or left untagged when it is null.
  */
-public record ProvisionBots(int count, long cashCents, List<ProvisionAccount.Holding> holdings, UUID actorUserId) {
+public record ProvisionBots(int count, long cashCents, List<ProvisionAccount.Holding> holdings, BotStrategy strategy,
+		UUID actorUserId) {
 
 	/** Keeps one command well inside the request timeout. */
 	public static final int MAX_PER_COMMAND = 100;

@@ -52,7 +52,12 @@ function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
     .on('GET /api/v1/admin/accounts', { status: 200, json: { accounts: [], nextCursor: null } })
     .on('GET /api/v1/admin/bots', () => ({
       status: 200,
-      json: { population: state.bots, maxPopulation: 1000, maxPerCommand: 100 },
+      json: {
+        population: state.bots,
+        maxPopulation: 1000,
+        maxPerCommand: 100,
+        byStrategy: { marketMakers: 0, noise: 0, momentum: 0, untagged: state.bots },
+      },
     }))
     .on('GET /api/v1/admin/bot-runs', () => ({ status: 200, json: { runs: state.runs, nextCursor: null } }));
   return { server, state };
@@ -770,8 +775,17 @@ describe('the operator screen', () => {
             cash: '100000.00',
             holdings: [{ instrumentId: NOVA.instrumentId, symbol: 'NOVA', quantity: 1000 }],
             token: null,
+            strategy: null,
           },
-          { accountId: 'b', username: 'bot-0001', kind: 'BOT', cash: '5000.00', holdings: [], token: 'ACTIVE' },
+          {
+            accountId: 'b',
+            username: 'bot-0001',
+            kind: 'BOT',
+            cash: '5000.00',
+            holdings: [],
+            token: 'ACTIVE',
+            strategy: 'NOISE',
+          },
         ],
         nextCursor: null,
       },
@@ -798,7 +812,9 @@ describe('the operator screen', () => {
     server.on('GET /api/v1/admin/accounts', () => ({
       status: 200,
       json: {
-        accounts: [{ accountId: 'b', username: 'bot-0001', kind: 'BOT', cash: '5000.00', holdings: [], token }],
+        accounts: [
+          { accountId: 'b', username: 'bot-0001', kind: 'BOT', cash: '5000.00', holdings: [], token, strategy: 'NOISE' },
+        ],
         nextCursor: null,
       },
     }));
@@ -829,7 +845,14 @@ describe('the operator screen', () => {
       state.bots = 10;
       return {
         status: 201,
-        json: { created: 10, firstBot: 'bot-0001', lastBot: 'bot-0010', population: 10, commandSequence: '9' },
+        json: {
+          created: 10,
+          firstBot: 'bot-0001',
+          lastBot: 'bot-0010',
+          population: 10,
+          strategy: null,
+          commandSequence: '9',
+        },
       };
     });
     renderPage();
@@ -1088,8 +1111,8 @@ describe('bot runs on the operator screen', () => {
       .on('GET /api/v1/admin/accounts', (request) => ({
         status: 200,
         json: request.url.includes('cursor=accounts-2')
-          ? { accounts: [{ accountId: 'b', username: 'second', kind: 'TRADER', cash: '1.00', holdings: [], token: null }], nextCursor: null }
-          : { accounts: [{ accountId: 'a', username: 'first', kind: 'TRADER', cash: '1.00', holdings: [], token: null }], nextCursor: 'accounts-2' },
+          ? { accounts: [{ accountId: 'b', username: 'second', kind: 'TRADER', cash: '1.00', holdings: [], token: null, strategy: null }], nextCursor: null }
+          : { accounts: [{ accountId: 'a', username: 'first', kind: 'TRADER', cash: '1.00', holdings: [], token: null, strategy: null }], nextCursor: 'accounts-2' },
       }));
     renderPage();
 

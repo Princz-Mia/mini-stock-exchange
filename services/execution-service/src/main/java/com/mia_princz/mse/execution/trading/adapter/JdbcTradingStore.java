@@ -23,6 +23,7 @@ import com.mia_princz.mse.contracts.events.PublicTrade;
 import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.contracts.events.VenueState;
 import com.mia_princz.mse.contracts.events.WireEvents;
+import com.mia_princz.mse.execution.trading.application.BotStrategy;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
 import com.mia_princz.mse.execution.trading.application.TapeTrade;
@@ -360,12 +361,12 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void insertBotAccount(UUID simulationId, UUID accountId, String displayName) {
+	public void insertBotAccount(UUID simulationId, UUID accountId, String displayName, BotStrategy strategy) {
 		// clock_timestamp, not the transaction's now(): bots made by one command then list in the order they were made.
 		expectOne(jdbc.sql("""
-				INSERT INTO account (id, simulation_id, kind, display_name, created_at)
-				VALUES (?, ?, 'BOT', ?, clock_timestamp())""")
-			.params(accountId, simulationId, displayName)
+				INSERT INTO account (id, simulation_id, kind, display_name, bot_strategy, created_at)
+				VALUES (?, ?, 'BOT', ?, ?, clock_timestamp())""")
+			.params(accountId, simulationId, displayName, strategy == null ? null : strategy.name())
 			.update(), "insert bot account");
 	}
 

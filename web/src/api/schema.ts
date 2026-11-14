@@ -976,14 +976,30 @@ export interface components {
             readonly count: number;
             readonly cash: components["schemas"]["Money"];
             readonly holdings?: readonly components["schemas"]["Endowment"][];
+            /** @description The tag every bot in the batch carries. Left out, they are untagged. */
+            readonly strategy?: components["schemas"]["BotStrategy"];
         };
+        /**
+         * @description The kind of trader a bot plays in a run. A bot is tagged once, when it is created, and keeps it.
+         * @enum {string}
+         */
+        readonly BotStrategy: "MARKET_MAKER" | "NOISE" | "MOMENTUM";
         readonly BotPopulation: {
             readonly population: number;
             readonly maxPopulation: number;
             readonly maxPerCommand: number;
+            /** @description How many bots carry each tag, and how many none. They add up to population. */
+            readonly byStrategy: {
+                readonly marketMakers: number;
+                readonly noise: number;
+                readonly momentum: number;
+                readonly untagged: number;
+            };
         };
         readonly BotsCreated: {
             readonly created: number;
+            /** @description The tag the new bots carry; null for none, and in answers stored before bots had tags. */
+            readonly strategy: components["schemas"]["BotStrategy"] | null;
             readonly firstBot: string;
             readonly lastBot: string;
             /** @description Bots in the market after this command. */
@@ -1189,6 +1205,8 @@ export interface components {
             readonly username: string;
             /** @enum {string} */
             readonly kind: "TRADER" | "BOT";
+            /** @description A bot's tag; null for a trader, and for a bot made without one. */
+            readonly strategy: components["schemas"]["BotStrategy"] | null;
             /**
              * @description A bot's token, ACTIVE until revoked; null for a trader.
              * @enum {string|null}

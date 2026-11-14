@@ -142,7 +142,8 @@ public interface TradingStore {
 
 	void requestBotRunStop(UUID runId, Instant at);
 
-	void insertBotAccount(UUID simulationId, UUID accountId, String displayName);
+	/** {@code strategy} is null for an untagged bot. */
+	void insertBotAccount(UUID simulationId, UUID accountId, String displayName, BotStrategy strategy);
 
 	/** Stores a bot's token hash; the token itself is never stored. */
 	void insertApiToken(UUID tokenId, UUID accountId, byte[] tokenHash);
