@@ -40,6 +40,14 @@ final class Snapshots {
 			.build();
 	}
 
+	/** What Execution writes when it deletes an instrument during setup: an empty market that says it was removed. */
+	static MarketSnapshot removed(UUID instrument, long commandSequence) {
+		MarketSnapshot removal = untraded(instrument, commandSequence);
+		removal.setVenueState(VenueState.SETUP);
+		removal.setRemoved(true);
+		return removal;
+	}
+
 	static MarketSnapshot snapshot(UUID instrument, long commandSequence, int levels) {
 		List<BookLevel> bids = new ArrayList<>();
 		for (int i = 0; i < levels; i++) {

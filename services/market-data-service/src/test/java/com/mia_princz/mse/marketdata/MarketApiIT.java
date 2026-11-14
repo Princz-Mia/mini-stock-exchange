@@ -116,6 +116,24 @@ class MarketApiIT {
 		assertThat(trend.get(59).get("price").asString()).isEqualTo("200.69");
 	}
 
+	/** An instrument deleted during setup leaves the list, and every read of it says it does not exist. */
+	@Test
+	void aRemovedInstrumentIsNoLongerServed() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		snapshots.apply(Snapshots.untraded(instrument, 4));
+		assertThat(find(json(get("/api/v1/instruments"), 200).get("instruments"), instrument)).isNotNull();
+
+		snapshots.apply(Snapshots.removed(instrument, 6));
+
+		for (JsonNode entry : json(get("/api/v1/instruments"), 200).get("instruments")) {
+			assertThat(entry.get("instrumentId").asString()).isNotEqualTo(instrument.toString());
+		}
+		for (String read : List.of("book", "trades", "candles")) {
+			assertThat(code(get("/api/v1/instruments/" + instrument + "/" + read), 404)).as(read)
+				.isEqualTo("INSTRUMENT_NOT_FOUND");
+		}
+	}
+
 	@Test
 	void bookIsBoundedToTheRequestedDepth() throws Exception {
 		UUID instrument = UUID.randomUUID();

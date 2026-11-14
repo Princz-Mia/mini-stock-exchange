@@ -155,6 +155,45 @@ class MarketEventsIT {
 		}
 	}
 
+	/**
+	 * A removal on Kafka takes the instrument away through the application's own feed. An open stream stays up with
+	 * heartbeats but sends no more markets, as there is none, and a new stream is refused.
+	 */
+	@Test
+	void aRemovedInstrumentIsNoLongerStreamed() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		publish(Snapshots.untraded(instrument, 1));
+		waitForMarket(instrument);
+
+		try (Stream<String> lines = open(instrument)) {
+			BlockingQueue<Event> received = read(lines);
+			next(received, "market");
+
+			publish(Snapshots.removed(instrument, 2));
+			long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+			while (status("/api/v1/instruments/" + instrument + "/book", "application/json") != 404) {
+				assertThat(System.nanoTime()).as("removal not projected in time").isLessThan(deadline);
+				Thread.sleep(100);
+			}
+			// Only what comes after the removal counts. Until two heartbeats show the stream is still up, any market is
+			// a repeat of the add.
+			received.clear();
+			int heartbeats = 0;
+			deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+			while (heartbeats < 2) {
+				assertThat(System.nanoTime()).as("no heartbeats in time").isLessThan(deadline);
+				Event event = received.poll(100, TimeUnit.MILLISECONDS);
+				if (event != null && event.name().equals("heartbeat")) {
+					heartbeats++;
+				}
+				else if (event != null) {
+					assertThat(event.data().get("sourceCommandSequence").asString()).as(event.name()).isEqualTo("1");
+				}
+			}
+		}
+		assertThat(status("/api/v1/market-events?instrumentId=" + instrument)).isEqualTo(404);
+	}
+
 	@Test
 	void requestsWithoutAMarketAreRefused() throws Exception {
 		assertThat(status("/api/v1/market-events?instrumentId=" + UUID.randomUUID())).isEqualTo(404);

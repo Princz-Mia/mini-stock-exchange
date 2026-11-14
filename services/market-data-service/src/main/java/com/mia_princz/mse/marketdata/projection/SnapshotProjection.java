@@ -16,7 +16,9 @@ import com.mia_princz.mse.contracts.events.VenueState;
 /**
  * Applies market snapshots to the instrument and market projections. A snapshot replaces the instrument's row only
  * when its source command sequence is higher than the stored one, so duplicates, redeliveries and late arrivals
- * change nothing. Its event id is recorded in the same transaction. Callers run each batch in one transaction.
+ * change nothing. A snapshot that says the instrument was removed deletes both rows under the same rule, and after a
+ * removal it is the event id, not the sequence, that stops a redelivered add. Each event id is recorded in the same
+ * transaction. Callers run each batch in one transaction.
  */
 public final class SnapshotProjection {
 
@@ -36,6 +38,9 @@ public final class SnapshotProjection {
 		int firstSeen = jdbc.sql("INSERT INTO processed_event (event_id, topic) VALUES (?, ?) ON CONFLICT DO NOTHING")
 			.params(snapshot.getEventId(), TOPIC)
 			.update();
+		if (snapshot.getRemoved()) {
+			return remove(snapshot);
+		}
 		if (firstSeen == 0) {
 			return false;
 		}
@@ -74,6 +79,29 @@ public final class SnapshotProjection {
 					snapshot.getSourceCommandSequence(), Timestamp.from(snapshot.getGeneratedAt()))
 			.update();
 		return replaced == 1;
+	}
+
+	/**
+	 * Deletes the instrument's market and then its catalogue entry, which the market refers to, each only below the
+	 * removal's sequence. Both rows always come from the same snapshot, so they hold the same sequence and go
+	 * together. Nothing is inserted, so a removal of an instrument never seen, as on a rebuild from the
+	 * compacted topic where the removal may be its only record, changes nothing.
+	 * <p>
+	 * A removal applies even when its event id was seen before. When the outbox relay resends after a failure, an add
+	 * still unmarked is sent again together with every later event, so the add's copy is always followed by the
+	 * removal's. Compaction can drop the first add while the copy is still in an uncleaned segment, and a rebuild then
+	 * inserts the copy under an event id the emptied table has not seen. The removal's copy has to delete it again.
+	 * The deletes are guarded and idempotent, so a repeated removal is otherwise harmless.
+	 */
+	private boolean remove(MarketSnapshot snapshot) {
+		int markets = jdbc.sql("DELETE FROM market_snapshot WHERE instrument_id = ? AND source_command_sequence < ?")
+			.params(snapshot.getInstrumentId(), snapshot.getSourceCommandSequence())
+			.update();
+		int instruments = jdbc
+			.sql("DELETE FROM instrument_projection WHERE instrument_id = ? AND source_command_sequence < ?")
+			.params(snapshot.getInstrumentId(), snapshot.getSourceCommandSequence())
+			.update();
+		return markets + instruments > 0;
 	}
 
 	/**
