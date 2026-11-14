@@ -2,22 +2,24 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, useCallback, useState } from 'react';
 
 import { api } from '../api/client';
-import type { BotsRequest, Instrument } from '../api/types';
+import type { BotsRequest, BotStrategy, Instrument } from '../api/types';
 import { groupInteger } from '../format';
 import { CommandStatus } from './CommandStatus';
 import { DEFAULT_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
+import { DEFAULT_STRATEGY, populationText, STRATEGIES, strategyNoun } from './strategies';
 import { useCommand } from './useCommand';
 
 export const DEFAULT_BOTS = '10';
 
 /**
- * The bot population and, during setup, a form to create more. Every bot in one command gets the same endowment and
- * its own token, which goes to the simulator and is never shown here.
+ * The bot population by strategy and, during setup, a form to create more. Every bot in one command gets the same
+ * strategy and endowment, and its own token, which goes to the simulator and is never shown here.
  */
 export function BotSetup({ instruments, editable }: { instruments: readonly Instrument[]; editable: boolean }) {
   const client = useQueryClient();
   const population = useQuery({ queryKey: ['bots'], queryFn: api.botPopulation });
   const [count, setCount] = useState(DEFAULT_BOTS);
+  const [strategy, setStrategy] = useState<BotStrategy>(DEFAULT_STRATEGY);
   const [cash, setCash] = useState(DEFAULT_CASH);
   const [shares, setShares] = useState<ShareInputs>({});
   const send = useCallback(
@@ -33,7 +35,12 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    void command.run({ count: Number(count.trim()), cash: cash.trim(), holdings: holdingsFrom(instruments, shares) });
+    void command.run({
+      count: Number(count.trim()),
+      cash: cash.trim(),
+      holdings: holdingsFrom(instruments, shares),
+      strategy,
+    });
   };
 
   const limits = population.data;
@@ -55,6 +62,7 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
             {groupInteger(limits.population)} of {groupInteger(limits.maxPopulation)} bots
           </p>
           <meter min={0} max={limits.maxPopulation} value={limits.population} aria-labelledby="bot-population" />
+          {limits.population > 0 && <p className="muted">{populationText(limits.byStrategy)}</p>}
         </div>
       )}
       {editable ? (
@@ -70,11 +78,32 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
                 <input value={cash} onChange={(event) => setCash(event.target.value)} inputMode="decimal" />
               </label>
             </div>
+            <fieldset className="choices strategies">
+              <legend>Strategy</legend>
+              {STRATEGIES.map((option) => (
+                <div key={option.value} className="strategy">
+                  <label>
+                    <input
+                      type="radio"
+                      name="bot-strategy"
+                      value={option.value}
+                      checked={strategy === option.value}
+                      onChange={() => setStrategy(option.value)}
+                      aria-describedby={`strategy-${option.value}`}
+                    />
+                    {option.label}
+                  </label>
+                  <p id={`strategy-${option.value}`} className="muted">
+                    {option.description}
+                  </p>
+                </div>
+              ))}
+            </fieldset>
             <ShareFields instruments={instruments} shares={shares} onChange={setShares} />
             <p className="muted hint">
               {limits !== undefined &&
                 `Up to ${groupInteger(limits.maxPerCommand)} at a time, ${groupInteger(remaining ?? 0)} more in all. `}
-              Each bot gets the same endowment and its own token for the simulator.
+              Each bot in a batch gets the same strategy and endowment, and its own token for the simulator.
             </p>
             {full && (
               <p id="bots-full" className="muted">
@@ -92,7 +121,9 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
       <CommandStatus
         outcome={command.outcome}
         done={(created) =>
-          `Created ${created.firstBot} to ${created.lastBot}. ${groupInteger(created.population)} bots in all.`
+          `Created ${created.firstBot} to ${created.lastBot}` +
+          (created.strategy === null ? '' : ` as ${strategyNoun(created.strategy, created.created)}`) +
+          `. ${groupInteger(created.population)} bots in all.`
         }
         onRetry={() => void command.retry()}
       />

@@ -27,6 +27,7 @@ from pathlib import Path
 import httpx
 
 from mse_simulator.loadtest import stats
+from mse_simulator.population import split_text, strategy_split
 
 logger = logging.getLogger("mse_simulator.loadtest")
 
@@ -210,7 +211,8 @@ def wait_for(what: str, condition, timeout: float, interval: float = 2.0):
 
 
 def set_up(operator: Session, bots: int) -> list[str]:
-    """Five instruments at 100.00, a funded trader for the probe, the bots, and an open market."""
+    """Five instruments at 100.00, a funded trader for the probe, the bots tagged in the split
+    the run uses, and an open market."""
     instruments = [
         operator.expect(
             201, "/api/v1/admin/instruments", {"symbol": symbol, "referencePrice": "100.00"}
@@ -224,12 +226,18 @@ def set_up(operator: Session, bots: int) -> list[str]:
         {"username": "trader", "cash": "1000000.00", "holdings": holdings},
     )
     bot_holdings = [{"instrumentId": instrument, "quantity": 200} for instrument in instruments]
-    for start in range(0, bots, 100):
-        operator.expect(
-            201,
-            "/api/v1/admin/bots",
-            {"count": min(100, bots - start), "cash": "100000.00", "holdings": bot_holdings},
-        )
+    for strategy, total in strategy_split(bots).items():
+        for start in range(0, total, 100):
+            operator.expect(
+                201,
+                "/api/v1/admin/bots",
+                {
+                    "count": min(100, total - start),
+                    "cash": "100000.00",
+                    "holdings": bot_holdings,
+                    "strategy": strategy,
+                },
+            )
     operator.expect(200, "/api/v1/admin/market/open")
     return instruments
 
@@ -476,9 +484,9 @@ def summarize(
         "",
         "## Scenario",
         "",
-        f"- {len(SYMBOLS)} instruments; {options.bots} bots (a fifth market makers, a fifth "
-        "momentum, "
-        f"the rest noise), seed {options.seed}, run rate {options.rate} commands/s.",
+        f"- {len(SYMBOLS)} instruments; {options.bots} bots, each tagged with the strategy it "
+        f"runs ({split_text(strategy_split(options.bots))}), seed {options.seed}, "
+        f"run rate {options.rate} commands/s.",
         f"- Warm-up {options.warmup} s, then a measured window of {seconds:.0f} s.",
         "- Probe: one trader places and cancels once a second through the public proxy, for client "
         "latency; its commands are part of the load.",
@@ -555,15 +563,15 @@ def run(options: Options) -> int:
             120,
         )
         trader = Session("trader", stack.passwords["trader"])
-        makers = momentum = options.bots // 5
+        split = strategy_split(options.bots)
         minutes = math.ceil((options.warmup + options.duration) / 60) + 3
         started = operator.expect(
             201,
             "/api/v1/admin/bot-runs",
             {
-                "marketMakers": makers,
-                "momentum": momentum,
-                "noise": options.bots - makers - momentum,
+                "marketMakers": split["MARKET_MAKER"],
+                "momentum": split["MOMENTUM"],
+                "noise": split["NOISE"],
                 "seed": options.seed,
                 "commandsPerSecond": options.rate,
                 "maxOrderQuantity": 10,

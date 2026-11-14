@@ -16,6 +16,7 @@ class FakeExchange:
         self.state = state
         self.answers: dict[str, httpx.Response] = {}
         self.applied: list[str] = []
+        self.bots: list[tuple[str, dict]] = []
         self.busy: set[str] = set()
         self.signed_in = False
 
@@ -37,6 +38,8 @@ class FakeExchange:
         if idempotency in self.answers:
             return self.answers[idempotency]
         self.applied.append(path)
+        if path == "/api/v1/admin/bots":
+            self.bots.append((idempotency, json.loads(request.content)))
         if path == "/api/v1/admin/instruments":
             answer = httpx.Response(201, json={"instrumentId": str(uuid4())})
             self.state = "SETUP"
@@ -61,10 +64,50 @@ def test_a_fresh_market_is_set_up_and_opened() -> None:
 
     assert exchange.applied.count("/api/v1/admin/instruments") == len(INSTRUMENTS)
     assert exchange.applied.count("/api/v1/admin/accounts") == 1
-    assert exchange.applied.count("/api/v1/admin/bots") == 2, "100 at a time"
+    assert [(body["strategy"], body["count"]) for _, body in exchange.bots] == [
+        ("MARKET_MAKER", 30),
+        ("NOISE", 90),
+        ("MOMENTUM", 30),
+    ], "a command per strategy, market makers first"
     assert exchange.applied[-1] == "/api/v1/admin/market/open"
     assert exchange.state == "OPEN"
-    assert "150 bots" in done
+    assert "150 bots (30 market makers, 90 noise, 30 momentum)" in done
+
+
+def test_each_strategy_is_provisioned_100_at_a_time_under_its_own_keys() -> None:
+    exchange = FakeExchange()
+
+    seed(operator(exchange), bots=600)
+
+    assert [(key, body["strategy"], body["count"]) for key, body in exchange.bots] == [
+        (seeding.key("bots:MARKET_MAKER:0:100"), "MARKET_MAKER", 100),
+        (seeding.key("bots:MARKET_MAKER:1:20"), "MARKET_MAKER", 20),
+        (seeding.key("bots:NOISE:0:100"), "NOISE", 100),
+        (seeding.key("bots:NOISE:1:100"), "NOISE", 100),
+        (seeding.key("bots:NOISE:2:100"), "NOISE", 100),
+        (seeding.key("bots:NOISE:3:60"), "NOISE", 60),
+        (seeding.key("bots:MOMENTUM:0:100"), "MOMENTUM", 100),
+        (seeding.key("bots:MOMENTUM:1:20"), "MOMENTUM", 20),
+    ]
+    funded = exchange.bots[0][1]
+    assert funded["cash"] == "100000.00"
+    assert len(funded["holdings"]) == len(INSTRUMENTS)
+    assert all(body["holdings"] == funded["holdings"] for _, body in exchange.bots)
+
+
+def test_a_few_bots_still_include_a_market_maker_and_a_noise_bot() -> None:
+    for bots, expected in [
+        (1, [("MARKET_MAKER", 1)]),
+        (2, [("MARKET_MAKER", 1), ("NOISE", 1)]),
+        (4, [("MARKET_MAKER", 1), ("NOISE", 3)]),
+        (0, []),
+    ]:
+        exchange = FakeExchange()
+
+        seed(operator(exchange), bots=bots)
+
+        assert [(body["strategy"], body["count"]) for _, body in exchange.bots] == expected, bots
+        assert exchange.state == "OPEN"
 
 
 def test_an_interrupted_seed_finishes_without_doing_anything_twice() -> None:
@@ -83,7 +126,11 @@ def test_an_interrupted_seed_finishes_without_doing_anything_twice() -> None:
     seed(operator(exchange), bots=20)
 
     assert exchange.applied.count("/api/v1/admin/instruments") == len(INSTRUMENTS)
-    assert exchange.applied.count("/api/v1/admin/bots") == 1, "retried after busy, applied once"
+    assert [body["strategy"] for _, body in exchange.bots] == [
+        "MARKET_MAKER",
+        "NOISE",
+        "MOMENTUM",
+    ], "retried after busy, each applied once"
     assert exchange.state == "OPEN"
 
 
