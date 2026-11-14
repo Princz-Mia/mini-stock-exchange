@@ -5,16 +5,24 @@ import java.util.List;
 
 import org.springframework.http.HttpStatus;
 
+import com.mia_princz.mse.execution.trading.application.BotStrategy;
 import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
 import com.mia_princz.mse.execution.trading.application.ProvisionBots;
 
-/** The JSON body for creating bots: how many, and the endowment each one gets. */
-record BotsBody(Integer count, String cash, List<Endowments.HoldingBody> holdings) {
+/** The JSON body for creating bots: how many, the endowment each one gets, and optionally their strategy. */
+record BotsBody(Integer count, String cash, List<Endowments.HoldingBody> holdings, String strategy) {
 
-	record Valid(int count, long cashCents, List<ProvisionAccount.Holding> holdings, String canonical) {
+	/** {@code strategy} is null for untagged bots. */
+	record Valid(int count, long cashCents, List<ProvisionAccount.Holding> holdings, String canonical,
+			BotStrategy strategy) {
 
+		/**
+		 * Without a strategy, the hash is the one keys had before bots had tags, so the seed's stored answers replay as
+		 * before. A strategy, when given, is appended last; its name can't be read as part of the endowment.
+		 */
 		byte[] hash() {
-			return CommandCalls.sha256(count + "|" + canonical);
+			String request = count + "|" + canonical;
+			return CommandCalls.sha256(strategy == null ? request : request + "|" + strategy.name());
 		}
 
 	}
@@ -26,10 +34,20 @@ record BotsBody(Integer count, String cash, List<Endowments.HoldingBody> holding
 					"count must be between 1 and " + ProvisionBots.MAX_PER_COMMAND));
 		}
 		Endowments.Endowment endowment = Endowments.parse(cash, holdings, errors);
+		BotStrategy tag = null;
+		if (strategy != null) {
+			try {
+				tag = BotStrategy.valueOf(strategy);
+			}
+			catch (IllegalArgumentException ex) {
+				errors.add(new ApiException.FieldError("strategy", "INVALID_STRATEGY",
+						"strategy must be MARKET_MAKER, NOISE or MOMENTUM"));
+			}
+		}
 		if (!errors.isEmpty()) {
 			throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "The bot request is invalid", errors);
 		}
-		return new Valid(count, endowment.cashCents(), endowment.holdings(), endowment.canonical());
+		return new Valid(count, endowment.cashCents(), endowment.holdings(), endowment.canonical(), tag);
 	}
 
 }

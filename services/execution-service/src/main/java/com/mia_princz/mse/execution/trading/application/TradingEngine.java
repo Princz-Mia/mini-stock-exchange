@@ -558,11 +558,11 @@ public final class TradingEngine {
 			store.insertAudit(simulationId, command.actorUserId(), "BOT_PROVISION", "NOT_ALLOWED", key.idempotencyKey(),
 					sequence);
 			int status = refusal == BotsResult.Status.UNKNOWN_INSTRUMENT ? 422 : 409;
-			return remember(key, status, new BotsResult(refusal, 0, null, null, population, sequence));
+			return remember(key, status, new BotsResult(refusal, 0, null, null, population, strategy(command), sequence));
 		}
 		for (int number = population + 1; number <= population + command.count(); number++) {
 			UUID account = UUID.randomUUID();
-			store.insertBotAccount(simulationId, account, ProvisionBots.name(number));
+			store.insertBotAccount(simulationId, account, ProvisionBots.name(number), command.strategy());
 			store.insertGenesis(simulationId, account, "BOT", sequence, command.cashCents(), command.holdings());
 			store.insertApiToken(UUID.randomUUID(), account, botCredentials.issue(account));
 		}
@@ -570,7 +570,11 @@ public final class TradingEngine {
 				sequence);
 		return remember(key, 201, new BotsResult(BotsResult.Status.CREATED, command.count(),
 				ProvisionBots.name(population + 1), ProvisionBots.name(population + command.count()),
-				population + command.count(), sequence));
+				population + command.count(), strategy(command), sequence));
+	}
+
+	private static String strategy(ProvisionBots command) {
+		return command.strategy() == null ? null : command.strategy().name();
 	}
 
 	private TokenRevocation processRevoke(CommandKey key, RevokeBotToken command) {

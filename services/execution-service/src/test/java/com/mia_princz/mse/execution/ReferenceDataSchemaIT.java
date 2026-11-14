@@ -179,6 +179,32 @@ class ReferenceDataSchemaIT {
 		});
 	}
 
+	/** Only a bot has a strategy, one of the three, and it is fixed once the bot exists. */
+	@Test
+	void botStrategiesAreForBotsOnlyAndFixed() {
+		db.inRolledBackTransaction((f) -> {
+			UUID simulation = f.simulation();
+			for (String strategy : new String[] { "MARKET_MAKER", "NOISE", "MOMENTUM" }) {
+				f.jdbc.update("""
+						INSERT INTO account (id, simulation_id, kind, display_name, bot_strategy)
+						VALUES (?, ?, 'BOT', 'Bot', ?)""", UUID.randomUUID(), simulation, strategy);
+			}
+			UUID untagged = f.bot(simulation);
+			assertFails(INSUFFICIENT_PRIVILEGE,
+					() -> f.jdbc.update("UPDATE account SET bot_strategy = 'NOISE' WHERE id = ?", untagged));
+		});
+		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION, () -> f.jdbc.update("""
+				INSERT INTO account (id, simulation_id, kind, display_name, bot_strategy)
+				VALUES (?, ?, 'BOT', 'Bot', 'SCALPER')""", UUID.randomUUID(), f.simulation())));
+		db.inRolledBackTransaction((f) -> {
+			UUID simulation = f.simulation();
+			UUID user = f.user();
+			assertFails(CHECK_VIOLATION, () -> f.jdbc.update("""
+					INSERT INTO account (id, simulation_id, kind, owner_user_id, display_name, bot_strategy)
+					VALUES (?, ?, 'TRADER', ?, 'Trader', 'NOISE')""", UUID.randomUUID(), simulation, user));
+		});
+	}
+
 	/** A display name changes only in SETUP, and the CHECK refuses what SQL can see of a broken one. */
 	@Test
 	void displayNamesChangeOnlyInSetupAndKeepTheirShape() {

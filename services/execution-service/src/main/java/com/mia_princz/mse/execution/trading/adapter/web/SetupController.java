@@ -87,17 +87,19 @@ class SetupController {
 			String commandSequence) {
 	}
 
-	record BotsResponse(int created, String firstBot, String lastBot, int population, String commandSequence) {
+	/** {@code strategy} is the tag the new bots carry, null for none. */
+	record BotsResponse(int created, String firstBot, String lastBot, int population, String strategy,
+			String commandSequence) {
 	}
 
-	record BotPopulation(int population, int maxPopulation, int maxPerCommand) {
+	record BotPopulation(int population, int maxPopulation, int maxPerCommand, TradingQueries.BotsByStrategy byStrategy) {
 	}
 
 	record AllocationView(String instrumentId, String symbol, long quantity) {
 	}
 
 	record AccountView(String accountId, String username, String kind, String cash, List<AllocationView> holdings,
-			String token) {
+			String token, String strategy) {
 	}
 
 	record RevocationResponse(String accountId, int revoked, String commandSequence) {
@@ -122,7 +124,7 @@ class SetupController {
 						.stream()
 						.map((held) -> new AllocationView(held.instrumentId().toString(), held.symbol(), held.quantity()))
 						.toList(),
-					account.token()))
+					account.token(), account.strategy()))
 			.toList();
 		if (page.size() <= limit) {
 			return new AccountPage(views, null);
@@ -156,7 +158,9 @@ class SetupController {
 	/** How many bots exist, and how many more may be made, so the screen can say so before trying. */
 	@GetMapping("/bots")
 	BotPopulation bots() {
-		return new BotPopulation(queries.botCount(), ProvisionBots.MAX_POPULATION, ProvisionBots.MAX_PER_COMMAND);
+		TradingQueries.BotsByStrategy byStrategy = queries.botsByStrategy();
+		int population = byStrategy.marketMakers() + byStrategy.noise() + byStrategy.momentum() + byStrategy.untagged();
+		return new BotPopulation(population, ProvisionBots.MAX_POPULATION, ProvisionBots.MAX_PER_COMMAND, byStrategy);
 	}
 
 	@PostMapping("/instruments")
@@ -289,13 +293,14 @@ class SetupController {
 		BotsBody.Valid bots = body.validate();
 		UUID operator = queries.userId(authentication.getName()).orElseThrow();
 		CommandKey commandKey = new CommandKey(operator, key, BOTS_ROUTE, bots.hash());
-		ProvisionBots command = new ProvisionBots(bots.count(), bots.cashCents(), bots.holdings(), operator);
+		ProvisionBots command = new ProvisionBots(bots.count(), bots.cashCents(), bots.holdings(), bots.strategy(),
+				operator);
 		BotsResult result = CommandCalls.await(key, timeout, () -> engine.provisionBots(commandKey, command));
 		String sequence = Long.toString(result.commandSequence());
 		return switch (result.status()) {
 			case CREATED -> ResponseEntity.status(HttpStatus.CREATED)
 				.body(new BotsResponse(result.created(), result.firstBot(), result.lastBot(), result.population(),
-						sequence));
+						result.strategy(), sequence));
 			case NOT_IN_SETUP -> throw new ApiException(HttpStatus.CONFLICT, "MARKET_NOT_IN_SETUP",
 					"Bots can only be provisioned before the market opens")
 				.with("commandSequence", sequence);

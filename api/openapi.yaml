@@ -1627,22 +1627,43 @@ components:
           type: array
           maxItems: 50
           items: { $ref: '#/components/schemas/Endowment' }
+        strategy:
+          $ref: '#/components/schemas/BotStrategy'
+          description: The tag every bot in the batch carries. Left out, they are untagged.
+
+    BotStrategy:
+      type: string
+      enum: [MARKET_MAKER, NOISE, MOMENTUM]
+      description: The kind of trader a bot plays in a run. A bot is tagged once, when it is created, and keeps it.
 
     BotPopulation:
       type: object
       additionalProperties: false
-      required: [population, maxPopulation, maxPerCommand]
+      required: [population, maxPopulation, maxPerCommand, byStrategy]
       properties:
         population: { type: integer, minimum: 0 }
         maxPopulation: { type: integer }
         maxPerCommand: { type: integer }
+        byStrategy:
+          type: object
+          additionalProperties: false
+          description: How many bots carry each tag, and how many none. They add up to population.
+          required: [marketMakers, noise, momentum, untagged]
+          properties:
+            marketMakers: { type: integer, minimum: 0 }
+            noise: { type: integer, minimum: 0 }
+            momentum: { type: integer, minimum: 0 }
+            untagged: { type: integer, minimum: 0 }
 
     BotsCreated:
       type: object
       additionalProperties: false
-      required: [created, firstBot, lastBot, population, commandSequence]
+      required: [created, firstBot, lastBot, population, strategy, commandSequence]
       properties:
         created: { type: integer, minimum: 1 }
+        strategy:
+          description: The tag the new bots carry; null for none, and in answers stored before bots had tags.
+          oneOf: [{ $ref: '#/components/schemas/BotStrategy' }, { type: 'null' }]
         firstBot: { type: string }
         lastBot: { type: string }
         population:
@@ -1934,11 +1955,14 @@ components:
     AccountSummary:
       type: object
       additionalProperties: false
-      required: [accountId, username, kind, cash, holdings, token]
+      required: [accountId, username, kind, cash, holdings, token, strategy]
       properties:
         accountId: { $ref: '#/components/schemas/Uuid' }
         username: { type: string }
         kind: { type: string, enum: [TRADER, BOT] }
+        strategy:
+          description: A bot's tag; null for a trader, and for a bot made without one.
+          oneOf: [{ $ref: '#/components/schemas/BotStrategy' }, { type: 'null' }]
         token:
           type: [string, 'null']
           enum: [ACTIVE, REVOKED, null]

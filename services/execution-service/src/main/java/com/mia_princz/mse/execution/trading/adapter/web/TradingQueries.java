@@ -100,8 +100,9 @@ class TradingQueries {
 
 	/** An account and what it started with, for the operator. Cash is null if it started with shares only. */
 	/** {@code token} is a bot's: ACTIVE while it has a token that works, REVOKED once none does; null for others. */
+	/** {@code strategy} is a bot's tag; null for a trader and for a bot made before tags. */
 	record AccountSummary(UUID accountId, String username, String kind, Long cashCents, List<Allocation> holdings,
-			Instant createdAt, String token) {
+			Instant createdAt, String token, String strategy) {
 	}
 
 	record Allocation(UUID instrumentId, String symbol, long quantity) {
@@ -113,10 +114,10 @@ class TradingQueries {
 
 	/** Every trading account with its initial allocation, in creation order either way, in keyset pages. */
 	List<AccountSummary> accounts(AccountPosition after, int limit, PageOrder order) {
-		record Row(UUID id, String name, String kind, Instant createdAt, String token) {
+		record Row(UUID id, String name, String kind, Instant createdAt, String token, String strategy) {
 		}
 		List<Row> rows = jdbc.sql("""
-				SELECT id, display_name, kind, created_at,
+				SELECT id, display_name, kind, created_at, bot_strategy,
 				    CASE WHEN kind <> 'BOT' THEN NULL
 				         WHEN EXISTS (SELECT 1 FROM api_token t WHERE t.account_id = account.id AND t.revoked_at IS NULL)
 				         THEN 'ACTIVE' ELSE 'REVOKED' END AS token
@@ -129,7 +130,8 @@ class TradingQueries {
 			.param("afterId", after == null ? null : after.id())
 			.param("limit", limit)
 			.query((row, index) -> new Row(row.getObject("id", UUID.class), row.getString("display_name"),
-					row.getString("kind"), row.getTimestamp("created_at").toInstant(), row.getString("token")))
+					row.getString("kind"), row.getTimestamp("created_at").toInstant(), row.getString("token"),
+					row.getString("bot_strategy")))
 			.list();
 		if (rows.isEmpty()) {
 			return List.of();
@@ -158,12 +160,25 @@ class TradingQueries {
 					holdings.add(new Allocation(allocated.instrumentId(), allocated.symbol(), allocated.amount()));
 				}
 			}
-			return new AccountSummary(row.id(), row.name(), row.kind(), cash, holdings, row.createdAt(), row.token());
+			return new AccountSummary(row.id(), row.name(), row.kind(), cash, holdings, row.createdAt(), row.token(),
+					row.strategy());
 		}).toList();
 	}
 
-	int botCount() {
-		return jdbc.sql("SELECT count(*) FROM account WHERE kind = 'BOT'").query(Integer.class).single();
+	/** How many bots carry each tag, and how many none; strategies with no bots count zero. */
+	record BotsByStrategy(int marketMakers, int noise, int momentum, int untagged) {
+	}
+
+	BotsByStrategy botsByStrategy() {
+		return jdbc.sql("""
+				SELECT count(*) FILTER (WHERE bot_strategy = 'MARKET_MAKER') AS market_makers,
+				    count(*) FILTER (WHERE bot_strategy = 'NOISE') AS noise,
+				    count(*) FILTER (WHERE bot_strategy = 'MOMENTUM') AS momentum,
+				    count(*) FILTER (WHERE bot_strategy IS NULL) AS untagged
+				FROM account WHERE kind = 'BOT'""")
+			.query((row, index) -> new BotsByStrategy(row.getInt("market_makers"), row.getInt("noise"),
+					row.getInt("momentum"), row.getInt("untagged")))
+			.single();
 	}
 
 	/** A user who may be given a trading account: one with the TRADER role. */
