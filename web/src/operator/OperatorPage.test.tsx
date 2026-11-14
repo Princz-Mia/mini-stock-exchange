@@ -45,7 +45,13 @@ function market(state: MarketStatus['state']): MarketStatus {
 
 /** A stateful stand-in: the market moves when a transition is accepted, so refetches show the new state. */
 function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
-  const state = { market: market(initial), bots: 0, runs: [] as BotRun[] };
+  // `bots` are untagged; `tagged` counts bots per strategy.
+  const state = {
+    market: market(initial),
+    bots: 0,
+    tagged: { marketMakers: 0, noise: 0, momentum: 0 },
+    runs: [] as BotRun[],
+  };
   const server = signedIn('operator', ['OPERATOR'])
     .on('GET /api/v1/market', () => ({ status: 200, json: state.market }))
     .on('GET /api/v1/instruments', { status: 200, json: { instruments, feed: { state: 'LIVE', lag: 0 } } })
@@ -53,10 +59,10 @@ function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
     .on('GET /api/v1/admin/bots', () => ({
       status: 200,
       json: {
-        population: state.bots,
+        population: state.bots + state.tagged.marketMakers + state.tagged.noise + state.tagged.momentum,
         maxPopulation: 1000,
         maxPerCommand: 100,
-        byStrategy: { marketMakers: 0, noise: 0, momentum: 0, untagged: state.bots },
+        byStrategy: { ...state.tagged, untagged: state.bots },
       },
     }))
     .on('GET /api/v1/admin/bot-runs', () => ({ status: 200, json: { runs: state.runs, nextCursor: null } }));
@@ -784,8 +790,9 @@ describe('the operator screen', () => {
             cash: '5000.00',
             holdings: [],
             token: 'ACTIVE',
-            strategy: 'NOISE',
+            strategy: 'MARKET_MAKER',
           },
+          { accountId: 'c', username: 'bot-0002', kind: 'BOT', cash: '5000.00', holdings: [], token: 'ACTIVE', strategy: null },
         ],
         nextCursor: null,
       },
@@ -799,9 +806,12 @@ describe('the operator screen', () => {
     expect(asked.url).toContain('limit=25');
     expect(row).toHaveTextContent('100,000.00');
     expect(row).toHaveTextContent('NOVA 1,000');
-    expect(within(row).queryByText('bot')).toBeNull();
+    expect(within(row).queryByText(/bot/)).toBeNull();
+    // A bot's tag says its strategy; one made without a strategy is just a bot.
     const bot = screen.getByRole('row', { name: /bot-0001/ });
-    expect(within(bot).getByText('bot')).toHaveClass('tag');
+    expect(within(bot).getByText('market maker bot')).toHaveClass('tag');
+    const untagged = screen.getByRole('row', { name: /bot-0002/ });
+    expect(within(untagged).getByText('bot')).toHaveClass('tag');
     expect(screen.getByText(/Endowments are frozen once the market opens/)).toBeInTheDocument();
     expect(screen.queryByRole('form', { name: 'Fund a trader' })).toBeNull();
   });
@@ -839,10 +849,10 @@ describe('the operator screen', () => {
     expect(within(bot).queryByRole('button', { name: /Revoke/ })).toBeNull();
   });
 
-  it('creates bots with the default endowment and shows the new population', async () => {
+  it('creates noise bots with the default endowment and shows the new population', async () => {
     const { server, state } = exchange('SETUP');
     server.on('POST /api/v1/admin/bots', () => {
-      state.bots = 10;
+      state.tagged.noise = 10;
       return {
         status: 201,
         json: {
@@ -850,7 +860,7 @@ describe('the operator screen', () => {
           firstBot: 'bot-0001',
           lastBot: 'bot-0010',
           population: 10,
-          strategy: null,
+          strategy: 'NOISE',
           commandSequence: '9',
         },
       };
@@ -861,18 +871,69 @@ describe('the operator screen', () => {
     expect(await screen.findByText('0 of 1,000 bots')).toBeInTheDocument();
     expect(within(form).getByLabelText('Number of bots')).toHaveValue('10');
     expect(await within(form).findByLabelText('NOVA shares')).toHaveValue('1000');
+    const strategy = within(form).getByRole('group', { name: 'Strategy' });
+    expect(within(strategy).getAllByRole('radio').map((radio) => radio.getAttribute('value'))).toEqual([
+      'MARKET_MAKER',
+      'NOISE',
+      'MOMENTUM',
+    ]);
+    expect(within(strategy).getByRole('radio', { name: 'Noise' })).toBeChecked();
+    expect(within(strategy).getByRole('radio', { name: 'Noise' })).toHaveAccessibleDescription(
+      'Places random limit orders near the current price.',
+    );
     expect(within(form).getByText(/Up to 100 at a time, 1,000 more in all/)).toBeInTheDocument();
     fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
 
-    expect(await screen.findByText('Created bot-0001 to bot-0010. 10 bots in all.')).toBeInTheDocument();
+    expect(
+      await screen.findByText('Created bot-0001 to bot-0010 as noise bots. 10 bots in all.'),
+    ).toBeInTheDocument();
     expect(await screen.findByText('10 of 1,000 bots')).toBeInTheDocument();
+    expect(screen.getByText('10 noise')).toBeInTheDocument();
     const sent = server.requests.find((request) => request.url === '/api/v1/admin/bots' && request.method === 'POST');
     expect(sent?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
     expect(sent?.body).toEqual({
       count: 10,
       cash: '100000.00',
       holdings: [{ instrumentId: NOVA.instrumentId, quantity: 1000 }],
+      strategy: 'NOISE',
     });
+  });
+
+  it('creates bots with the strategy chosen and counts the population by strategy', async () => {
+    const { server, state } = exchange('SETUP');
+    state.tagged = { marketMakers: 0, noise: 12, momentum: 4 };
+    state.bots = 2;
+    server.on('POST /api/v1/admin/bots', () => {
+      state.tagged.marketMakers = 1;
+      return {
+        status: 201,
+        json: {
+          created: 1,
+          firstBot: 'bot-0019',
+          lastBot: 'bot-0019',
+          population: 19,
+          strategy: 'MARKET_MAKER',
+          commandSequence: '12',
+        },
+      };
+    });
+    renderPage();
+
+    expect(await screen.findByText('12 noise · 4 momentum · 2 untagged')).toBeInTheDocument();
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '1' } });
+    fireEvent.click(within(form).getByRole('radio', { name: 'Market maker' }));
+    expect(within(form).getByRole('radio', { name: 'Noise' })).not.toBeChecked();
+    fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
+
+    expect(
+      await screen.findByText('Created bot-0019 to bot-0019 as a market maker. 19 bots in all.'),
+    ).toBeInTheDocument();
+    expect(await screen.findByText('1 market maker · 12 noise · 4 momentum · 2 untagged')).toBeInTheDocument();
+    const sent = server.requests.find((request) => request.url === '/api/v1/admin/bots' && request.method === 'POST');
+    expect(sent?.body).toMatchObject({ count: 1, strategy: 'MARKET_MAKER' });
+    // The choice stays for the next batch.
+    expect(within(form).getByRole('radio', { name: 'Market maker' })).toBeChecked();
   });
 
   it("shows a refused bot request in the exchange's words and keeps the input", async () => {

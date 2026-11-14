@@ -11,7 +11,7 @@ Do this beforehand. The first build takes a few minutes.
 docker compose --profile full up -d --build --wait
 ```
 
-On Linux or macOS, use `./scripts/init-env.sh`. The stack starts with a demo market already set up and open: NOVA, ORBT, HELI, QUAD and VELO, the trader funded, and 20 bots ready.
+On Linux or macOS, use `./scripts/init-env.sh`. The stack starts with a demo market already set up and open: NOVA, ORBT, HELI, QUAD and VELO, the trader funded, and 20 bots ready: 4 market makers, 12 noise and 4 momentum bots.
 
 The passwords for `operator` and `trader` are `DEV_OPERATOR_PASSWORD` and `DEV_TRADER_PASSWORD` in `.env`. Use two browser windows, one of them private, so both can be signed in at once: the operator in one, the trader in the other. Open <http://localhost:8080> in both.
 

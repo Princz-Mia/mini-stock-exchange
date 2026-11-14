@@ -501,6 +501,16 @@ for (const size of SIZES) {
       // The panel scrolls a table too wide for it; the setup rows must fit instead, controls and editor included.
       const fits = () => instruments.evaluate((panel) => panel.scrollWidth <= panel.clientWidth);
       expect(await fits(), `the instruments panel scrolls sideways at ${size.name}`).toBe(true);
+      // The bot form's strategies stack, each with what it does, Noise chosen, and fit their panel too.
+      const bots = page.getByRole('region', { name: 'Bots' });
+      await expect(bots.getByRole('group', { name: 'Strategy' }).getByRole('radio', { name: 'Noise' })).toBeChecked();
+      await expect(bots.getByRole('radio', { name: 'Market maker' })).toHaveAccessibleDescription(
+        'Keeps a bid and an ask around the price, leaning against what it holds.',
+      );
+      expect(
+        await bots.evaluate((panel) => panel.scrollWidth <= panel.clientWidth),
+        `the bots panel scrolls sideways at ${size.name}`,
+      ).toBe(true);
 
       // Edit opens a labelled form under the row, filled in, with focus on the name.
       await instruments.getByRole('button', { name: 'Edit NOVA' }).click();

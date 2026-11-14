@@ -1,8 +1,10 @@
 """Sets up the demonstration market through the operator API, once, so a fresh stack can trade.
 
 Five instruments at their reference prices, the demo trader funded with USD 100,000.00 and
-1,000 shares of each, a population of funded bots, and the market opened. It signs in as the
-operator and goes through the same endpoints the operator screen uses.
+1,000 shares of each, a population of funded bots, and the market opened. The bots are tagged with
+their strategy: a fifth market makers and a fifth momentum, the rest noise, with at least one market
+maker (see population.strategy_split). It signs in as the operator and goes through the same
+endpoints the operator screen uses.
 
 Each step has an idempotency key derived from its name, so running the seed again repeats the first
 answers instead of doing anything twice, and a seed interrupted halfway finishes on the next run. A
@@ -23,6 +25,8 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
+
+from mse_simulator.population import split_text, strategy_split
 
 logger = logging.getLogger("mse_simulator.seed")
 
@@ -122,21 +126,23 @@ def seed(operator: Operator, bots: int) -> str:
         f"account:{TRADER}",
         {"username": TRADER, "cash": CASH, "holdings": holdings},
     )
-    left = bots
-    batch = 0
-    while left > 0:
-        count = min(left, 100)
-        operator.command(
-            "/api/v1/admin/bots",
-            f"bots:{batch}:{count}",
-            {"count": count, "cash": CASH, "holdings": holdings},
-        )
-        left -= count
-        batch += 1
+    split = strategy_split(bots)
+    for strategy, total in split.items():
+        left = total
+        batch = 0
+        while left > 0:
+            count = min(left, 100)
+            operator.command(
+                "/api/v1/admin/bots",
+                f"bots:{strategy}:{batch}:{count}",
+                {"count": count, "cash": CASH, "holdings": holdings, "strategy": strategy},
+            )
+            left -= count
+            batch += 1
     operator.command("/api/v1/admin/market/open", "open")
     return (
-        f"seeded {len(ids)} instruments, the {TRADER} account and {bots} bots,"
-        " and opened the market"
+        f"seeded {len(ids)} instruments, the {TRADER} account and {bots} bots"
+        f" ({split_text(split)}), and opened the market"
     )
 
 

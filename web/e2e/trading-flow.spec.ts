@@ -58,12 +58,16 @@ async function setUpMarket(): Promise<string> {
     });
     await expectStatus(funded, 201, `fund ${username}`);
   }
-  const bots = await operator.command('/api/v1/admin/bots', {
-    count: 2,
-    cash: '10000.00',
-    holdings: [{ instrumentId, quantity: 100 }],
-  });
-  await expectStatus(bots, 201, 'provision two bots');
+  // One market maker and one noise bot, each tagged, for the run that starts one of each.
+  for (const strategy of ['MARKET_MAKER', 'NOISE']) {
+    const bots = await operator.command('/api/v1/admin/bots', {
+      count: 1,
+      cash: '10000.00',
+      holdings: [{ instrumentId, quantity: 100 }],
+      strategy,
+    });
+    await expectStatus(bots, 201, `provision a ${strategy} bot`);
+  }
   await expectStatus(await operator.command('/api/v1/admin/market/open'), 200, 'open the market');
   await operator.api.dispose();
   return instrumentId;

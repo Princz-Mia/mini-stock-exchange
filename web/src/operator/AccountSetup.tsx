@@ -9,6 +9,7 @@ import { groupDigits, groupInteger } from '../format';
 import { toCents } from '../terminal/money';
 import { CommandStatus } from './CommandStatus';
 import { DEFAULT_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
+import { strategyTag } from './strategies';
 import { useCommand } from './useCommand';
 
 /** A bot's token: whether it still works, and a way to revoke it, confirmed first since it can't be undone. */
@@ -75,7 +76,10 @@ const ACCOUNT_COLUMNS: readonly Column<AccountSummary>[] = [
     rowHeader: true,
     cell: (account) => (
       <>
-        {account.username} {account.kind === 'BOT' && <span className="tag">bot</span>}
+        {account.username}{' '}
+        {account.kind === 'BOT' && (
+          <span className="tag">{account.strategy === null ? 'bot' : `${strategyTag(account.strategy)} bot`}</span>
+        )}
       </>
     ),
     sortValue: (account) => account.username,

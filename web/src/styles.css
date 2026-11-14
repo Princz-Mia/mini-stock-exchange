@@ -557,6 +557,26 @@ tbody th {
   gap: var(--space-1);
 }
 
+/* One strategy a line, its description under its label, lined up with the label's text. */
+.setup-form .choices.strategies {
+  display: grid;
+  gap: var(--space-2);
+}
+
+/* The radio's margin is set here, not left to the browser, so the description can line up with the label's text. */
+.strategy input[type='radio'] {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+}
+
+.strategy p {
+  margin: 0;
+  padding-left: calc(13px + var(--space-1));
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .control-list {
   list-style: none;
   margin: 0;
