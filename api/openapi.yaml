@@ -401,12 +401,13 @@ paths:
     put:
       tags: [execution]
       operationId: editInstrument
-      summary: Change an instrument's reference price while the market is in SETUP.
+      summary: Change an instrument's reference price and display name while the market is in SETUP.
       description: |
-        Operator only. The body holds every field an operator may change. Sequenced on the writer and audited, with an
-        idempotency key: a retry with the same key, instrument and body returns the first answer, even a refusal. The
-        same price is applied like any other. Publishes the instrument's market snapshot with the new price. Starting
-        shares already granted are valued at the new price. Once the market has opened, the catalogue is frozen.
+        Operator only. The body holds every field an operator may change, all of them each time: a displayName left
+        out or null removes the name. Sequenced on the writer and audited, with an idempotency key: a retry with the
+        same key, instrument and body returns the first answer, even a refusal. The same values are applied like any
+        others. Publishes the instrument's market snapshot with them. Starting shares already granted are valued at the
+        new price. Once the market has opened, the catalogue is frozen.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
         - name: instrumentId
@@ -1511,14 +1512,28 @@ components:
       properties:
         symbol: { type: string, pattern: '^[A-Z]{1,8}$' }
         referencePrice: { $ref: '#/components/schemas/Price' }
+        displayName: { $ref: '#/components/schemas/DisplayName' }
+
+    DisplayName:
+      type: string
+      minLength: 1
+      maxLength: 100
+      description: |
+        A name to show beside the symbol: printable characters in any language, words separated by single plain spaces,
+        none at either end. Control and invisible formatting characters are refused (VALIDATION_FAILED,
+        INVALID_DISPLAY_NAME), never trimmed or removed.
+      examples: ['Nova Dynamics']
 
     InstrumentCreated:
       type: object
       additionalProperties: false
-      required: [instrumentId, symbol, referencePrice, commandSequence]
+      required: [instrumentId, symbol, displayName, referencePrice, commandSequence]
       properties:
         instrumentId: { $ref: '#/components/schemas/Uuid' }
         symbol: { type: string }
+        displayName:
+          description: Null for none, and in answers stored before instruments had names.
+          oneOf: [{ $ref: '#/components/schemas/DisplayName' }, { type: 'null' }]
         referencePrice: { $ref: '#/components/schemas/Price' }
         commandSequence: { $ref: '#/components/schemas/Sequence' }
 
@@ -1528,14 +1543,20 @@ components:
       required: [referencePrice]
       properties:
         referencePrice: { $ref: '#/components/schemas/Price' }
+        displayName:
+          description: Left out or null removes the name.
+          oneOf: [{ $ref: '#/components/schemas/DisplayName' }, { type: 'null' }]
 
     InstrumentEdited:
       type: object
       additionalProperties: false
-      required: [instrumentId, symbol, referencePrice, commandSequence]
+      required: [instrumentId, symbol, displayName, referencePrice, commandSequence]
       properties:
         instrumentId: { $ref: '#/components/schemas/Uuid' }
         symbol: { type: string }
+        displayName:
+          description: The name now set; null for none, and in answers stored before instruments had names.
+          oneOf: [{ $ref: '#/components/schemas/DisplayName' }, { type: 'null' }]
         referencePrice: { $ref: '#/components/schemas/Price' }
         commandSequence: { $ref: '#/components/schemas/Sequence' }
     InstrumentDeleted:

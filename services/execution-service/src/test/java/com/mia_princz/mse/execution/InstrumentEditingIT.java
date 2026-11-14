@@ -121,6 +121,43 @@ class InstrumentEditingIT {
 		assertThat(sameSequence).isGreaterThan(editSequence);
 		assertThat(snapshotAt(sameSequence).getRules().getReferencePriceCents()).isEqualTo(12_050);
 
+		// A display name is set with the price, and every edit sets both: one left out, or null, removes the name.
+		UUID nameKey = UUID.randomUUID();
+		HttpResponse<String> named = edit(operator, nameKey, nova, "120.50", "Nova Dynamics");
+		assertThat(named.statusCode()).as(named.body()).isEqualTo(200);
+		CONTRACT.assertResponse("PUT", EDIT, 200, named.headers().firstValue("Content-Type").orElse(null),
+				named.body());
+		assertThat(field(named, "displayName")).isEqualTo("Nova Dynamics");
+		assertThat(displayName("NOVA")).isEqualTo("Nova Dynamics");
+		assertThat(snapshotAt(Long.parseLong(field(named, "commandSequence"))).getDisplayName())
+			.isEqualTo("Nova Dynamics");
+		assertThat(code(edit(operator, nameKey, nova, "120.50", "Nova"), 409)).isEqualTo("IDEMPOTENCY_CONFLICT");
+		assertThat(code(edit(operator, nameKey, nova, "120.50"), 409)).as("no name is another request")
+			.isEqualTo("IDEMPOTENCY_CONFLICT");
+		UUID omittedKey = UUID.randomUUID();
+		HttpResponse<String> omitted = edit(operator, omittedKey, nova, "120.50");
+		assertThat(omitted.statusCode()).as(omitted.body()).isEqualTo(200);
+		assertThat(JSON.readTree(omitted.body()).get("displayName").isNull()).isTrue();
+		assertThat(displayName("NOVA")).as("left out, so removed").isNull();
+		assertThat(snapshotAt(Long.parseLong(field(omitted, "commandSequence"))).getDisplayName()).isNull();
+		UUID renamedKey = UUID.randomUUID();
+		assertThat(edit(operator, renamedKey, nova, "120.50", "Nova Dynamics").statusCode()).isEqualTo(200);
+		UUID nulledKey = UUID.randomUUID();
+		HttpResponse<String> nulled = operator.put(path(nova), """
+				{"referencePrice":"120.50","displayName":null}""", "Idempotency-Key", nulledKey.toString());
+		assertThat(nulled.statusCode()).as(nulled.body()).isEqualTo(200);
+		assertThat(displayName("NOVA")).as("null, so removed").isNull();
+		for (String bad : List.of("", " Nova", "Nova ", "Nova  Dynamics", "Nova\tDynamics", "Nova\u200BDynamics",
+				"x".repeat(101))) {
+			HttpResponse<String> refused = edit(operator, UUID.randomUUID(), nova, "120.50", bad);
+			assertThat(code(refused, 400)).as(bad).isEqualTo("VALIDATION_FAILED");
+			assertThat(fields(refused)).as(bad).containsExactly("displayName INVALID_DISPLAY_NAME");
+		}
+		UUID longestKey = UUID.randomUUID();
+		assertThat(edit(operator, longestKey, nova, "120.50", "x".repeat(100)).statusCode()).isEqualTo(200);
+		UUID lastNameKey = UUID.randomUUID();
+		assertThat(edit(operator, lastNameKey, nova, "120.50", "Nova Dynamics").statusCode()).isEqualTo(200);
+
 		// An instrument this market does not have: committed, so its key repeats the answer.
 		UUID unknownKey = UUID.randomUUID();
 		UUID missingId = UUID.randomUUID();
@@ -150,6 +187,10 @@ class InstrumentEditingIT {
 		HttpResponse<String> opened = operator.post("/api/v1/admin/market/open", "", "Idempotency-Key",
 				UUID.randomUUID().toString());
 		assertThat(opened.statusCode()).as(opened.body()).isEqualTo(200);
+		UUID lateNameKey = UUID.randomUUID();
+		assertThat(code(edit(operator, lateNameKey, nova, "120.50", "Another"), 409))
+			.isEqualTo("MARKET_NOT_IN_SETUP");
+		assertThat(displayName("NOVA")).as("frozen with the catalogue").isEqualTo("Nova Dynamics");
 		UUID lateKey = UUID.randomUUID();
 		HttpResponse<String> late = edit(operator, lateKey, nova, "90.00");
 		assertThat(code(late, 409)).isEqualTo("MARKET_NOT_IN_SETUP");
@@ -174,7 +215,11 @@ class InstrumentEditingIT {
 				WHERE actor_user_id = ? AND action = 'INSTRUMENT_EDIT' ORDER BY command_sequence""", String.class,
 				operatorId);
 		assertThat(audit).containsExactly("INSTRUMENT_EDIT APPLIED " + editKey, "INSTRUMENT_EDIT APPLIED " + sameKey,
-				"INSTRUMENT_EDIT NOT_ALLOWED " + unknownKey, "INSTRUMENT_EDIT NOT_ALLOWED " + lateKey,
+				"INSTRUMENT_EDIT APPLIED " + nameKey, "INSTRUMENT_EDIT APPLIED " + omittedKey,
+				"INSTRUMENT_EDIT APPLIED " + renamedKey, "INSTRUMENT_EDIT APPLIED " + nulledKey,
+				"INSTRUMENT_EDIT APPLIED " + longestKey, "INSTRUMENT_EDIT APPLIED " + lastNameKey,
+				"INSTRUMENT_EDIT NOT_ALLOWED " + unknownKey, "INSTRUMENT_EDIT NOT_ALLOWED " + lateNameKey,
+				"INSTRUMENT_EDIT NOT_ALLOWED " + lateKey,
 				"INSTRUMENT_EDIT NOT_ALLOWED " + lateUnknownKey);
 	}
 
@@ -195,6 +240,17 @@ class InstrumentEditingIT {
 			throws Exception {
 		return browser.put(path(instrument), """
 				{"referencePrice":"%s"}""".formatted(price), "Idempotency-Key", key.toString());
+	}
+
+	private static HttpResponse<String> edit(TestBrowser browser, UUID key, UUID instrument, String price,
+			String displayName) throws Exception {
+		return browser.put(path(instrument),
+				JSON.writeValueAsString(java.util.Map.of("referencePrice", price, "displayName", displayName)),
+				"Idempotency-Key", key.toString());
+	}
+
+	private String displayName(String symbol) {
+		return jdbc.queryForObject("SELECT display_name FROM instrument WHERE symbol = ?", String.class, symbol);
 	}
 
 	private static String path(UUID instrument) {

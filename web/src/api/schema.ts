@@ -262,11 +262,12 @@ export interface paths {
         };
         readonly get?: never;
         /**
-         * Change an instrument's reference price while the market is in SETUP.
-         * @description Operator only. The body holds every field an operator may change. Sequenced on the writer and audited, with an
-         *     idempotency key: a retry with the same key, instrument and body returns the first answer, even a refusal. The
-         *     same price is applied like any other. Publishes the instrument's market snapshot with the new price. Starting
-         *     shares already granted are valued at the new price. Once the market has opened, the catalogue is frozen.
+         * Change an instrument's reference price and display name while the market is in SETUP.
+         * @description Operator only. The body holds every field an operator may change, all of them each time: a displayName left
+         *     out or null removes the name. Sequenced on the writer and audited, with an idempotency key: a retry with the
+         *     same key, instrument and body returns the first answer, even a refusal. The same values are applied like any
+         *     others. Publishes the instrument's market snapshot with them. Starting shares already granted are valued at the
+         *     new price. Once the market has opened, the catalogue is frozen.
          */
         readonly put: operations["editInstrument"];
         readonly post?: never;
@@ -909,19 +910,33 @@ export interface components {
         readonly InstrumentRequest: {
             readonly symbol: string;
             readonly referencePrice: components["schemas"]["Price"];
+            readonly displayName?: components["schemas"]["DisplayName"];
         };
+        /**
+         * @description A name to show beside the symbol: printable characters in any language, words separated by single plain spaces,
+         *     none at either end. Control and invisible formatting characters are refused (VALIDATION_FAILED,
+         *     INVALID_DISPLAY_NAME), never trimmed or removed.
+         * @example Nova Dynamics
+         */
+        readonly DisplayName: string;
         readonly InstrumentCreated: {
             readonly instrumentId: components["schemas"]["Uuid"];
             readonly symbol: string;
+            /** @description Null for none, and in answers stored before instruments had names. */
+            readonly displayName: components["schemas"]["DisplayName"] | null;
             readonly referencePrice: components["schemas"]["Price"];
             readonly commandSequence: components["schemas"]["Sequence"];
         };
         readonly InstrumentEditRequest: {
             readonly referencePrice: components["schemas"]["Price"];
+            /** @description Left out or null removes the name. */
+            readonly displayName?: components["schemas"]["DisplayName"] | null;
         };
         readonly InstrumentEdited: {
             readonly instrumentId: components["schemas"]["Uuid"];
             readonly symbol: string;
+            /** @description The name now set; null for none, and in answers stored before instruments had names. */
+            readonly displayName: components["schemas"]["DisplayName"] | null;
             readonly referencePrice: components["schemas"]["Price"];
             readonly commandSequence: components["schemas"]["Sequence"];
         };

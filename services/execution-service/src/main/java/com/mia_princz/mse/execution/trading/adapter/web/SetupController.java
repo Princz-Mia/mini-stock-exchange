@@ -69,7 +69,9 @@ class SetupController {
 		this.timeout = timeout;
 	}
 
-	record InstrumentResponse(String instrumentId, String symbol, String referencePrice, String commandSequence) {
+	/** {@code displayName} is null for none. */
+	record InstrumentResponse(String instrumentId, String symbol, String displayName, String referencePrice,
+			String commandSequence) {
 	}
 
 	record InstrumentDeleted(String instrumentId, String symbol, String commandSequence) {
@@ -165,12 +167,12 @@ class SetupController {
 		InstrumentBody.Valid instrument = body.validate();
 		UUID operator = queries.userId(authentication.getName()).orElseThrow();
 		CommandKey commandKey = new CommandKey(operator, key, INSTRUMENT_ROUTE, instrument.hash());
-		AddInstrument command = new AddInstrument(UUID.randomUUID(), instrument.symbol(), instrument.referencePrice(),
-				operator);
+		AddInstrument command = new AddInstrument(UUID.randomUUID(), instrument.symbol(), instrument.displayName(),
+				instrument.referencePrice(), operator);
 		InstrumentResult result = CommandCalls.await(key, timeout, () -> engine.addInstrument(commandKey, command));
 		return switch (result.status()) {
 			case CREATED -> ResponseEntity.status(HttpStatus.CREATED)
-				.body(new InstrumentResponse(result.instrumentId().toString(), result.symbol(),
+				.body(new InstrumentResponse(result.instrumentId().toString(), result.symbol(), result.displayName(),
 						new Price(result.referencePriceCents()).format(), Long.toString(result.commandSequence())));
 			case NOT_IN_SETUP -> throw new ApiException(HttpStatus.CONFLICT, "MARKET_NOT_IN_SETUP",
 					"Instruments can only be added before the market opens")
@@ -182,8 +184,8 @@ class SetupController {
 	}
 
 	/**
-	 * Changes an instrument's reference price before the market opens. Every account's starting shares are valued at
-	 * the new price, since nothing has traded yet.
+	 * Sets an instrument's reference price and display name before the market opens, both each time: a name left out
+	 * is removed. Every account's starting shares are valued at the new price, since nothing has traded yet.
 	 */
 	@PutMapping("/instruments/{instrumentId}")
 	InstrumentResponse editInstrument(@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader,
@@ -192,11 +194,11 @@ class SetupController {
 		InstrumentEditBody.Valid edit = body.validate(instrumentId);
 		UUID operator = queries.userId(authentication.getName()).orElseThrow();
 		CommandKey commandKey = new CommandKey(operator, key, INSTRUMENT_EDIT_ROUTE, edit.hash());
-		EditInstrument command = new EditInstrument(instrumentId, edit.referencePrice(), operator);
+		EditInstrument command = new EditInstrument(instrumentId, edit.referencePrice(), edit.displayName(), operator);
 		InstrumentEdit result = CommandCalls.await(key, timeout, () -> engine.editInstrument(commandKey, command));
 		String sequence = Long.toString(result.commandSequence());
 		return switch (result.status()) {
-			case UPDATED -> new InstrumentResponse(result.instrumentId().toString(), result.symbol(),
+			case UPDATED -> new InstrumentResponse(result.instrumentId().toString(), result.symbol(), result.displayName(),
 					new Price(result.referencePriceCents()).format(), sequence);
 			case NOT_IN_SETUP -> throw new ApiException(HttpStatus.CONFLICT, "MARKET_NOT_IN_SETUP",
 					"Instruments can only be changed before the market opens")

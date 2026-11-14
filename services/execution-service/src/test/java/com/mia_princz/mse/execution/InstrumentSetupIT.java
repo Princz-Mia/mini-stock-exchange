@@ -68,6 +68,7 @@ class InstrumentSetupIT {
 		UUID novaId = UUID.fromString(created.get("instrumentId").asString());
 		assertThat(created.get("symbol").asString()).isEqualTo("NOVA");
 		assertThat(created.get("referencePrice").asString()).isEqualTo("100.00");
+		assertThat(created.get("displayName").isNull()).as("no name was given").isTrue();
 		assertThat(field(anonymous.get("/api/v1/market"), "state")).isEqualTo("SETUP");
 		assertThat(jdbc.queryForObject("SELECT writer_epoch FROM simulation", Long.class)).isEqualTo(1);
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM account WHERE kind = 'ISSUANCE'", Long.class)).isEqualTo(1);
@@ -80,7 +81,7 @@ class InstrumentSetupIT {
 		assertThat(snapshot.getSymbol()).isEqualTo("NOVA");
 		assertThat(snapshot.getVenueState()).isEqualTo(VenueState.SETUP);
 		assertThat(snapshot.getRules().getReferencePriceCents()).isEqualTo(10_000);
-		// Written with the event's second version, whose added fields nothing sets yet: their defaults.
+		// Written with the event's second version: no name was given, and the rest is set by later work.
 		assertThat(snapshot.getRemoved()).isFalse();
 		assertThat(snapshot.getDisplayName()).isNull();
 		assertThat(snapshot.getOpensAt()).isNull();
@@ -104,10 +105,27 @@ class InstrumentSetupIT {
 		List<String> fields = new ArrayList<>();
 		JSON.readTree(invalid.body()).get("errors").forEach((error) -> fields.add(error.get("field").asString()));
 		assertThat(fields).containsExactlyInAnyOrder("symbol", "referencePrice");
+		HttpResponse<String> badName = named(operator, UUID.randomUUID(), "ORBT", "50.00", " Orbit");
+		assertThat(code(badName, 400)).isEqualTo("VALIDATION_FAILED");
+		assertThat(JSON.readTree(badName.body()).get("errors").get(0).get("code").asString())
+			.isEqualTo("INVALID_DISPLAY_NAME");
 
+		// A display name, in any language, is stored, answered and published with the instrument.
 		UUID orbtKey = UUID.randomUUID();
-		HttpResponse<String> orbt = add(operator, orbtKey, "ORBT", "50.00");
+		HttpResponse<String> orbt = named(operator, orbtKey, "ORBT", "50.00", "Orbité Labs");
 		assertThat(orbt.statusCode()).as(orbt.body()).isEqualTo(201);
+		CONTRACT.assertResponse("POST", ADD, 201, orbt.headers().firstValue("Content-Type").orElse(null), orbt.body());
+		assertThat(field(orbt, "displayName")).isEqualTo("Orbité Labs");
+		assertThat(jdbc.queryForObject("SELECT display_name FROM instrument WHERE symbol = 'ORBT'", String.class))
+			.isEqualTo("Orbité Labs");
+		assertThat(WireEvents.decodeSnapshot(jdbc.queryForObject(
+				"SELECT payload FROM outbox WHERE topic = 'mse.market.v1' AND command_sequence = ?", byte[].class,
+				Long.parseLong(field(orbt, "commandSequence"))))
+			.getDisplayName()).isEqualTo("Orbité Labs");
+		// The name is part of the request: the same key with another name, or none, is a conflict.
+		assertThat(named(operator, orbtKey, "ORBT", "50.00", "Orbité Labs").body()).isEqualTo(orbt.body());
+		assertThat(code(named(operator, orbtKey, "ORBT", "50.00", "Orbit"), 409)).isEqualTo("IDEMPOTENCY_CONFLICT");
+		assertThat(code(add(operator, orbtKey, "ORBT", "50.00"), 409)).isEqualTo("IDEMPOTENCY_CONFLICT");
 
 		// Once open, the catalogue is frozen.
 		UUID openKey = UUID.randomUUID();
@@ -142,6 +160,13 @@ class InstrumentSetupIT {
 			throws Exception {
 		return browser.post(ADD, """
 				{"symbol":"%s","referencePrice":"%s"}""".formatted(symbol, price), "Idempotency-Key", key.toString());
+	}
+
+	private static HttpResponse<String> named(TestBrowser operator, UUID key, String symbol, String price,
+			String displayName) throws Exception {
+		return operator.post("/api/v1/admin/instruments", JSON.writeValueAsString(
+				java.util.Map.of("symbol", symbol, "referencePrice", price, "displayName", displayName)),
+				"Idempotency-Key", key.toString());
 	}
 
 	private static String field(HttpResponse<String> response, String name) {

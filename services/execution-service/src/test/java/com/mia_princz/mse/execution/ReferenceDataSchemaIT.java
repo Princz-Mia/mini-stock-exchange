@@ -179,6 +179,39 @@ class ReferenceDataSchemaIT {
 		});
 	}
 
+	/** A display name changes only in SETUP, and the CHECK refuses what SQL can see of a broken one. */
+	@Test
+	void displayNamesChangeOnlyInSetupAndKeepTheirShape() {
+		db.inRolledBackTransaction((f) -> {
+			UUID instrument = f.instrument(f.simulation(), "NOVA");
+			assertThat(f.jdbc.update("UPDATE instrument SET display_name = 'Nova Dynamics' WHERE id = ?", instrument))
+				.isEqualTo(1);
+			assertThat(f.jdbc.update("UPDATE instrument SET display_name = NULL WHERE id = ?", instrument)).isEqualTo(1);
+		});
+		for (String bad : new String[] { "", " Nova", "Nova ", "Nova  Dynamics", "Nova" + (char) 9 + "Dynamics",
+				"x".repeat(101) }) {
+			db.inRolledBackTransaction((f) -> {
+				UUID instrument = f.instrument(f.simulation(), "NOVA");
+				assertFails(CHECK_VIOLATION,
+						() -> f.jdbc.update("UPDATE instrument SET display_name = ? WHERE id = ?", bad, instrument));
+			});
+		}
+		db.inRolledBackTransaction((f) -> {
+			UUID instrument = f.instrument(f.simulation(), "NOVA");
+			assertThat(f.jdbc.update("UPDATE instrument SET display_name = ? WHERE id = ?", "x".repeat(100),
+					instrument)).isEqualTo(1);
+		});
+		for (String state : new String[] { "OPEN", "HALTED" }) {
+			db.inRolledBackTransaction((f) -> {
+				UUID simulation = f.simulation();
+				UUID instrument = f.instrument(simulation, "NOVA");
+				f.jdbc.update("UPDATE simulation SET state = ?, opened_at = now() WHERE id = ?", state, simulation);
+				assertFails(NOT_IN_PREREQUISITE_STATE, () -> f.jdbc
+					.update("UPDATE instrument SET display_name = 'Nova Dynamics' WHERE id = ?", instrument));
+			});
+		}
+	}
+
 	/** The runtime role may delete an instrument in SETUP that nothing refers to; the database refuses anything else. */
 	@Test
 	void instrumentsAreDeletedOnlyInSetupAndOnlyWhenUnused() {
