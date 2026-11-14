@@ -100,7 +100,7 @@ class TradingQueries {
 
 	/** An account and what it started with, for the operator. Cash is null if it started with shares only. */
 	/** {@code token} is a bot's: ACTIVE while it has a token that works, REVOKED once none does; null for others. */
-	/** {@code strategy} is a bot's tag; null for a trader and for a bot made before tags. */
+	/** {@code strategy} is a bot's tag; null for a trader and for a bot made without one. */
 	record AccountSummary(UUID accountId, String username, String kind, Long cashCents, List<Allocation> holdings,
 			Instant createdAt, String token, String strategy) {
 	}
