@@ -36,7 +36,7 @@ That one database is all a restore needs. `backups/` is ignored by Git, and hold
 Execution then republishes its whole history in order. Market Data and the candles rebuild from it, which takes seconds for a demo-sized history. The restore asks before deleting anything unless given `--yes` (`-Yes`).
 
 After a restore:
-- **Trades and orders after the backup are gone.** So are sessions started since, so people sign in again.
+- **Trades and orders after the backup are gone.** So are sessions started since, so people sign in again, and trader logins added since, which the operator adds again.
 - **A bot token revoked after the backup works again.** Revoke it again from the operator screen.
 - **A backup from an older version** is migrated forward when Execution starts. A backup from a newer version holds schema changes this code doesn't know, so restore it only with code at least as new as the backup's `commit`.
 

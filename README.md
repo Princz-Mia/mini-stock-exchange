@@ -62,9 +62,9 @@ docker compose --profile full up -d --build --wait
 
 On Linux or macOS, run `./scripts/init-env.sh` instead of the first command. The app is then on <http://localhost:8080>.
 
-`init-env` creates a local `.env` with random secrets. Its `DEV_TRADER_PASSWORD` and `DEV_OPERATOR_PASSWORD` are the passwords for the demo users `trader` and `operator`.
+`init-env` creates a local `.env` with random secrets. Its `DEV_OPERATOR_PASSWORD` is the password of the `operator` login, created at startup. `DEV_TRADER_PASSWORD` is the password the demo seed gives the `trader` it adds, so it follows a trader password's rules (12 to 64 characters, not the username); traders are added by the operator during setup, like everything else a simulation needs.
 
-On first start, the full profile sets up a demo market: NOVA, ORBT, HELI, QUAD and VELO at their reference prices, the trader funded with USD 100,000.00 and 1,000 shares of each, 20 funded bots tagged with their strategy (4 market makers, 12 noise and 4 momentum), and the market open. Start the bots from the operator screen, and trade as `trader`. Set `MSE_DEMO_SEED=false` in `.env` to start with an empty market instead, which the operator sets up.
+On first start, the full profile sets up a demo market: NOVA, ORBT, HELI, QUAD and VELO at their reference prices, the trader funded with USD 100,000.00 and 1,000 shares of each, 20 funded bots tagged with their strategy (4 market makers, 12 noise and 4 momentum), and the market open. Start the bots from the operator screen, and trade as `trader`. Set `MSE_DEMO_SEED=false` in `.env` to start with an empty market instead, which the operator sets up, traders included.
 
 [docs/demo.md](docs/demo.md) is a five-minute scripted walk through it: bots, orders, fills, a halt, and analytics failing without stopping trading.
 
@@ -145,7 +145,7 @@ It starts its own throwaway Compose project (`mse-load`, on port 38080) with fiv
 
 `trading-screens.spec.ts` then checks every screen at 1440x900, 1280x720 and 390x844: sign-in, the terminal, the portfolio and the operator screen, each in its states (a refused sign-in, a rejected order, a busy exchange, a rate limit, an order that was not placed, stale or lost market data, empty and unreachable data). States the stack won't produce on demand are made by answering those requests in the browser. Nothing may scroll sideways, both sides of the order book must fit their panel, and a full-page screenshot of each goes to `web/test-results/screens/` for review.
 
-The compatibility gate runs them. It inserts the counterparty's login from `web/e2e/seed-users.sql` into its throwaway stack. It then runs `npm run e2e` with these variables:
+The compatibility gate runs them. Their global setup (`web/e2e/global-setup.ts`) adds the dev trader, a counterparty and a newcomer through the operator API, as the setup screen does, and marks the tour seen for all but the newcomer. The gate runs `npm run e2e` with these variables:
 
 - `E2E_BASE_URL`: the stack's address.
 - `E2E_TRADER_PASSWORD`: the dev trader's password.

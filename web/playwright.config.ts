@@ -1,7 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
-// Browser tests run against a running stack, never a dev server: the compatibility gate seeds a market, then runs
-// them through the reverse proxy. E2E_BASE_URL says where that stack is.
+// Browser tests run against a running stack, never a dev server, through the reverse proxy. E2E_BASE_URL says where
+// that stack is. The global setup adds the tests' traders through the operator API before any test runs.
 const baseURL = process.env.E2E_BASE_URL;
 if (baseURL === undefined) {
   throw new Error('Set E2E_BASE_URL to a running stack, such as http://localhost:18080');
@@ -9,6 +9,7 @@ if (baseURL === undefined) {
 
 export default defineConfig({
   testDir: './e2e',
+  globalSetup: './e2e/global-setup.ts',
   fullyParallel: false,
   workers: 1,
   retries: 0,

@@ -226,7 +226,12 @@ proxy_routes() {
 }
 
 login_flow() {
-  local base="http://localhost:$web_port/api/v1" jar="$run_dir/cookies.txt" token body
+  local base="http://localhost:$web_port/api/v1" jar="$run_dir/cookies.txt" token body added
+  # Traders are added by the operator during setup, as on the setup screen; the dev trader first, to sign in as.
+  api_login "$run_dir/operator-login.txt" operator "$operator_password" || return 1
+  added=$(api_command "$run_dir/operator-login.txt" /admin/traders \
+    "{\"username\":\"trader\",\"password\":\"$trader_password\"}")
+  assert_equal 'add the dev trader' 201 "$(status_of "$added")" || return 1
   token=$(curl -s -c "$jar" "$base/auth/csrf" | sed -E 's/.*"token":"([^"]+)".*/\1/')
   body=$(curl -s -b "$jar" -c "$jar" -H "X-CSRF-TOKEN: $token" -H 'Content-Type: application/json' \
     -d "{\"username\":\"trader\",\"password\":\"$trader_password\"}" "$base/auth/login")
@@ -235,10 +240,8 @@ login_flow() {
 }
 
 browser_flow() {
-  # The counterparty's login is inserted; the test sets up the market as the operator.
-  compose cp web/e2e/seed-users.sql postgres:/tmp/seed-users.sql >> "$log" 2>&1 &&
-    compose exec -T -e PGPASSWORD="$execution_owner_password" postgres psql -h 127.0.0.1 -q -U execution_owner       -d execution_db -v counterparty_password="$counterparty_password" -f /tmp/seed-users.sql >> "$log" 2>&1 &&
-    (cd web && npx playwright install chromium &&
+  # The tests add their other traders through the operator API, in Playwright's global setup.
+  (cd web && npx playwright install chromium &&
       E2E_BASE_URL="http://localhost:$web_port" E2E_TRADER_PASSWORD="$trader_password"         E2E_OPERATOR_PASSWORD="$operator_password" E2E_COUNTERPARTY_PASSWORD="$counterparty_password"         npm run e2e) >> "$log" 2>&1
 }
 

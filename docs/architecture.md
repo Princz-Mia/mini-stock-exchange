@@ -65,7 +65,7 @@ flowchart TD
 
 **Packages:**
 - **`trading`:** a pure `domain` (prices, money, the order book, matching, settlement), an `application` layer (the engine, the writer, ports), and `adapter`s for JDBC and the web.
-- **`identity`:** users, sessions and bot tokens. The operator adds trader logins during SETUP, through the writer like any SETUP command; configuration seeds the demo users.
+- **`identity`:** users, sessions and bot tokens. The operator adds trader logins during SETUP, through the writer like any SETUP command; configuration creates only the operator's login, and the demo seed adds its trader the same way the operator would.
 - **`outbox`:** the relay.
 - **`operations`:** security and configuration.
 

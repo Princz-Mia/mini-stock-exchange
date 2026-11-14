@@ -1,6 +1,6 @@
 """Sets up the demonstration market through the operator API, once, so a fresh stack can trade.
 
-Five instruments at their reference prices, the demo trader funded with USD 100,000.00 and
+Five instruments at their reference prices, the demo trader added with USD 100,000.00 and
 1,000 shares of each, a population of funded bots, and the market opened. The bots are tagged with
 their strategy: a fifth market makers and a fifth momentum, the rest noise, with at least one market
 maker (see population.strategy_split). It signs in as the operator and goes through the same
@@ -12,8 +12,12 @@ market that is already open or halted was set up before, by the seed or by hand,
 
     python -m mse_simulator.seed
 
-Reads MSE_EXECUTION_URL, MSE_DEMO_SEED (only "true" seeds), MSE_DEMO_OPERATOR_PASSWORD and
-MSE_DEMO_BOTS (how many bots, 20 by default).
+The trader is added as the operator adds one on the setup screen, with MSE_DEMO_TRADER_PASSWORD. A
+stack set up before traders were added that way already has a configured 'trader', which is funded
+instead.
+
+Reads MSE_EXECUTION_URL, MSE_DEMO_SEED (only "true" seeds), MSE_DEMO_OPERATOR_PASSWORD,
+MSE_DEMO_TRADER_PASSWORD and MSE_DEMO_BOTS (how many bots, 20 by default).
 """
 
 import logging
@@ -46,7 +50,9 @@ RETRY = frozenset({429, 500, 502, 503, 504})
 
 
 class SeedError(RuntimeError):
-    pass
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def key(step: str) -> str:
@@ -96,7 +102,14 @@ class Operator:
             if answer is not None and answer.status_code not in RETRY:
                 payload = answer.json() if answer.content else {}
                 if answer.status_code >= 400:
-                    raise SeedError(f"{step} answered {answer.status_code} {payload.get('code')}")
+                    code = payload.get("code")
+                    # Which field was refused, if any: a trader password too short, say.
+                    fields = "; ".join(
+                        f"{error.get('field')}: {error.get('message')}"
+                        for error in payload.get("errors") or []
+                    )
+                    detail = f" ({fields})" if fields else ""
+                    raise SeedError(f"{step} answered {answer.status_code} {code}{detail}", code)
                 return payload
             self._sleep(min(1.0 + attempt, 5.0))
         raise SeedError(f"{step} had no final answer after {self._attempts} attempts")
@@ -106,7 +119,7 @@ class Operator:
         self._csrf = {token["headerName"]: token["token"]}
 
 
-def seed(operator: Operator, bots: int) -> str:
+def seed(operator: Operator, bots: int, trader_password: str) -> str:
     """Sets the market up and opens it, unless it is already running. Returns what it did."""
     operator.sign_in()
     state = operator.market_state()
@@ -121,11 +134,20 @@ def seed(operator: Operator, bots: int) -> str:
         )
         ids[symbol] = UUID(created["instrumentId"])
     holdings = [{"instrumentId": str(i), "quantity": SHARES} for i in ids.values()]
-    operator.command(
-        "/api/v1/admin/accounts",
-        f"account:{TRADER}",
-        {"username": TRADER, "cash": CASH, "holdings": holdings},
-    )
+    endowment = {"cash": CASH, "holdings": holdings}
+    try:
+        operator.command(
+            "/api/v1/admin/traders",
+            f"trader:{TRADER}",
+            {"username": TRADER, "password": trader_password, **endowment},
+        )
+    except SeedError as error:
+        if error.code != "USERNAME_TAKEN":
+            raise
+        # A trader from an earlier configuration: fund that login, under the key the seed used then.
+        operator.command(
+            "/api/v1/admin/accounts", f"account:{TRADER}", {"username": TRADER, **endowment}
+        )
     split = strategy_split(bots)
     for strategy, total in split.items():
         left = total
@@ -155,11 +177,15 @@ def main() -> int:
     if not password:
         logger.error("MSE_DEMO_OPERATOR_PASSWORD is not set")
         return 1
+    trader_password = os.environ.get("MSE_DEMO_TRADER_PASSWORD", "")
+    if not trader_password:
+        logger.error("MSE_DEMO_TRADER_PASSWORD is not set")
+        return 1
     bots = int(os.environ.get("MSE_DEMO_BOTS", "20"))
     url = os.environ.get("MSE_EXECUTION_URL", "http://execution-service:8080")
     with httpx.Client(base_url=url, timeout=10.0) as http:
         try:
-            logger.info(seed(Operator(http, password), bots))
+            logger.info(seed(Operator(http, password), bots, trader_password))
         except (SeedError, httpx.HTTPError) as error:
             logger.error("the demo seed failed: %s", error)
             return 1

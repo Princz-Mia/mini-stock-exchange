@@ -92,7 +92,6 @@ services:
       EXECUTION_DB_APP_PASSWORD: ${EXECUTION_DB_APP_PASSWORD:?run scripts/init-env first}
       EXECUTION_DB_OWNER_PASSWORD: ${EXECUTION_DB_OWNER_PASSWORD:?run scripts/init-env first}
       DEV_OPERATOR_PASSWORD: ${DEV_OPERATOR_PASSWORD:?run scripts/init-env first}
-      DEV_TRADER_PASSWORD: ${DEV_TRADER_PASSWORD:?run scripts/init-env first}
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       MSE_BOT_TOKEN_DIRECTORY: /run/mse/bot-tokens
       # Optional, so an older .env still starts; without it the internal trade export refuses every request.
@@ -240,6 +239,8 @@ services:
       MSE_DEMO_SEED: ${MSE_DEMO_SEED:-false}
       MSE_DEMO_BOTS: ${MSE_DEMO_BOTS:-20}
       MSE_DEMO_OPERATOR_PASSWORD: ${DEV_OPERATOR_PASSWORD:-}
+      # The demo seed adds the trader with this password, as the operator would on the setup screen.
+      MSE_DEMO_TRADER_PASSWORD: ${DEV_TRADER_PASSWORD:-}
     entrypoint: [python, -m, mse_simulator.seed]
     mem_limit: 256m
 

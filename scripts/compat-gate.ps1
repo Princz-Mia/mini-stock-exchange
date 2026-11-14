@@ -478,6 +478,10 @@ try {
     }
 
     Step 'Login: session and CSRF through the proxy' {
+        # Traders are added by the operator during setup, as on the setup screen; the dev trader first, to sign in as.
+        $operatorSession = New-ApiSession 'operator' $operatorPassword
+        $added = Invoke-ApiCommand $operatorSession '/admin/traders' (@{ username = 'trader'; password = $traderPassword } | ConvertTo-Json)
+        Assert-Equal 'add the dev trader' 201 $added.Status
         $base = "http://localhost:$webPort/api/v1"
         $csrf = Invoke-RestMethod "$base/auth/csrf" -SessionVariable browser
         $body = @{ username = 'trader'; password = $traderPassword } | ConvertTo-Json
@@ -546,10 +550,7 @@ try {
     }
 
     Step 'Browser: trading, halt, resume, bot runs and every screen' {
-        # The counterparty's login is inserted; the test sets up the market as the operator.
-        Invoke-Checked 'docker' ($compose + @('cp', 'web/e2e/seed-users.sql', 'postgres:/tmp/seed-users.sql'))
-        Invoke-Checked 'docker' ($compose + @('exec', '-T', '-e', "PGPASSWORD=$($passwords.execution_owner)", 'postgres', 'psql', '-h', '127.0.0.1', '-q',
-            '-U', 'execution_owner', '-d', 'execution_db', '-v', "counterparty_password=$counterpartyPassword", '-f', '/tmp/seed-users.sql'))
+        # The tests add their other traders through the operator API, in Playwright's global setup.
         Push-Location web
         try {
             Invoke-Checked 'npx.cmd' @('playwright', 'install', 'chromium')
