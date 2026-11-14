@@ -282,6 +282,21 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public boolean usernameTaken(String username) {
+		return jdbc.sql("SELECT EXISTS (SELECT 1 FROM app_user WHERE lower(username) = lower(?))")
+			.param(username)
+			.query(Boolean.class)
+			.single();
+	}
+
+	@Override
+	public void insertTraderUser(UUID userId, String username, String passwordHash) {
+		expectOne(jdbc.sql("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, ?, 'TRADER')")
+			.params(userId, username, passwordHash)
+			.update(), "insert trader user");
+	}
+
+	@Override
 	public void insertTraderAccount(UUID simulationId, UUID accountId, UUID ownerUserId, String displayName) {
 		expectOne(jdbc.sql("""
 				INSERT INTO account (id, simulation_id, kind, owner_user_id, display_name) VALUES (?, ?, 'TRADER', ?, ?)""")

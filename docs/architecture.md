@@ -65,7 +65,7 @@ flowchart TD
 
 **Packages:**
 - **`trading`:** a pure `domain` (prices, money, the order book, matching, settlement), an `application` layer (the engine, the writer, ports), and `adapter`s for JDBC and the web.
-- **`identity`:** users, sessions and bot tokens.
+- **`identity`:** users, sessions and bot tokens. The operator adds trader logins during SETUP, through the writer like any SETUP command; configuration seeds the demo users.
 - **`outbox`:** the relay.
 - **`operations`:** security and configuration.
 
@@ -224,7 +224,7 @@ The main decisions, each with its consequences and the condition for revisiting 
 
 | | Capability | Where |
 | --- | --- | --- |
-| F01 | Access | Session login with CSRF and bcrypt; trader and operator roles; accounts taken from the credential, never the request; scoped, revocable bot tokens; a failed sign-in limit |
+| F01 | Access | Session login with CSRF and bcrypt; trader and operator roles; trader logins added by the operator during SETUP, their passwords stored only as bcrypt hashes; accounts taken from the credential, never the request; scoped, revocable bot tokens; a failed sign-in limit |
 | F02 | Orders | Limit GTC and protected market IOC; committed rejections with reasons; idempotency keys; command lookup |
 | F03 | Matching | Price then acceptance sequence; the resting order's price; partial fills; self-trade prevention (`domain/OrderBook`) |
 | F04 | Accounting | Reservations, executions, transfers and releases as balanced ledger batches in one transaction; no negative balances, enforced by checks and reconciled at startup |

@@ -145,7 +145,7 @@ It starts its own throwaway Compose project (`mse-load`, on port 38080) with fiv
 
 `trading-screens.spec.ts` then checks every screen at 1440x900, 1280x720 and 390x844: sign-in, the terminal, the portfolio and the operator screen, each in its states (a refused sign-in, a rejected order, a busy exchange, a rate limit, an order that was not placed, stale or lost market data, empty and unreachable data). States the stack won't produce on demand are made by answering those requests in the browser. Nothing may scroll sideways, both sides of the order book must fit their panel, and a full-page screenshot of each goes to `web/test-results/screens/` for review.
 
-The compatibility gate runs them. It inserts the counterparty's login from `web/e2e/seed-users.sql` into its throwaway stack, because users have no API. It then runs `npm run e2e` with these variables:
+The compatibility gate runs them. It inserts the counterparty's login from `web/e2e/seed-users.sql` into its throwaway stack. It then runs `npm run e2e` with these variables:
 
 - `E2E_BASE_URL`: the stack's address.
 - `E2E_TRADER_PASSWORD`: the dev trader's password.

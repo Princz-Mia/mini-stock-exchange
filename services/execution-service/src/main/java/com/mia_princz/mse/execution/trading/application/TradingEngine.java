@@ -183,6 +183,11 @@ public final class TradingEngine {
 		return submit(() -> processProvision(key, command));
 	}
 
+	/** Adds a trader login, and optionally its account and endowment, while the market is in SETUP. */
+	public CompletableFuture<TraderResult> addTrader(CommandKey key, AddTrader command) {
+		return submit(() -> processAddTrader(key, command));
+	}
+
 	/** Creates funded bot accounts, each with its own API token, while the market is in SETUP. */
 	public CompletableFuture<BotsResult> provisionBots(CommandKey key, ProvisionBots command) {
 		return submit(() -> processBots(key, command));
@@ -519,6 +524,60 @@ public final class TradingEngine {
 				sequence);
 		return remember(key, 201, new AccountResult(AccountResult.Status.CREATED, command.accountId(),
 				command.username(), command.cashCents(), command.holdings(), sequence));
+	}
+
+	private TraderResult processAddTrader(CommandKey key, AddTrader command) {
+		try {
+			ensureMarket();
+			return transactions.inTransaction(() -> addTraderInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+	}
+
+	/**
+	 * The login and, when asked, its account and genesis batch, in one transaction: either the trader can sign in with
+	 * what they were given, or nothing was added. A username is taken whatever its case.
+	 */
+	private TraderResult addTraderInTransaction(CommandKey key, AddTrader command) {
+		Market market = store.lockMarket();
+		if (market.writerEpoch() != writerEpoch) {
+			throw new StaleWriterException();
+		}
+		Optional<TradingStore.StoredResult<TraderResult>> prior = store.findResult(simulationId, key,
+				TraderResult.class);
+		if (prior.isPresent()) {
+			return replay(key, prior.get());
+		}
+		long sequence = store.nextCommandSequence(simulationId);
+		Long cash = command.funded() ? command.cashCents() : null;
+		TraderResult.Status refusal = null;
+		if (!"SETUP".equals(market.state())) {
+			refusal = TraderResult.Status.NOT_IN_SETUP;
+		}
+		else if (store.usernameTaken(command.username())) {
+			refusal = TraderResult.Status.USERNAME_TAKEN;
+		}
+		else if (!command.holdings().stream().allMatch((holding) -> books.containsKey(holding.instrumentId()))) {
+			refusal = TraderResult.Status.UNKNOWN_INSTRUMENT;
+		}
+		if (refusal != null) {
+			store.insertAudit(simulationId, command.actorUserId(), "TRADER_ADD", "NOT_ALLOWED", key.idempotencyKey(),
+					sequence);
+			int status = refusal == TraderResult.Status.UNKNOWN_INSTRUMENT ? 422 : 409;
+			return remember(key, status,
+					new TraderResult(refusal, command.username(), null, cash, command.holdings(), sequence));
+		}
+		store.insertTraderUser(command.userId(), command.username(), command.passwordHash());
+		if (command.funded()) {
+			store.insertTraderAccount(simulationId, command.accountId(), command.userId(), command.username());
+			store.insertGenesis(simulationId, command.accountId(), "TRADER", sequence, command.cashCents(),
+					command.holdings());
+		}
+		store.insertAudit(simulationId, command.actorUserId(), "TRADER_ADD", "APPLIED", key.idempotencyKey(), sequence);
+		return remember(key, 201, new TraderResult(TraderResult.Status.CREATED, command.username(),
+				command.accountId(), cash, command.holdings(), sequence));
 	}
 
 	private BotsResult processBots(CommandKey key, ProvisionBots command) {
@@ -955,6 +1014,7 @@ public final class TradingEngine {
 			case InstrumentEdit edit -> edit.commandSequence();
 			case InstrumentDeletion deletion -> deletion.commandSequence();
 			case AccountResult account -> account.commandSequence();
+			case TraderResult trader -> trader.commandSequence();
 			case BotsResult bots -> bots.commandSequence();
 			case BotRunResult run -> run.commandSequence();
 			case TokenRevocation revocation -> revocation.commandSequence();

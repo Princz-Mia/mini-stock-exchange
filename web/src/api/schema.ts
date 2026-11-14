@@ -309,6 +309,32 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/traders": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Add a trader login, optionally with its account and starting endowment, while the market is in SETUP.
+         * @description Operator only. Sequenced on the writer and audited (TRADER_ADD), with an idempotency key: a retry with the
+         *     same key returns the first answer, even a refusal. The password is hashed before the command is queued and
+         *     is never stored or returned in any other form; it is not part of the request the key is checked against, so a
+         *     retry answers the stored result whatever password it carries. With cash, and optionally holdings, the trader
+         *     also gets an account funded from the issuance account in one balanced genesis batch, by the rules of POST
+         *     /api/v1/admin/accounts: holdings need cash, and cash of 0.00 needs a holding. With neither, only the login is
+         *     added, and it can be funded later in SETUP. Logins outlive the simulation they were added in.
+         */
+        readonly post: operations["addTrader"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/bots": {
         readonly parameters: {
             readonly query?: never;
@@ -970,6 +996,27 @@ export interface components {
             readonly accountId: components["schemas"]["Uuid"];
             readonly username: string;
             readonly cash: components["schemas"]["Money"];
+            readonly holdings: readonly components["schemas"]["Endowment"][];
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        readonly TraderRequest: {
+            /** @description 3 to 32 lower-case letters, digits, '.', '-' or '_', starting with a letter or digit; unique ignoring case. */
+            readonly username: string;
+            /**
+             * Format: password
+             * @description 12 to 64 characters and at most 72 bytes in UTF-8, not the username and not only spaces. Stored only as a bcrypt hash.
+             */
+            readonly password: string;
+            /** @description The trader's starting cash, which gives them an account now. Required with holdings; left out with no holdings, only the login is added. */
+            readonly cash?: components["schemas"]["Money"];
+            readonly holdings?: readonly components["schemas"]["Endowment"][];
+        };
+        readonly TraderAdded: {
+            readonly username: string;
+            /** @description The trader's account in this simulation, or null when added without one. */
+            readonly accountId: components["schemas"]["Uuid"] | null;
+            /** @description The starting cash, or null when added without an account. */
+            readonly cash: components["schemas"]["Money"] | null;
             readonly holdings: readonly components["schemas"]["Endowment"][];
             readonly commandSequence: components["schemas"]["Sequence"];
         };
@@ -2340,6 +2387,71 @@ export interface operations {
              * @description UNKNOWN_INSTRUMENT (committed and audited), or UNKNOWN_TRADER (no trader with that username; nothing
              *     committed).
              */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly addTrader: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["TraderRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Added, and funded when an endowment was given. */
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["TraderAdded"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /**
+             * @description MARKET_NOT_IN_SETUP or USERNAME_TAKEN (taken whatever its case; both committed and audited), or
+             *     IDEMPOTENCY_CONFLICT.
+             */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description UNKNOWN_INSTRUMENT (committed and audited). */
             readonly 422: {
                 headers: {
                     readonly [name: string]: unknown;
