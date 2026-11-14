@@ -15,6 +15,7 @@ import { OperatorPage } from './OperatorPage';
 const NOVA = {
   instrumentId: '00000000-0000-0000-0000-000000000001',
   symbol: 'NOVA',
+  displayName: null as string | null,
   venueState: 'SETUP',
   referencePrice: '100.00',
   tick: '0.01',
@@ -113,7 +114,9 @@ describe('the operator screen', () => {
     });
     renderPage();
 
-    expect(await screen.findByRole('textbox', { name: 'New price for NOVA' })).toBeEnabled();
+    // An edit left open when the market opens goes with the rest of the setup controls.
+    fireEvent.click(await button('Edit NOVA'));
+    expect(screen.getByRole('form', { name: 'Edit NOVA' })).toBeInTheDocument();
     fireEvent.click(await button('Open market'));
 
     expect(await screen.findByText('The market is open.')).toBeInTheDocument();
@@ -122,12 +125,13 @@ describe('the operator screen', () => {
     await waitFor(() => expect(screen.getByText('Open', { selector: '.state-badge' })).toBeInTheDocument());
     expect(await button('Halt trading')).toBeEnabled();
     expect(screen.getByText('The catalogue is frozen once the market opens.')).toBeInTheDocument();
-    // The rows that were mounted in SETUP drop their editor too.
+    // The rows that were mounted in SETUP drop their controls too.
     const table = screen.getByRole('table', { name: 'Instruments' });
     expect(within(table).queryByRole('textbox')).toBeNull();
-    expect(within(table).queryByRole('button', { name: 'Save new price for NOVA' })).toBeNull();
+    expect(within(table).queryByRole('button', { name: 'Edit NOVA' })).toBeNull();
     expect(within(table).queryByRole('button', { name: 'Delete NOVA' })).toBeNull();
-    expect(within(table).queryByRole('columnheader', { name: 'New price' })).toBeNull();
+    expect(within(table).queryByRole('columnheader', { name: 'Actions' })).toBeNull();
+    expect(screen.queryByRole('form', { name: 'Edit NOVA' })).toBeNull();
   });
 
   it('retries a busy halt under the same key, so it cannot apply twice', async () => {
@@ -163,7 +167,10 @@ describe('the operator screen', () => {
       calls += 1;
       return calls === 1
         ? { status: 409, problem: { status: 409, code: 'SYMBOL_TAKEN', detail: 'An instrument with symbol ORBT already exists' } }
-        : { status: 201, json: { instrumentId: 'x', symbol: 'ORBT', referencePrice: '50.00', commandSequence: '9' } };
+        : {
+            status: 201,
+            json: { instrumentId: 'x', symbol: 'ORBT', displayName: 'Orbit Labs', referencePrice: '50.00', commandSequence: '9' },
+          };
     });
     renderPage();
 
@@ -174,18 +181,25 @@ describe('the operator screen', () => {
 
     expect(await screen.findByText('An instrument with symbol ORBT already exists')).toBeInTheDocument();
     expect(within(form).getByLabelText('Symbol')).toHaveValue('ORBT');
-    expect(server.requests.at(-1)?.body).toEqual({ symbol: 'ORBT', referencePrice: '50.00' });
+    // No name typed, so none is sent: the request is the one it was before names existed.
+    const lastAdd = () =>
+      server.requests.filter((request) => request.method === 'POST' && request.url === '/api/v1/admin/instruments').at(-1)?.body;
+    expect(lastAdd()).toEqual({ symbol: 'ORBT', referencePrice: '50.00' });
 
+    fireEvent.change(within(form).getByLabelText('Name (optional)'), { target: { value: ' Orbit Labs ' } });
     fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
-    expect(await screen.findByText(/Added ORBT at 50.00/)).toBeInTheDocument();
+    expect(await screen.findByText(/Added ORBT \(Orbit Labs\) at 50.00/)).toBeInTheDocument();
+    expect(lastAdd()).toEqual({ symbol: 'ORBT', referencePrice: '50.00', displayName: 'Orbit Labs' });
+    expect(within(form).getByLabelText('Name (optional)')).toHaveValue('');
     const keys = server.requests
       .filter((request) => request.url === '/api/v1/admin/instruments')
       .map((request) => request.headers['Idempotency-Key']);
     expect(keys[1]).not.toBe(keys[0]);
   });
 
-  it('changes a reference price under a key, and keeps the input after a refusal', async () => {
-    const { server } = exchange('SETUP');
+  it('edits the name and price together under a key, and keeps the form after a refusal', async () => {
+    const named = { ...NOVA, displayName: 'Nova Dynamics' };
+    const { server } = exchange('SETUP', [named]);
     const route = `PUT /api/v1/admin/instruments/${NOVA.instrumentId}`;
     let calls = 0;
     server.on(route, () => {
@@ -202,41 +216,214 @@ describe('the operator screen', () => {
           }
         : {
             status: 200,
-            json: { instrumentId: NOVA.instrumentId, symbol: 'NOVA', referencePrice: '1205.50', commandSequence: '9' },
+            json: { instrumentId: NOVA.instrumentId, symbol: 'NOVA', displayName: null, referencePrice: '1205.50', commandSequence: '9' },
           };
     });
     renderPage();
 
-    const field = await screen.findByRole('textbox', { name: 'New price for NOVA' });
-    expect(screen.getByRole('columnheader', { name: 'New price' })).toBeInTheDocument();
-    fireEvent.change(field, { target: { value: ' 1205.5x ' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save new price for NOVA' }));
+    // The name shows under the symbol; Edit opens a labelled form under the row, filled in, with focus on the name.
+    const table = await screen.findByRole('table', { name: 'Instruments' });
+    expect(within(table).getByText('Nova Dynamics')).toBeInTheDocument();
+    fireEvent.click(await button('Edit NOVA'));
+    const form = screen.getByRole('form', { name: 'Edit NOVA' });
+    const name = within(form).getByLabelText('Name');
+    const price = within(form).getByLabelText('Reference price');
+    expect(name).toHaveValue('Nova Dynamics');
+    expect(name).toHaveFocus();
+    expect(price).toHaveValue('100.00');
+    expect(screen.queryByRole('button', { name: 'Edit NOVA' })).toBeNull();
 
+    // Both are sent each time, the ends trimmed; a refusal keeps the form and marks the field it names.
+    fireEvent.change(name, { target: { value: ' Nova  Dyn ' } });
+    fireEvent.change(price, { target: { value: ' 1205.5x ' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save NOVA' }));
     expect(await screen.findByText('Reference price must be a price in cents')).toBeInTheDocument();
-    expect(field).toHaveValue(' 1205.5x ');
-    expect(field).toHaveAttribute('aria-invalid', 'true');
-    expect(field).toHaveAccessibleDescription('Reference price must be a price in cents');
-    expect(server.requests.at(-1)?.body).toEqual({ referencePrice: '1205.5x' });
+    expect(price).toHaveValue(' 1205.5x ');
+    expect(price).toHaveAttribute('aria-invalid', 'true');
+    expect(price).toHaveAccessibleDescription('Reference price must be a price in cents');
+    expect(price).toHaveFocus();
+    expect(name).not.toHaveAttribute('aria-invalid');
+    expect(server.requests.at(-1)?.body).toEqual({ referencePrice: '1205.5x', displayName: 'Nova  Dyn' });
 
+    // An empty name removes it; a save closes the form and puts focus back on Edit.
     const listReads = () => server.requests.filter((request) => request.url === '/api/v1/instruments').length;
     const readsBefore = listReads();
-    fireEvent.change(field, { target: { value: '1205.50' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save new price for NOVA' }));
-    expect(field).toBeDisabled();
+    fireEvent.change(name, { target: { value: '   ' } });
+    fireEvent.change(price, { target: { value: '1205.50' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save NOVA' }));
+    expect(price).toBeDisabled();
     expect(
-      await screen.findByText("NOVA's reference price is now 1,205.50. The list shows it once market data has it."),
+      await screen.findByText('Saved NOVA, with no name, at 1,205.50. The list shows it once market data has it.'),
     ).toBeInTheDocument();
-    expect(field).toHaveValue('');
-    expect(field).not.toHaveAttribute('aria-invalid');
+    expect(screen.queryByRole('form', { name: 'Edit NOVA' })).toBeNull();
+    expect(await button('Edit NOVA')).toHaveFocus();
     // The list is read again at once rather than at the next poll.
     await waitFor(() => expect(listReads()).toBeGreaterThan(readsBefore));
     const sent = server.requests.filter((request) => `${request.method} ${request.url}` === route);
-    expect(sent.map((request) => request.body)).toEqual([{ referencePrice: '1205.5x' }, { referencePrice: '1205.50' }]);
+    expect(sent.map((request) => request.body)).toEqual([
+      { referencePrice: '1205.5x', displayName: 'Nova  Dyn' },
+      { referencePrice: '1205.50', displayName: null },
+    ]);
     expect(sent[0]?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
     expect(sent[1]?.headers['Idempotency-Key']).not.toBe(sent[0]?.headers['Idempotency-Key']);
   });
 
-  it('retries an unconfirmed price under its own key, while the other rows go on under theirs', async () => {
+  it('cancels an edit without sending anything, and opens it again with the current values', async () => {
+    const { server } = exchange('SETUP', [{ ...NOVA, displayName: 'Nova Dynamics' }]);
+    renderPage();
+
+    fireEvent.click(await button('Edit NOVA'));
+    const form = screen.getByRole('form', { name: 'Edit NOVA' });
+    fireEvent.change(within(form).getByLabelText('Name'), { target: { value: 'Typed, then dropped' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Cancel editing NOVA' }));
+
+    expect(screen.queryByRole('form', { name: 'Edit NOVA' })).toBeNull();
+    expect(await button('Edit NOVA')).toHaveFocus();
+    fireEvent.click(await button('Edit NOVA'));
+    expect(within(screen.getByRole('form', { name: 'Edit NOVA' })).getByLabelText('Name')).toHaveValue('Nova Dynamics');
+    expect(server.requests.filter((request) => request.method === 'PUT')).toHaveLength(0);
+  });
+
+  it('fills a reopened form from the last save until the list catches up', async () => {
+    const listed = { ...NOVA };
+    const { server } = exchange('SETUP', [listed]);
+    server.on(`PUT /api/v1/admin/instruments/${NOVA.instrumentId}`, {
+      status: 200,
+      json: { instrumentId: NOVA.instrumentId, symbol: 'NOVA', displayName: 'Nova Dynamics', referencePrice: '110.00', commandSequence: '9' },
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+
+    fireEvent.click(await button('Edit NOVA'));
+    let form = screen.getByRole('form', { name: 'Edit NOVA' });
+    fireEvent.change(within(form).getByLabelText('Name'), { target: { value: 'Nova Dynamics' } });
+    fireEvent.change(within(form).getByLabelText('Reference price'), { target: { value: '110.00' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save NOVA' }));
+    expect(await screen.findByText(/Saved NOVA as Nova Dynamics at 110.00/)).toBeInTheDocument();
+
+    // Market Data has not projected the save yet, so the list still shows the old values: the form takes the saved ones.
+    fireEvent.click(await button('Edit NOVA'));
+    form = screen.getByRole('form', { name: 'Edit NOVA' });
+    expect(within(form).getByLabelText('Name')).toHaveValue('Nova Dynamics');
+    expect(within(form).getByLabelText('Reference price')).toHaveValue('110.00');
+    fireEvent.click(within(form).getByRole('button', { name: 'Cancel editing NOVA' }));
+
+    // Once the list is newer than the save, it is the list that fills the form.
+    Object.assign(listed, { displayName: 'Renamed Elsewhere', referencePrice: '120.00', sourceCommandSequence: '10' });
+    await client.invalidateQueries({ queryKey: ['instruments'] });
+    await screen.findByText('Renamed Elsewhere');
+    fireEvent.click(await button('Edit NOVA'));
+    form = screen.getByRole('form', { name: 'Edit NOVA' });
+    expect(within(form).getByLabelText('Name')).toHaveValue('Renamed Elsewhere');
+    expect(within(form).getByLabelText('Reference price')).toHaveValue('120.00');
+  });
+
+  it('leaves focus where the user moved it while a save was sending', async () => {
+    const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
+    const { server } = exchange('SETUP', [NOVA, ORBT]);
+    server.on(`PUT /api/v1/admin/instruments/${NOVA.instrumentId}`, {
+      status: 200,
+      json: { instrumentId: NOVA.instrumentId, symbol: 'NOVA', displayName: null, referencePrice: '100.00', commandSequence: '9' },
+    });
+    renderPage();
+
+    fireEvent.click(await button('Edit NOVA'));
+    fireEvent.click(within(screen.getByRole('form', { name: 'Edit NOVA' })).getByRole('button', { name: 'Save NOVA' }));
+    const elsewhere = screen.getByRole('button', { name: 'Edit ORBT' });
+    elsewhere.focus();
+
+    expect(await screen.findByText(/Saved NOVA/)).toBeInTheDocument();
+    expect(elsewhere).toHaveFocus();
+  });
+
+  it('marks and focuses the field a refusal names, or the name when it names none', async () => {
+    const { server } = exchange('SETUP');
+    const badName = { field: 'displayName', code: 'INVALID_DISPLAY_NAME', message: 'displayName must not have two spaces in a row' };
+    const badPrice = { field: 'referencePrice', code: 'INVALID_PRICE', message: 'Reference price must be a price in cents' };
+    let call = 0;
+    server.on(`PUT /api/v1/admin/instruments/${NOVA.instrumentId}`, () => {
+      call += 1;
+      if (call === 1) {
+        return { status: 400, problem: { status: 400, code: 'VALIDATION_FAILED', detail: 'invalid', errors: [badName] } };
+      }
+      if (call === 2) {
+        return { status: 400, problem: { status: 400, code: 'VALIDATION_FAILED', detail: 'invalid', errors: [badName, badPrice] } };
+      }
+      return {
+        status: 409,
+        problem: { status: 409, code: 'MARKET_NOT_IN_SETUP', detail: 'Instruments can only be changed before the market opens' },
+      };
+    });
+    renderPage();
+
+    fireEvent.click(await button('Edit NOVA'));
+    const form = screen.getByRole('form', { name: 'Edit NOVA' });
+    const name = within(form).getByLabelText('Name');
+    const price = within(form).getByLabelText('Reference price');
+    const save = within(form).getByRole('button', { name: 'Save NOVA' });
+
+    fireEvent.click(save);
+    expect(await screen.findByText(badName.message)).toBeInTheDocument();
+    expect(name).toHaveAttribute('aria-invalid', 'true');
+    expect(name).toHaveAccessibleDescription(badName.message);
+    expect(name).toHaveFocus();
+    expect(price).not.toHaveAttribute('aria-invalid');
+
+    price.focus();
+    fireEvent.click(save);
+    expect(await screen.findByText(`${badName.message}; ${badPrice.message}`)).toBeInTheDocument();
+    expect(name).toHaveAttribute('aria-invalid', 'true');
+    expect(price).toHaveAttribute('aria-invalid', 'true');
+    expect(name).toHaveFocus();
+
+    fireEvent.click(save);
+    expect(await screen.findByText('Instruments can only be changed before the market opens')).toBeInTheDocument();
+    expect(name).not.toHaveAttribute('aria-invalid');
+    expect(price).not.toHaveAttribute('aria-invalid');
+    expect(name).toHaveFocus();
+  });
+
+  it('drops a refusal with the form it answered', async () => {
+    const { server } = exchange('SETUP');
+    server.on(`PUT /api/v1/admin/instruments/${NOVA.instrumentId}`, {
+      status: 400,
+      problem: {
+        status: 400,
+        code: 'VALIDATION_FAILED',
+        detail: 'invalid',
+        errors: [{ field: 'referencePrice', code: 'INVALID_PRICE', message: 'Reference price must be a price in cents' }],
+      },
+    });
+    renderPage();
+
+    fireEvent.click(await button('Edit NOVA'));
+    let form = screen.getByRole('form', { name: 'Edit NOVA' });
+    fireEvent.change(within(form).getByLabelText('Reference price'), { target: { value: '1x' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save NOVA' }));
+    expect(await screen.findByText('Reference price must be a price in cents')).toBeInTheDocument();
+
+    fireEvent.click(within(form).getByRole('button', { name: 'Cancel editing NOVA' }));
+    expect(screen.queryByText('Reference price must be a price in cents')).toBeNull();
+    fireEvent.click(await button('Edit NOVA'));
+    form = screen.getByRole('form', { name: 'Edit NOVA' });
+    expect(within(form).getByLabelText('Reference price')).not.toHaveAttribute('aria-invalid');
+    expect(within(form).getByLabelText('Reference price')).toHaveValue('100.00');
+  });
+
+  it('closes a pending delete confirmation with the form, so focus lands on Edit', async () => {
+    exchange('SETUP');
+    renderPage();
+
+    fireEvent.click(await button('Edit NOVA'));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete NOVA' }));
+    expect(screen.getByRole('button', { name: 'Confirm delete of NOVA' })).toHaveFocus();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel editing NOVA' }));
+
+    expect(screen.queryByRole('button', { name: 'Confirm delete of NOVA' })).toBeNull();
+    expect(await button('Edit NOVA')).toHaveFocus();
+  });
+
+  it('retries an unconfirmed save under its own key, while the other rows go on under theirs', async () => {
     const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT', referencePrice: '50.00' };
     const { server } = exchange('SETUP', [NOVA, ORBT]);
     let novaCalls = 0;
@@ -245,35 +432,45 @@ describe('the operator screen', () => {
         novaCalls += 1;
         return novaCalls === 1
           ? { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY', detail: 'busy' } }
-          : { status: 200, json: { instrumentId: NOVA.instrumentId, symbol: 'NOVA', referencePrice: '110.00', commandSequence: '10' } };
+          : {
+              status: 200,
+              json: { instrumentId: NOVA.instrumentId, symbol: 'NOVA', displayName: null, referencePrice: '110.00', commandSequence: '10' },
+            };
       })
       .on(`PUT /api/v1/admin/instruments/${ORBT.instrumentId}`, {
         status: 200,
-        json: { instrumentId: ORBT.instrumentId, symbol: 'ORBT', referencePrice: '55.00', commandSequence: '9' },
+        json: { instrumentId: ORBT.instrumentId, symbol: 'ORBT', displayName: null, referencePrice: '55.00', commandSequence: '9' },
       });
     renderPage();
 
-    fireEvent.change(await screen.findByRole('textbox', { name: 'New price for NOVA' }), { target: { value: '110.00' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save new price for NOVA' }));
-    // Each outcome sits in the row under its own instrument.
+    const save = async (symbol: string, value: string) => {
+      fireEvent.click(await button(`Edit ${symbol}`));
+      const form = screen.getByRole('form', { name: `Edit ${symbol}` });
+      fireEvent.change(within(form).getByLabelText('Reference price'), { target: { value } });
+      fireEvent.click(within(form).getByRole('button', { name: `Save ${symbol}` }));
+    };
+    await save('NOVA', '110.00');
+    // Each outcome sits in the row under its own instrument and its form.
     const outcomeOf = (symbol: string) => {
-      const next = screen.getByRole('rowheader', { name: symbol }).closest('tr')?.nextElementSibling;
-      expect(next).toHaveClass('row-outcome');
+      const rows = screen.getAllByRole('row');
+      const at = rows.findIndex((row) => within(row).queryByRole('rowheader', { name: symbol }) !== null);
+      const next = rows.slice(at + 1).find((row) => row.classList.contains('row-outcome'));
+      expect(next).toBeDefined();
       return next as HTMLElement;
     };
     await waitFor(() => expect(outcomeOf('NOVA')).toHaveTextContent(/Not confirmed/));
-    expect(screen.getByRole('textbox', { name: 'New price for NOVA' })).toBeDisabled();
+    const novaForm = screen.getByRole('form', { name: 'Edit NOVA' });
+    expect(within(novaForm).getByLabelText('Reference price')).toBeDisabled();
+    expect(within(novaForm).getByRole('button', { name: 'Cancel editing NOVA' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Delete NOVA' })).toBeDisabled();
 
-    const orbt = screen.getByRole('textbox', { name: 'New price for ORBT' });
-    expect(orbt).toBeEnabled();
-    fireEvent.change(orbt, { target: { value: '55.00' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save new price for ORBT' }));
-    await waitFor(() => expect(outcomeOf('ORBT')).toHaveTextContent(/ORBT's reference price is now 55.00/));
+    await save('ORBT', '55.00');
+    await waitFor(() => expect(outcomeOf('ORBT')).toHaveTextContent(/Saved ORBT, with no name, at 55.00/));
     expect(outcomeOf('NOVA')).toHaveTextContent(/Not confirmed/);
 
     fireEvent.click(within(outcomeOf('NOVA')).getByRole('button', { name: 'Retry' }));
-    await waitFor(() => expect(outcomeOf('NOVA')).toHaveTextContent(/NOVA's reference price is now 110.00/));
-    expect(screen.getByRole('textbox', { name: 'New price for NOVA' })).toBeEnabled();
+    await waitFor(() => expect(outcomeOf('NOVA')).toHaveTextContent(/Saved NOVA, with no name, at 110.00/));
+    expect(screen.queryByRole('form', { name: 'Edit NOVA' })).toBeNull();
 
     const keyOf = (id: string) =>
       server.requests
@@ -285,9 +482,9 @@ describe('the operator screen', () => {
     expect(keyOf(ORBT.instrumentId)).toHaveLength(1);
     expect(keyOf(ORBT.instrumentId)[0]).not.toBe(nova[0]);
     expect(server.requests.filter((request) => request.method === 'PUT').map((request) => request.body)).toEqual([
-      { referencePrice: '110.00' },
-      { referencePrice: '55.00' },
-      { referencePrice: '110.00' },
+      { referencePrice: '110.00', displayName: null },
+      { referencePrice: '55.00', displayName: null },
+      { referencePrice: '110.00', displayName: null },
     ]);
   });
 
@@ -303,14 +500,19 @@ describe('the operator screen', () => {
       .on(`PUT /api/v1/admin/instruments/${NOVA.instrumentId}`, () =>
         down
           ? { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY', detail: 'busy' } }
-          : { status: 200, json: { instrumentId: NOVA.instrumentId, symbol: 'NOVA', referencePrice: '110.00', commandSequence: '9' } },
+          : {
+              status: 200,
+              json: { instrumentId: NOVA.instrumentId, symbol: 'NOVA', displayName: null, referencePrice: '110.00', commandSequence: '9' },
+            },
       );
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     renderWith(client);
 
-    fireEvent.change(await screen.findByRole('textbox', { name: 'New price for NOVA' }), { target: { value: '110.00' } });
+    fireEvent.click(await button('Edit NOVA'));
+    const form = screen.getByRole('form', { name: 'Edit NOVA' });
+    fireEvent.change(within(form).getByLabelText('Reference price'), { target: { value: '110.00' } });
     down = true;
-    fireEvent.click(screen.getByRole('button', { name: 'Save new price for NOVA' }));
+    fireEvent.click(within(form).getByRole('button', { name: 'Save NOVA' }));
     expect(await screen.findByText(/Not confirmed/)).toBeInTheDocument();
     await client.refetchQueries({ queryKey: ['market'] });
 
@@ -318,10 +520,10 @@ describe('the operator screen', () => {
       await screen.findByText('The exchange is not answering, so the market state shown may be out of date.'),
     ).toBeInTheDocument();
     expect(screen.queryByText('The exchange is not reachable right now.')).toBeNull();
-    expect(screen.getByRole('textbox', { name: 'New price for NOVA' })).toHaveValue('110.00');
+    expect(within(screen.getByRole('form', { name: 'Edit NOVA' })).getByLabelText('Reference price')).toHaveValue('110.00');
     down = false;
     fireEvent.click(await button('Retry'));
-    expect(await screen.findByText(/NOVA's reference price is now 110.00/)).toBeInTheDocument();
+    expect(await screen.findByText(/Saved NOVA, with no name, at 110.00/)).toBeInTheDocument();
     const keys = server.requests
       .filter((request) => request.method === 'PUT')
       .map((request) => request.headers['Idempotency-Key']);
@@ -329,17 +531,17 @@ describe('the operator screen', () => {
     expect(keys[1]).toBe(keys[0]);
   });
 
-  it('offers no price change once the market has opened', async () => {
-    exchange('OPEN');
+  it('shows names but offers no editing once the market has opened', async () => {
+    exchange('OPEN', [{ ...NOVA, displayName: 'Nova Dynamics' }]);
     renderPage();
 
     const table = await screen.findByRole('table', { name: 'Instruments' });
-    expect(within(table).getByRole('rowheader', { name: 'NOVA' })).toBeInTheDocument();
+    expect(within(table).getByRole('rowheader', { name: 'NOVA Nova Dynamics' })).toBeInTheDocument();
     expect(within(table).queryByRole('textbox')).toBeNull();
+    expect(within(table).queryByRole('button', { name: 'Edit NOVA' })).toBeNull();
     expect(within(table).queryByRole('button', { name: 'Delete NOVA' })).toBeNull();
-    expect(within(table).queryByRole('columnheader', { name: 'New price' })).toBeNull();
-    expect(within(table).queryByRole('columnheader', { name: 'Delete' })).toBeNull();
-    expect(screen.queryByText(/Reference prices can be changed/)).toBeNull();
+    expect(within(table).queryByRole('columnheader', { name: 'Actions' })).toBeNull();
+    expect(screen.queryByText(/can be changed until the market opens/)).toBeNull();
   });
 
   it('deletes an instrument only once confirmed, under a key, and moves on to adding', async () => {
@@ -374,7 +576,7 @@ describe('the operator screen', () => {
     const table = screen.getByRole('table', { name: 'Instruments' });
     expect(within(table).getByText('Deleted')).toBeInTheDocument();
     expect(within(table).queryByRole('button', { name: 'Delete NOVA' })).toBeNull();
-    expect(within(table).queryByRole('textbox', { name: 'New price for NOVA' })).toBeNull();
+    expect(within(table).queryByRole('button', { name: 'Edit NOVA' })).toBeNull();
     // The row's controls are gone, so focus goes to the add form.
     expect(screen.getByRole('textbox', { name: 'Symbol' })).toHaveFocus();
     await waitFor(() =>
@@ -413,7 +615,7 @@ describe('the operator screen', () => {
     expect(again).toBeEnabled();
     expect(again).toHaveFocus();
     expect(again).toHaveAccessibleDescription(alert.textContent ?? '');
-    expect(screen.getByRole('textbox', { name: 'New price for NOVA' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Edit NOVA' })).toBeEnabled();
 
     fireEvent.click(again);
     fireEvent.click(screen.getByRole('button', { name: 'Confirm delete of NOVA' }));
@@ -439,8 +641,8 @@ describe('the operator screen', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm delete of NOVA' }));
     expect(await screen.findByText(/Not confirmed/)).toBeInTheDocument();
     expect(await button('Delete NOVA')).toBeDisabled();
-    // The row's price waits for the delete's final answer too.
-    expect(screen.getByRole('textbox', { name: 'New price for NOVA' })).toBeDisabled();
+    // The row's edit waits for the delete's final answer too.
+    expect(screen.getByRole('button', { name: 'Edit NOVA' })).toBeDisabled();
 
     busy = false;
     fireEvent.click(await button('Retry'));
@@ -463,7 +665,7 @@ describe('the operator screen', () => {
 
     fireEvent.click(await button('Delete NOVA'));
     fireEvent.click(screen.getByRole('button', { name: 'Confirm delete of NOVA' }));
-    const elsewhere = screen.getByRole('textbox', { name: 'New price for ORBT' });
+    const elsewhere = screen.getByRole('button', { name: 'Edit ORBT' });
     elsewhere.focus();
 
     expect(await screen.findByText(/NOVA is deleted\./)).toBeInTheDocument();
@@ -499,9 +701,11 @@ describe('the operator screen', () => {
     renderPage();
 
     // An unconfirmed save holds the delete back, so a deleted row never offers to retry a save.
-    const field = await screen.findByRole('textbox', { name: 'New price for NOVA' });
-    fireEvent.change(field, { target: { value: '1x' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Save new price for NOVA' }));
+    fireEvent.click(await button('Edit NOVA'));
+    const form = screen.getByRole('form', { name: 'Edit NOVA' });
+    const price = within(form).getByLabelText('Reference price');
+    fireEvent.change(price, { target: { value: '1x' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Save NOVA' }));
     expect(await screen.findByText(/Not confirmed/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Delete NOVA' })).toBeDisabled();
 
@@ -513,7 +717,7 @@ describe('the operator screen', () => {
     expect(await screen.findByText(/NOVA can't be deleted/)).toBeInTheDocument();
 
     // Both refusals show, and each control is described by its own.
-    expect(field).toHaveAccessibleDescription('Reference price must be a price in cents');
+    expect(price).toHaveAccessibleDescription('Reference price must be a price in cents');
     expect(await button('Delete NOVA')).toHaveAccessibleDescription(/^NOVA can't be deleted: it is in use\./);
     expect(await button('Delete NOVA')).not.toHaveAccessibleDescription(/Reference price/);
   });

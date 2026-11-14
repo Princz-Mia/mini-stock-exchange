@@ -826,20 +826,22 @@ button.chip {
   gap: var(--space-2);
 }
 
-/* A reference price changed in place: the field and its Save side by side in the row, wrapping under on a phone. */
-.price-edit fieldset {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
+/* An instrument's display name, under its symbol in the setup table. Long names wrap rather than widen the table. */
+.instrument-name {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: normal;
+  overflow-wrap: anywhere;
+}
+
+/* The form Edit opens under an instrument's row: its fields wrap as the add form's do. */
+.row-editor fieldset {
   border: none;
   margin: 0;
   padding: 0;
-}
-
-.price-edit input {
-  width: 8rem;
-  min-width: 0;
+  display: grid;
+  gap: var(--space-2);
 }
 
 .row-outcome td {
@@ -853,16 +855,11 @@ button.chip {
   gap: var(--space-2);
 }
 
-/* On a phone the instrument row has four columns to fit: a narrower price field, tighter cells, and the confirm pair
-   stacked, so the panel never scrolls sideways. */
+/* On a phone the row's buttons stack and the cells tighten, so the panel never scrolls sideways. */
 @media (max-width: 640px) {
   .setup-table th,
   .setup-table td {
     padding-inline: var(--space-1);
-  }
-
-  .setup-table .price-edit input {
-    width: 5rem;
   }
 
   .setup-table .row-actions {
@@ -1113,6 +1110,8 @@ button.primary.sell:enabled {
 }
 
 .outcome {
+  /* Messages can carry a display name of up to 100 characters with no space to break at. */
+  overflow-wrap: anywhere;
   margin: 0;
   padding: var(--space-2) var(--space-3);
   border-radius: var(--radius);

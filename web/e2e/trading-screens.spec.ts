@@ -450,9 +450,10 @@ for (const size of SIZES) {
       await page.context().close();
     });
 
-    test('the setup editor, with a reference price refused and saved', async ({ browser }) => {
-      // The live market is open by now, so the market reads as SETUP here and the edit is answered in the browser:
-      // first refused, then saved. Nothing reaches Execution, so the live market is left as it is.
+    test('the setup editor, with a name and price refused and saved', async ({ browser }) => {
+      // The live market is open by now, so the market reads as SETUP here, NOVA's name is added to the live list, and the
+      // edit is answered in the browser: first refused, then saved. Nothing reaches Execution, so the live market is left
+      // as it is.
       const edits: unknown[] = [];
       const page = await at(browser, size, 'operator', async (fresh) => {
         await fresh.route(/\/api\/v1\/market$/, (route) =>
@@ -460,7 +461,19 @@ for (const size of SIZES) {
             json: { state: 'SETUP', simulationId: '10000000-0000-0000-0000-000000000001', openedAt: null, commandSequence: '7' },
           }),
         );
+        await fresh.route(/\/api\/v1\/instruments$/, async (route) => {
+          const live = (await (await route.fetch()).json()) as { instruments: { symbol: string; displayName: string | null }[] };
+          live.instruments.forEach((instrument) => {
+            if (instrument.symbol === 'NOVA') {
+              instrument.displayName = 'Nova Dynamics';
+            }
+          });
+          return route.fulfill({ json: live });
+        });
         await fresh.route(/\/api\/v1\/admin\/instruments\/[0-9a-f-]+$/, (route) => {
+          if (route.request().method() !== 'PUT') {
+            return route.fallback();
+          }
           edits.push(route.request().postDataJSON());
           return edits.length === 1
             ? route.fulfill({
@@ -474,37 +487,54 @@ for (const size of SIZES) {
                 }),
               })
             : route.fulfill({
-                json: { instrumentId: 'x', symbol: 'NOVA', referencePrice: '120.50', commandSequence: '8' },
+                json: { instrumentId: 'x', symbol: 'NOVA', displayName: 'Nova Dynamics Group', referencePrice: '120.50', commandSequence: '8' },
               });
         });
       });
       await page.getByRole('link', { name: 'Operator' }).click();
       const instruments = page.getByRole('region', { name: 'Instruments' });
-      const field = instruments.getByRole('textbox', { name: 'New price for NOVA' });
-      await expect(field).toBeVisible();
-      await expect(instruments.getByText('Reference prices can be changed until the market opens.', { exact: false })).toBeVisible();
+      await expect(instruments.getByRole('rowheader', { name: 'NOVA Nova Dynamics' })).toBeVisible();
+      await expect(
+        instruments.getByText("An instrument's name and reference price can be changed until the market opens", { exact: false }),
+      ).toBeVisible();
       await capture(page, size, 'operator-setup');
-      // The panel scrolls a table too wide for it; the setup row must fit instead, controls included.
+      // The panel scrolls a table too wide for it; the setup rows must fit instead, controls and editor included.
       const fits = () => instruments.evaluate((panel) => panel.scrollWidth <= panel.clientWidth);
       expect(await fits(), `the instruments panel scrolls sideways at ${size.name}`).toBe(true);
 
-      await field.fill('120.5x');
-      await instruments.getByRole('button', { name: 'Save new price for NOVA' }).click();
+      // Edit opens a labelled form under the row, filled in, with focus on the name.
+      await instruments.getByRole('button', { name: 'Edit NOVA' }).click();
+      const form = instruments.getByRole('form', { name: 'Edit NOVA' });
+      const name = form.getByLabel('Name');
+      const price = form.getByLabel('Reference price');
+      await expect(name).toBeFocused();
+      await expect(name).toHaveValue('Nova Dynamics');
+      await expect(price).toHaveValue('100.00');
+      await capture(page, size, 'operator-setup-editing');
+      expect(await fits(), `the instruments panel scrolls sideways at ${size.name} while editing`).toBe(true);
+
+      await price.fill('120.5x');
+      await form.getByRole('button', { name: 'Save NOVA' }).click();
       await expect(instruments.getByRole('alert')).toHaveText('Reference price must be a price in cents');
-      await expect(field).toHaveValue('120.5x');
-      // Sending disabled the field; once answered, focus is back on it to correct the price.
-      await expect(field).toBeFocused();
-      await expect(field).toHaveAttribute('aria-invalid', 'true');
+      await expect(price).toHaveValue('120.5x');
+      // Sending disabled the form; once refused, focus goes to the field the refusal names.
+      await expect(price).toBeFocused();
+      await expect(price).toHaveAttribute('aria-invalid', 'true');
       await capture(page, size, 'operator-setup-refused');
 
-      await field.fill('120.50');
-      await instruments.getByRole('button', { name: 'Save new price for NOVA' }).click();
+      await name.fill('Nova Dynamics Group');
+      await price.fill('120.50');
+      await form.getByRole('button', { name: 'Save NOVA' }).click();
       await expect(instruments.getByRole('status')).toHaveText(
-        "NOVA's reference price is now 120.50. The list shows it once market data has it.",
+        'Saved NOVA as Nova Dynamics Group at 120.50. The list shows it once market data has it.',
       );
-      await expect(field).toHaveValue('');
-      await expect(field).toBeFocused();
-      expect(edits).toEqual([{ referencePrice: '120.5x' }, { referencePrice: '120.50' }]);
+      // The form closes and focus is back on Edit.
+      await expect(form).toHaveCount(0);
+      await expect(instruments.getByRole('button', { name: 'Edit NOVA' })).toBeFocused();
+      expect(edits).toEqual([
+        { referencePrice: '120.5x', displayName: 'Nova Dynamics' },
+        { referencePrice: '120.50', displayName: 'Nova Dynamics Group' },
+      ]);
       await capture(page, size, 'operator-setup-saved');
       await page.context().close();
     });
