@@ -372,15 +372,15 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        /** How many bots exist and the limits on making more. Operator only. */
+        /** How many bots exist, by strategy, and how many one command may make. Operator only. */
         readonly get: operations["getBotPopulation"];
         readonly put?: never;
         /**
          * Create funded bot accounts, each with its own API token, while the market is in SETUP.
          * @description Operator only. Sequenced on the writer and audited, with an idempotency key: a retry with the same key and
          *     body returns the first answer, even a refusal. Bots are named bot-0001, bot-0002 and so on, in the order
-         *     they are created, and each gets the same endowment in its own genesis batch. Each token is written once to
-         *     the simulator's secret directory; no response ever contains a token.
+         *     they are created (bot-10000 follows bot-9999), and each gets the same endowment in its own genesis batch.
+         *     Each token is written once to the simulator's secret directory; no response ever contains a token.
          */
         readonly post: operations["provisionBots"];
         readonly delete?: never;
@@ -1085,7 +1085,7 @@ export interface components {
         readonly BotStrategy: "MARKET_MAKER" | "NOISE" | "MOMENTUM";
         readonly BotPopulation: {
             readonly population: number;
-            readonly maxPopulation: number;
+            /** @description The most bots one command may create. The population itself has no limit. */
             readonly maxPerCommand: number;
             /** @description How many bots carry each tag, and how many none. They add up to population. */
             readonly byStrategy: {
@@ -1120,8 +1120,11 @@ export interface components {
             readonly commandSequence: components["schemas"]["Sequence"];
         };
         readonly BotRunRequest: {
+            /** @description Bots playing market makers; no limit beyond the tagged bots. */
             readonly marketMakers?: number;
+            /** @description Bots playing noise traders; no limit beyond the tagged bots. */
             readonly noise?: number;
+            /** @description Bots playing momentum traders; no limit beyond the tagged bots. */
             readonly momentum?: number;
             /** Format: int64 */
             readonly seed?: number;
@@ -2618,7 +2621,7 @@ export interface operations {
         };
         readonly requestBody?: never;
         readonly responses: {
-            /** @description The population and its limits. */
+            /** @description The population, which has no limit, and the most bots one command may make. */
             readonly 200: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -2683,7 +2686,10 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description MARKET_NOT_IN_SETUP or BOT_POPULATION_LIMIT (both committed and audited), or IDEMPOTENCY_CONFLICT. */
+            /**
+             * @description MARKET_NOT_IN_SETUP (committed and audited), or IDEMPOTENCY_CONFLICT. The population has no limit; a retry
+             *     of a request refused while it was limited to 1,000 bots replays its stored BOT_POPULATION_LIMIT.
+             */
             readonly 409: {
                 headers: {
                     readonly [name: string]: unknown;

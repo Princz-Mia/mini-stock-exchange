@@ -22,7 +22,10 @@ final class RateLimiter {
 
 	private final LongSupplier nanoTime;
 
-	/** Bounded by the number of accounts that send commands, which provisioning limits. */
+	/**
+	 * One small entry per account that has sent a command. Only the operator creates accounts, during setup, so this is
+	 * bounded by the accounts the market has; tens of thousands of entries are a few megabytes.
+	 */
 	private final ConcurrentHashMap<UUID, Long> due = new ConcurrentHashMap<>();
 
 	RateLimiter(int perSecond, LongSupplier nanoTime) {

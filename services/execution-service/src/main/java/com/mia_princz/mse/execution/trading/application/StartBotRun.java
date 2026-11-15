@@ -21,7 +21,8 @@ public record StartBotRun(UUID runId, int marketMakers, int noise, int momentum,
 		Objects.requireNonNull(runId, "runId");
 		Objects.requireNonNull(actorUserId, "actorUserId");
 		instrumentIds = List.copyOf(instrumentIds);
-		if (marketMakers < 0 || noise < 0 || momentum < 0 || marketMakers + noise + momentum < 1) {
+		// No sum: with no limit on a run, counts near the int maximum would overflow one.
+		if (marketMakers < 0 || noise < 0 || momentum < 0 || (marketMakers == 0 && noise == 0 && momentum == 0)) {
 			throw new IllegalArgumentException("a run needs at least one bot");
 		}
 	}
@@ -35,8 +36,9 @@ public record StartBotRun(UUID runId, int marketMakers, int noise, int momentum,
 		};
 	}
 
+	/** The bots in a run that started; each count was then at most the bots tagged with it, so this cannot overflow. */
 	public int bots() {
-		return marketMakers + noise + momentum;
+		return Math.addExact(Math.addExact(marketMakers, noise), momentum);
 	}
 
 }

@@ -17,8 +17,6 @@ import com.mia_princz.mse.execution.trading.domain.Money;
 record BotRunBody(Integer marketMakers, Integer noise, Integer momentum, Long seed, String commandsPerSecond,
 		Integer maxOrderQuantity, Integer maxPosition, Integer durationMinutes, List<UUID> instrumentIds) {
 
-	static final int MAX_PER_STRATEGY = 1_000;
-
 	static final long MAX_HUNDREDTHS_PER_SECOND = 20_000;
 
 	record Valid(int marketMakers, int noise, int momentum, Long seed, long commandsPerSecondHundredths,
@@ -39,7 +37,8 @@ record BotRunBody(Integer marketMakers, Integer noise, Integer momentum, Long se
 		int makers = count("marketMakers", marketMakers, errors);
 		int noisy = count("noise", noise, errors);
 		int trending = count("momentum", momentum, errors);
-		if (errors.isEmpty() && makers + noisy + trending < 1) {
+		// No sum: with no limit on a run, counts near the int maximum would overflow one.
+		if (errors.isEmpty() && makers == 0 && noisy == 0 && trending == 0) {
 			errors.add(new ApiException.FieldError("noise", "NO_BOTS", "a run needs at least one bot"));
 		}
 		if (seed != null && seed < 0) {
@@ -85,9 +84,8 @@ record BotRunBody(Integer marketMakers, Integer noise, Integer momentum, Long se
 		if (value == null) {
 			return 0;
 		}
-		if (value < 0 || value > MAX_PER_STRATEGY) {
-			errors.add(new ApiException.FieldError(field, "OUT_OF_RANGE",
-					field + " must be between 0 and " + MAX_PER_STRATEGY));
+		if (value < 0) {
+			errors.add(new ApiException.FieldError(field, "OUT_OF_RANGE", field + " must not be negative"));
 			return 0;
 		}
 		return value;

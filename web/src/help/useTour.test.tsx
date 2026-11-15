@@ -199,7 +199,6 @@ describe('the first-login tour', () => {
       .on('GET /api/v1/admin/traders', { status: 200, json: { traders: [], nextCursor: null } })
       .on('GET /api/v1/admin/bots', { status: 200, json: {
           population: 0,
-          maxPopulation: 1000,
           maxPerCommand: 100,
           byStrategy: { marketMakers: 0, noise: 0, momentum: 0, untagged: 0 },
         },

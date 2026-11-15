@@ -92,7 +92,7 @@ class SetupController {
 			String commandSequence) {
 	}
 
-	record BotPopulation(int population, int maxPopulation, int maxPerCommand, TradingQueries.BotsByStrategy byStrategy) {
+	record BotPopulation(int population, int maxPerCommand, TradingQueries.BotsByStrategy byStrategy) {
 	}
 
 	record AllocationView(String instrumentId, String symbol, long quantity) {
@@ -155,12 +155,12 @@ class SetupController {
 		};
 	}
 
-	/** How many bots exist, and how many more may be made, so the screen can say so before trying. */
+	/** How many bots exist, by strategy, and how many one command may make. There is no limit on the population. */
 	@GetMapping("/bots")
 	BotPopulation bots() {
 		TradingQueries.BotsByStrategy byStrategy = queries.botsByStrategy();
 		int population = byStrategy.marketMakers() + byStrategy.noise() + byStrategy.momentum() + byStrategy.untagged();
-		return new BotPopulation(population, ProvisionBots.MAX_POPULATION, ProvisionBots.MAX_PER_COMMAND, byStrategy);
+		return new BotPopulation(population, ProvisionBots.MAX_PER_COMMAND, byStrategy);
 	}
 
 	@PostMapping("/instruments")
@@ -304,8 +304,9 @@ class SetupController {
 			case NOT_IN_SETUP -> throw new ApiException(HttpStatus.CONFLICT, "MARKET_NOT_IN_SETUP",
 					"Bots can only be provisioned before the market opens")
 				.with("commandSequence", sequence);
+			// Only an answer stored while the population was limited to 1,000; the limit itself is gone.
 			case POPULATION_LIMIT -> throw new ApiException(HttpStatus.CONFLICT, "BOT_POPULATION_LIMIT",
-					"At most " + ProvisionBots.MAX_POPULATION + " bots; " + result.population() + " exist")
+					"At most 1000 bots; " + result.population() + " exist")
 				.with("commandSequence", sequence);
 			case UNKNOWN_INSTRUMENT -> throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_INSTRUMENT",
 					"A holding names an instrument this market does not have")

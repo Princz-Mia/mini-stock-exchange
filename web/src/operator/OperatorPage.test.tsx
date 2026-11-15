@@ -66,7 +66,6 @@ function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
       status: 200,
       json: {
         population: state.bots + state.tagged.marketMakers + state.tagged.noise + state.tagged.momentum,
-        maxPopulation: 1000,
         maxPerCommand: 100,
         byStrategy: { ...state.tagged, untagged: state.bots },
       },
@@ -887,7 +886,7 @@ describe('the operator screen', () => {
     renderPage();
 
     const form = await screen.findByRole('form', { name: 'Create bots' });
-    expect(await screen.findByText('0 of 1,000 bots')).toBeInTheDocument();
+    expect(await screen.findByText('No bots yet')).toBeInTheDocument();
     // The fields start empty, with examples, and the batch is what the operator typed.
     const count = within(form).getByLabelText('Number of bots');
     const cash = within(form).getByLabelText('Cash each');
@@ -911,13 +910,13 @@ describe('the operator screen', () => {
     expect(within(strategy).getByRole('radio', { name: 'Noise' })).toHaveAccessibleDescription(
       'Places random limit orders near the current price.',
     );
-    expect(within(form).getByText(/Up to 100 at a time, 1,000 more in all/)).toBeInTheDocument();
+    expect(within(form).getByText(/Up to 100 at a time, as many batches as you like/)).toBeInTheDocument();
     fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
 
     expect(
       await screen.findByText('Created bot-0001 to bot-0010 as noise bots. 10 bots in all.'),
     ).toBeInTheDocument();
-    expect(await screen.findByText('10 of 1,000 bots')).toBeInTheDocument();
+    expect(await screen.findByText('10 bots')).toBeInTheDocument();
     expect(screen.getByText('10 noise')).toBeInTheDocument();
     const sent = server.requests.find((request) => request.url === '/api/v1/admin/bots' && request.method === 'POST');
     expect(sent?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
@@ -1031,6 +1030,7 @@ describe('the operator screen', () => {
 
   it("shows a refused bot request in the exchange's words and keeps the input", async () => {
     const { server } = exchange('SETUP');
+    // The population has no limit now; this refusal is one a retry can still replay from before.
     server.on('POST /api/v1/admin/bots', {
       status: 409,
       problem: { status: 409, code: 'BOT_POPULATION_LIMIT', detail: 'At most 1000 bots; 990 exist' },
@@ -1045,14 +1045,27 @@ describe('the operator screen', () => {
     expect(within(form).getByLabelText('Number of bots')).toHaveValue('20');
   });
 
-  it('cannot create bots once the population is full, and says why', async () => {
+  it('keeps creating bots however many there are: no limit, no meter', async () => {
     const { state } = exchange('SETUP');
-    state.bots = 1000;
+    state.bots = 10_000;
+    const { container } = renderPage();
+
+    expect(await screen.findByText('10,000 bots')).toBeInTheDocument();
+    expect(screen.getByText('10,000 untagged')).toBeInTheDocument();
+    const create = await button('Create bots');
+    expect(create).toBeEnabled();
+    expect(create).not.toHaveAttribute('aria-describedby');
+    expect(container.querySelector('meter')).toBeNull();
+    const panel = screen.getByRole('region', { name: 'Bots' });
+    expect(within(panel).queryByText(/ of [\d,]+ bots|at its limit|more in all/)).toBeNull();
+  });
+
+  it('counts a single bot as one', async () => {
+    const { state } = exchange('SETUP');
+    state.bots = 1;
     renderPage();
 
-    const create = await button('Create bots');
-    await waitFor(() => expect(create).toBeDisabled());
-    expect(create).toHaveAccessibleDescription('The population is at its limit; no more bots can be created.');
+    expect(await screen.findByText('1 bot')).toBeInTheDocument();
   });
 
   it('fixes the bot population once the market opens', async () => {
@@ -1060,7 +1073,7 @@ describe('the operator screen', () => {
     state.bots = 12;
     renderPage();
 
-    expect(await screen.findByText('12 of 1,000 bots')).toBeInTheDocument();
+    expect(await screen.findByText('12 bots')).toBeInTheDocument();
     expect(screen.getByText(/the population is fixed after that/)).toBeInTheDocument();
     expect(screen.queryByRole('form', { name: 'Create bots' })).toBeNull();
   });

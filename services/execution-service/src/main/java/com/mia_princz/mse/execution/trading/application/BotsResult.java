@@ -10,7 +10,15 @@ public record BotsResult(Status status, int created, String firstBot, String las
 
 	public enum Status {
 
-		CREATED, NOT_IN_SETUP, POPULATION_LIMIT, UNKNOWN_INSTRUMENT
+		CREATED, NOT_IN_SETUP,
+
+		/**
+		 * Never decided any more: the population was once limited to 1,000 bots. Kept so an answer stored with it still
+		 * replays for a retry of the same key, since stored answers are never rewritten.
+		 */
+		POPULATION_LIMIT,
+
+		UNKNOWN_INSTRUMENT
 
 	}
 

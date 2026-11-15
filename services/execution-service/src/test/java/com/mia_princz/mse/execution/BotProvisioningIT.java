@@ -77,7 +77,7 @@ class BotProvisioningIT {
 	@Test
 	void botsAreFundedInSetupAndTradeWithTheTokenTheyWereGiven(CapturedOutput output) throws Exception {
 		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
-		assertThat(population(operator)).isEqualTo("0 of 1000, 100 at a time");
+		assertThat(population(operator)).isEqualTo("0, 100 at a time");
 		String nova = instrument(operator, "NOVA", "100.00");
 
 		// Three bots, each funded from issuance in its own genesis batch, each with a token file and only its hash.
@@ -136,7 +136,7 @@ class BotProvisioningIT {
 		assertThat(code(bots(operator, unknownKey, 1, "1.00", holding(UUID.randomUUID().toString(), 1)), 422))
 			.isEqualTo("UNKNOWN_INSTRUMENT");
 		assertThat(botCount()).isEqualTo(5);
-		assertThat(population(operator)).isEqualTo("5 of 1000, 100 at a time");
+		assertThat(population(operator)).isEqualTo("5, 100 at a time");
 		List<String> listed = new ArrayList<>();
 		JSON.readTree(operator.get("/api/v1/admin/accounts").body())
 			.get("accounts")
@@ -171,14 +171,35 @@ class BotProvisioningIT {
 		assertThat(bots(operator, failingKey, 1, "1.00").statusCode()).isEqualTo(201);
 		assertThat(tokenFiles()).hasSize(6);
 
-		// The population is capped. Plain rows stand in for most of it.
+		// The population has no limit: past the 1,000 it once stopped at, a full batch is made. Plain rows stand in for
+		// most of it.
 		jdbc.update("""
 				INSERT INTO account (id, simulation_id, kind, display_name)
-				SELECT gen_random_uuid(), id, 'BOT', 'filler' FROM simulation, generate_series(1, 993)""");
+				SELECT gen_random_uuid(), id, 'BOT', 'filler' FROM simulation, generate_series(1, 995)""");
+		HttpResponse<String> past = bots(operator, UUID.randomUUID(), 100, "1.00");
+		assertThat(past.statusCode()).as(past.body()).isEqualTo(201);
+		CONTRACT.assertResponse("POST", BOTS, 201, past.headers().firstValue("Content-Type").orElse(null), past.body());
+		assertThat(JSON.readTree(past.body()).get("firstBot").asString()).isEqualTo("bot-1002");
+		assertThat(JSON.readTree(past.body()).get("lastBot").asString()).isEqualTo("bot-1101");
+		assertThat(JSON.readTree(past.body()).get("population").asInt()).isEqualTo(1101);
+		assertThat(population(operator)).isEqualTo("1101, 100 at a time");
+		assertThat(tokenFiles()).hasSize(106);
+
+		// A refusal stored while the population was limited still replays for a retry of its key: stored answers are
+		// never rewritten. Here one is stored as an earlier release did, for the first batch's request.
 		UUID limitKey = UUID.randomUUID();
-		assertThat(code(bots(operator, limitKey, 2, "1.00"), 409)).isEqualTo("BOT_POPULATION_LIMIT");
-		assertThat(JSON.readTree(bots(operator, UUID.randomUUID(), 1, "1.00").body()).get("lastBot").asString())
-			.isEqualTo("bot-1000");
+		jdbc.update("""
+				INSERT INTO command_result (simulation_id, principal_id, idempotency_key, route, request_hash,
+				    response_status, response_body, command_sequence)
+				SELECT simulation_id, principal_id, ?, route, request_hash, 409,
+				    response_body || '{"status":"POPULATION_LIMIT","created":0,"firstBot":null,"lastBot":null,"population":999}',
+				    command_sequence + 1000000 FROM command_result WHERE idempotency_key = ?""", limitKey, firstKey);
+		HttpResponse<String> limited = bots(operator, limitKey, 3, "50000.00", holding(nova, 200));
+		assertThat(code(limited, 409)).isEqualTo("BOT_POPULATION_LIMIT");
+		CONTRACT.assertResponse("POST", BOTS, 409, limited.headers().firstValue("Content-Type").orElse(null),
+				limited.body());
+		assertThat(JSON.readTree(limited.body()).get("detail").asString()).isEqualTo("At most 1000 bots; 999 exist");
+		assertThat(botCount()).as("a replay makes nothing").isEqualTo(1101);
 
 		// Once open, a bot trades with the token from its file, and no more bots are made.
 		UUID openKey = UUID.randomUUID();
@@ -197,8 +218,9 @@ class BotProvisioningIT {
 				SELECT outcome || ' ' || correlation_id FROM audit_log
 				WHERE action = 'BOT_PROVISION' AND correlation_id IN (?, ?, ?, ?) ORDER BY command_sequence""",
 				String.class, firstKey, unknownKey, limitKey, lateKey);
+		// The replayed refusal decided nothing now, so it has no audit row of its own.
 		assertThat(audit).containsExactly("APPLIED " + firstKey, "NOT_ALLOWED " + unknownKey,
-				"NOT_ALLOWED " + limitKey, "NOT_ALLOWED " + lateKey);
+				"NOT_ALLOWED " + lateKey);
 
 		// Provisioning, a failed handover and a trade with a token all happened above; none of it logged a token.
 		assertThat(output.getAll()).as("the log").doesNotContain(ApiTokens.PREFIX);
@@ -216,8 +238,8 @@ class BotProvisioningIT {
 		HttpResponse<String> read = operator.get(BOTS);
 		CONTRACT.assertResponse("GET", BOTS, 200, read.headers().firstValue("Content-Type").orElse(null), read.body());
 		JsonNode body = JSON.readTree(read.body());
-		return body.get("population").asInt() + " of " + body.get("maxPopulation").asInt() + ", "
-				+ body.get("maxPerCommand").asInt() + " at a time";
+		assertThat(body.has("maxPopulation")).as("no limit is served").isFalse();
+		return body.get("population").asInt() + ", " + body.get("maxPerCommand").asInt() + " at a time";
 	}
 
 	private long botCount() {
