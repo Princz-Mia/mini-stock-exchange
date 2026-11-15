@@ -68,7 +68,14 @@ function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout
           <HelpMenu onTour={tour.replay} button={help} />
           <ThemeSwitch />
         </div>
-        <span className="user">{identity.username}</span>
+        {trader ? (
+          // A trader's own account, where they change their password; the name is the link, labelled with it.
+          <NavLink to="/account" className="user" aria-label={`${identity.username}, account`}>
+            {identity.username}
+          </NavLink>
+        ) : (
+          <span className="user">{identity.username}</span>
+        )}
         <button type="button" className="quiet" onClick={logout} disabled={loggingOut}>
           Log out
         </button>

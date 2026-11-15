@@ -382,6 +382,55 @@ for (const size of SIZES) {
       await down.context().close();
     });
 
+    test('the account page, a refused change and a changed password', async ({ browser }) => {
+      // Answered in the browser, so the trader's real password stays as it is for the other tests.
+      const asked: unknown[] = [];
+      const page = await at(browser, size, 'trader', async (fresh) => {
+        await fresh.route(/\/api\/v1\/me\/password$/, (route) => {
+          asked.push(route.request().postDataJSON());
+          return asked.length === 1
+            ? route.fulfill({
+                status: 400,
+                contentType: 'application/problem+json',
+                body: JSON.stringify({
+                  status: 400,
+                  code: 'VALIDATION_FAILED',
+                  detail: 'The password change is invalid',
+                  errors: [{ field: 'currentPassword', code: 'WRONG_PASSWORD', message: 'the current password is not right' }],
+                }),
+              })
+            : route.fulfill({ status: 204 });
+        });
+      });
+      await page.getByRole('link', { name: 'trader, account' }).click();
+      const panel = page.getByRole('region', { name: 'Change password' });
+      const form = panel.getByRole('form', { name: 'Change password' });
+      await expect(form.getByLabel('Current password')).toHaveAttribute('type', 'password');
+      await capture(page, size, 'account');
+      const fits = () => panel.evaluate((element) => element.scrollWidth <= element.clientWidth);
+      expect(await fits(), `the account page scrolls sideways at ${size.name}`).toBe(true);
+
+      await form.getByLabel('Current password').fill('a wrong guess');
+      await form.getByLabel('New password').fill('a brand new password');
+      await form.getByRole('button', { name: 'Show passwords' }).click();
+      await form.getByRole('button', { name: 'Change password' }).click();
+      await expect(panel.getByRole('alert')).toHaveText('the current password is not right');
+      await expect(form.getByLabel('Current password')).toBeFocused();
+      await capture(page, size, 'account-refused');
+      expect(await fits(), `the account page scrolls sideways at ${size.name} when refused`).toBe(true);
+
+      await form.getByLabel('Current password').fill('the right password');
+      await form.getByRole('button', { name: 'Change password' }).click();
+      await expect(panel.getByRole('status')).toContainText('Your password is changed.');
+      await expect(form.getByLabel('New password')).toHaveValue('');
+      await capture(page, size, 'account-changed');
+      expect(asked).toEqual([
+        { currentPassword: 'a wrong guess', newPassword: 'a brand new password' },
+        { currentPassword: 'the right password', newPassword: 'a brand new password' },
+      ]);
+      await page.context().close();
+    });
+
     test('a long history, one page at a time', async ({ browser }) => {
       // 300 executions, served a page at a time the way the exchange pages them: limit, cursor and order honoured.
       const history = Array.from({ length: 300 }, (_, index) => ({

@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
 
+import { AccountPage } from './account/AccountPage';
 import { isRefusal } from './api/client';
 import { AppShell, RequireRole } from './app/AppShell';
 import { LoginPage } from './auth/LoginPage';
@@ -32,6 +33,7 @@ export function App() {
             <Route element={<RequireRole role="TRADER" />}>
               <Route path="/terminal" element={<TerminalPage />} />
               <Route path="/portfolio" element={<PortfolioPage />} />
+              <Route path="/account" element={<AccountPage />} />
             </Route>
             <Route element={<RequireRole role="OPERATOR" />}>
               <Route path="/operator" element={<OperatorPage />} />

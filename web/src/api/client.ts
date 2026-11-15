@@ -27,6 +27,7 @@ import type {
   OrderPage,
   OrderRequest,
   OwnTradePage,
+  PasswordChangeRequest,
   Portfolio,
   Problem,
   TokenRevoked,
@@ -130,6 +131,9 @@ export const api = {
   me: () => request<Identity>('GET', '/api/v1/me'),
   tourSeen: () => request<TourSeen>('GET', '/api/v1/me/tour'),
   seeTour: (seenVersion: number) => request<TourSeen>('PUT', '/api/v1/me/tour', { body: { seenVersion } }),
+
+  /** A trader's own password; both passwords go in the body only, and are never kept here. */
+  changePassword: (change: PasswordChangeRequest) => request<void>('POST', '/api/v1/me/password', { body: change }),
 
   /** Login rotates the session and its CSRF token, so the token is fetched again afterwards. */
   login: async (username: string, password: string) => {

@@ -136,6 +136,43 @@ paths:
         '403':
           description: Missing or invalid CSRF token. No body.
 
+  /api/v1/me/password:
+    post:
+      tags: [execution]
+      operationId: changePassword
+      summary: A signed-in trader changes their own password, confirming the current one.
+      description: |
+        Traders only; the operator's password comes from configuration. The new password follows the same rules as
+        one the operator sets: 12 to 64 characters and at most 72 bytes, not only spaces, not the username, and not
+        the current password. A wrong current password counts against the sign-in limit, and once the limit is
+        reached the change is refused before any password is checked. Once changed, the trader's other sessions end
+        and this one gets a new ID. There is no reset.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PasswordChangeRequest' }
+      responses:
+        '204':
+          description: Changed. No body.
+        '400':
+          description: VALIDATION_FAILED, with WRONG_PASSWORD on currentPassword or the rule the new one breaks.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not a trader, or a missing or invalid CSRF token. No body.
+        '429':
+          description: LOGIN_RATE_LIMITED, with Retry-After.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
   /api/v1/orders:
     get:
       tags: [execution]
@@ -1369,6 +1406,14 @@ components:
       required: [seenVersion]
       properties:
         seenVersion: { type: integer, minimum: 0, maximum: 1000 }
+
+    PasswordChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword: { type: string, format: password, writeOnly: true }
+        newPassword: { type: string, format: password, writeOnly: true, minLength: 12, maxLength: 64 }
 
     TourSeenRequest:
       type: object

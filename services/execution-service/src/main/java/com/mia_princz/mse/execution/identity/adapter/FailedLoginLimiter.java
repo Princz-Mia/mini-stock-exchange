@@ -57,14 +57,65 @@ final class FailedLoginLimiter {
 		return Math.max(wait(userKey(username), perUser, now), wait(addressKey(address), perAddress, now));
 	}
 
+	/**
+	 * Zero if this attempt may go on, having already counted it as a failure against both keys; otherwise the
+	 * nanoseconds until it may, counting nothing. Counting before the password is checked means attempts sent at once
+	 * cannot all pass the check while the first is still being hashed. A successful attempt gives it back with
+	 * {@link #succeeded}.
+	 */
+	long reserve(String username, String address) {
+		String user = userKey(username);
+		String place = addressKey(address);
+		long refused = take(user, perUser);
+		if (refused > 0) {
+			return refused;
+		}
+		refused = take(place, perAddress);
+		if (refused > 0) {
+			giveBack(user, perUser);
+			return refused;
+		}
+		prune();
+		return 0;
+	}
+
+	/** Gives back what {@link #reserve} counted: someone who knows their password is never slowed by it. */
+	void succeeded(String username, String address) {
+		giveBack(userKey(username), perUser);
+		giveBack(addressKey(address), perAddress);
+	}
+
 	/** Counts a failed sign-in against both the username and the address. */
 	void failed(String username, String address) {
 		record(userKey(username), perUser);
 		record(addressKey(address), perAddress);
+		prune();
+	}
+
+	private void prune() {
 		if (due.size() > PRUNE_ABOVE) {
 			long now = nanoTime.getAsLong();
 			due.values().removeIf((next) -> next - now <= 0);
 		}
+	}
+
+	/** In one step: the wait if this key is over its limit, counting nothing; otherwise 0, counting a failure. */
+	private long take(String key, Limit limit) {
+		long[] refused = { 0 };
+		due.compute(key, (k, next) -> {
+			long now = nanoTime.getAsLong();
+			if (next != null && next - now > limit.tolerance()) {
+				refused[0] = next - limit.tolerance() - now;
+				return next;
+			}
+			long start = (next == null || next - now < 0) ? now : next;
+			return start + limit.intervalNanos();
+		});
+		return refused[0];
+	}
+
+	private void giveBack(String key, Limit limit) {
+		due.computeIfPresent(key, (k, next) -> next - limit.intervalNanos());
 	}
 
 	int keys() {

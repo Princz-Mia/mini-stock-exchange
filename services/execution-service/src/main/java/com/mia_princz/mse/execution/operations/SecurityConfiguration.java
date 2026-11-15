@@ -23,6 +23,7 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.DelegatingPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.security.web.authentication.www.BasicAuthenticationFilter;
 import org.springframework.security.web.authentication.logout.HttpStatusReturningLogoutSuccessHandler;
@@ -39,6 +40,7 @@ import org.springframework.security.web.csrf.CsrfTokenRepository;
 import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 
 import com.mia_princz.mse.execution.identity.adapter.BotTokenFilter;
+import com.mia_princz.mse.execution.identity.adapter.PasswordVersionFilter;
 import com.mia_princz.mse.execution.identity.adapter.ServiceTokenFilter;
 
 /**
@@ -114,8 +116,10 @@ class SecurityConfiguration {
 	@Bean
 	@Order(2)
 	SecurityFilterChain securityFilterChain(HttpSecurity http, CsrfTokenRepository csrfTokens,
-			SecurityContextRepository contexts, List<LogoutHandler> logoutHandlers) throws Exception {
+			SecurityContextRepository contexts, List<LogoutHandler> logoutHandlers, JdbcClient jdbc) throws Exception {
 		return http
+			// A session signed in with a password that has since changed goes on signed out.
+			.addFilterBefore(new PasswordVersionFilter(jdbc), AuthorizationFilter.class)
 			.authorizeHttpRequests((requests) -> requests
 				.requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/prometheus")
 				.permitAll()
@@ -130,6 +134,9 @@ class SecurityConfiguration {
 				.authenticated()
 				.requestMatchers(HttpMethod.PUT, "/api/v1/me/tour")
 				.authenticated()
+				// A trader's own password; the operator's comes from configuration.
+				.requestMatchers(HttpMethod.POST, "/api/v1/me/password")
+				.hasRole("TRADER")
 				.requestMatchers(HttpMethod.GET, "/api/v1/market")
 				.permitAll()
 				.requestMatchers(HttpMethod.GET, "/api/v1/admin/accounts", "/api/v1/admin/traders", "/api/v1/admin/bots", "/api/v1/admin/bot-runs",
