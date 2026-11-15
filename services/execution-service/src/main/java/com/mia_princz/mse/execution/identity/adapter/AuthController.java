@@ -1,6 +1,5 @@
 package com.mia_princz.mse.execution.identity.adapter;
 
-import java.time.Duration;
 import java.util.List;
 
 import jakarta.servlet.http.HttpServletRequest;
@@ -9,7 +8,6 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
@@ -44,17 +42,11 @@ class AuthController {
 	private final FailedLoginLimiter failedLogins;
 
 	AuthController(AuthenticationManager authenticationManager, SessionAuthenticationStrategy sessionStrategy,
-			SecurityContextRepository contextRepository,
-			@Value("${mse.login.failures-per-user}") int failuresPerUser,
-			@Value("${mse.login.user-failure-interval}") Duration userInterval,
-			@Value("${mse.login.failures-per-address}") int failuresPerAddress,
-			@Value("${mse.login.address-failure-interval}") Duration addressInterval) {
+			SecurityContextRepository contextRepository, FailedLoginLimiter failedLogins) {
 		this.authenticationManager = authenticationManager;
 		this.sessionStrategy = sessionStrategy;
 		this.contextRepository = contextRepository;
-		this.failedLogins = new FailedLoginLimiter(
-				new FailedLoginLimiter.Limit(failuresPerUser, userInterval.toNanos()),
-				new FailedLoginLimiter.Limit(failuresPerAddress, addressInterval.toNanos()), System::nanoTime);
+		this.failedLogins = failedLogins;
 	}
 
 	@GetMapping("/auth/csrf")
@@ -70,20 +62,20 @@ class AuthController {
 	@PostMapping("/auth/login")
 	IdentityResponse login(@Valid @RequestBody LoginRequest login, HttpServletRequest request,
 			HttpServletResponse response) {
-		long refused = failedLogins.refusedFor(login.username(), request.getRemoteAddr());
+		// Counted before the password is checked, and given back when it is right, so sign-ins sent at once cannot
+		// all pass while the first is being hashed.
+		long refused = failedLogins.reserve(login.username(), request.getRemoteAddr());
 		if (refused > 0) {
 			throw new LoginLimitedException(refused);
 		}
-		Authentication authentication;
-		try {
-			authentication = authenticationManager
-				.authenticate(UsernamePasswordAuthenticationToken.unauthenticated(login.username(), login.password()));
-		}
-		catch (AuthenticationException ex) {
-			failedLogins.failed(login.username(), request.getRemoteAddr());
-			throw ex;
-		}
+		Authentication authentication = authenticationManager
+			.authenticate(UsernamePasswordAuthenticationToken.unauthenticated(login.username(), login.password()));
+		failedLogins.succeeded(login.username(), request.getRemoteAddr());
 		sessionStrategy.onAuthentication(authentication, request, response);
+		// The password version read with the hash; a session signed in with an old password ends on its next request.
+		if (authentication.getPrincipal() instanceof VersionedUser user) {
+			request.getSession().setAttribute(PasswordVersionFilter.SESSION_ATTRIBUTE, user.passwordVersion());
+		}
 		SecurityContext context = SecurityContextHolder.createEmptyContext();
 		context.setAuthentication(authentication);
 		SecurityContextHolder.setContext(context);

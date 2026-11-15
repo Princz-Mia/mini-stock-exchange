@@ -54,3 +54,4 @@ export type BotRunList = Schemas['BotRunList'];
 export type BotRun = Schemas['BotRun'];
 export type HealthSummary = Schemas['HealthSummary'];
 export type TourSeen = Schemas['TourSeen'];
+export type PasswordChangeRequest = Schemas['PasswordChangeRequest'];

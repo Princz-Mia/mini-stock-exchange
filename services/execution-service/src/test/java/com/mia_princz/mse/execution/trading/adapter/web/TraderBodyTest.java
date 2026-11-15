@@ -8,6 +8,8 @@ import java.util.Random;
 
 import org.junit.jupiter.api.Test;
 
+import com.mia_princz.mse.execution.identity.PasswordRules;
+
 /** The rules for a trader's username and password, the request hash, and what a logged body shows. */
 class TraderBodyTest {
 
@@ -68,8 +70,8 @@ class TraderBodyTest {
 		// Half a surrogate pair, which a JSON escape can carry, would be hashed as '?'.
 		assertThat(problems("maria", "\ud800".repeat(12))).containsExactly("password INVALID_PASSWORD");
 		assertThat(problems("maria", "a-good-pass" + "\udc00")).containsExactly("password INVALID_PASSWORD");
-		assertThat(TraderBody.utf8Length("€😀a")).isEqualTo(3 + 4 + 1);
-		assertThat(TraderBody.utf8Length("\ud800")).isEqualTo(-1);
+		assertThat(PasswordRules.utf8Length("€😀a")).isEqualTo(3 + 4 + 1);
+		assertThat(PasswordRules.utf8Length("\ud800")).isEqualTo(-1);
 	}
 
 	@Test

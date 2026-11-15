@@ -90,6 +90,30 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/me/password": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * A signed-in trader changes their own password, confirming the current one.
+         * @description Traders only; the operator's password comes from configuration. The new password follows the same rules as
+         *     one the operator sets: 12 to 64 characters and at most 72 bytes, not only spaces, not the username, and not
+         *     the current password. A wrong current password counts against the sign-in limit, and once the limit is
+         *     reached the change is refused before any password is checked. Once changed, the trader's other sessions end
+         *     and this one gets a new ID. There is no reset.
+         */
+        readonly post: operations["changePassword"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/orders": {
         readonly parameters: {
             readonly query?: never;
@@ -774,6 +798,12 @@ export interface components {
         };
         readonly TourSeen: {
             readonly seenVersion: number;
+        };
+        readonly PasswordChangeRequest: {
+            /** Format: password */
+            readonly currentPassword: string;
+            /** Format: password */
+            readonly newPassword: string;
         };
         readonly TourSeenRequest: {
             readonly seenVersion: number;
@@ -1786,6 +1816,61 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    readonly changePassword: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["PasswordChangeRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Changed. No body. */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description VALIDATION_FAILED, with WRONG_PASSWORD on currentPassword or the rule the new one breaks. */
+            readonly 400: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not a trader, or a missing or invalid CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description LOGIN_RATE_LIMITED, with Retry-After. */
+            readonly 429: {
+                headers: {
+                    readonly "Retry-After"?: number;
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
             };
         };
     };

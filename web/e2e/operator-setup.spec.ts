@@ -3,7 +3,7 @@ import { type Page, expect, test } from '@playwright/test';
 // Runs first, against the fresh stack, before trading-flow sets up its market: test files run in name order on one
 // worker. The operator adds a named scratch instrument through the setup editor, changes its name and price, removes
 // the name, and deletes it, each answered by the real Execution and shown once Market Data has it. Then the operator
-// adds a trader login, which signs in at once. It leaves behind the market, still in SETUP with no instruments, so
+// adds a trader login, which signs in at once and changes its password. It leaves behind the market, still in SETUP with no instruments, so
 // trading-flow finds a clean catalogue, and that login, without an account.
 
 function required(name: string): string {
@@ -71,7 +71,7 @@ test('the setup editor adds, edits and deletes an instrument, leaving nothing be
   expect(market.state).toBe('SETUP');
 });
 
-test('the operator adds a trader with a generated password, who signs in at once', async ({ page, browser }) => {
+test('the operator adds a trader, who signs in at once and changes the password', async ({ page, browser }) => {
   await signInAsOperator(page);
   const accounts = page.getByRole('region', { name: 'Accounts' });
   const add = accounts.getByRole('form', { name: 'Add a trader' });
@@ -96,5 +96,28 @@ test('the operator adds a trader with a generated password, who signs in at once
   await trader.getByLabel('Password').fill(password);
   await trader.getByRole('button', { name: 'Sign in' }).click();
   await expect(trader.getByRole('dialog')).toBeVisible();
+  await trader.getByRole('button', { name: 'Skip tour' }).click();
+
+  // The trader changes the password the operator handed over, from their name in the top bar.
+  await trader.getByRole('link', { name: `${username}, account` }).click();
+  const change = trader.getByRole('form', { name: 'Change password' });
+  const newPassword = `${password}-changed`;
+  await change.getByLabel('Current password').fill(password);
+  await change.getByLabel('New password').fill(newPassword);
+  await change.getByRole('button', { name: 'Change password' }).click();
+  await expect(trader.getByText('Your password is changed.', { exact: false })).toBeVisible();
   await context.close();
+
+  // The new password signs in; the one the operator set no longer does.
+  const again = await browser.newContext();
+  const signIn = await again.newPage();
+  await signIn.goto('/');
+  await signIn.getByLabel('Username').fill(username);
+  await signIn.getByLabel('Password').fill(password);
+  await signIn.getByRole('button', { name: 'Sign in' }).click();
+  await expect(signIn.getByRole('alert')).toContainText('Wrong username or password.');
+  await signIn.getByLabel('Password').fill(newPassword);
+  await signIn.getByRole('button', { name: 'Sign in' }).click();
+  await expect(signIn.getByRole('link', { name: `${username}, account` })).toBeVisible();
+  await again.close();
 });

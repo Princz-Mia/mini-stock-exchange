@@ -126,8 +126,11 @@ class TourIT {
 			assertThat(rename.executeUpdate()).isEqualTo(1);
 		}
 
+		// A session whose user is gone is signed out on its next request, so it can neither store nor read a tour.
 		assertThat(gone.put(TOUR, seen(1)).statusCode()).isEqualTo(401);
-		assertThat(gone.get(TOUR).body()).isEqualTo(seen(0));
+		assertThat(gone.get(TOUR).statusCode()).isEqualTo(401);
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM user_preference p JOIN app_user u ON u.id = p.user_id "
+				+ "WHERE u.username = ?", Long.class, username + "-renamed")).as("nothing stored").isZero();
 	}
 
 	/** The runtime role may read, add and raise a preference, never remove one. */

@@ -35,6 +35,39 @@ class FailedLoginLimiterTest {
 	}
 
 	@Test
+	void attemptsReservedAtOnceCannotAllPassWhileTheFirstIsChecked() {
+		// Six attempts sent together, none of them answered yet: five go on, the sixth waits.
+		for (int i = 0; i < 5; i++) {
+			assertThat(limiter.reserve("trader", "10.0.0.1")).as("attempt %d", i + 1).isZero();
+		}
+		assertThat(limiter.reserve("trader", "10.0.0.1")).as("the sixth, refused").isEqualTo(12 * SECOND);
+		// A refused attempt counted nothing, and a right one gives its place back.
+		limiter.succeeded("trader", "10.0.0.1");
+		assertThat(limiter.reserve("trader", "10.0.0.1")).as("one given back").isZero();
+		assertThat(limiter.reserve("trader", "10.0.0.1")).isEqualTo(12 * SECOND);
+	}
+
+	@Test
+	void rightAttemptsCostNothing() {
+		for (int i = 0; i < 50; i++) {
+			assertThat(limiter.reserve("trader", "10.0.0.1")).as("attempt %d", i + 1).isZero();
+			limiter.succeeded("trader", "10.0.0.1");
+		}
+		assertThat(limiter.refusedFor("trader", "10.0.0.1")).isZero();
+	}
+
+	@Test
+	void anAttemptRefusedForItsAddressCountsNothingForTheUsername() {
+		for (int i = 0; i < 20; i++) {
+			assertThat(limiter.reserve("person" + i, "10.0.0.9")).isZero();
+		}
+		assertThat(limiter.reserve("trader", "10.0.0.9")).as("the address is over").isEqualTo(3 * SECOND);
+		for (int i = 0; i < 5; i++) {
+			assertThat(limiter.reserve("trader", "10.0.0." + i)).as("the username had nothing taken").isZero();
+		}
+	}
+
+	@Test
 	void theUsernameLimitFollowsThePersonFromAnyAddressInAnyCase() {
 		for (int i = 0; i < 5; i++) {
 			limiter.failed(i % 2 == 0 ? "Trader" : " trader ", "10.0.0." + i);

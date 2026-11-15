@@ -224,7 +224,7 @@ The main decisions, each with its consequences and the condition for revisiting 
 
 | | Capability | Where |
 | --- | --- | --- |
-| F01 | Access | Session login with CSRF and bcrypt; trader and operator roles; trader logins added by the operator during SETUP, their passwords stored only as bcrypt hashes; accounts taken from the credential, never the request; scoped, revocable bot tokens; a failed sign-in limit |
+| F01 | Access | Session login with CSRF and bcrypt; trader and operator roles; trader logins added by the operator during SETUP, their passwords stored only as bcrypt hashes, and changed by the trader with the current one, which signs out their other sessions; accounts taken from the credential, never the request; scoped, revocable bot tokens; a failed sign-in limit |
 | F02 | Orders | Limit GTC and protected market IOC; committed rejections with reasons; idempotency keys; command lookup |
 | F03 | Matching | Price then acceptance sequence; the resting order's price; partial fills; self-trade prevention (`domain/OrderBook`) |
 | F04 | Accounting | Reservations, executions, transfers and releases as balanced ledger batches in one transaction; no negative balances, enforced by checks and reconciled at startup |
