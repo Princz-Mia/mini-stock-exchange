@@ -622,11 +622,19 @@ trivy() {
 security_scan() {
   # Secrets in the whole git history; the npm and uv lockfiles and the Dockerfiles; every image Compose runs. The
   # Java dependencies are scanned in the images, as the jars that actually ship, so Maven Central isn't queried.
-  local image name
+  local image name git_common git_dir scanned
   rm -rf "$security_dir" && mkdir -p "$security_dir" || return 1
-  MSYS_NO_PATHCONV=1 docker run --rm -v "$host_root:/repo" -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory \
-    -e GIT_CONFIG_VALUE_0='*' "$gitleaks_image" git /repo --redact --no-banner --exit-code 0 --report-format json \
+  # In a worktree, .git is a file naming the git directory by a host path the container can't follow, so the
+  # repository's git directory is mounted on its own. gitleaks reports no leaks when it can read no history, so a
+  # scan that read no commits fails.
+  git_common=$(git -C "$root" rev-parse --path-format=absolute --git-common-dir) &&
+    git_dir=$(git -C "$root" rev-parse --path-format=absolute --git-dir) || { fail 'no git directory'; return 1; }
+  MSYS_NO_PATHCONV=1 docker run --rm -v "$host_root:/repo" -v "$git_common:/git" -e "GIT_DIR=/git${git_dir#"$git_common"}" \
+    -e GIT_WORK_TREE=/repo -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0='*' \
+    "$gitleaks_image" git /repo --redact --no-banner --exit-code 0 --report-format json \
     --report-path /repo/runtime/compat-gate/security/gitleaks.json >> "$log" 2>&1 || { fail 'gitleaks did not run'; return 1; }
+  scanned=$(grep -ao '[0-9][0-9]* commits scanned' "$log" | tail -n 1 | cut -d' ' -f1)
+  [ "${scanned:-0}" -gt 0 ] || { fail 'gitleaks read no commits'; return 1; }
   trivy fs . --scanners vuln,misconfig --ignorefile .trivyignore.yaml --skip-files '**/pom.xml' \
     --skip-dirs runtime --skip-dirs local-docs --skip-dirs '**/node_modules' --skip-dirs '**/target' \
     --skip-dirs '**/.venv' --skip-dirs web/dist --skip-dirs web/test-results \
