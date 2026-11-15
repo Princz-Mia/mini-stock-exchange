@@ -11,8 +11,9 @@ import { DEFAULT_STRATEGY, populationText, STRATEGIES, strategyNoun } from './st
 import { useCommand } from './useCommand';
 
 /**
- * The bot population by strategy and, during setup, a form to create more. Every bot in one command gets the same
- * strategy and endowment, and its own token, which goes to the simulator and is never shown here.
+ * The bot population by strategy and, during setup, a form to create more. The population has no limit; one command
+ * makes at most a batch. Every bot in one command gets the same strategy and endowment, and its own token, which goes
+ * to the simulator and is never shown here.
  */
 export function BotSetup({ instruments, editable }: { instruments: readonly Instrument[]; editable: boolean }) {
   const client = useQueryClient();
@@ -50,9 +51,7 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
     void command.run({ count: Number(count.trim()), cash: cash.trim(), holdings, strategy });
   };
 
-  const limits = population.data;
-  const remaining = limits === undefined ? undefined : Math.max(limits.maxPopulation - limits.population, 0);
-  const full = remaining === 0;
+  const bots = population.data;
 
   return (
     <section className="panel" aria-labelledby="bots-title">
@@ -61,15 +60,16 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
         <p role="alert" className="form-error">
           The bot population could not be loaded.
         </p>
-      ) : limits === undefined ? (
+      ) : bots === undefined ? (
         <p className="muted">Loading…</p>
       ) : (
         <div className="population">
-          <p id="bot-population">
-            {groupInteger(limits.population)} of {groupInteger(limits.maxPopulation)} bots
+          <p>
+            {bots.population === 0
+              ? 'No bots yet'
+              : `${groupInteger(bots.population)} ${bots.population === 1 ? 'bot' : 'bots'}`}
           </p>
-          <meter min={0} max={limits.maxPopulation} value={limits.population} aria-labelledby="bot-population" />
-          {limits.population > 0 && <p className="muted">{populationText(limits.byStrategy)}</p>}
+          {bots.population > 0 && <p className="muted">{populationText(bots.byStrategy)}</p>}
         </div>
       )}
       {editable ? (
@@ -126,17 +126,11 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
               describedBy={outcomeId}
             />
             <p className="muted hint">
-              {limits !== undefined &&
-                `Up to ${groupInteger(limits.maxPerCommand)} at a time, ${groupInteger(remaining ?? 0)} more in all. `}
+              {bots !== undefined && `Up to ${groupInteger(bots.maxPerCommand)} at a time, as many batches as you like. `}
               Each bot in a batch gets the same strategy and endowment, and its own token for the simulator; a
               blank or 0 gives none of that instrument. Create a batch of 1 to give one bot its own.
             </p>
-            {full && (
-              <p id="bots-full" className="muted">
-                The population is at its limit; no more bots can be created.
-              </p>
-            )}
-            <button type="submit" className="primary" disabled={full} aria-describedby={full ? 'bots-full' : undefined}>
+            <button type="submit" className="primary">
               Create bots
             </button>
           </fieldset>

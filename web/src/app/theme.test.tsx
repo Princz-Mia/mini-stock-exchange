@@ -249,7 +249,8 @@ describe('the stylesheet', () => {
       '--warn-text: #f3d48b;',
       // Added with the light palette review, as what dark already showed: controls outlined like rules, no shadow, and
       // the live status pill on its old sunken fill; disabled controls drawn as enabled ones were, no warning edge,
-      // the meter track on the sunken fill, and no mark beside a selected item's fill.
+      // and no mark beside a selected item's fill. (The bot population's meter track went with the meter, when the
+      // population stopped having a limit.)
       '--control-line: #322e3d;',
       '--panel-shadow: none;',
       // Added with the fill notices: something floating above the page needs a deeper shadow to stand off it.
@@ -259,7 +260,6 @@ describe('the stylesheet', () => {
       '--control-disabled-line: #322e3d;',
       '--control-disabled-text: #ece9f2;',
       '--warn-line: transparent;',
-      '--track: #24202d;',
       '--selected-mark: transparent;',
     ]);
   });

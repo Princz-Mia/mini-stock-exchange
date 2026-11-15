@@ -609,9 +609,6 @@ public final class TradingEngine {
 		if (!"SETUP".equals(market.state())) {
 			refusal = BotsResult.Status.NOT_IN_SETUP;
 		}
-		else if (population + command.count() > ProvisionBots.MAX_POPULATION) {
-			refusal = BotsResult.Status.POPULATION_LIMIT;
-		}
 		else if (!command.holdings().stream().allMatch((holding) -> books.containsKey(holding.instrumentId()))) {
 			refusal = BotsResult.Status.UNKNOWN_INSTRUMENT;
 		}
@@ -706,15 +703,12 @@ public final class TradingEngine {
 		Instant now = clock.instant();
 		BotRunResult.Status refusal = null;
 		Optional<TradingStore.RunningBotRun> running = store.runningBotRun(simulationId);
-		Map<BotStrategy, List<UUID>> tagged = new EnumMap<>(BotStrategy.class);
-		for (BotStrategy strategy : BotStrategy.values()) {
-			tagged.put(strategy, store.botAccountIds(simulationId, strategy));
-		}
+		Map<BotStrategy, Integer> tagged = store.taggedBotCounts(simulationId);
 		BotRunResult.Shortfall shortfall = Arrays.stream(BotStrategy.values())
-			.filter((strategy) -> command.count(strategy) > tagged.get(strategy).size())
+			.filter((strategy) -> command.count(strategy) > tagged.getOrDefault(strategy, 0))
 			.findFirst()
 			.map((strategy) -> new BotRunResult.Shortfall(strategy.name(), command.count(strategy),
-					tagged.get(strategy).size()))
+					tagged.getOrDefault(strategy, 0)))
 			.orElse(null);
 		List<UUID> instruments = command.instrumentIds().isEmpty()
 				? store.instruments(simulationId).stream().map(TradingStore.Instrument::id).toList()
@@ -746,8 +740,9 @@ public final class TradingEngine {
 			store.insertBotRunInstrument(command.runId(), simulationId, instrument);
 		}
 		for (BotStrategy strategy : BotStrategy.values()) {
-			for (UUID bot : tagged.get(strategy).subList(0, command.count(strategy))) {
-				store.insertBotAssignment(command.runId(), bot, strategy.name());
+			int wanted = command.count(strategy);
+			if (wanted > 0 && store.assignOldestBots(command.runId(), simulationId, strategy, wanted) != wanted) {
+				throw new IllegalStateException("assigned fewer " + strategy + " bots than counted");
 			}
 		}
 		store.insertAudit(simulationId, command.actorUserId(), "BOT_RUN_START", "APPLIED", key.idempotencyKey(),

@@ -3,6 +3,7 @@ package com.mia_princz.mse.execution.trading.application;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -124,8 +125,8 @@ public interface TradingStore {
 
 	int botCount(UUID simulationId);
 
-	/** The bot accounts tagged with a strategy, oldest first. */
-	List<UUID> botAccountIds(UUID simulationId, BotStrategy strategy);
+	/** How many bots carry each strategy's tag; a strategy no bot carries is left out. */
+	Map<BotStrategy, Integer> taggedBotCounts(UUID simulationId);
 
 	/** The run whose desired state is RUNNING, if any; {@code endsAt} is null for a run without a time limit. */
 	record RunningBotRun(UUID id, Instant endsAt) {
@@ -144,7 +145,11 @@ public interface TradingStore {
 
 	void insertBotRunInstrument(UUID runId, UUID simulationId, UUID instrumentId);
 
-	void insertBotAssignment(UUID runId, UUID accountId, String strategy);
+	/**
+	 * Assigns the oldest {@code count} bots tagged with the strategy to the run, in one statement, and returns how many
+	 * were assigned.
+	 */
+	int assignOldestBots(UUID runId, UUID simulationId, BotStrategy strategy, int count);
 
 	void requestBotRunStop(UUID runId, Instant at);
 

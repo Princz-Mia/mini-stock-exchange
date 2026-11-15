@@ -669,10 +669,10 @@ paths:
     get:
       tags: [execution]
       operationId: getBotPopulation
-      summary: How many bots exist and the limits on making more. Operator only.
+      summary: How many bots exist, by strategy, and how many one command may make. Operator only.
       responses:
         '200':
-          description: The population and its limits.
+          description: The population, which has no limit, and the most bots one command may make.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/BotPopulation' }
@@ -687,8 +687,8 @@ paths:
       description: |
         Operator only. Sequenced on the writer and audited, with an idempotency key: a retry with the same key and
         body returns the first answer, even a refusal. Bots are named bot-0001, bot-0002 and so on, in the order
-        they are created, and each gets the same endowment in its own genesis batch. Each token is written once to
-        the simulator's secret directory; no response ever contains a token.
+        they are created (bot-10000 follows bot-9999), and each gets the same endowment in its own genesis batch.
+        Each token is written once to the simulator's secret directory; no response ever contains a token.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -709,7 +709,8 @@ paths:
           description: Not an operator, or missing CSRF token. No body.
         '409':
           description: |
-            MARKET_NOT_IN_SETUP or BOT_POPULATION_LIMIT (both committed and audited), or IDEMPOTENCY_CONFLICT.
+            MARKET_NOT_IN_SETUP (committed and audited), or IDEMPOTENCY_CONFLICT. The population has no limit; a retry
+            of a request refused while it was limited to 1,000 bots replays its stored BOT_POPULATION_LIMIT.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1837,11 +1838,13 @@ components:
     BotPopulation:
       type: object
       additionalProperties: false
-      required: [population, maxPopulation, maxPerCommand, byStrategy]
+      required: [population, maxPerCommand, byStrategy]
       properties:
         population: { type: integer, minimum: 0 }
-        maxPopulation: { type: integer }
-        maxPerCommand: { type: integer }
+        maxPerCommand:
+          type: integer
+          minimum: 1
+          description: The most bots one command may create. The population itself has no limit.
         byStrategy:
           type: object
           additionalProperties: false
@@ -1866,7 +1869,7 @@ components:
         lastBot: { type: string }
         population:
           type: integer
-          maximum: 1000
+          minimum: 1
           description: Bots in the market after this command.
         commandSequence: { $ref: '#/components/schemas/Sequence' }
 
@@ -1903,9 +1906,9 @@ components:
       additionalProperties: false
       required: [commandsPerSecond]
       properties:
-        marketMakers: { type: integer, minimum: 0, maximum: 1000 }
-        noise: { type: integer, minimum: 0, maximum: 1000 }
-        momentum: { type: integer, minimum: 0, maximum: 1000 }
+        marketMakers: { type: integer, minimum: 0, description: Bots playing market makers; no limit beyond the tagged bots. }
+        noise: { type: integer, minimum: 0, description: Bots playing noise traders; no limit beyond the tagged bots. }
+        momentum: { type: integer, minimum: 0, description: Bots playing momentum traders; no limit beyond the tagged bots. }
         seed: { type: integer, format: int64, minimum: 0 }
         commandsPerSecond:
           type: string

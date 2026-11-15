@@ -29,7 +29,7 @@ About 6% more throughput and 5 to 8% lower latency. Most of a command's time is 
 
 ## Steady load
 
-**Scenario:** five instruments and 1,000 bots (200 market makers, 200 momentum, 600 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured.
+**Scenario:** five instruments and 1,000 bots (200 market makers, 200 momentum, 600 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. The 1,000 bots are what was measured, not a limit: the exchange limits neither the bot population nor the bots in one run.
 
 **Command:**
 

@@ -94,7 +94,7 @@ class BotRunIT {
 		assertThat(fields(start(operator, UUID.randomUUID(), "{\"commandsPerSecond\":\"0.00\",\"durationMinutes\":0}")))
 			.containsExactlyInAnyOrder("noise", "commandsPerSecond", "durationMinutes");
 		assertThat(fields(start(operator, UUID.randomUUID(), """
-				{"noise":1001,"seed":-1,"commandsPerSecond":"200.01","maxOrderQuantity":0,"maxPosition":1000001,
+				{"noise":-1,"seed":-1,"commandsPerSecond":"200.01","maxOrderQuantity":0,"maxPosition":1000001,
 				"instrumentIds":["%s","%s"]}""".formatted(nova, nova))))
 			.containsExactlyInAnyOrder("noise", "seed", "commandsPerSecond", "maxOrderQuantity", "maxPosition",
 					"instrumentIds");
@@ -133,6 +133,14 @@ class BotRunIT {
 		assertThat(code(tooNoisy, 422)).isEqualTo("NOT_ENOUGH_BOTS");
 		assertThat(JSON.readTree(tooNoisy.body()).get("shortfall").toString())
 			.isEqualTo("{\"strategy\":\"NOISE\",\"requested\":3,\"available\":2}");
+		// A run has no size limit of its own: 1,001 noise bots are only too many for this market's two. Counts whose
+		// sum would pass the int maximum are refused the same way, not as a run with no bots.
+		assertThat(JSON.readTree(start(operator, UUID.randomUUID(), run(1, 1001, 1, "1.00")).body()).get("shortfall")
+			.toString()).isEqualTo("{\"strategy\":\"NOISE\",\"requested\":1001,\"available\":2}");
+		HttpResponse<String> huge = start(operator, UUID.randomUUID(), run(Integer.MAX_VALUE, 1, 0, "1.00"));
+		assertThat(code(huge, 422)).isEqualTo("NOT_ENOUGH_BOTS");
+		assertThat(JSON.readTree(huge.body()).get("shortfall").toString())
+			.isEqualTo("{\"strategy\":\"MARKET_MAKER\",\"requested\":2147483647,\"available\":1}");
 		assertThat(JSON.readTree(start(operator, UUID.randomUUID(), run(1, 2, 2, "1.00")).body()).get("shortfall")
 			.get("strategy")
 			.asString()).isEqualTo("MOMENTUM");

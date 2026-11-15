@@ -7,7 +7,9 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.EnumMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -313,13 +315,16 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public List<UUID> botAccountIds(UUID simulationId, BotStrategy strategy) {
-		return jdbc.sql("""
-				SELECT id FROM account WHERE simulation_id = ? AND kind = 'BOT' AND bot_strategy = ?
-				ORDER BY created_at, id""")
-			.params(simulationId, strategy.name())
-			.query(UUID.class)
-			.list();
+	public Map<BotStrategy, Integer> taggedBotCounts(UUID simulationId) {
+		Map<BotStrategy, Integer> counts = new EnumMap<>(BotStrategy.class);
+		jdbc.sql("""
+				SELECT bot_strategy, count(*) AS bots FROM account
+				WHERE simulation_id = ? AND kind = 'BOT' AND bot_strategy IS NOT NULL GROUP BY bot_strategy""")
+			.param(simulationId)
+			.query((row) -> {
+				counts.put(BotStrategy.valueOf(row.getString("bot_strategy")), row.getInt("bots"));
+			});
+		return counts;
 	}
 
 	@Override
@@ -361,11 +366,14 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void insertBotAssignment(UUID runId, UUID accountId, String strategy) {
-		expectOne(jdbc.sql("""
-				INSERT INTO bot_assignment (run_id, account_id, account_kind, strategy) VALUES (?, ?, 'BOT', ?)""")
-			.params(runId, accountId, strategy)
-			.update(), "insert bot assignment");
+	public int assignOldestBots(UUID runId, UUID simulationId, BotStrategy strategy, int count) {
+		return jdbc.sql("""
+				INSERT INTO bot_assignment (run_id, account_id, account_kind, strategy)
+				SELECT ?, id, 'BOT', bot_strategy FROM account
+				WHERE simulation_id = ? AND kind = 'BOT' AND bot_strategy = ?
+				ORDER BY created_at, id LIMIT ?""")
+			.params(runId, simulationId, strategy.name(), count)
+			.update();
 	}
 
 	@Override

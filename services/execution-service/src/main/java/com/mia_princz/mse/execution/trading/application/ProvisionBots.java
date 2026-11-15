@@ -15,9 +15,6 @@ public record ProvisionBots(int count, long cashCents, List<ProvisionAccount.Hol
 	/** Keeps one command well inside the request timeout. */
 	public static final int MAX_PER_COMMAND = 100;
 
-	/** The largest population the simulator is planned for. */
-	public static final int MAX_POPULATION = 1_000;
-
 	public ProvisionBots {
 		Objects.requireNonNull(strategy, "strategy");
 		Objects.requireNonNull(actorUserId, "actorUserId");
