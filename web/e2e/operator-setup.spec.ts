@@ -2,8 +2,9 @@ import { type Page, expect, test } from '@playwright/test';
 
 // Runs first, against the fresh stack, before trading-flow sets up its market: test files run in name order on one
 // worker. The operator adds a named scratch instrument through the setup editor, changes its name and price, removes
-// the name, and deletes it, each answered by the real Execution and shown once Market Data has it. It leaves nothing
-// behind but the market itself, still in SETUP with no instruments, so trading-flow finds a clean catalogue.
+// the name, and deletes it, each answered by the real Execution and shown once Market Data has it. Then the operator
+// adds a trader login, which signs in at once. It leaves behind the market, still in SETUP with no instruments, so
+// trading-flow finds a clean catalogue, and that login, without an account.
 
 function required(name: string): string {
   const value = process.env[name];
@@ -68,4 +69,32 @@ test('the setup editor adds, edits and deletes an instrument, leaving nothing be
   expect(listed.instruments).toEqual([]);
   const market = (await (await page.request.get('/api/v1/market')).json()) as { state: string };
   expect(market.state).toBe('SETUP');
+});
+
+test('the operator adds a trader with a generated password, who signs in at once', async ({ page, browser }) => {
+  await signInAsOperator(page);
+  const accounts = page.getByRole('region', { name: 'Accounts' });
+  const add = accounts.getByRole('form', { name: 'Add a trader' });
+  // A name of its own on each run, so the test can run again on the same stack.
+  const username = `e2e-${Date.now().toString(36)}`;
+  await add.getByLabel('Username').fill(username);
+  await add.getByRole('button', { name: 'Generate' }).click();
+  const password = await add.getByLabel('Password').inputValue();
+  expect(password).toMatch(/^[a-km-np-zA-HJ-NP-Z2-9]{20}$/);
+  await add.getByRole('button', { name: 'Add trader' }).click();
+  await expect(accounts.getByText(`Added ${username}, without an account yet`, { exact: false })).toBeVisible();
+  await expect(add.getByLabel('Password')).toHaveValue('');
+  await expect(
+    accounts.getByRole('table', { name: 'Traders without an account' }).getByRole('rowheader', { name: username }),
+  ).toBeVisible();
+
+  // The new trader signs in at once, in a browser of their own, and is greeted by the tour.
+  const context = await browser.newContext();
+  const trader = await context.newPage();
+  await trader.goto('/');
+  await trader.getByLabel('Username').fill(username);
+  await trader.getByLabel('Password').fill(password);
+  await trader.getByRole('button', { name: 'Sign in' }).click();
+  await expect(trader.getByRole('dialog')).toBeVisible();
+  await context.close();
 });

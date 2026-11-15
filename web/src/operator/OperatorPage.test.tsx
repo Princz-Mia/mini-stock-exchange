@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resetSession } from '../api/client';
 import type { BotRun, MarketStatus } from '../api/types';
@@ -51,11 +51,17 @@ function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
     bots: 0,
     tagged: { marketMakers: 0, noise: 0, momentum: 0 },
     runs: [] as BotRun[],
+    // Trader logins without an account yet.
+    unfunded: [] as string[],
   };
   const server = signedIn('operator', ['OPERATOR'])
     .on('GET /api/v1/market', () => ({ status: 200, json: state.market }))
     .on('GET /api/v1/instruments', { status: 200, json: { instruments, feed: { state: 'LIVE', lag: 0 } } })
     .on('GET /api/v1/admin/accounts', { status: 200, json: { accounts: [], nextCursor: null } })
+    .on('GET /api/v1/admin/traders', () => ({
+      status: 200,
+      json: { traders: state.unfunded.map((username) => ({ username, funded: false })), nextCursor: null },
+    }))
     .on('GET /api/v1/admin/bots', () => ({
       status: 200,
       json: {
@@ -1057,6 +1063,240 @@ describe('the operator screen', () => {
     expect(await screen.findByText('12 of 1,000 bots')).toBeInTheDocument();
     expect(screen.getByText(/the population is fixed after that/)).toBeInTheDocument();
     expect(screen.queryByRole('form', { name: 'Create bots' })).toBeNull();
+  });
+});
+
+describe('adding traders on the operator screen', () => {
+  beforeEach(() => resetSession());
+
+  const writeText = vi.fn<(text: string) => Promise<void>>();
+  beforeEach(() => {
+    writeText.mockReset();
+    writeText.mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+  });
+  afterEach(() => {
+    Reflect.deleteProperty(navigator, 'clipboard');
+  });
+
+  const addForm = () => screen.findByRole('form', { name: 'Add a trader' });
+
+  it('adds a trader with a generated password, shown and copied, then clears it', async () => {
+    const { server, state } = exchange('SETUP');
+    server.on('POST /api/v1/admin/traders', () => {
+      state.unfunded = ['omar'];
+      return {
+        status: 201,
+        json: { username: 'omar', accountId: null, cash: null, holdings: [], commandSequence: '7' },
+      };
+    });
+    renderPage();
+
+    const form = await addForm();
+    const password = within(form).getByLabelText('Password');
+    expect(password).toHaveAttribute('type', 'password');
+    expect(password).toHaveAttribute('autocomplete', 'new-password');
+    expect(password).toHaveAccessibleDescription(/12 to 64 characters, not the username/);
+    expect(within(form).getByRole('button', { name: 'Copy' })).toBeDisabled();
+
+    // Generate fills in twenty readable characters and shows them, so they can be read or copied.
+    fireEvent.click(within(form).getByRole('button', { name: 'Generate' }));
+    const generated = (password as HTMLInputElement).value;
+    expect(generated).toMatch(/^[a-km-np-zA-HJ-NP-Z2-9]{20}$/);
+    expect(password).toHaveAttribute('type', 'text');
+    expect(within(form).getByRole('button', { name: 'Show password' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(within(form).getByRole('button', { name: 'Copy' }));
+    expect(await within(form).findByText('Password copied.')).toBeInTheDocument();
+    expect(writeText).toHaveBeenCalledWith(generated);
+    // Show is a toggle; it is left on here, so adding has to hide the field again.
+    fireEvent.click(within(form).getByRole('button', { name: 'Show password' }));
+    expect(password).toHaveAttribute('type', 'password');
+    fireEvent.click(within(form).getByRole('button', { name: 'Show password' }));
+    expect(password).toHaveAttribute('type', 'text');
+
+    fireEvent.change(within(form).getByLabelText('Username'), { target: { value: 'omar' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Add trader' }));
+
+    expect(
+      await screen.findByText('Added omar, without an account yet: fund them below before the market opens.'),
+    ).toBeInTheDocument();
+    const sent = server.requests.find((request) => request.url === '/api/v1/admin/traders' && request.method === 'POST');
+    expect(sent?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
+    // Without cash or shares, only the login is asked for.
+    expect(sent?.body).toEqual({ username: 'omar', password: generated });
+    // The password is gone from the form, hidden again, and the trader is now listed for funding.
+    expect(password).toHaveValue('');
+    expect(password).toHaveAttribute('type', 'password');
+    expect(within(form).getByLabelText('Username')).toHaveValue('');
+    expect(await screen.findByRole('rowheader', { name: 'omar' })).toBeInTheDocument();
+    // Nothing of it was kept in the browser.
+    expect(JSON.stringify({ ...window.localStorage })).not.toContain(generated);
+    // eslint-disable-next-line no-restricted-properties -- only reads it, to show nothing went there
+    expect(JSON.stringify({ ...window.sessionStorage })).not.toContain(generated);
+  });
+
+  it('adds a trader with a typed password and a starting endowment', async () => {
+    const { server } = exchange('SETUP');
+    server.on('POST /api/v1/admin/traders', {
+      status: 201,
+      json: {
+        username: 'maria',
+        accountId: 'a',
+        cash: '25000.00',
+        holdings: [{ instrumentId: NOVA.instrumentId, quantity: 300 }],
+        commandSequence: '8',
+      },
+    });
+    renderPage();
+
+    const form = await addForm();
+    fireEvent.change(within(form).getByLabelText('Username'), { target: { value: ' maria ' } });
+    fireEvent.change(within(form).getByLabelText('Password'), { target: { value: 'a typed password' } });
+    fireEvent.change(within(form).getByLabelText('Cash (optional)'), { target: { value: '25000.00' } });
+    fireEvent.change(await within(form).findByLabelText('NOVA shares'), { target: { value: '300' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Add trader' }));
+
+    expect(await screen.findByText('Added maria with 25,000.00.')).toBeInTheDocument();
+    expect(server.requests.find((request) => request.url === '/api/v1/admin/traders')?.body).toEqual({
+      username: 'maria',
+      password: 'a typed password',
+      cash: '25000.00',
+      holdings: [{ instrumentId: NOVA.instrumentId, quantity: 300 }],
+    });
+  });
+
+  it('gives a trader with shares but no cash an account with 0.00', async () => {
+    const { server } = exchange('SETUP');
+    server.on('POST /api/v1/admin/traders', {
+      status: 201,
+      json: {
+        username: 'lena',
+        accountId: 'b',
+        cash: '0.00',
+        holdings: [{ instrumentId: NOVA.instrumentId, quantity: 50 }],
+        commandSequence: '9',
+      },
+    });
+    renderPage();
+
+    const form = await addForm();
+    fireEvent.change(within(form).getByLabelText('Username'), { target: { value: 'lena' } });
+    fireEvent.change(within(form).getByLabelText('Password'), { target: { value: 'a typed password' } });
+    fireEvent.change(await within(form).findByLabelText('NOVA shares'), { target: { value: '50' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Add trader' }));
+
+    expect(await screen.findByText('Added lena with 0.00.')).toBeInTheDocument();
+    expect(server.requests.find((request) => request.url === '/api/v1/admin/traders')?.body).toEqual({
+      username: 'lena',
+      password: 'a typed password',
+      cash: '0.00',
+      holdings: [{ instrumentId: NOVA.instrumentId, quantity: 50 }],
+    });
+  });
+
+  it('marks and focuses the field a refused trader names, keeping what was typed', async () => {
+    const { server } = exchange('SETUP');
+    server.on('POST /api/v1/admin/traders', {
+      status: 400,
+      problem: {
+        status: 400,
+        code: 'VALIDATION_FAILED',
+        detail: 'The trader request is invalid',
+        errors: [{ field: 'password', code: 'INVALID_PASSWORD', message: 'password must be 12 to 64 characters' }],
+      },
+    });
+    renderPage();
+
+    const form = await addForm();
+    fireEvent.change(within(form).getByLabelText('Username'), { target: { value: 'lena' } });
+    fireEvent.change(within(form).getByLabelText('Password'), { target: { value: 'short' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Add trader' }));
+
+    expect(await screen.findByText('password must be 12 to 64 characters')).toBeInTheDocument();
+    const password = within(form).getByLabelText('Password');
+    expect(password).toHaveAttribute('aria-invalid', 'true');
+    expect(password).toHaveAccessibleDescription(/12 to 64 characters, not the username.*password must be 12 to 64/);
+    expect(within(form).getByLabelText('Username')).not.toHaveAttribute('aria-invalid');
+    expect(password).toHaveValue('short');
+    await waitFor(() => expect(password).toHaveFocus());
+  });
+
+  it('says when the password could not be copied', async () => {
+    exchange('SETUP');
+    writeText.mockRejectedValue(new Error('denied'));
+    renderPage();
+
+    const form = await addForm();
+    fireEvent.click(within(form).getByRole('button', { name: 'Generate' }));
+    fireEvent.click(within(form).getByRole('button', { name: 'Copy' }));
+    expect(
+      await within(form).findByText("The password couldn't be copied; select it and copy it by hand."),
+    ).toBeInTheDocument();
+  });
+
+  it('lists traders without an account, and Fund picks one for the funding form', async () => {
+    const { server, state } = exchange('SETUP');
+    state.unfunded = ['omar', 'lena'];
+    renderPage();
+
+    const list = await screen.findByRole('table', { name: 'Traders without an account' });
+    expect(within(list).getAllByRole('rowheader').map((cell) => cell.textContent)).toEqual(['omar', 'lena']);
+    const asked = server.requests.find((request) => request.url.startsWith('/api/v1/admin/traders'))!;
+    expect(asked.url).toContain('funded=false');
+    expect(asked.url).toContain('limit=10');
+    fireEvent.click(within(list).getByRole('button', { name: 'Fund lena' }));
+
+    const fund = screen.getByRole('form', { name: 'Fund a trader' });
+    expect(within(fund).getByLabelText("Trader's username")).toHaveValue('lena');
+    expect(within(fund).getByLabelText('Cash')).toHaveFocus();
+  });
+
+  it('drops a funded trader from the list, and Fund waits while a funding is unconfirmed', async () => {
+    const { server, state } = exchange('SETUP');
+    state.unfunded = ['omar', 'lena'];
+    let answers = 0;
+    server.on('POST /api/v1/admin/accounts', () => {
+      answers += 1;
+      if (answers === 1) {
+        return { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY' } };
+      }
+      state.unfunded = ['omar'];
+      return {
+        status: 201,
+        json: { accountId: 'l', username: 'lena', cash: '500.00', holdings: [], commandSequence: '11' },
+      };
+    });
+    renderPage();
+
+    const list = await screen.findByRole('table', { name: 'Traders without an account' });
+    fireEvent.click(within(list).getByRole('button', { name: 'Fund lena' }));
+    const fund = screen.getByRole('form', { name: 'Fund a trader' });
+    fireEvent.change(within(fund).getByLabelText('Cash'), { target: { value: '500.00' } });
+    fireEvent.click(within(fund).getByRole('button', { name: 'Fund account' }));
+
+    // Unconfirmed: Retry would fund lena again under the same key, so Fund can't swap in another trader meanwhile.
+    expect(await screen.findByText(/Not confirmed/)).toBeInTheDocument();
+    expect(within(list).getByRole('button', { name: 'Fund omar' })).toBeDisabled();
+    expect(within(fund).getByLabelText("Trader's username")).toHaveValue('lena');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByText('Funded lena with 500.00.')).toBeInTheDocument();
+    await waitFor(() => expect(within(list).queryByRole('rowheader', { name: 'lena' })).toBeNull());
+    expect(within(list).getByRole('button', { name: 'Fund omar' })).toBeEnabled();
+  });
+
+  it('says when every trader has an account', async () => {
+    exchange('SETUP');
+    renderPage();
+    expect(await screen.findByText('Every trader has an account.')).toBeInTheDocument();
+  });
+
+  it('hides adding and funding once the market is open', async () => {
+    exchange('OPEN');
+    renderPage();
+    await screen.findByText(/Endowments are frozen once the market opens/);
+    expect(screen.queryByRole('form', { name: 'Add a trader' })).toBeNull();
+    expect(screen.queryByRole('table', { name: 'Traders without an account' })).toBeNull();
   });
 });
 

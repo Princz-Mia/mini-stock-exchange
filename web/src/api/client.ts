@@ -31,6 +31,9 @@ import type {
   Problem,
   TokenRevoked,
   TourSeen,
+  TraderAdded,
+  TraderPage,
+  TraderRequest,
 } from './types';
 
 /** Which end of a paged list to start from. */
@@ -112,7 +115,7 @@ async function request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: strin
   return data as T;
 }
 
-function query(params: Record<string, string | number | undefined>): string {
+function query(params: Record<string, string | number | boolean | undefined>): string {
   const search = new URLSearchParams();
   for (const [name, value] of Object.entries(params)) {
     if (value !== undefined) {
@@ -191,6 +194,14 @@ export const api = {
 
   accounts: (cursor?: string, limit = 50, order?: ListOrder) =>
     request<AccountPage>('GET', `/api/v1/admin/accounts${query({ cursor, limit, order })}`),
+
+  /** Only while the market is being set up. The password goes in the body only, and is never kept here. */
+  addTrader: (trader: TraderRequest, idempotencyKey: string) =>
+    request<TraderAdded>('POST', '/api/v1/admin/traders', { body: trader, idempotencyKey }),
+
+  /** Trader logins, with {@code funded: false} only those still without an account in this market. */
+  traders: (cursor?: string, limit = 50, order?: ListOrder, funded?: boolean) =>
+    request<TraderPage>('GET', `/api/v1/admin/traders${query({ funded, cursor, limit, order })}`),
 
   botPopulation: () => request<BotPopulation>('GET', '/api/v1/admin/bots'),
 

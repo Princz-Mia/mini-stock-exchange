@@ -5,7 +5,8 @@ import { type ListOrder, PAGE_SIZES, type PageSize, type PagedList } from './pag
 
 export interface Column<T> {
   key: string;
-  header: string;
+  /** Text, or a visually hidden label for a column of controls. */
+  header: ReactNode;
   cell: (row: T) => ReactNode;
   /** Right-aligned, tabular figures. */
   numeric?: boolean;

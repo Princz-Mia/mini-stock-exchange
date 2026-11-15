@@ -9,10 +9,12 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.mia_princz.mse.execution.trading.application.AddTrader;
@@ -51,6 +53,35 @@ class TraderController {
 	/** {@code accountId} and {@code cash} are null for a trader added without an account. */
 	record TraderResponse(String username, String accountId, String cash, List<SetupController.HoldingResponse> holdings,
 			String commandSequence) {
+	}
+
+	record TraderView(String username, boolean funded) {
+	}
+
+	record TraderPage(List<TraderView> traders, String nextCursor) {
+	}
+
+	/**
+	 * Every trader login, wherever it came from, oldest first unless {@code order=newest}, in pages; with
+	 * {@code funded=false}, those still without an account in this market, which setup can fund.
+	 */
+	@GetMapping("/traders")
+	TraderPage traders(@RequestParam(required = false) Boolean funded, @RequestParam(required = false) String cursor,
+			@RequestParam(defaultValue = "50") int limit, @RequestParam(required = false) String order) {
+		Pages.checkLimit(limit);
+		PageOrder direction = PageOrder.parse(order, PageOrder.OLDEST);
+		TradingQueries.AccountPosition after = cursor == null ? null : Cursors.traders(cursor, direction, funded);
+		List<TradingQueries.TraderLogin> page = queries.traders(funded, after, limit + 1, direction);
+		List<TraderView> views = page.stream()
+			.limit(limit)
+			.map((trader) -> new TraderView(trader.username(), trader.funded()))
+			.toList();
+		if (page.size() <= limit) {
+			return new TraderPage(views, null);
+		}
+		TradingQueries.TraderLogin last = page.get(limit - 1);
+		return new TraderPage(views, Cursors.traders(new TradingQueries.AccountPosition(last.createdAt(), last.id()),
+				direction, funded));
 	}
 
 	@PostMapping("/traders")

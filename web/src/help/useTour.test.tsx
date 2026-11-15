@@ -196,6 +196,7 @@ describe('the first-login tour', () => {
       .on('GET /api/v1/market', { status: 200, json: { state: 'SETUP', simulationId: 's', openedAt: null, commandSequence: '1' } })
       .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
       .on('GET /api/v1/admin/accounts', { status: 200, json: { accounts: [], nextCursor: null } })
+      .on('GET /api/v1/admin/traders', { status: 200, json: { traders: [], nextCursor: null } })
       .on('GET /api/v1/admin/bots', { status: 200, json: {
           population: 0,
           maxPopulation: 1000,

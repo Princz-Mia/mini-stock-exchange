@@ -95,7 +95,9 @@ export const TOURS: Record<TourRole, TourScript> = {
       {
         anchor: 'section[aria-labelledby="accounts-title"]',
         title: 'Accounts and endowments',
-        body: 'Each trader and bot with its starting cash and shares. Nothing is granted after the market opens.',
+        body:
+          'Each trader and bot with its starting cash and shares. Before the market opens, add trader logins here and ' +
+          'fund them; nothing is granted after it opens.',
       },
       {
         anchor: 'section[aria-labelledby="bots-title"]',

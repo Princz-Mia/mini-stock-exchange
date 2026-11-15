@@ -511,6 +511,13 @@ for (const size of SIZES) {
         await bots.evaluate((panel) => panel.scrollWidth <= panel.clientWidth),
         `the bots panel scrolls sideways at ${size.name}`,
       ).toBe(true);
+      // The trader form's password stays beside or under its Show, Generate and Copy buttons, within the form.
+      const addTrader = page.getByRole('form', { name: 'Add a trader' });
+      await expect(addTrader.getByLabel('Password')).toHaveAttribute('type', 'password');
+      expect(
+        await addTrader.evaluate((form) => form.scrollWidth <= form.clientWidth),
+        `the add-a-trader form scrolls sideways at ${size.name}`,
+      ).toBe(true);
 
       // Edit opens a labelled form under the row, filled in, with focus on the name.
       await instruments.getByRole('button', { name: 'Edit NOVA' }).click();
