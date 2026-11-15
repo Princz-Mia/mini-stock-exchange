@@ -1026,11 +1026,11 @@ paths:
     get:
       tags: [execution]
       operationId: simulatorAssignment
-      summary: The bot run the simulator should work on, with its bots and instruments.
+      summary: The bot run the simulator should work on, with its instruments and how many bots it has.
       description: |
         Internal: the proxy never forwards it. Needs the simulator token, which can't trade. A run a worker left
         without confirming its stop comes first, then the run that should be running; run is null when there is
-        neither. Bots name their credential file in the simulator's token directory, never a token.
+        neither. The run's bots are read from its bot pages, since a run has no size limit.
       responses:
         '200':
           description: The assignment.
@@ -1041,6 +1041,46 @@ paths:
           description: No valid simulator token. No body.
         '403':
           description: Another service's token. No body.
+
+  /internal/simulator/runs/{runId}/bots:
+    get:
+      tags: [execution]
+      operationId: simulatorRunBots
+      summary: A page of a bot run's bots, oldest first.
+      description: |
+        Internal, with the simulator token. A run's bots never change once it starts, so a worker reads every page
+        once, until nextCursor is null, and has as many bots as the assignment's botCount. Each names its credential
+        file in the simulator's token directory, never a token. A cursor belongs to its run and is refused for
+        another.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Uuid' }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 1000, default: 1000 }
+      responses:
+        '200':
+          description: The page.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SimulatorBotPage' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No valid simulator token. No body.
+        '403':
+          description: Another service's token. No body.
+        '404':
+          description: RUN_NOT_FOUND.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
 
   /internal/simulator/heartbeat:
     post:
@@ -2063,7 +2103,7 @@ components:
             - type: object
               additionalProperties: false
               required: [runId, desiredState, seed, commandsPerSecond, maxOrderQuantity, maxPosition, endsAt,
-                leaseSeconds, instruments, bots, worker, totals]
+                leaseSeconds, instruments, botCount, worker, totals]
               properties:
                 runId: { $ref: '#/components/schemas/Uuid' }
                 desiredState:
@@ -2085,18 +2125,10 @@ components:
                     properties:
                       instrumentId: { $ref: '#/components/schemas/Uuid' }
                       symbol: { type: string }
-                bots:
-                  type: array
-                  items:
-                    type: object
-                    additionalProperties: false
-                    required: [accountId, strategy, credentialRef]
-                    properties:
-                      accountId: { $ref: '#/components/schemas/Uuid' }
-                      strategy: { type: string, enum: [MARKET_MAKER, NOISE, MOMENTUM] }
-                      credentialRef:
-                        type: string
-                        description: The file in the simulator's token directory holding this bot's token.
+                botCount:
+                  type: integer
+                  minimum: 1
+                  description: How many bots the run's pages hold.
                 worker:
                   type: object
                   additionalProperties: false
@@ -2113,6 +2145,28 @@ components:
                     canceled: { type: integer, format: int64, minimum: 0 }
                     rejected: { type: integer, format: int64, minimum: 0 }
                     errors: { type: integer, format: int64, minimum: 0 }
+    SimulatorBotPage:
+      type: object
+      additionalProperties: false
+      required: [bots, nextCursor]
+      properties:
+        bots:
+          type: array
+          maxItems: 1000
+          items:
+            type: object
+            additionalProperties: false
+            required: [accountId, strategy, credentialRef]
+            properties:
+              accountId: { $ref: '#/components/schemas/Uuid' }
+              strategy: { type: string, enum: [MARKET_MAKER, NOISE, MOMENTUM] }
+              credentialRef:
+                type: string
+                description: The file in the simulator's token directory holding this bot's token.
+        nextCursor:
+          type: [string, 'null']
+          description: Pass it back for the next page; null after the last.
+
     SimulatorHeartbeatRequest:
       type: object
       additionalProperties: false

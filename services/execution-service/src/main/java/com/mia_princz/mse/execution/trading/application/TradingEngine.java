@@ -591,6 +591,19 @@ public final class TradingEngine {
 	}
 
 	/**
+	 * The orders resting in the market, counted from the books. The books hold exactly the committed open orders
+	 * (startup reconciles them, and they change only after a commit), so this matches a count in the database, which
+	 * cost more with every order resting and ran for each one that rests.
+	 */
+	private int restingOrders() {
+		int total = 0;
+		for (OrderBook book : books.values()) {
+			total += book.size();
+		}
+		return total;
+	}
+
+	/**
 	 * Each bot gets its own genesis batch and token. Tokens are handed over before commit; if the transaction then
 	 * fails, the stray tokens belong to accounts that never existed, so they authenticate nothing.
 	 */
@@ -902,7 +915,7 @@ public final class TradingEngine {
 			return reject(key, command, RejectionCode.EXECUTION_LIMIT_EXCEEDED, sequence);
 		}
 		if (plan.rests() && (store.openOrders(command.accountId()) >= market.maxOpenOrdersPerAccount()
-				|| store.openOrdersTotal(simulationId) >= market.maxOpenOrdersTotal())) {
+				|| restingOrders() >= market.maxOpenOrdersTotal())) {
 			return reject(key, command, RejectionCode.ORDER_LIMIT_EXCEEDED, sequence);
 		}
 

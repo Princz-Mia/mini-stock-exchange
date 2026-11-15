@@ -18,14 +18,17 @@ import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * The simulator's control plane: which run to work on, and its heartbeat. Internal, by the simulator's own token,
- * which can't trade. Assignments name each bot's credential file, never a token.
+ * The simulator's control plane: which run to work on, its bots, and its heartbeat. Internal, by the simulator's own
+ * token, which can't trade. A run's bots are read in pages, since a run has no size limit; they never change once the
+ * run starts, so a worker reads them once. Each names its credential file, never a token.
  * <p>
  * One worker holds a run at a time. A heartbeat takes the run's lease if it is free, its own or lapsed, and renews it
  * for {@code mse.simulator.lease}; totals are cumulative for the run, so a retried heartbeat changes nothing and a
@@ -38,6 +41,9 @@ import org.springframework.web.bind.annotation.RestController;
 class SimulatorControlController {
 
 	private static final Pattern WORKER_ID = Pattern.compile("[A-Za-z0-9._:-]{1,100}");
+
+	/** The most bots one page holds: 10,000 bots are ten pages. */
+	static final int MAX_BOTS_PER_PAGE = 1_000;
 
 	private static final String RUN_COLUMNS = """
 			id, desired_state, seed, commands_per_second, max_order_quantity, max_position, ends_at, worker_id,
@@ -72,10 +78,16 @@ class SimulatorControlController {
 	record Totals(long placed, long canceled, long rejected, long errors) {
 	}
 
-	/** {@code desiredState} is STOPPED once the run is stopped or its time is up. */
+	/**
+	 * {@code desiredState} is STOPPED once the run is stopped or its time is up. {@code botCount} is how many bots the
+	 * run's pages hold.
+	 */
 	record RunAssignment(String runId, String desiredState, String seed, String commandsPerSecond,
 			int maxOrderQuantity, int maxPosition, Instant endsAt, long leaseSeconds, List<Instrument> instruments,
-			List<Bot> bots, Worker worker, Totals totals) {
+			int botCount, Worker worker, Totals totals) {
+	}
+
+	record BotPage(List<Bot> bots, String nextCursor) {
 	}
 
 	record Assignment(RunAssignment run) {
@@ -118,19 +130,59 @@ class SimulatorControlController {
 			.query((row, index) -> new Instrument(row.getObject("instrument_id", UUID.class).toString(),
 					row.getString("symbol")))
 			.list();
-		List<Bot> bots = jdbc.sql("""
-				SELECT b.account_id, b.strategy FROM bot_assignment b JOIN account a ON a.id = b.account_id
-				WHERE b.run_id = ? ORDER BY a.created_at, a.id""")
+		int bots = jdbc.sql("SELECT count(*) FROM bot_assignment WHERE run_id = ?")
 			.param(run.id())
-			.query((row, index) -> {
-				UUID account = row.getObject("account_id", UUID.class);
-				return new Bot(account.toString(), row.getString("strategy"), account + ".token");
-			})
-			.list();
+			.query(Integer.class)
+			.single();
 		return new RunAssignment(run.id().toString(), run.shouldRun(clock.instant()) ? "RUNNING" : "STOPPED",
 				Long.toString(run.seed()), run.rate().setScale(2).toPlainString(), run.maxOrderQuantity(),
 				run.maxPosition(), run.endsAt(), lease.toSeconds(), instruments, bots,
 				new Worker(run.workerId(), run.leaseExpiresAt()), run.totals());
+	}
+
+	/**
+	 * A page of a run's bots, oldest first, as they were assigned. A cursor belongs to its run, and is refused for
+	 * another.
+	 */
+	@GetMapping("/runs/{runId}/bots")
+	BotPage bots(@PathVariable UUID runId, @RequestParam(required = false) String cursor,
+			@RequestParam(defaultValue = "1000") int limit) {
+		if (limit < 1 || limit > MAX_BOTS_PER_PAGE) {
+			throw ApiException.invalid("limit", "OUT_OF_RANGE", "limit must be between 1 and " + MAX_BOTS_PER_PAGE);
+		}
+		TradingQueries.AccountPosition after = cursor == null ? null : Cursors.assignedBots(cursor, runId);
+		boolean known = jdbc.sql("SELECT EXISTS (SELECT 1 FROM bot_run WHERE id = ?)")
+			.param(runId)
+			.query(Boolean.class)
+			.single();
+		if (!known) {
+			throw new ApiException(HttpStatus.NOT_FOUND, "RUN_NOT_FOUND", "No such bot run");
+		}
+		List<AssignedBot> page = jdbc.sql("""
+				SELECT b.account_id, b.strategy, a.created_at FROM bot_assignment b JOIN account a ON a.id = b.account_id
+				WHERE b.run_id = :run%s
+				ORDER BY a.created_at, a.id LIMIT :limit""".formatted(
+				after == null ? "" : " AND (a.created_at, a.id) > (:afterAt, :afterId)"))
+			.param("run", runId)
+			.param("afterAt", after == null ? null : Timestamp.from(after.createdAt()))
+			.param("afterId", after == null ? null : after.id())
+			.param("limit", limit + 1)
+			.query((row, index) -> new AssignedBot(row.getObject("account_id", UUID.class), row.getString("strategy"),
+					row.getTimestamp("created_at").toInstant()))
+			.list();
+		List<Bot> bots = page.stream()
+			.limit(limit)
+			.map((bot) -> new Bot(bot.accountId().toString(), bot.strategy(), bot.accountId() + ".token"))
+			.toList();
+		if (page.size() <= limit) {
+			return new BotPage(bots, null);
+		}
+		AssignedBot last = page.get(limit - 1);
+		return new BotPage(bots,
+				Cursors.assignedBots(new TradingQueries.AccountPosition(last.createdAt(), last.accountId()), runId));
+	}
+
+	private record AssignedBot(UUID accountId, String strategy, Instant createdAt) {
 	}
 
 	/** Totals are cumulative for the run. {@code stopped} confirms the stop, with nothing left in flight. */

@@ -69,6 +69,8 @@ class SecurityConfiguration {
 				.hasRole("EXPORT")
 				.requestMatchers(HttpMethod.GET, "/internal/simulator/assignment")
 				.hasRole("SIMULATOR")
+				.requestMatchers(HttpMethod.GET, "/internal/simulator/runs/*/bots")
+				.hasRole("SIMULATOR")
 				.requestMatchers(HttpMethod.POST, "/internal/simulator/heartbeat")
 				.hasRole("SIMULATOR")
 				.anyRequest()

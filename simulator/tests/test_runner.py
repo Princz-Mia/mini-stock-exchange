@@ -50,6 +50,7 @@ def test_a_token_is_read_only_by_its_own_file_name(tmp_path) -> None:
 
 
 def run_body(accounts: dict, strategies: list[str], **overrides) -> dict:
+    """A run as the assignment gives it, with its bots as their pages would give them, together."""
     body = {
         "runId": str(uuid4()),
         "desiredState": "RUNNING",
@@ -68,6 +69,17 @@ def run_body(accounts: dict, strategies: list[str], **overrides) -> dict:
         "totals": {"placed": 0, "canceled": 0, "rejected": 0, "errors": 0},
     }
     return body | overrides
+
+
+def assigned(body: dict) -> Assignment:
+    """The assignment the control client builds from the run and its pages."""
+    return Assignment.parse(served_run(body), body["bots"])
+
+
+def served_run(body: dict) -> dict:
+    """The run without its bots, as the assignment serves it: only their count."""
+    run = {key: value for key, value in body.items() if key != "bots"}
+    return run | {"botCount": len(body["bots"])}
 
 
 def quote(instrument: str, last: str | None = None) -> dict:
@@ -106,6 +118,7 @@ class Exchange:
         self.rest = False
         self.trend: int | None = None
         self.polls = 0
+        self.pages = 0
 
     def open_order(
         self, bot_token: str, instrument: str = INSTRUMENT, side: str = "BUY", limit="99.00"
@@ -123,13 +136,29 @@ class Exchange:
         )
         return order_id
 
+    def bot_page(self, request: httpx.Request) -> httpx.Response:
+        """A page of the run's bots; the cursor is where the page starts."""
+        assert self.run is not None and request.url.path.split("/")[-2] == self.run["runId"]
+        self.pages += 1
+        start = int(request.url.params.get("cursor", "0"))
+        limit = int(request.url.params["limit"])
+        bots = self.run["bots"][start : start + limit]
+        more = start + limit < len(self.run["bots"])
+        return httpx.Response(
+            200, json={"bots": bots, "nextCursor": str(start + limit) if more else None}
+        )
+
     async def handle(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         bearer = request.headers.get("Authorization", "").removeprefix("Bearer ")
         if path.startswith("/internal/"):
             assert bearer == CONTROL, "control routes take only the control token"
             if path == "/internal/simulator/assignment":
-                return httpx.Response(200, json={"run": self.run})
+                return httpx.Response(
+                    200, json={"run": None if self.run is None else served_run(self.run)}
+                )
+            if path.endswith("/bots"):
+                return self.bot_page(request)
             beat = json.loads(request.content)
             self.beats.append(beat)
             if self.refuse is not None:
@@ -211,7 +240,7 @@ def placed_instruments(exchange: Exchange) -> set[str]:
 
 async def follow_until(runner: Runner, exchange: Exchange, condition, then=None) -> None:
     """Follows the exchange's run until the condition holds, then applies ``then``."""
-    task = asyncio.create_task(runner.follow(Assignment.parse(exchange.run)))
+    task = asyncio.create_task(runner.follow(assigned(exchange.run)))
     for _ in range(300):
         if condition():
             break
@@ -231,7 +260,7 @@ def test_each_bot_trades_with_its_own_token_and_never_has_two_commands_in_flight
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http)
-            runner.start_run(Assignment.parse(exchange.run))
+            runner.start_run(assigned(exchange.run))
             await runner.refresh_market()
             assert runner.tick() and runner.tick()
             assert not runner.tick(), "both bots still have a command in flight"
@@ -310,7 +339,7 @@ def test_a_run_left_stopping_by_another_worker_is_settled_without_trading(tmp_pa
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http)
-            await asyncio.wait_for(runner.follow(Assignment.parse(exchange.run)), 5)
+            await asyncio.wait_for(runner.follow(assigned(exchange.run)), 5)
 
     asyncio.run(scenario())
     assert exchange.placed == []
@@ -329,7 +358,7 @@ def test_without_the_lease_nothing_trades(tmp_path, code) -> None:
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http)
-            await asyncio.wait_for(runner.follow(Assignment.parse(exchange.run)), 5)
+            await asyncio.wait_for(runner.follow(assigned(exchange.run)), 5)
 
     asyncio.run(scenario())
     assert exchange.placed == []
@@ -368,7 +397,7 @@ def test_unanswered_heartbeats_stop_new_commands_before_the_lease_could_lapse(tm
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http, clock=lambda: now[0])
-            runner.start_run(Assignment.parse(exchange.run))
+            runner.start_run(assigned(exchange.run))
             assert (await runner.beat()).held
             stop = asyncio.Event()
             trading = asyncio.create_task(runner._trade(stop))
@@ -433,7 +462,7 @@ def test_market_data_that_is_not_live_pauses_new_orders(tmp_path) -> None:
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http)
-            runner.start_run(Assignment.parse(exchange.run))
+            runner.start_run(assigned(exchange.run))
             await runner.refresh_market()
             runner.tick()
             await asyncio.wait_for(runner.drain(), 2)
@@ -450,7 +479,7 @@ def test_a_command_with_no_idle_bot_waits_in_the_pacer(tmp_path) -> None:
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http)
-            runner.start_run(Assignment.parse(exchange.run))
+            runner.start_run(assigned(exchange.run))
             for bot in runner._bots.values():
                 bot.busy = True
             pacer = Pacer(1.0, 0.0)
@@ -480,7 +509,7 @@ def test_a_bot_that_waits_by_choice_gives_its_command_to_another(tmp_path, live,
     async def scenario() -> bool:
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http)
-            runner.start_run(Assignment.parse(exchange.run))
+            runner.start_run(assigned(exchange.run))
             await runner.refresh_market()
             for bot in runner._bots.values():
                 bot.strategy = Waits()
@@ -514,7 +543,7 @@ def test_each_bot_draws_from_its_own_generator_seeded_by_the_run(tmp_path) -> No
     async def decisions(seed: str):
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http)
-            runner.start_run(Assignment.parse(run_body(accounts, ["NOISE", "NOISE"], seed=seed)))
+            runner.start_run(assigned(run_body(accounts, ["NOISE", "NOISE"], seed=seed)))
             await runner.refresh_market()
             holdings = Holdings(cash=10**9, shares={UUID(INSTRUMENT): 10**6})
             return [
@@ -601,7 +630,7 @@ def test_every_strategy_is_seeded_by_the_run(tmp_path, strategy) -> None:
             runner = Runner(quick, http)
             body = run_body(accounts, [strategy, strategy], seed=seed)
             body["instruments"].append({"instrumentId": OTHER, "symbol": "ZETA"})
-            runner.start_run(Assignment.parse(body))
+            runner.start_run(assigned(body))
             # The same observations every time: the price climbs from the same start.
             exchange.trend, exchange.polls = 30, 0
             for _ in range(2):
