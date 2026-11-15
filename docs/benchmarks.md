@@ -29,7 +29,7 @@ About 6% more throughput and 5 to 8% lower latency. Most of a command's time is 
 
 ## Steady load
 
-**Scenario:** five instruments and 1,000 bots (200 market makers, 200 momentum, 600 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. The 1,000 bots are what was measured, not a limit: the exchange limits neither the bot population nor the bots in one run.
+**Scenario:** five instruments and 10,000 bots (2,000 market makers, 2,000 momentum, 6,000 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. Until 2026-11-15 the scenario was 1,000 bots; its last result is kept below. Neither is a limit: the exchange limits neither the bot population nor the bots in one run, and `--bots` sets the number.
 
 **Command:**
 
@@ -48,7 +48,37 @@ It runs in its own throwaway Compose project and writes its report to `runtime/l
 | Unexpected infrastructure failures | under 0.1% of commands |
 | Accounting | no violations, no lost acknowledged trades, no duplicate financial effects |
 
-### 2026-11-08
+### 2026-11-15, 10,000 bots
+
+All budgets met.
+
+| | Result |
+| --- | --- |
+| Offered | 57,657 commands in 600 s, 96.0 a second (bots plus the probe trader) |
+| Admitted and committed | 58,086, 96.7 a second |
+| Within 150 ms | 100.000% of commands |
+| Within 500 ms | 100.000% |
+| Estimated p50 / p95 / p99 | 5.1 / 12.5 / 55.6 ms |
+| Client p50 / p95 / p99, through the proxy | 10.9 / 18.5 / 31.0 ms (1,200 probe commands) |
+| Writer queue depth | first minute 0.2, last minute 0.0, peak 23 |
+| Unexpected failures | 0 |
+| Business rejections (committed refusals such as insufficient cash) | 0 |
+| Refused before admission (busy, publication backlog, rate limit) | 0, 0, 0 |
+| Outbox, unpublished events at peak | 13 |
+| Public feed not live | 0 of 120 samples |
+
+**Starting and stopping,** reported rather than budgeted, since they grow with the bots:
+
+| | Result |
+| --- | --- |
+| Provisioning 10,000 bots in batches of 100 | 93 s |
+| Starting the run to its first commands counted (the lease taken, the bots loaded), to within a heartbeat (5 s) | 6 s |
+| Asking the run to stop to stopped (every bot's open orders cancelled) | 28 s |
+| Simulator memory at the end of the window | 83 MiB of 512 MiB |
+
+Admitted is a little above offered because the bots' counts come from heartbeats, so each end of the window may lag by one. The accounting checks after the run passed as below, and the environment is the same as for 2026-11-08, at commit `fb532d1` with the load test's own reporting of the figures above.
+
+### 2026-11-08, 1,000 bots
 
 All budgets met.
 
