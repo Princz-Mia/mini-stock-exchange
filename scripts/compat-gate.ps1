@@ -421,7 +421,15 @@ try {
         # queried.
         if (Test-Path $securityDir) { Remove-Item -Recurse -Force $securityDir }
         New-Item -ItemType Directory -Force $securityDir | Out-Null
-        Invoke-Checked 'docker' @('run', '--rm', '-v', "${root}:/repo", '-e', 'GIT_CONFIG_COUNT=1', '-e', 'GIT_CONFIG_KEY_0=safe.directory', '-e', 'GIT_CONFIG_VALUE_0=*', $gitleaksImage, 'git', '/repo', '--redact', '--no-banner', '--exit-code', '0', '--report-format', 'json', '--report-path', '/repo/runtime/compat-gate/security/gitleaks.json')
+        # In a worktree, .git is a file naming the git directory by a host path the container can't follow, so the
+        # repository's git directory is mounted on its own. gitleaks reports no leaks when it can read no history,
+        # so a scan that read no commits fails.
+        $gitCommon = (& git -C $root rev-parse --path-format=absolute --git-common-dir).Trim()
+        $gitDir = (& git -C $root rev-parse --path-format=absolute --git-dir).Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $gitDir.StartsWith($gitCommon)) { throw 'no git directory' }
+        Invoke-Checked 'docker' @('run', '--rm', '-v', "${root}:/repo", '-v', "${gitCommon}:/git", '-e', "GIT_DIR=/git$($gitDir.Substring($gitCommon.Length))", '-e', 'GIT_WORK_TREE=/repo', '-e', 'GIT_CONFIG_COUNT=1', '-e', 'GIT_CONFIG_KEY_0=safe.directory', '-e', 'GIT_CONFIG_VALUE_0=*', $gitleaksImage, 'git', '/repo', '--redact', '--no-banner', '--exit-code', '0', '--report-format', 'json', '--report-path', '/repo/runtime/compat-gate/security/gitleaks.json')
+        $scanned = Select-String -Path $script:currentLog -Pattern '(\d+) commits scanned' | Select-Object -Last 1
+        if ($null -eq $scanned -or [int]$scanned.Matches[0].Groups[1].Value -eq 0) { throw 'gitleaks read no commits' }
         Invoke-Trivy @('fs', '.', '--scanners', 'vuln,misconfig', '--ignorefile', '.trivyignore.yaml', '--skip-files', '**/pom.xml', '--skip-dirs', 'runtime', '--skip-dirs', 'local-docs', '--skip-dirs', '**/node_modules', '--skip-dirs', '**/target', '--skip-dirs', '**/.venv', '--skip-dirs', 'web/dist', '--skip-dirs', 'web/test-results', '--format', 'json', '--output', 'runtime/compat-gate/security/trivy-repo.json', '--quiet')
         foreach ($image in (& docker @($compose + @('config', '--images')) | Sort-Object -Unique)) {
             if ($image -match '@sha256:') { $name = 'third-party-' + (($image -split '@')[0] -replace '[/:]', '-') }
