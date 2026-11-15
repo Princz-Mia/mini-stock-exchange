@@ -5,11 +5,12 @@ time."""
 import asyncio
 import contextlib
 import logging
-import random
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from pathlib import Path
 from uuid import UUID
 
 import httpx
@@ -35,6 +36,12 @@ LEASE_MARGIN = 0.8
 
 # Liquidity first: market makers take the first turns of a run, then directional bots.
 TURN_ORDER = {"MARKET_MAKER": 0, "MOMENTUM": 1, "NOISE": 1}
+
+# Token files read at once while a run loads: opening a file waits on the disk, not the processor.
+TOKEN_READERS = 8
+
+# Bots built between yields to the event loop while a run loads, so heartbeats keep their time.
+BUILD_BATCH = 500
 
 
 @dataclass
@@ -141,8 +148,7 @@ class Runner:
         return None
 
     def start_run(self, run: Assignment) -> None:
-        """The run's bots, each with its own generators seeded by the run and its account, market
-        makers first."""
+        """Takes up a run with no bots yet: they are loaded once its lease is held."""
         self._run = run
         self._bots.clear()
         self._order.clear()
@@ -152,33 +158,46 @@ class Runner:
         self._lease_until = float("-inf")
         self.activity = Activity(**asdict(run.totals))
         self._signal = self._new_signal()
+
+    async def load_bots(self) -> None:
+        """The run's bots, each with its own generators seeded by the run and its account, market
+        makers first. A run has no size limit, so its token files are read off the event loop, a
+        few at a time, and the bots are built in batches: heartbeats keep their time meanwhile."""
+        run = self._run
+        assert run is not None
+        began = self._clock()
+        assigned = sorted(run.bots, key=lambda bot: TURN_ORDER.get(bot.strategy, 2))
+        directory = self._settings.token_directory
+        refs = [bot.credential_ref for bot in assigned]
+        tokens = await asyncio.to_thread(_read_tokens, directory, refs)
         missing = unknown = 0
-        bots = sorted(run.bots, key=lambda bot: TURN_ORDER.get(bot.strategy, 2))
-        for assigned in bots:
-            token = load_token(self._settings.token_directory, assigned.credential_ref)
+        for index, (bot, token) in enumerate(zip(assigned, tokens, strict=True)):
+            if index % BUILD_BATCH == 0 and index > 0:
+                await asyncio.sleep(0)
             if token is None:
                 missing += 1
                 continue
-            account = assigned.account_id
+            account = bot.account_id
             client = TraderClient(
                 self._http,
                 self.execution_url,
                 account,
                 token,
                 self._in_flight,
-                random.Random(account.int ^ run.seed),
+                account.int ^ run.seed,
                 self._sleep,
             )
             rng = np.random.default_rng([run.seed, account.int])
-            strategy = self._strategy(assigned.strategy, rng, run)
+            strategy = self._strategy(bot.strategy, rng, run)
             if strategy is None:
                 unknown += 1
             self._bots[account] = Bot(client, strategy)
             self._order.append(account)
         logger.info(
-            "run %s: %d bots, %d without a token file, %d with an unknown strategy",
+            "run %s: %d bots in %.1f s, %d without a token file, %d with an unknown strategy",
             run.run_id,
             len(self._bots),
+            self._clock() - began,
             missing,
             unknown,
         )
@@ -368,8 +387,10 @@ class Runner:
         first = await self.beat()
         if first is None or not first.held:
             return
+        # Only with the lease: a worker that finds it held reads no token at all.
         keeper = asyncio.create_task(self._keep_lease())
         try:
+            await self.load_bots()
             await self._trade(self._shutdown)
             await self.drain()
             if self._lost or not self._stopping:
@@ -411,3 +432,9 @@ class Runner:
                 await self.follow(run)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), self._settings.control_poll_seconds)
+
+
+def _read_tokens(directory: Path, refs: list[str]) -> list[str | None]:
+    """Each bot's token, or None, in the order given, read by a few threads at once."""
+    with ThreadPoolExecutor(TOKEN_READERS, thread_name_prefix="tokens") as pool:
+        return list(pool.map(lambda ref: load_token(directory, ref), refs))

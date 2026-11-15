@@ -1,11 +1,13 @@
 import asyncio
 import json
+import threading
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 
+from mse_simulator import runner as runner_module
 from mse_simulator.control import Assignment
 from mse_simulator.credentials import load_token
 from mse_simulator.market import fetch
@@ -261,6 +263,7 @@ def test_each_bot_trades_with_its_own_token_and_never_has_two_commands_in_flight
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http)
             runner.start_run(assigned(exchange.run))
+            await runner.load_bots()
             await runner.refresh_market()
             assert runner.tick() and runner.tick()
             assert not runner.tick(), "both bots still have a command in flight"
@@ -348,7 +351,9 @@ def test_a_run_left_stopping_by_another_worker_is_settled_without_trading(tmp_pa
 
 
 @pytest.mark.parametrize("code", ["LEASE_HELD", "RUN_FINISHED"])
-def test_without_the_lease_nothing_trades(tmp_path, code) -> None:
+def test_without_the_lease_nothing_trades(tmp_path, code, monkeypatch) -> None:
+    read: list[str] = []
+    monkeypatch.setattr(runner_module, "load_token", lambda directory, ref: read.append(ref))
     accounts = write_tokens(tmp_path / "tokens", 1)
     exchange = Exchange()
     exchange.refuse = code
@@ -364,6 +369,47 @@ def test_without_the_lease_nothing_trades(tmp_path, code) -> None:
     assert exchange.placed == []
     assert exchange.canceled == [], "another worker's quotes are its to cancel"
     assert len(exchange.beats) == 1
+    assert read == [], "a worker without the lease reads no token"
+
+
+def test_heartbeats_go_on_while_a_run_loads_and_nothing_trades_until_it_has(
+    tmp_path, monkeypatch
+) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 3)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["NOISE", "NOISE", "NOISE"])
+    loading = threading.Event()
+    real = runner_module.load_token
+
+    def slow(directory, ref):
+        # A token file on a slow disk: the read waits, off the event loop, until released.
+        assert loading.wait(5), "never released"
+        return real(directory, ref)
+
+    monkeypatch.setattr(runner_module, "load_token", slow)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            task = asyncio.create_task(runner.follow(assigned(exchange.run)))
+            for _ in range(300):
+                if len(exchange.beats) >= 3:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(exchange.beats) >= 3, "the lease keeper beats while tokens are read"
+            # No bot exists yet, so nothing could be placed anyway: what shows trading has not
+            # started is that it has no pacer and has not polled the market.
+            assert runner._pacer is None and exchange.polls == 0, "trading waits for the bots"
+            loading.set()
+            for _ in range(300):
+                if exchange.placed:
+                    break
+                await asyncio.sleep(0.01)
+            assert exchange.placed, "trading starts once they are"
+            exchange.desired = "STOPPED"
+            await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
 
 
 def test_a_lost_lease_stops_trading_at_once_without_settling(tmp_path) -> None:
@@ -398,6 +444,7 @@ def test_unanswered_heartbeats_stop_new_commands_before_the_lease_could_lapse(tm
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http, clock=lambda: now[0])
             runner.start_run(assigned(exchange.run))
+            await runner.load_bots()
             assert (await runner.beat()).held
             stop = asyncio.Event()
             trading = asyncio.create_task(runner._trade(stop))
@@ -453,6 +500,39 @@ def test_without_a_control_token_the_worker_stays_idle(tmp_path) -> None:
     assert exchange.placed == [] and exchange.beats == []
 
 
+def test_building_a_large_run_yields_to_the_event_loop(tmp_path, monkeypatch) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 6)
+    monkeypatch.setattr(runner_module, "BUILD_BATCH", 2)
+    events: list[str] = []
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(Exchange().handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            build = runner._strategy
+
+            def recorded(*args):
+                events.append("build")
+                return build(*args)
+
+            monkeypatch.setattr(runner, "_strategy", recorded)
+
+            async def other_work() -> None:
+                while True:
+                    events.append("other")
+                    await asyncio.sleep(0)
+
+            other = asyncio.create_task(other_work())
+            runner.start_run(assigned(run_body(accounts, ["NOISE"] * 6)))
+            await runner.load_bots()
+            other.cancel()
+
+    asyncio.run(scenario())
+    built = [index for index, event in enumerate(events) if event == "build"]
+    assert len(built) == 6
+    between = events[built[0] : built[-1]]
+    assert between.count("other") >= 2, "other work runs between batches of bots"
+
+
 def test_market_data_that_is_not_live_pauses_new_orders(tmp_path) -> None:
     accounts = write_tokens(tmp_path / "tokens", 1)
     exchange = Exchange()
@@ -463,6 +543,7 @@ def test_market_data_that_is_not_live_pauses_new_orders(tmp_path) -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http)
             runner.start_run(assigned(exchange.run))
+            await runner.load_bots()
             await runner.refresh_market()
             runner.tick()
             await asyncio.wait_for(runner.drain(), 2)
@@ -480,6 +561,7 @@ def test_a_command_with_no_idle_bot_waits_in_the_pacer(tmp_path) -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http)
             runner.start_run(assigned(exchange.run))
+            await runner.load_bots()
             for bot in runner._bots.values():
                 bot.busy = True
             pacer = Pacer(1.0, 0.0)
@@ -510,6 +592,7 @@ def test_a_bot_that_waits_by_choice_gives_its_command_to_another(tmp_path, live,
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http)
             runner.start_run(assigned(exchange.run))
+            await runner.load_bots()
             await runner.refresh_market()
             for bot in runner._bots.values():
                 bot.strategy = Waits()
@@ -544,6 +627,7 @@ def test_each_bot_draws_from_its_own_generator_seeded_by_the_run(tmp_path) -> No
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
             runner = Runner(settings(tmp_path / "tokens"), http)
             runner.start_run(assigned(run_body(accounts, ["NOISE", "NOISE"], seed=seed)))
+            await runner.load_bots()
             await runner.refresh_market()
             holdings = Holdings(cash=10**9, shares={UUID(INSTRUMENT): 10**6})
             return [
@@ -631,6 +715,7 @@ def test_every_strategy_is_seeded_by_the_run(tmp_path, strategy) -> None:
             body = run_body(accounts, [strategy, strategy], seed=seed)
             body["instruments"].append({"instrumentId": OTHER, "symbol": "ZETA"})
             runner.start_run(assigned(body))
+            await runner.load_bots()
             # The same observations every time: the price climbs from the same start.
             exchange.trend, exchange.polls = 30, 0
             for _ in range(2):
