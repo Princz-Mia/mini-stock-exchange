@@ -100,7 +100,6 @@ class Stack:
             f"MARKET_DATA_DB_APP_PASSWORD={self.passwords['market_data_app']}",
             f"GRAFANA_ADMIN_PASSWORD={self.passwords['grafana']}",
             f"DEV_OPERATOR_PASSWORD={self.passwords['operator']}",
-            f"DEV_TRADER_PASSWORD={self.passwords['trader']}",
             f"MSE_EXPORT_TOKEN={self.passwords['export']}",
             f"MSE_SIMULATOR_TOKEN={self.passwords['simulator']}",
             f"WEB_HOST_PORT={WEB_PORT}",
@@ -210,9 +209,9 @@ def wait_for(what: str, condition, timeout: float, interval: float = 2.0):
         time.sleep(interval)
 
 
-def set_up(operator: Session, bots: int) -> list[str]:
-    """Five instruments at 100.00, a funded trader for the probe, the bots tagged in the split
-    the run uses, and an open market."""
+def set_up(operator: Session, bots: int, trader_password: str) -> list[str]:
+    """Five instruments at 100.00, a trader for the probe, added and funded as the operator adds
+    one, the bots tagged in the split the run uses, and an open market."""
     instruments = [
         operator.expect(
             201, "/api/v1/admin/instruments", {"symbol": symbol, "referencePrice": "100.00"}
@@ -222,8 +221,13 @@ def set_up(operator: Session, bots: int) -> list[str]:
     holdings = [{"instrumentId": instrument, "quantity": 1000} for instrument in instruments]
     operator.expect(
         201,
-        "/api/v1/admin/accounts",
-        {"username": "trader", "cash": "1000000.00", "holdings": holdings},
+        "/api/v1/admin/traders",
+        {
+            "username": "trader",
+            "password": trader_password,
+            "cash": "1000000.00",
+            "holdings": holdings,
+        },
     )
     bot_holdings = [{"instrumentId": instrument, "quantity": 200} for instrument in instruments]
     for strategy, total in strategy_split(bots).items():
@@ -556,7 +560,7 @@ def run(options: Options) -> int:
     try:
         stack.compose("up", "-d", "--build", "--wait", "--wait-timeout", "600", timeout=1800)
         operator = Session("operator", stack.passwords["operator"])
-        instruments = set_up(operator, options.bots)
+        instruments = set_up(operator, options.bots, stack.passwords["trader"])
         wait_for(
             "Market Data to list the instruments",
             lambda: len(listing()["instruments"]) >= len(SYMBOLS),

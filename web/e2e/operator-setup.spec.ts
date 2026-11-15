@@ -27,7 +27,7 @@ test('the setup editor adds, edits and deletes an instrument, leaving nothing be
   const instruments = page.getByRole('region', { name: 'Instruments' });
   await expect(instruments.getByText('No instruments yet.')).toBeVisible();
 
-  // Added through the form with a name: the first instrument also creates the market.
+  // Added through the form with a name.
   const add = instruments.getByRole('form', { name: 'Add an instrument' });
   await add.getByLabel('Symbol').fill('ZEDIT');
   await add.getByLabel('Reference price').fill('10.00');

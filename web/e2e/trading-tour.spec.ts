@@ -1,7 +1,7 @@
 import AxeBuilder from '@axe-core/playwright';
 import { type Browser, type Page, expect, test } from '@playwright/test';
 
-// The first-login tour in a real browser. The newcomer (seeded by the gate, with no tour seen) gets it on their first
+// The first-login tour in a real browser. The newcomer (added by the global setup, with no tour seen) gets it on their first
 // sign-in and not on the next; Help replays it; the operator's tour replays the same way. Every step passes an
 // accessibility scan, and the card fits a phone. Runs after trading-flow.spec.ts, which opened the market, so every
 // part of both start pages is there to point at. Every other browser test signs in as a user who has seen the tour.
