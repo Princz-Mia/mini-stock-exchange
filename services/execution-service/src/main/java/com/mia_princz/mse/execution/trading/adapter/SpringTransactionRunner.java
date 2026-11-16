@@ -4,14 +4,15 @@ import java.util.function.Supplier;
 
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionStatus;
-import org.springframework.transaction.TransactionSystemException;
 import org.springframework.transaction.support.DefaultTransactionDefinition;
 
 import com.mia_princz.mse.execution.trading.application.TransactionRunner;
 
 /**
  * Explicit transactions, not {@code @Transactional}: the writer thread calls this directly, so there is no proxy to
- * miss and no propagation across threads. A failed commit after successful work is reported as an unknown outcome.
+ * miss and no propagation across threads. A failed commit after successful work is reported as an unknown outcome,
+ * whatever exception the transaction manager translated it to, unless the database certainly rolled it back
+ * ({@link CommitFailures}).
  */
 public final class SpringTransactionRunner implements TransactionRunner {
 
@@ -35,7 +36,14 @@ public final class SpringTransactionRunner implements TransactionRunner {
 		try {
 			transactionManager.commit(status);
 		}
-		catch (TransactionSystemException ex) {
+		catch (RuntimeException ex) {
+			if (CommitFailures.certainlyRolledBack(ex)) {
+				throw ex;
+			}
+			throw new CommitOutcomeUnknownException(ex);
+		}
+		catch (Error ex) {
+			// Out of memory while reading the commit's answer, say: the database may well have committed.
 			throw new CommitOutcomeUnknownException(ex);
 		}
 		return result;

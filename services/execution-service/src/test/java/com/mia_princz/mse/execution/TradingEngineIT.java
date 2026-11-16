@@ -142,6 +142,96 @@ class TradingEngineIT {
 		engine.start();
 	}
 
+	/**
+	 * A connection lost during COMMIT leaves the command's outcome unknown: it may have committed. The writer must halt,
+	 * not answer it as refused, or the book would miss a command the database may hold. Here a test-only deferred
+	 * trigger holds the commit for an order of 7,777 shares while an administrator ends the connection.
+	 */
+	@Test
+	void aConnectionLostDuringCommitHaltsTheWriter() throws Exception {
+		UUID buyer = funded();
+		ddl("""
+				CREATE FUNCTION test_slow_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN
+				    IF NEW.requested_quantity = 7777 THEN PERFORM pg_sleep(30); END IF;
+				    RETURN NULL;
+				END $$;
+				CREATE CONSTRAINT TRIGGER test_slow_commit AFTER INSERT ON orders DEFERRABLE INITIALLY DEFERRED
+				    FOR EACH ROW EXECUTE FUNCTION test_slow_commit();""");
+		try {
+			PlaceOrder order = order(buyer, Side.BUY, OrderType.LIMIT, "1.00", 7_777);
+			CompletableFuture<PlacementResult> lost = engine.place(key(), order);
+			assertThat(terminateTheSleepingCommit()).as("the commit was found waiting and its connection ended").isTrue();
+
+			assertThatThrownBy(lost::get).hasCauseInstanceOf(WriterHaltException.class);
+			assertThat(writer.isAvailable()).as("the writer stops").isFalse();
+		}
+		finally {
+			ddl("DROP TRIGGER test_slow_commit ON orders; DROP FUNCTION test_slow_commit();");
+			restartEngine();
+		}
+	}
+
+	/**
+	 * A deferred constraint that fails at COMMIT is a definite rollback, not an unknown outcome: the command fails, and
+	 * the writer goes on. The ledger's balance check works this way; here a test-only trigger refuses an order of 6,666
+	 * shares at commit with the same error class.
+	 */
+	@Test
+	void aConstraintFailingAtCommitRollsBackOnlyThatCommand() throws Exception {
+		UUID buyer = funded();
+		ddl("""
+				CREATE FUNCTION test_refused_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN
+				    IF NEW.requested_quantity = 6666 THEN
+				        RAISE EXCEPTION 'refused at commit' USING ERRCODE = 'check_violation';
+				    END IF;
+				    RETURN NULL;
+				END $$;
+				CREATE CONSTRAINT TRIGGER test_refused_commit AFTER INSERT ON orders DEFERRABLE INITIALLY DEFERRED
+				    FOR EACH ROW EXECUTE FUNCTION test_refused_commit();""");
+		try {
+			PlaceOrder refused = order(buyer, Side.BUY, OrderType.LIMIT, "1.00", 6_666);
+			CompletableFuture<PlacementResult> answer = engine.place(key(), refused);
+
+			assertThatThrownBy(answer::get).cause().isNotInstanceOf(WriterHaltException.class);
+			assertThat(writer.isAvailable()).as("the writer goes on").isTrue();
+			assertThat(jdbc.queryForObject("SELECT count(*) FROM orders WHERE id = ?", Long.class, refused.orderId()))
+				.as("nothing committed")
+				.isZero();
+			assertThat(place(buyer, Side.BUY, OrderType.LIMIT, "1.00", 5).rejection()).isNull();
+		}
+		finally {
+			ddl("DROP TRIGGER test_refused_commit ON orders; DROP FUNCTION test_refused_commit();");
+		}
+	}
+
+	/** Schema changes for one test, as the owner. */
+	private void ddl(String sql) throws Exception {
+		String url = TestcontainersConfiguration.jdbcUrl(postgres, "execution_db");
+		try (Connection owner = DriverManager.getConnection(url, "execution_owner",
+				TestcontainersConfiguration.EXECUTION_OWNER_PASSWORD)) {
+			owner.createStatement().execute(sql);
+		}
+	}
+
+	/** Ends the connection whose commit is held in {@code pg_sleep}, as an administrator; false if none appears. */
+	private boolean terminateTheSleepingCommit() throws Exception {
+		try (Connection admin = DriverManager.getConnection(TestcontainersConfiguration.jdbcUrl(postgres, "postgres"),
+				postgres.getUsername(), postgres.getPassword())) {
+			for (int attempt = 0; attempt < 200; attempt++) {
+				var found = admin.createStatement().executeQuery("""
+						SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+						WHERE datname = 'execution_db' AND wait_event = 'PgSleep'""");
+				if (found.next() && found.getBoolean(1)) {
+					return true;
+				}
+				Thread.sleep(25);
+			}
+			return false;
+		}
+	}
+
 	/** The market's limits are the owner's to change; the runtime role may not. */
 	private void asOwner(String sql, Object... parameters) throws Exception {
 		String url = TestcontainersConfiguration.jdbcUrl(postgres, "execution_db");
