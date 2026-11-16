@@ -18,6 +18,7 @@ import platform
 import secrets
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -26,7 +27,7 @@ from pathlib import Path
 
 import httpx
 
-from mse_simulator.loadtest import stats
+from mse_simulator.loadtest import diagnostics, stats
 from mse_simulator.population import split_text, strategy_split
 
 logger = logging.getLogger("mse_simulator.loadtest")
@@ -134,6 +135,10 @@ class Stack:
             PROJECT,
             "--env-file",
             str(self.env_file),
+            "-f",
+            "compose.yaml",
+            "-f",
+            str(Path("infra", "load-test", "compose.diagnostics.yaml")),
             "--profile",
             "full",
             *args,
@@ -186,11 +191,34 @@ class Stack:
         )
         return result.stdout.strip() or "n/a"
 
-    def scrape(self) -> dict:
-        text = self.exec(
-            "execution-service", "curl", "-fsS", "http://localhost:8080/actuator/prometheus"
-        )
+    def scrape(self, service: str = "execution-service") -> dict:
+        text = self.exec(service, "curl", "-fsS", "http://localhost:8080/actuator/prometheus")
         return stats.parse_prometheus(text)
+
+    def database(self) -> diagnostics.Database:
+        """The database's statistics now, read as its superuser."""
+
+        def read(query: str, database: str = "execution_db") -> str:
+            return self.sql("postgres", database, query)
+
+        return diagnostics.database(
+            read(diagnostics.STATEMENTS),
+            read(diagnostics.WAL_IO),
+            read(diagnostics.WAL),
+            read(diagnostics.CHECKPOINTER),
+            read(diagnostics.TABLES),
+        )
+
+    def cpu(self) -> str:
+        """One docker stats reading of every container's processor, as "name|12.34%" lines."""
+        result = subprocess.run(
+            ["docker", "stats", "--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        return result.stdout
 
 
 class Session:
@@ -282,10 +310,25 @@ def listing() -> dict:
 
 
 def measure(
-    stack: Stack, operator: Session, trader: Session, instrument: str, seconds: int
+    stack: Stack,
+    operator: Session,
+    trader: Session,
+    instrument: str,
+    seconds: int,
+    sampled: diagnostics.Sampled,
 ) -> Window:
-    """The probe trader places and cancels once a second; the queue, feed and outbox are sampled."""
+    """The probe trader places and cancels once a second; the queue, feed and outbox are sampled,
+    and the feed's lag, the database pool and each container's processor."""
     result = Window()
+    done = threading.Event()
+
+    def cpu() -> None:
+        # docker stats takes a second or two, so it runs beside the probe, not in its loop.
+        while not done.wait(10):
+            sampled.docker(stack.cpu(), PROJECT)
+
+    sampler = threading.Thread(target=cpu, name="cpu", daemon=True)
+    sampler.start()
     order = {
         "instrumentId": instrument,
         "side": "BUY",
@@ -305,8 +348,10 @@ def measure(
             canceled = trader.command(f"/api/v1/orders/{placed.json()['orderId']}/cancel")
             result.probe.append(("cancel", time.perf_counter() - began, canceled.status_code))
         if tick % 5 == 0:
-            result.queue.append((now, stats.total(stack.scrape(), "mse_writer_queue_depth")))
+            execution = stack.scrape()
+            result.queue.append((now, stats.total(execution, "mse_writer_queue_depth")))
             result.feeds.append((now, listing()["feed"]["state"]))
+            sampled.scrape(stack.scrape("market-data-service"), execution)
         if tick % 15 == 0:
             pending = stack.sql(
                 "execution_owner",
@@ -316,6 +361,8 @@ def measure(
             result.outbox.append((now, int(pending)))
         tick += 1
         time.sleep(max(0.0, start + tick - time.monotonic()))
+    done.set()
+    sampler.join(timeout=70)
     return result
 
 
@@ -386,10 +433,11 @@ def environment(stack: Stack) -> dict:
     }
 
 
-def correctness(stack: Stack, instruments: list[str]) -> dict:
+def correctness(stack: Stack, instruments: list[str]) -> tuple[dict, float]:
     """After the stop: the books and ledger reload and reconcile, and the public side matches
-    exactly."""
+    exactly. Also how long the restart took, its reconciliation included."""
     checks = {}
+    began = time.monotonic()
     stack.compose("restart", "execution-service")
     try:
         stack.compose(
@@ -398,6 +446,7 @@ def correctness(stack: Stack, instruments: list[str]) -> dict:
         checks["Execution restarts and its startup reconciliation passes"] = True
     except RuntimeError:
         checks["Execution restarts and its startup reconciliation passes"] = False
+    restarted = time.monotonic() - began
     totals = (
         "SELECT count(*) || ' ' || coalesce(sum(quantity), 0) || ' ' "
         "|| coalesce(sum(price_cents * quantity), 0) || ' ' || coalesce(max(trade_sequence), 0)"
@@ -448,7 +497,7 @@ def correctness(stack: Stack, instruments: list[str]) -> dict:
         checks["Candles reconcile exactly with the trade export"] = '"reconciled":true' in report
     except RuntimeError:
         checks["Candles reconcile exactly with the trade export"] = False
-    return checks
+    return checks, restarted
 
 
 def summarize(
@@ -459,6 +508,7 @@ def summarize(
     env: dict,
     checks: dict,
     phases: Phases,
+    where: list[str] | None = None,
 ) -> tuple[str, bool]:
     seconds = after.at - before.at
     histogram = stats.window(
@@ -568,6 +618,7 @@ def summarize(
         f"{phases.stopped:.0f} s.",
         f"- Simulator memory at the end of the window: {phases.simulator_memory}.",
         "",
+        *(where or []),
         "## Pipeline during the window",
         "",
         f"- Writer queue depth: first minute {queue.first_minute:.1f}, last minute "
@@ -601,6 +652,7 @@ def run(options: Options) -> int:
     stack.compose("down", "-v", "--remove-orphans", check=False)
     try:
         stack.compose("up", "-d", "--build", "--wait", "--wait-timeout", "600", timeout=1800)
+        stack.sql("postgres", "execution_db", "CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
         operator = Session("operator", stack.passwords["operator"])
         phases = Phases()
         began = time.monotonic()
@@ -639,10 +691,13 @@ def run(options: Options) -> int:
         phases.loaded = time.monotonic() - began
         logger.info("warming up for %d s", options.warmup)
         time.sleep(options.warmup)
+        database_before = stack.database()
         before = snapshot(stack, operator)
         logger.info("measuring for %d s", options.duration)
-        window = measure(stack, operator, trader, instruments[0], options.duration)
+        sampled = diagnostics.Sampled()
+        window = measure(stack, operator, trader, instruments[0], options.duration, sampled)
         after = snapshot(stack, operator)
+        database_after = stack.database()
         phases.simulator_memory = stack.memory("simulator")
         operator.expect(200, f"/api/v1/admin/bot-runs/{started['runId']}/stop")
         began = time.monotonic()
@@ -650,8 +705,25 @@ def run(options: Options) -> int:
         phases.stopped = time.monotonic() - began
         env = environment(stack)
         logger.info("checking accounting and the public side")
-        checks = correctness(stack, instruments)
-        report, passed = summarize(options, before, after, window, env, checks, phases)
+        payloads = diagnostics.outbox(
+            stack.sql("execution_owner", "execution_db", diagnostics.OUTBOX)
+        )
+        checks, restarted = correctness(stack, instruments)
+        split = diagnostics.writer_split(before.metrics, after.metrics)
+        committed = sum(
+            stats.total(after.metrics, "mse_writer_commit_seconds_count", command=command)
+            - stats.total(before.metrics, "mse_writer_commit_seconds_count", command=command)
+            for command in ("place", "cancel")
+        )
+        where = diagnostics.report(
+            split,
+            diagnostics.database_window(database_before, database_after, committed),
+            diagnostics.reads_per_second(before.metrics, after.metrics, after.at - before.at),
+            sampled,
+            payloads,
+            restarted,
+        )
+        report, passed = summarize(options, before, after, window, env, checks, phases, where)
         path = stack.run_dir / f"report-{datetime.now(UTC):%Y%m%d-%H%M}.md"
         path.write_text(report, encoding="utf-8")
         print(report)
