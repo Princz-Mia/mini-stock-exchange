@@ -51,6 +51,8 @@ import com.mia_princz.mse.contracts.events.VenueState;
 import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.execution.trading.adapter.JdbcTradingStore;
 import com.mia_princz.mse.execution.trading.adapter.SpringTransactionRunner;
+import com.mia_princz.mse.execution.trading.application.WriterTimings;
+import com.mia_princz.mse.execution.trading.application.AccountChanges;
 import com.mia_princz.mse.execution.trading.application.CancelOrder;
 import com.mia_princz.mse.execution.trading.application.CancelResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
@@ -100,6 +102,11 @@ class TradingEngineIT {
 	@Autowired
 	PostgreSQLContainer postgres;
 
+	/** What the writer timed, as it recorded it. */
+	private final List<String> timed = java.util.Collections.synchronizedList(new ArrayList<>());
+
+	private final WriterTimings timings = (phase, command, nanos) -> timed.add(phase + " " + command + " " + nanos);
+
 	/** When set, the next transaction commits and its outcome is then lost, as if the process died right after. */
 	private final AtomicBoolean loseAnswer = new AtomicBoolean();
 
@@ -138,7 +145,7 @@ class TradingEngineIT {
 				writer,
 				Clock.systemUTC(), (account) -> {
 					throw new UnsupportedOperationException("no bots in these tests");
-				});
+				}, AccountChanges.NONE, timings, System::nanoTime);
 		engine.start();
 	}
 
@@ -203,6 +210,208 @@ class TradingEngineIT {
 		}
 		finally {
 			ddl("DROP TRIGGER test_refused_commit ON orders; DROP FUNCTION test_refused_commit();");
+		}
+	}
+
+	/**
+	 * The writer times each part of a command, so a command's time can be split: the queue, opening the transaction,
+	 * its statements, its commit and applying it. A test-only trigger holds the commit of an order of 5,555 shares for
+	 * 300 ms, which must show as commit time and not as statements; a commit the database refuses records no commit.
+	 */
+	@Test
+	void theWriterTimesEachPartOfACommand() throws Exception {
+		UUID buyer = funded();
+		ddl("""
+				CREATE FUNCTION test_timed_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN
+				    IF NEW.requested_quantity = 5555 THEN PERFORM pg_sleep(0.3); END IF;
+				    IF NEW.requested_quantity = 4444 THEN
+				        RAISE EXCEPTION 'refused at commit' USING ERRCODE = 'check_violation';
+				    END IF;
+				    RETURN NULL;
+				END $$;
+				CREATE CONSTRAINT TRIGGER test_timed_commit AFTER INSERT ON orders DEFERRABLE INITIALLY DEFERRED
+				    FOR EACH ROW EXECUTE FUNCTION test_timed_commit();""");
+		try {
+			timed.clear();
+			PlacementResult resting = place(buyer, Side.BUY, OrderType.LIMIT, "1.00", 5_555);
+			assertThat(phases("place")).containsExactly("QUEUE_WAIT", "BEGIN", "WORK", "COMMIT", "APPLY");
+			assertThat(nanos("COMMIT place")).as("the held commit").isGreaterThanOrEqualTo(300_000_000L);
+			assertThat(nanos("WORK place")).as("the statements, without the commit").isLessThan(300_000_000L);
+
+			timed.clear();
+			engine.cancel(key(), new CancelOrder(resting.orderId(), buyer)).get();
+			assertThat(phases("cancel")).containsExactly("QUEUE_WAIT", "BEGIN", "WORK", "COMMIT", "APPLY");
+
+			timed.clear();
+			assertThatThrownBy(() -> place(buyer, Side.BUY, OrderType.LIMIT, "1.00", 4_444)).isNotNull();
+			assertThat(phases("place")).as("a transaction refused at commit records none of its parts")
+				.containsExactly("QUEUE_WAIT");
+		}
+		finally {
+			ddl("DROP TRIGGER test_timed_commit ON orders; DROP FUNCTION test_timed_commit();");
+		}
+	}
+
+	/**
+	 * The statements each outcome sends, pinned: the round trips are most of a command's time (see the benchmarks), so a
+	 * change in these counts is a change in throughput, made on purpose or found here. Counts are statement executions
+	 * and commits on the writer's connection.
+	 */
+	@Test
+	void eachOutcomeSendsAKnownNumberOfStatements() throws Exception {
+		UUID seller = funded();
+		UUID buyer = funded();
+		Statements statements = new Statements(dataSource);
+		int perAccount = jdbc.queryForObject("SELECT max_open_orders_per_account FROM simulation", Integer.class);
+		countingEngine(statements);
+		try {
+			Map<String, String> counts = new java.util.LinkedHashMap<>();
+			PlacementResult resting = statements.count(counts, "resting order",
+					() -> place(seller, Side.SELL, OrderType.LIMIT, "100.00", 3));
+			statements.count(counts, "one fill", () -> place(buyer, Side.BUY, OrderType.LIMIT, "100.00", 1));
+			statements.count(counts, "cancel", () -> engine.cancel(key(), new CancelOrder(resting.orderId(), seller)).get());
+			statements.count(counts, "cancel of an unknown order",
+					() -> engine.cancel(key(), new CancelOrder(UUID.randomUUID(), seller)).get());
+			statements.count(counts, "insufficient cash",
+					() -> place(buyer, Side.BUY, OrderType.LIMIT, "1000000.00", 1_000));
+			CommandKey again = key();
+			PlaceOrder repeated = order(seller, Side.SELL, OrderType.LIMIT, "200.00", 1);
+			engine.place(again, repeated).get();
+			statements.count(counts, "a repeated key", () -> engine.place(again, repeated).get());
+			asOwner("UPDATE simulation SET max_open_orders_per_account = 1");
+			try {
+				statements.count(counts, "order limit reached",
+						() -> place(seller, Side.SELL, OrderType.LIMIT, "201.00", 1));
+			}
+			finally {
+				asOwner("UPDATE simulation SET max_open_orders_per_account = ?", perAccount);
+			}
+			jdbc.update("UPDATE simulation SET state = 'HALTED'");
+			try {
+				statements.count(counts, "market not open", () -> place(seller, Side.SELL, OrderType.LIMIT, "10.00", 1));
+			}
+			finally {
+				jdbc.update("UPDATE simulation SET state = 'OPEN'");
+			}
+			assertThat(counts).containsExactly(Map.entry("resting order", "15 statements, 1 commit"),
+					Map.entry("one fill", "27 statements, 1 commit"), Map.entry("cancel", "13 statements, 1 commit"),
+					Map.entry("cancel of an unknown order", "5 statements, 1 commit"),
+					Map.entry("insufficient cash", "7 statements, 1 commit"),
+					Map.entry("a repeated key", "2 statements, 1 commit"),
+					Map.entry("order limit reached", "8 statements, 1 commit"),
+					Map.entry("market not open", "5 statements, 1 commit"));
+		}
+		finally {
+			restartEngine();
+		}
+	}
+
+	/** Replaces the engine with one whose connections count what they send. */
+	private void countingEngine(Statements statements) throws InterruptedException {
+		writer.close(Duration.ofSeconds(5));
+		writer = new CommandWriter("counted-writer", 1_000);
+		DataSource counted = statements.dataSource();
+		engine = new TradingEngine(new JdbcTradingStore(JdbcClient.create(counted), JsonMapper.builder().build()),
+				new SpringTransactionRunner(new org.springframework.jdbc.support.JdbcTransactionManager(counted)), writer,
+				Clock.systemUTC(), (account) -> {
+					throw new UnsupportedOperationException("no bots in these tests");
+				});
+		engine.start();
+	}
+
+	/** Counts statement executions and commits on connections from a data source. */
+	private static final class Statements {
+
+		private final DataSource target;
+
+		private final java.util.concurrent.atomic.AtomicInteger executed = new java.util.concurrent.atomic.AtomicInteger();
+
+		private final java.util.concurrent.atomic.AtomicInteger commits = new java.util.concurrent.atomic.AtomicInteger();
+
+		Statements(DataSource target) {
+			this.target = target;
+		}
+
+		<T> T count(Map<String, String> counts, String outcome, java.util.concurrent.Callable<T> command) throws Exception {
+			executed.set(0);
+			commits.set(0);
+			T result = command.call();
+			counts.put(outcome, executed.get() + " statements, " + commits.get() + " commit");
+			return result;
+		}
+
+		DataSource dataSource() {
+			return (DataSource) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] { DataSource.class },
+					(proxy, method, args) -> {
+						switch (method.getName()) {
+							case "getConnection":
+								return connection((Connection) invoke(method, target, args));
+							case "hashCode":
+								return System.identityHashCode(proxy);
+							case "equals":
+								return proxy == args[0];
+							default:
+								return invoke(method, target, args);
+						}
+					});
+		}
+
+		private Connection connection(Connection real) {
+			return (Connection) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] { Connection.class },
+					(proxy, method, args) -> {
+						if (method.getName().equals("commit")) {
+							commits.incrementAndGet();
+						}
+						Object answer = invoke(method, real, args);
+						if (answer instanceof java.sql.Statement statement
+								&& method.getName().matches("prepareStatement|createStatement|prepareCall")) {
+							return statement(statement);
+						}
+						return answer;
+					});
+		}
+
+		private Object statement(java.sql.Statement real) {
+			Class<?> type = real instanceof java.sql.CallableStatement ? java.sql.CallableStatement.class
+					: real instanceof java.sql.PreparedStatement ? java.sql.PreparedStatement.class
+							: java.sql.Statement.class;
+			return Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[] { type }, (proxy, method, args) -> {
+				if (method.getName().startsWith("execute")) {
+					executed.incrementAndGet();
+				}
+				return invoke(method, real, args);
+			});
+		}
+
+		private static Object invoke(java.lang.reflect.Method method, Object target, Object[] args) throws Throwable {
+			try {
+				return method.invoke(target, args);
+			}
+			catch (java.lang.reflect.InvocationTargetException ex) {
+				throw ex.getCause();
+			}
+		}
+
+	}
+
+	private List<String> phases(String command) {
+		synchronized (timed) {
+			return timed.stream()
+				.map((entry) -> entry.split(" "))
+				.filter((parts) -> parts[1].equals(command))
+				.map((parts) -> parts[0])
+				.toList();
+		}
+	}
+
+	private long nanos(String phaseAndCommand) {
+		synchronized (timed) {
+			return timed.stream()
+				.filter((entry) -> entry.startsWith(phaseAndCommand + " "))
+				.mapToLong((entry) -> Long.parseLong(entry.substring(entry.lastIndexOf(' ') + 1)))
+				.findFirst()
+				.orElseThrow();
 		}
 	}
 
@@ -997,7 +1206,7 @@ class TradingEngineIT {
 				writer,
 				Clock.systemUTC(), (account) -> {
 					throw new UnsupportedOperationException("no bots in these tests");
-				});
+				}, AccountChanges.NONE, timings, System::nanoTime);
 	}
 
 	/** A fresh idempotency key for a command whose repeat behaviour the test does not care about. */

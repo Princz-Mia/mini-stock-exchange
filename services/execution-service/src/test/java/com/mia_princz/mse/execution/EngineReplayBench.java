@@ -45,6 +45,9 @@ import com.mia_princz.mse.execution.trading.domain.Side;
  * not alter. Each run prints a digest of every answer, so two runs can show they did the same work.
  *
  * <p>
+ * Testcontainers runs PostgreSQL with fsync off unless {@code -Dmse.test.fsync=on} is given; the report says which.
+ *
+ * <p>
  * Not part of the build; run it on its own:
  * {@code mvnw -pl services/execution-service verify -Dtest=None -Dsurefire.failIfNoSpecifiedTests=false
  * -Dit.test=EngineReplayBench}. It writes {@code target/engine-replay-<time>.txt}.
@@ -101,7 +104,9 @@ class EngineReplayBench {
 			digest.update(answer.getBytes(StandardCharsets.UTF_8));
 		}
 		long wall = System.nanoTime() - measuredStart;
-		String report = report(latencies, wall, counts, HexFormat.of().formatHex(digest.digest()));
+		String durability = "fsync=" + setting("fsync") + ", synchronous_commit=" + setting("synchronous_commit")
+				+ ", full_page_writes=" + setting("full_page_writes");
+		String report = report(latencies, wall, counts, HexFormat.of().formatHex(digest.digest()), durability);
 		System.out.println(report);
 		Path out = Path.of("target", "engine-replay-" + Instant.now().toString().replace(':', '-') + ".txt");
 		Files.writeString(out, report);
@@ -153,7 +158,11 @@ class EngineReplayBench {
 		return new CommandKey(account, new UUID(~SEED, index), "bench", hash);
 	}
 
-	private static String report(long[] latencies, long wall, int[] counts, String digest) {
+	private String setting(String name) {
+		return jdbc.queryForObject("SHOW " + name, String.class);
+	}
+
+	private static String report(long[] latencies, long wall, int[] counts, String digest, String durability) {
 		long[] sorted = latencies.clone();
 		Arrays.sort(sorted);
 		double mean = Arrays.stream(sorted).average().orElse(0) / 1e6;
@@ -163,9 +172,10 @@ class EngineReplayBench {
 				  throughput %.0f commands/s
 				  latency ms: mean %.3f, p50 %.3f, p95 %.3f, p99 %.3f, max %.3f
 				  answers digest %s
+				  PostgreSQL: %s
 				""".formatted(WARM_UP, MEASURED, counts[0], counts[2], counts[1], counts[3],
 				MEASURED / (wall / 1e9), mean, ms(sorted, 0.50), ms(sorted, 0.95), ms(sorted, 0.99),
-				sorted[sorted.length - 1] / 1e6, digest);
+				sorted[sorted.length - 1] / 1e6, digest, durability);
 	}
 
 	private static double ms(long[] sorted, double fraction) {

@@ -27,6 +27,18 @@ The change between the two columns: each instrument's newest 50 trades, publishe
 
 About 6% more throughput and 5 to 8% lower latency. Most of a command's time is spent waiting on database round trips, and this removes one of them.
 
+**These runs had fsync off.** Testcontainers starts PostgreSQL with `fsync=off` unless told otherwise, so the figures above leave out the cost of a durable commit. The bench now prints the settings, and `-Dmse.test.fsync=on` keeps fsync on, as Compose does. One run each, on 2026-11-16, same machine, identical work (the same answers digest):
+
+| | fsync off | fsync on |
+| --- | --- | --- |
+| Throughput | 130 commands a second | 77 commands a second |
+| Mean | 7.7 ms | 12.9 ms |
+| p50 | 5.9 ms | 10.7 ms |
+| p95 | 17.5 ms | 24.4 ms |
+| p99 | 23.1 ms | 32.6 ms |
+
+A durable commit costs about 5 ms a command here. The bench reaches PostgreSQL from the Windows host through Docker, so each round trip costs more than inside Compose, where the steady-load run's p50 is 5.1 ms with fsync on.
+
 ## Steady load
 
 **Scenario:** five instruments and 10,000 bots (2,000 market makers, 2,000 momentum, 6,000 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. Until 2026-11-15 the scenario was 1,000 bots; its last result is kept below. Neither is a limit: the exchange limits neither the bot population nor the bots in one run, and `--bots` sets the number.
