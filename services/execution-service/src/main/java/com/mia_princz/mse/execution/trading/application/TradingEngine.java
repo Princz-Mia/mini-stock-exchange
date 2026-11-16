@@ -16,6 +16,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterHaltException;
 import com.mia_princz.mse.execution.trading.application.PlacementResult.OrderState;
@@ -60,6 +62,10 @@ public final class TradingEngine {
 
 	private final AccountChanges accountChanges;
 
+	private final WriterTimings timings;
+
+	private final LongSupplier nanoTime;
+
 	private final Map<UUID, OrderBook> books = new HashMap<>();
 
 	private final Map<UUID, String> symbols = new HashMap<>();
@@ -85,12 +91,21 @@ public final class TradingEngine {
 
 	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
 			BotCredentials botCredentials, AccountChanges accountChanges) {
+		this(store, transactions, writer, clock, botCredentials, accountChanges, WriterTimings.NONE, System::nanoTime);
+	}
+
+	/** {@code nanoTime} is the clock the timings are taken with, replaceable in tests. */
+	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
+			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings,
+			LongSupplier nanoTime) {
 		this.store = store;
 		this.transactions = transactions;
 		this.writer = writer;
 		this.clock = clock;
 		this.botCredentials = botCredentials;
 		this.accountChanges = accountChanges;
+		this.timings = timings;
+		this.nanoTime = nanoTime;
 	}
 
 	/**
@@ -138,12 +153,12 @@ public final class TradingEngine {
 
 	/** Places an order. A repeat of the same key and request returns the first committed result unchanged. */
 	public CompletableFuture<PlacementResult> place(CommandKey key, PlaceOrder command) {
-		return submit(() -> process(key, command));
+		return submit("place", () -> process(key, command));
 	}
 
 	/** Cancels a resting order; allowed while the market is open or halted. */
 	public CompletableFuture<CancelResult> cancel(CommandKey key, CancelOrder command) {
-		return submit(() -> processCancel(key, command));
+		return submit("cancel", () -> processCancel(key, command));
 	}
 
 	/**
@@ -234,12 +249,13 @@ public final class TradingEngine {
 		}
 		Outcome outcome;
 		try {
-			outcome = transactions.inTransaction(() -> placeInTransaction(key, command, book));
+			outcome = timed("place", () -> placeInTransaction(key, command, book));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 		if (outcome.plan() != null) {
+			long applying = nanoTime.getAsLong();
 			try {
 				book.apply(outcome.plan());
 				tapes.get(command.instrumentId()).add(outcome.trades());
@@ -247,6 +263,7 @@ public final class TradingEngine {
 			catch (RuntimeException ex) {
 				throw new WriterHaltException("The book could not apply a committed plan", ex);
 			}
+			timings.record(WriterTimings.Phase.APPLY, "place", nanoTime.getAsLong() - applying);
 		}
 		if (outcome.fresh()) {
 			// The order's own account, a rejection included, and every resting order's account it traded against.
@@ -266,16 +283,18 @@ public final class TradingEngine {
 	private CancelResult processCancel(CommandKey key, CancelOrder command) {
 		CancelOutcome outcome;
 		try {
-			outcome = transactions.inTransaction(() -> cancelInTransaction(key, command));
+			outcome = timed("cancel", () -> cancelInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException | BookOutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
+		long applying = nanoTime.getAsLong();
 		if (outcome.instrumentId() != null && outcome.result().status() == CancelResult.Status.CANCELED
 				&& books.get(outcome.instrumentId()).cancel(command.orderId()).isEmpty()) {
 			throw new WriterHaltException("A committed cancel found no order in the book",
 					new BookOutOfStepException(command.orderId()));
 		}
+		timings.record(WriterTimings.Phase.APPLY, "cancel", nanoTime.getAsLong() - applying);
 		if (outcome.instrumentId() != null && outcome.result().status() == CancelResult.Status.CANCELED) {
 			accountChanges.changed(Set.of(command.accountId()), outcome.result().commandSequence());
 		}
@@ -289,7 +308,7 @@ public final class TradingEngine {
 		AddedInstrument added;
 		try {
 			ensureMarket();
-			added = transactions.inTransaction(() -> addInstrumentInTransaction(key, command));
+			added = timed("other", () -> addInstrumentInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
@@ -305,10 +324,38 @@ public final class TradingEngine {
 
 	/** Refused, not queued, until startup has finished, so the caller can retry the same key. */
 	private <T> CompletableFuture<T> submit(Callable<T> command) {
+		return submit("other", command);
+	}
+
+	private <T> CompletableFuture<T> submit(String kind, Callable<T> command) {
 		if (!started) {
 			throw new CommandWriter.WriterStoppedException("Trading has not started");
 		}
-		return writer.submit(command);
+		long admitted = nanoTime.getAsLong();
+		return writer.submit(() -> {
+			timings.record(WriterTimings.Phase.QUEUE_WAIT, kind, nanoTime.getAsLong() - admitted);
+			return command.call();
+		});
+	}
+
+	/**
+	 * A command's transaction, timed: opening it (a pooled connection included), its statements, and its commit, all
+	 * recorded once it has committed. A transaction that fails records none of them.
+	 */
+	private <T> T timed(String kind, Supplier<T> work) {
+		long opening = nanoTime.getAsLong();
+		long[] marks = new long[2];
+		T result = transactions.inTransaction(() -> {
+			marks[0] = nanoTime.getAsLong();
+			T value = work.get();
+			marks[1] = nanoTime.getAsLong();
+			return value;
+		});
+		long committed = nanoTime.getAsLong();
+		timings.record(WriterTimings.Phase.BEGIN, kind, marks[0] - opening);
+		timings.record(WriterTimings.Phase.WORK, kind, marks[1] - marks[0]);
+		timings.record(WriterTimings.Phase.COMMIT, kind, committed - marks[1]);
+		return result;
 	}
 
 	/**
@@ -365,7 +412,7 @@ public final class TradingEngine {
 					name(command.displayName()), command.referencePrice().cents(), 0);
 		}
 		try {
-			return transactions.inTransaction(() -> editInstrumentInTransaction(key, command));
+			return timed("other", () -> editInstrumentInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
@@ -421,7 +468,7 @@ public final class TradingEngine {
 		}
 		InstrumentDeletion deletion;
 		try {
-			deletion = transactions.inTransaction(() -> deleteInstrumentInTransaction(key, command));
+			deletion = timed("other", () -> deleteInstrumentInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
@@ -482,7 +529,7 @@ public final class TradingEngine {
 	private AccountResult processProvision(CommandKey key, ProvisionAccount command) {
 		try {
 			ensureMarket();
-			return transactions.inTransaction(() -> provisionInTransaction(key, command));
+			return timed("other", () -> provisionInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
@@ -529,7 +576,7 @@ public final class TradingEngine {
 	private TraderResult processAddTrader(CommandKey key, AddTrader command) {
 		try {
 			ensureMarket();
-			return transactions.inTransaction(() -> addTraderInTransaction(key, command));
+			return timed("other", () -> addTraderInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
@@ -583,7 +630,7 @@ public final class TradingEngine {
 	private BotsResult processBots(CommandKey key, ProvisionBots command) {
 		try {
 			ensureMarket();
-			return transactions.inTransaction(() -> botsInTransaction(key, command));
+			return timed("other", () -> botsInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
@@ -649,7 +696,7 @@ public final class TradingEngine {
 			return new TokenRevocation(TokenRevocation.Status.NOT_A_BOT, command.accountId(), 0, 0);
 		}
 		try {
-			return transactions.inTransaction(() -> revokeInTransaction(key, command));
+			return timed("other", () -> revokeInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
@@ -690,7 +737,7 @@ public final class TradingEngine {
 			return new BotRunResult(BotRunResult.Status.NO_MARKET, null, 0, 0);
 		}
 		try {
-			return transactions.inTransaction(() -> startRunInTransaction(key, command));
+			return timed("other", () -> startRunInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
@@ -769,7 +816,7 @@ public final class TradingEngine {
 			return new BotRunResult(BotRunResult.Status.NO_MARKET, null, 0, 0);
 		}
 		try {
-			return transactions.inTransaction(() -> stopRunInTransaction(key, command));
+			return timed("other", () -> stopRunInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
@@ -804,7 +851,7 @@ public final class TradingEngine {
 			return MarketTransition.notSetUp();
 		}
 		try {
-			return transactions.inTransaction(() -> controlInTransaction(key, command));
+			return timed("other", () -> controlInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);

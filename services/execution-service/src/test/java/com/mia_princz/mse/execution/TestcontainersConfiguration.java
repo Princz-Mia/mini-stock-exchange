@@ -33,11 +33,20 @@ public class TestcontainersConfiguration {
 		return new KafkaContainer(DockerImageName.parse(KAFKA_IMAGE).asCompatibleSubstituteFor("apache/kafka"));
 	}
 
-	/** Starts from the same init script as Compose, so tests exercise the real roles and grants. */
+	/**
+	 * Starts from the same init script as Compose, so tests exercise the real roles and grants. Testcontainers runs
+	 * PostgreSQL with {@code fsync=off} for speed; {@code -Dmse.test.fsync=on} keeps it on, as Compose does, for a
+	 * benchmark whose figures should include the cost of a durable commit.
+	 */
 	@Bean
 	PostgreSQLContainer postgresContainer() {
 		Path initScript = Path.of("../../infra/postgres/init/10-service-databases.sh").toAbsolutePath().normalize();
-		return new PostgreSQLContainer(DockerImageName.parse(POSTGRES_IMAGE).asCompatibleSubstituteFor("postgres"))
+		PostgreSQLContainer container = new PostgreSQLContainer(
+				DockerImageName.parse(POSTGRES_IMAGE).asCompatibleSubstituteFor("postgres"));
+		if ("on".equals(System.getProperty("mse.test.fsync"))) {
+			container.withCommand("postgres", "-c", "fsync=on");
+		}
+		return container
 			.withDatabaseName("postgres")
 			.withEnv("EXECUTION_DB_OWNER_PASSWORD", EXECUTION_OWNER_PASSWORD)
 			.withEnv("EXECUTION_DB_APP_PASSWORD", EXECUTION_APP_PASSWORD)

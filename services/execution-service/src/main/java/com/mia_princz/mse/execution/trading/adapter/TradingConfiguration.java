@@ -56,9 +56,9 @@ class TradingConfiguration {
 
 	@Bean
 	TradingEngine tradingEngine(TradingStore store, PlatformTransactionManager transactionManager, CommandWriter writer,
-			Clock clock, BotCredentials botCredentials, AccountChanges accountChanges) {
+			Clock clock, BotCredentials botCredentials, AccountChanges accountChanges, MeterRegistry meters) {
 		return new TradingEngine(store, new SpringTransactionRunner(transactionManager), writer, clock, botCredentials,
-				accountChanges);
+				accountChanges, new MicrometerWriterTimings(meters), System::nanoTime);
 	}
 
 	@Bean(destroyMethod = "close")
