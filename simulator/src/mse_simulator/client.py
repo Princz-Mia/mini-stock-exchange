@@ -42,7 +42,7 @@ class TraderClient:
         account_id: UUID,
         token: str,
         in_flight: asyncio.Semaphore,
-        jitter: random.Random,
+        jitter_seed: int,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         max_backoff: float = 5.0,
     ) -> None:
@@ -51,7 +51,9 @@ class TraderClient:
         self._base = execution_url
         self._headers = {"Authorization": f"Bearer {token}"}
         self._in_flight = in_flight
-        self._jitter = jitter
+        # A generator holds 2.5 KB of state, and most bots never retry: made on the first retry.
+        self._jitter_seed = jitter_seed
+        self._jitter: random.Random | None = None
         self._sleep = sleep
         self._max_backoff = max_backoff
 
@@ -95,6 +97,8 @@ class TraderClient:
     def _backoff(self, attempt: int, response: httpx.Response | None) -> float:
         """Full jitter on a doubling cap, but never sooner than the exchange's Retry-After."""
         cap = min(self._max_backoff, 0.2 * 2**attempt)
+        if self._jitter is None:
+            self._jitter = random.Random(self._jitter_seed)
         wait = self._jitter.uniform(0, cap)
         if response is not None:
             try:
