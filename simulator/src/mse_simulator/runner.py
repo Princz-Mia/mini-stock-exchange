@@ -43,6 +43,10 @@ TOKEN_READERS = 8
 # Bots built between yields to the event loop while a run loads, so heartbeats keep their time.
 BUILD_BATCH = 500
 
+# The trading loop's shortest pause: at a high rate it spends the credit of a few milliseconds at a
+# time rather than spinning.
+MIN_TICK = 0.005
+
 
 @dataclass
 class Bot:
@@ -63,6 +67,9 @@ class Activity:
     rejected: int = 0
     errors: int = 0
     stop_failures: int = 0
+    # This worker's own steps and reads, for its log; not reported in the heartbeat.
+    steps: int = 0
+    reads: int = 0
 
     def totals(self) -> Totals:
         return Totals(self.placed, self.canceled, self.rejected, self.errors)
@@ -81,6 +88,7 @@ class Runner:
         self._clock = clock
         self._sleep = sleep
         self._in_flight = asyncio.Semaphore(settings.max_in_flight)
+        self._reads = asyncio.Semaphore(settings.max_reads_in_flight)
         token = settings.simulator_token
         self._control = (
             None
@@ -186,6 +194,7 @@ class Runner:
                 self._in_flight,
                 account.int ^ run.seed,
                 self._sleep,
+                reads=self._reads,
             )
             rng = np.random.default_rng([run.seed, account.int])
             strategy = self._strategy(bot.strategy, rng, run)
@@ -246,6 +255,7 @@ class Runner:
 
     async def _step(self, bot: Bot, strategy: Strategy) -> None:
         assert self._run is not None
+        self.activity.steps += 1
         try:
             now = self._clock()
             view = self._market.only(self._run.instrument_ids)
@@ -286,6 +296,7 @@ class Runner:
     async def _observe(self, client: TraderClient, now: float) -> tuple[Holdings, list[OpenOrder]]:
         portfolio = await client.portfolio()
         active = await client.active_orders()
+        self.activity.reads += 2
         holdings = Holdings(
             cash=market.cents(portfolio["cash"]["available"]),
             shares={
@@ -348,21 +359,36 @@ class Runner:
         # The rate counts commands, not steps: see pacing.py. Polled often enough that a high rate
         # is spread over each second rather than sent in bursts.
         self._pacer = pacer = Pacer(self._run.commands_per_second, self._clock())
-        interval = min(1.0 / self._run.commands_per_second, 0.05)
-        last_poll = last_report = float("-inf")
+        interval = max(MIN_TICK, min(1.0 / self._run.commands_per_second, 0.05))
+        # The first view before any step; after that the market is polled beside the trading loop,
+        # so a slow answer from Market Data never holds the bots' steps back.
+        await self.refresh_market()
+        poller = asyncio.create_task(self._poll_market(stop))
+        last_report = float("-inf")
+        try:
+            while not (stop.is_set() or self._stopping or self._lost):
+                now = self._clock()
+                if now - last_report >= 30:
+                    logger.info("run %s: %s", self._run.run_id, asdict(self.activity))
+                    last_report = now
+                # Without a renewed lease another worker may take the run, so no new commands.
+                pacer.accrue(self._clock())
+                if now < self._lease_until:
+                    self.spend(pacer)
+                await self._sleep(interval)
+        finally:
+            poller.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poller
+
+    async def _poll_market(self, stop: asyncio.Event) -> None:
         while not (stop.is_set() or self._stopping or self._lost):
-            now = self._clock()
-            if now - last_poll >= self._settings.market_poll_seconds:
+            await self._sleep(self._settings.market_poll_seconds)
+            try:
                 await self.refresh_market()
-                last_poll = now
-            if now - last_report >= 30:
-                logger.info("run %s: %s", self._run.run_id, asdict(self.activity))
-                last_report = now
-            # Without a renewed lease another worker may take the run, so no new commands.
-            pacer.accrue(self._clock())
-            if now < self._lease_until:
-                self.spend(pacer)
-            await self._sleep(interval)
+            except Exception:
+                # The view ages out, which pauses new exposure; the next poll tries again.
+                logger.exception("market poll failed")
 
     async def settle(self) -> None:
         """Cancels every open order of the run's bots, counting each one that can't be cancelled."""

@@ -11,17 +11,24 @@ reads, so steps have a budget of their own that is never refunded: a few per com
 
 STEPS_PER_COMMAND = 3
 
+# Idle time saves up at most this much credit, so a stall (every bot busy, a pause) is followed by
+# a short catch-up, not a whole second of commands at once. A slow run still saves a second's
+# worth, up to this many commands, or waiting steps would make it fall short of its rate.
+BURST_SECONDS = 0.25
+SLOW_RUN_SAVES = 4.0
+
 
 class Pacer:
-    """Command and step credit that accrue with the clock, up to one second's worth each plus the
-    one in hand, so a refund at the cap is never lost."""
+    """Command and step credit that accrue with the clock, up to a quarter second's worth (a
+    second's, for a slow run) plus the one in hand, so a refund at the cap is never lost."""
 
     def __init__(self, commands_per_second: float, now: float) -> None:
         if commands_per_second <= 0:
             raise ValueError("a run needs a positive rate")
         self._rate = commands_per_second
-        self._commands_cap = commands_per_second + 1
-        self._steps_cap = (commands_per_second + 1) * STEPS_PER_COMMAND
+        saved = max(commands_per_second * BURST_SECONDS, min(commands_per_second, SLOW_RUN_SAVES))
+        self._commands_cap = saved + 1
+        self._steps_cap = (saved + 1) * STEPS_PER_COMMAND
         # One command at once, so a run starts trading without waiting for credit to build up.
         self._commands = 1.0
         self._steps = float(STEPS_PER_COMMAND)

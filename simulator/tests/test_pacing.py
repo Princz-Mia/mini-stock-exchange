@@ -18,14 +18,24 @@ def test_a_run_starts_with_one_command_at_once() -> None:
     assert steps(pacer) == 1
 
 
-def test_credit_accrues_at_the_rate_up_to_one_second_of_it() -> None:
+def test_credit_accrues_at_the_rate_and_a_slow_run_saves_up_to_four_commands() -> None:
     pacer = Pacer(10.0, 0.0)
     steps(pacer)
 
-    pacer.accrue(0.5)
-    assert steps(pacer) == 5
+    pacer.accrue(0.4)
+    assert steps(pacer) == 4
     pacer.accrue(100.0)
-    assert steps(pacer) == 11, "idle time saves up one second's worth, plus the one in hand"
+    assert steps(pacer) == 5, "a slow run saves a second's worth up to four, plus the one in hand"
+
+
+def test_a_fast_run_saves_a_quarter_second_so_a_stall_is_no_burst() -> None:
+    pacer = Pacer(2000.0, 0.0)
+    steps(pacer)
+
+    pacer.accrue(100.0)
+    assert steps(pacer) == 501, "a quarter second's worth, plus the one in hand"
+    pacer.accrue(100.0625)
+    assert steps(pacer) == 125, "then the rate itself: a sixteenth of a second earns 125"
 
 
 def test_a_step_that_sends_nothing_gives_its_command_back() -> None:
@@ -49,7 +59,7 @@ def test_refunds_cannot_repeat_steps_beyond_their_own_budget() -> None:
         taken += 1
         pacer.refund()
 
-    assert taken == 10 * STEPS_PER_COMMAND, "a second of steps, not more"
+    assert taken == (4 + 1) * STEPS_PER_COMMAND, "the saved credit's steps, not more"
 
 
 def test_a_clock_that_goes_back_neither_adds_nor_takes_away() -> None:

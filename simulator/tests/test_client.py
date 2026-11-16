@@ -98,6 +98,33 @@ def test_a_cancel_names_the_order_and_sends_no_body() -> None:
     assert "Idempotency-Key" in seen[0].headers
 
 
+def test_reads_have_their_own_limit_so_a_slow_read_holds_back_no_command() -> None:
+    reading = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            reading.set()
+            await release.wait()
+            return httpx.Response(200, json={"cash": {}, "holdings": []})
+        return httpx.Response(201, json={"orderId": "o-1", "state": "OPEN"})
+
+    async def scenario() -> int:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            commands = asyncio.Semaphore(1)
+            trader = TraderClient(
+                http, "http://execution", uuid4(), TOKEN, commands, 7, reads=asyncio.Semaphore(1)
+            )
+            read = asyncio.create_task(trader.portfolio())
+            await asyncio.wait_for(reading.wait(), 2)
+            answer = await asyncio.wait_for(trader.place(ORDER), 2)
+            release.set()
+            await read
+            return answer.status
+
+    assert asyncio.run(scenario()) == 201
+
+
 def test_retry_waits_are_the_seeded_jitter_on_a_doubling_cap() -> None:
     answers = [httpx.Response(503)] * 4 + [httpx.Response(201, json={"orderId": "o-1"})]
 

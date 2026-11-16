@@ -9,8 +9,9 @@ same public and authenticated API as people use.
 - **Credentials:** one `<accountId>.token` file per bot, written once by the exchange when the operator
   provisions bots. Compose mounts that volume read-only at `/run/mse/bot-tokens`. The assignment names each
   bot's file, never its token.
-- **Pacing:** the run's commands per second across its bots, round robin, one command in flight per bot and at
-  most 32 calls in flight overall. The rate counts commands sent: a bot that looks and decides to wait hands
+- **Pacing:** the run's commands per second across its bots, round robin, one call in flight per bot, at most
+  32 trading calls (orders and cancels) in flight overall, and reads (balances, open orders) limited apart, to
+  64 by default. The rate counts commands sent: a bot that looks and decides to wait hands
   its turn to another, up to three looks per command. New commands stop if the lease isn't renewed in time.
 - **Strategies:** each bot draws from its own generator, seeded by the run's seed and its account, so the same
   observations give the same decisions. Market makers take the first turns of a run. No bot orders more than it
