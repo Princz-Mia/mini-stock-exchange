@@ -380,7 +380,7 @@
     {
       "type": "timeseries",
       "title": "Database connections",
-      "description": "Execution's connection pool: in use, idle, and threads waiting for one.",
+      "description": "Execution's two connection pools, by name: execution (reads, sessions, the outbox relay) and writer (trading commands). In use, idle, and threads waiting for one.",
       "id": 9,
       "datasource": {
         "type": "prometheus",
@@ -413,7 +413,7 @@
             "uid": "${datasource}"
           },
           "expr": "hikaricp_connections_active{job=\"execution-service\"}",
-          "legendFormat": "active"
+          "legendFormat": "{{pool}} active"
         },
         {
           "refId": "B",
@@ -422,7 +422,7 @@
             "uid": "${datasource}"
           },
           "expr": "hikaricp_connections_idle{job=\"execution-service\"}",
-          "legendFormat": "idle"
+          "legendFormat": "{{pool}} idle"
         },
         {
           "refId": "C",
@@ -431,7 +431,7 @@
             "uid": "${datasource}"
           },
           "expr": "hikaricp_connections_pending{job=\"execution-service\"}",
-          "legendFormat": "waiting"
+          "legendFormat": "{{pool}} waiting"
         }
       ]
     },

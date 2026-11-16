@@ -8,10 +8,13 @@ import javax.sql.DataSource;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.jdbc.autoconfigure.DataSourceProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.jdbc.core.simple.JdbcClient;
-import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.jdbc.support.JdbcTransactionManager;
+
+import com.zaxxer.hikari.HikariDataSource;
 
 import tools.jackson.databind.json.JsonMapper;
 
@@ -29,10 +32,28 @@ class TradingConfiguration {
 		return Clock.systemUTC();
 	}
 
-	/** Its own mapper, so stored command results never change shape with the web layer's JSON settings. */
+	/**
+	 * The writer's own pool, from the same connection settings as the application's: reads, sessions and the outbox
+	 * relay use the application's pool, so they never hold a connection a command is waiting for.
+	 */
+	@Bean(destroyMethod = "close")
+	WriterConnections writerConnections(DataSourceProperties properties, MeterRegistry meters,
+			@Value("${mse.trading.writer-pool-size:2}") int size) {
+		HikariDataSource pool = properties.initializeDataSourceBuilder().type(HikariDataSource.class).build();
+		pool.setPoolName("writer");
+		pool.setMaximumPoolSize(size);
+		pool.setMinimumIdle(1);
+		pool.setMetricRegistry(meters);
+		return new WriterConnections(pool);
+	}
+
+	/**
+	 * On the writer's connections, since every trading command writes through it. Its own mapper, so stored command
+	 * results never change shape with the web layer's JSON settings.
+	 */
 	@Bean
-	TradingStore tradingStore(JdbcClient jdbcClient) {
-		return new JdbcTradingStore(jdbcClient, JsonMapper.builder().build());
+	TradingStore tradingStore(WriterConnections connections) {
+		return new JdbcTradingStore(JdbcClient.create(connections.dataSource()), JsonMapper.builder().build());
 	}
 
 	@Bean(destroyMethod = "close")
@@ -55,10 +76,12 @@ class TradingConfiguration {
 	}
 
 	@Bean
-	TradingEngine tradingEngine(TradingStore store, PlatformTransactionManager transactionManager, CommandWriter writer,
-			Clock clock, BotCredentials botCredentials, AccountChanges accountChanges, MeterRegistry meters) {
-		return new TradingEngine(store, new SpringTransactionRunner(transactionManager), writer, clock, botCredentials,
-				accountChanges, new MicrometerWriterTimings(meters), System::nanoTime);
+	TradingEngine tradingEngine(TradingStore store, WriterConnections connections, CommandWriter writer, Clock clock,
+			BotCredentials botCredentials, AccountChanges accountChanges, MeterRegistry meters) {
+		// The store and the transactions share the writer's data source, so a command's statements join its transaction.
+		return new TradingEngine(store,
+				new SpringTransactionRunner(new JdbcTransactionManager(connections.dataSource())), writer, clock,
+				botCredentials, accountChanges, new MicrometerWriterTimings(meters), System::nanoTime);
 	}
 
 	@Bean(destroyMethod = "close")
