@@ -382,7 +382,7 @@ describe('the operator screen', () => {
     expect(await screen.findByText(badName.message)).toBeInTheDocument();
     expect(name).toHaveAttribute('aria-invalid', 'true');
     expect(name).toHaveAccessibleDescription(badName.message);
-    expect(name).toHaveFocus();
+    await waitFor(() => expect(name).toHaveFocus());
     expect(price).not.toHaveAttribute('aria-invalid');
 
     price.focus();
@@ -390,13 +390,13 @@ describe('the operator screen', () => {
     expect(await screen.findByText(`${badName.message}; ${badPrice.message}`)).toBeInTheDocument();
     expect(name).toHaveAttribute('aria-invalid', 'true');
     expect(price).toHaveAttribute('aria-invalid', 'true');
-    expect(name).toHaveFocus();
+    await waitFor(() => expect(name).toHaveFocus());
 
     fireEvent.click(save);
     expect(await screen.findByText('Instruments can only be changed before the market opens')).toBeInTheDocument();
     expect(name).not.toHaveAttribute('aria-invalid');
     expect(price).not.toHaveAttribute('aria-invalid');
-    expect(name).toHaveFocus();
+    await waitFor(() => expect(name).toHaveFocus());
   });
 
   it('drops a refusal with the form it answered', async () => {
