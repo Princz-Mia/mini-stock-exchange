@@ -60,6 +60,20 @@ It runs in its own throwaway Compose project and writes its report to `runtime/l
 | Unexpected infrastructure failures | under 0.1% of commands |
 | Accounting | no violations, no lost acknowledged trades, no duplicate financial effects |
 
+### Where a command's time goes, 2026-11-16
+
+The load test now reports the writer's timers and PostgreSQL's own statistics (through a load-test-only Compose overlay that enables `pg_stat_statements` and I/O timing; durability unchanged). The same 10,000-bot scenario at 100 commands a second met every budget again (99.969% within 150 ms, 100% within 500 ms, no failures). Means over the window:
+
+| Per command | Queue | Statements | Commit | Begin, apply |
+| --- | --- | --- | --- | --- |
+| Order | 2.8 ms | 3.6 ms | 2.1 ms | under 0.01 ms |
+| Cancel | 4.5 ms | 2.1 ms | 2.0 ms | under 0.01 ms |
+
+- One writer at that service time (5.3 ms) sustains about 188 commands a second.
+- Each WAL flush took 1.6 ms. `pg_test_fsync` on the same volume: `fdatasync` 1.59 ms, about 630 a second. One durable commit per command therefore caps the writer below that, however few the statements.
+- PostgreSQL's own time per statement is a few hundredths of a millisecond, so most of the statement time is round trips.
+- The restart, its reconciliation included, took 6 s; Execution averaged 35% of a CPU, PostgreSQL 49%, the simulator 35%, Kafka 21% (peak 140%).
+
 ### 2026-11-15, 10,000 bots
 
 All budgets met.
