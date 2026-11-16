@@ -41,6 +41,8 @@ P95_BUDGET = 0.150
 P99_BUDGET = 0.500
 FAILURE_BUDGET = 0.001
 LATENCY = "mse_commands_seconds_bucket"
+# The longest the bots may take to load before the run counts as failed to start.
+LOADING = 600
 
 
 @dataclass
@@ -59,6 +61,17 @@ class Snapshot:
     at: float
     metrics: dict
     activity: dict
+
+
+@dataclass
+class Phases:
+    """How long the parts around the window took, and what the simulator held. A run has no size
+    limit, so these grow with the bots and are reported, not budgeted."""
+
+    provisioned: float = 0.0
+    loaded: float = 0.0
+    stopped: float = 0.0
+    simulator_memory: str = "n/a"
 
 
 @dataclass
@@ -158,6 +171,20 @@ class Stack:
             query,
             env={"PGPASSWORD": self.passwords[role]},
         ).strip()
+
+    def memory(self, service: str) -> str:
+        """The service's memory use and limit as Docker reports it, such as "61.2MiB / 512MiB"."""
+        container = self.compose("ps", "-q", service).strip()
+        if not container:
+            return "n/a"
+        result = subprocess.run(
+            ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", container],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        return result.stdout.strip() or "n/a"
 
     def scrape(self) -> dict:
         text = self.exec(
@@ -425,7 +452,13 @@ def correctness(stack: Stack, instruments: list[str]) -> dict:
 
 
 def summarize(
-    options: Options, before: Snapshot, after: Snapshot, window: Window, env: dict, checks: dict
+    options: Options,
+    before: Snapshot,
+    after: Snapshot,
+    window: Window,
+    env: dict,
+    checks: dict,
+    phases: Phases,
 ) -> tuple[str, bool]:
     seconds = after.at - before.at
     histogram = stats.window(
@@ -526,6 +559,15 @@ def summarize(
         f"{within_p99:.3%} within "
         "500 ms. The percentiles between edges are estimates.",
         "",
+        "## Starting and stopping",
+        "",
+        f"- Provisioning {options.bots} bots in batches of 100: {phases.provisioned:.0f} s.",
+        f"- From starting the run to its first commands counted, while the simulator takes the "
+        f"lease and loads its bots (heartbeats come every few seconds): {phases.loaded:.0f} s.",
+        f"- From asking the run to stop to STOPPED, after its open orders are cancelled: "
+        f"{phases.stopped:.0f} s.",
+        f"- Simulator memory at the end of the window: {phases.simulator_memory}.",
+        "",
         "## Pipeline during the window",
         "",
         f"- Writer queue depth: first minute {queue.first_minute:.1f}, last minute "
@@ -560,7 +602,10 @@ def run(options: Options) -> int:
     try:
         stack.compose("up", "-d", "--build", "--wait", "--wait-timeout", "600", timeout=1800)
         operator = Session("operator", stack.passwords["operator"])
+        phases = Phases()
+        began = time.monotonic()
         instruments = set_up(operator, options.bots, stack.passwords["trader"])
+        phases.provisioned = time.monotonic() - began
         wait_for(
             "Market Data to list the instruments",
             lambda: len(listing()["instruments"]) >= len(SYMBOLS),
@@ -568,7 +613,9 @@ def run(options: Options) -> int:
         )
         trader = Session("trader", stack.passwords["trader"])
         split = strategy_split(options.bots)
-        minutes = math.ceil((options.warmup + options.duration) / 60) + 3
+        # Room for the bots to load (up to LOADING seconds) as well as the warm-up and the window;
+        # the run is stopped by hand at the end anyway.
+        minutes = math.ceil((options.warmup + options.duration + LOADING) / 60) + 3
         started = operator.expect(
             201,
             "/api/v1/admin/bot-runs",
@@ -584,19 +631,27 @@ def run(options: Options) -> int:
             },
         )
         logger.info("run %s started; waiting for a worker", started["runId"])
+        began = time.monotonic()
         wait_for("the run to be RUNNING", lambda: activity(operator)["status"] == "RUNNING", 180)
+        # The lease is taken before the bots load, so loading ends when the first commands are
+        # counted, which the next heartbeat reports.
+        wait_for("the bots to trade", lambda: activity(operator)["activity"]["placed"] > 0, LOADING)
+        phases.loaded = time.monotonic() - began
         logger.info("warming up for %d s", options.warmup)
         time.sleep(options.warmup)
         before = snapshot(stack, operator)
         logger.info("measuring for %d s", options.duration)
         window = measure(stack, operator, trader, instruments[0], options.duration)
         after = snapshot(stack, operator)
+        phases.simulator_memory = stack.memory("simulator")
         operator.expect(200, f"/api/v1/admin/bot-runs/{started['runId']}/stop")
-        wait_for("the run to stop", lambda: activity(operator)["status"] == "STOPPED", 180)
+        began = time.monotonic()
+        wait_for("the run to stop", lambda: activity(operator)["status"] == "STOPPED", 600)
+        phases.stopped = time.monotonic() - began
         env = environment(stack)
         logger.info("checking accounting and the public side")
         checks = correctness(stack, instruments)
-        report, passed = summarize(options, before, after, window, env, checks)
+        report, passed = summarize(options, before, after, window, env, checks, phases)
         path = stack.run_dir / f"report-{datetime.now(UTC):%Y%m%d-%H%M}.md"
         path.write_text(report, encoding="utf-8")
         print(report)
@@ -618,7 +673,7 @@ def parse(argv: list[str]) -> Options:
     parser.add_argument(
         "--rate", default="100.00", help="run rate in commands/s, as the API takes it"
     )
-    parser.add_argument("--bots", type=int, default=1000)
+    parser.add_argument("--bots", type=int, default=10_000)
     parser.add_argument("--warmup", type=int, default=120, help="seconds before measuring")
     parser.add_argument("--duration", type=int, default=600, help="seconds measured")
     parser.add_argument("--seed", type=int, default=42)

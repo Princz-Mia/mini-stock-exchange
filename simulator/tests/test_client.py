@@ -16,9 +16,7 @@ def client(handler, sleeps: list[float]) -> tuple[TraderClient, httpx.AsyncClien
         sleeps.append(seconds)
 
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    trader = TraderClient(
-        http, "http://execution", uuid4(), TOKEN, asyncio.Semaphore(2), random.Random(7), sleep
-    )
+    trader = TraderClient(http, "http://execution", uuid4(), TOKEN, asyncio.Semaphore(2), 7, sleep)
     return trader, http
 
 
@@ -44,6 +42,7 @@ def test_an_unresolved_command_is_retried_with_the_same_key_and_body_until_it_re
 
     async def scenario():
         trader, http = client(handler, sleeps)
+        assert trader._jitter is None, "no generator until a retry needs one"
         async with http:
             return await trader.place(ORDER)
 
@@ -97,3 +96,21 @@ def test_a_cancel_names_the_order_and_sends_no_body() -> None:
     assert seen[0].url.path == "/api/v1/orders/order-7/cancel"
     assert seen[0].content == b""
     assert "Idempotency-Key" in seen[0].headers
+
+
+def test_retry_waits_are_the_seeded_jitter_on_a_doubling_cap() -> None:
+    answers = [httpx.Response(503)] * 4 + [httpx.Response(201, json={"orderId": "o-1"})]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return answers.pop(0)
+
+    sleeps: list[float] = []
+
+    async def scenario() -> None:
+        trader, http = client(handler, sleeps)
+        async with http:
+            await trader.place(ORDER)
+
+    asyncio.run(scenario())
+    seeded = random.Random(7)
+    assert sleeps == [seeded.uniform(0, min(5.0, 0.2 * 2**attempt)) for attempt in range(1, 5)]
