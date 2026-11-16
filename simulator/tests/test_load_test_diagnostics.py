@@ -157,14 +157,18 @@ def test_the_feed_lag_and_the_pool_are_sampled_by_topic() -> None:
                 f'mse_feed_lag{{topic="mse.trades.v1"}} {trades}\n'
                 f'mse_feed_lag{{topic="mse.market.v1"}} {snapshots}\n'
             ),
-            stats.parse_prometheus("hikaricp_connections_pending 2\n"),
+            stats.parse_prometheus(
+                'hikaricp_connections_pending{pool="execution"} 2\n'
+                'hikaricp_connections_pending{pool="writer"} 1\n'
+            ),
         )
 
     assert diagnostics.lag_by_topic(sampled) == {
         "mse.market.v1": (5, 3),
         "mse.trades.v1": (12, 4),
     }, "a lag of -1 means not measured yet and is left out"
-    assert max(sampled.pending) == 2
+    assert max(sampled.pending) == 2, "the application pool alone"
+    assert max(sampled.writer_pending) == 1, "the writer's pool apart"
 
 
 def test_processor_samples_are_read_by_service() -> None:

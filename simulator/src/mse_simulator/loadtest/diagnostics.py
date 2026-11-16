@@ -225,13 +225,19 @@ class Sampled:
 
     feed_lag: dict[str, list[float]] = field(default_factory=dict)
     pending: list[float] = field(default_factory=list)
+    writer_pending: list[float] = field(default_factory=list)
     cpu: dict[str, list[float]] = field(default_factory=dict)
 
     def scrape(self, market_data: Samples, execution: Samples) -> None:
         for (name, labels), value in market_data.items():
             if name == "mse_feed_lag" and value >= 0:
                 self.feed_lag.setdefault(dict(labels).get("topic", "?"), []).append(value)
-        self.pending.append(stats.total(execution, "hikaricp_connections_pending"))
+        self.pending.append(
+            stats.total(execution, "hikaricp_connections_pending", pool="execution")
+        )
+        self.writer_pending.append(
+            stats.total(execution, "hikaricp_connections_pending", pool="writer")
+        )
 
     def docker(self, text: str, project: str) -> None:
         """docker stats lines of "name|12.34%"; containers named <project>-<service>-<n>."""
@@ -326,9 +332,11 @@ def report(
         for topic, (peak, last) in lag_by_topic(sampled).items()
     ] or ["- not sampled"]
     peak_pending = max(sampled.pending, default=0.0)
+    peak_writer = max(sampled.writer_pending, default=0.0)
     lines += [
         "",
-        f"Execution's database pool, waiting connections at peak: {peak_pending:.0f}.",
+        f"Threads waiting for a connection at peak: {peak_pending:.0f} on Execution's application "
+        f"pool, {peak_writer:.0f} on the writer's.",
         "",
     ]
     lines += ["Processor by container, percent of one CPU (mean, peak):", ""]
