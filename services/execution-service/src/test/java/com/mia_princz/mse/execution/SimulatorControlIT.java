@@ -52,6 +52,8 @@ class SimulatorControlIT {
 
 	private static final String ASSIGNMENT = "/internal/simulator/assignment";
 
+	private static final String BOTS = "/internal/simulator/runs/{runId}/bots";
+
 	private static final String HEARTBEAT = "/internal/simulator/heartbeat";
 
 	@LocalServerPort
@@ -102,7 +104,7 @@ class SimulatorControlIT {
 				UUID.randomUUID().toString()).statusCode()).isEqualTo(200);
 		assertThat(assignment(simulator).get("run").isNull()).isTrue();
 
-		// A run: the assignment names each bot's credential file, never a token.
+		// A run: the assignment counts its bots, and their pages name each bot's credential file, never a token.
 		UUID first = start(operator, """
 				{"marketMakers":1,"noise":1,"momentum":1,"seed":9,"commandsPerSecond":"3.00","maxOrderQuantity":5,
 				"maxPosition":40,"instrumentIds":["%s"]}""".formatted(nova));
@@ -118,12 +120,34 @@ class SimulatorControlIT {
 		assertThat(run.get("leaseSeconds").asLong()).isEqualTo(20);
 		assertThat(run.get("worker").get("workerId").isNull()).isTrue();
 		assertThat(run.get("instruments").get(0).get("symbol").asString()).isEqualTo("NOVA");
+		assertThat(run.has("bots")).as("bots come in pages").isFalse();
+		assertThat(run.get("botCount").asInt()).isEqualTo(3);
 		List<String> assigned = new ArrayList<>();
-		run.get("bots").forEach((bot) -> assigned.add(bot.get("accountId").asString() + " "
-				+ bot.get("strategy").asString() + " " + bot.get("credentialRef").asString()));
-		// Each bot runs the strategy it is tagged with, and the list stays in creation order.
+		JsonNode page = botPage(simulator, first, null, 2, 200);
+		assertThat(page.get("bots")).hasSize(2);
+		String cursor = page.get("nextCursor").asString();
+		page.get("bots").forEach((bot) -> assigned.add(describe(bot)));
+		JsonNode last = botPage(simulator, first, cursor, 2, 200);
+		assertThat(last.get("nextCursor").isNull()).as("the last page").isTrue();
+		last.get("bots").forEach((bot) -> assigned.add(describe(bot)));
+		// Each bot runs the strategy it is tagged with, and the pages stay in creation order.
 		assertThat(assigned).containsExactly(bots.get(0) + " MOMENTUM " + bots.get(0) + ".token",
 				bots.get(1) + " NOISE " + bots.get(1) + ".token", bots.get(2) + " MARKET_MAKER " + bots.get(2) + ".token");
+		assertThat(botPage(simulator, first, null, 1000, 200).get("bots")).as("one page holds them all").hasSize(3);
+		// A cursor belongs to its run; limits are bounded; an unknown run is not found; only the simulator reads them.
+		assertThat(botPage(simulator, unworked, cursor, 2, 400).get("errors").get(0).get("code").asString())
+			.isEqualTo("INVALID_CURSOR");
+		assertThat(botPage(simulator, first, null, 0, 400).get("errors").get(0).get("field").asString())
+			.isEqualTo("limit");
+		assertThat(botPage(simulator, first, null, 1001, 400).get("errors").get(0).get("field").asString())
+			.isEqualTo("limit");
+		assertThat(botPage(simulator, UUID.randomUUID(), null, 10, 404).get("code").asString())
+			.isEqualTo("RUN_NOT_FOUND");
+		String route = BOTS.replace("{runId}", first.toString());
+		assertThat(simulator.get(route).statusCode()).isEqualTo(401);
+		assertThat(simulator.get(route, bearer(EXPORT_TOKEN)).statusCode()).isEqualTo(403);
+		assertThat(operator.get(route).statusCode()).isEqualTo(401);
+		assertThat(simulator.get(route, bearer(SIMULATOR_TOKEN)).body()).doesNotContain(ApiTokens.PREFIX);
 
 		// The first heartbeat takes the lease; a retry, or lower totals, change nothing.
 		Instant before = Instant.now();
@@ -210,6 +234,21 @@ class SimulatorControlIT {
 		CONTRACT.assertResponse("GET", ASSIGNMENT, 200, read.headers().firstValue("Content-Type").orElse(null),
 				read.body());
 		return JSON.readTree(read.body());
+	}
+
+	private static JsonNode botPage(TestBrowser simulator, UUID run, String cursor, int limit, int status)
+			throws Exception {
+		HttpResponse<String> read = simulator.get(BOTS.replace("{runId}", run.toString()) + "?limit=" + limit
+				+ (cursor == null ? "" : "&cursor=" + cursor), bearer(SIMULATOR_TOKEN));
+		assertThat(read.statusCode()).as(read.body()).isEqualTo(status);
+		CONTRACT.assertResponse("GET", BOTS, status, read.headers().firstValue("Content-Type").orElse(null),
+				read.body());
+		return JSON.readTree(read.body());
+	}
+
+	private static String describe(JsonNode bot) {
+		return bot.get("accountId").asString() + " " + bot.get("strategy").asString() + " "
+				+ bot.get("credentialRef").asString();
 	}
 
 	private static HttpResponse<String> beatResponse(TestBrowser simulator, UUID run, String worker, long placed,

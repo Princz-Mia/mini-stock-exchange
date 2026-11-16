@@ -503,15 +503,6 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public int openOrdersTotal(UUID simulationId) {
-		return jdbc
-			.sql("SELECT count(*) FROM orders WHERE simulation_id = ? AND state IN ('OPEN', 'PARTIALLY_FILLED')")
-			.param(simulationId)
-			.query(Integer.class)
-			.single();
-	}
-
-	@Override
 	public void insertOrder(NewOrder order) {
 		OrderRequest request = order.request();
 		expectOne(jdbc.sql("""

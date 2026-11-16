@@ -568,12 +568,35 @@ export interface paths {
             readonly cookie?: never;
         };
         /**
-         * The bot run the simulator should work on, with its bots and instruments.
+         * The bot run the simulator should work on, with its instruments and how many bots it has.
          * @description Internal: the proxy never forwards it. Needs the simulator token, which can't trade. A run a worker left
          *     without confirming its stop comes first, then the run that should be running; run is null when there is
-         *     neither. Bots name their credential file in the simulator's token directory, never a token.
+         *     neither. The run's bots are read from its bot pages, since a run has no size limit.
          */
         readonly get: operations["simulatorAssignment"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/internal/simulator/runs/{runId}/bots": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * A page of a bot run's bots, oldest first.
+         * @description Internal, with the simulator token. A run's bots never change once it starts, so a worker reads every page
+         *     once, until nextCursor is null, and has as many bots as the assignment's botCount. Each names its credential
+         *     file in the simulator's token directory, never a token. A cursor belongs to its run and is refused for
+         *     another.
+         */
+        readonly get: operations["simulatorRunBots"];
         readonly put?: never;
         readonly post?: never;
         readonly delete?: never;
@@ -1248,13 +1271,8 @@ export interface components {
                     readonly instrumentId: components["schemas"]["Uuid"];
                     readonly symbol: string;
                 }[];
-                readonly bots: readonly {
-                    readonly accountId: components["schemas"]["Uuid"];
-                    /** @enum {string} */
-                    readonly strategy: "MARKET_MAKER" | "NOISE" | "MOMENTUM";
-                    /** @description The file in the simulator's token directory holding this bot's token. */
-                    readonly credentialRef: string;
-                }[];
+                /** @description How many bots the run's pages hold. */
+                readonly botCount: number;
                 readonly worker: {
                     readonly workerId: string | null;
                     readonly leaseExpiresAt: components["schemas"]["Timestamp"] | null;
@@ -1270,6 +1288,17 @@ export interface components {
                     readonly errors: number;
                 };
             };
+        };
+        readonly SimulatorBotPage: {
+            readonly bots: readonly {
+                readonly accountId: components["schemas"]["Uuid"];
+                /** @enum {string} */
+                readonly strategy: "MARKET_MAKER" | "NOISE" | "MOMENTUM";
+                /** @description The file in the simulator's token directory holding this bot's token. */
+                readonly credentialRef: string;
+            }[];
+            /** @description Pass it back for the next page; null after the last. */
+            readonly nextCursor: string | null;
         };
         readonly SimulatorHeartbeatRequest: {
             readonly runId: components["schemas"]["Uuid"];
@@ -3196,6 +3225,55 @@ export interface operations {
                     readonly [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    readonly simulatorRunBots: {
+        readonly parameters: {
+            readonly query?: {
+                readonly cursor?: string;
+                readonly limit?: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly runId: components["schemas"]["Uuid"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The page. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SimulatorBotPage"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No valid simulator token. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Another service's token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description RUN_NOT_FOUND. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
             };
         };
     };

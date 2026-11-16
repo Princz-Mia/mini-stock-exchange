@@ -49,6 +49,16 @@ final class Cursors {
 		return new TradingQueries.AccountPosition(instant(parts[0]), uuid(parts[1]));
 	}
 
+	/** A page of one bot run's bots; the run is the filter, so a cursor is refused for any other run. */
+	static String assignedBots(TradingQueries.AccountPosition position, UUID runId) {
+		return encode(PageOrder.OLDEST, "run=" + runId, position.createdAt() + "|" + position.id());
+	}
+
+	static TradingQueries.AccountPosition assignedBots(String cursor, UUID runId) {
+		String[] parts = decode(cursor, PageOrder.OLDEST, "run=" + runId, PageOrder.OLDEST);
+		return new TradingQueries.AccountPosition(instant(parts[0]), uuid(parts[1]));
+	}
+
 	private static String traderFilter(Boolean funded) {
 		return funded == null ? "" : "funded=" + funded;
 	}

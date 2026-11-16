@@ -180,8 +180,6 @@ public interface TradingStore {
 
 	int openOrders(UUID accountId);
 
-	int openOrdersTotal(UUID simulationId);
-
 	void insertOrder(NewOrder order);
 
 	void recordMakerFill(UUID makerOrderId, long quantity);

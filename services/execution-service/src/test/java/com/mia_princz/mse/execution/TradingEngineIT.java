@@ -9,6 +9,9 @@ import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Comparator;
@@ -34,6 +37,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 import tools.jackson.databind.json.JsonMapper;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -93,6 +97,9 @@ class TradingEngineIT {
 	@Autowired
 	PlatformTransactionManager transactionManager;
 
+	@Autowired
+	PostgreSQLContainer postgres;
+
 	/** When set, the next transaction commits and its outcome is then lost, as if the process died right after. */
 	private final AtomicBoolean loseAnswer = new AtomicBoolean();
 
@@ -133,6 +140,19 @@ class TradingEngineIT {
 					throw new UnsupportedOperationException("no bots in these tests");
 				});
 		engine.start();
+	}
+
+	/** The market's limits are the owner's to change; the runtime role may not. */
+	private void asOwner(String sql, Object... parameters) throws Exception {
+		String url = TestcontainersConfiguration.jdbcUrl(postgres, "execution_db");
+		try (Connection owner = DriverManager.getConnection(url, "execution_owner",
+				TestcontainersConfiguration.EXECUTION_OWNER_PASSWORD);
+				PreparedStatement statement = owner.prepareStatement(sql)) {
+			for (int i = 0; i < parameters.length; i++) {
+				statement.setObject(i + 1, parameters[i]);
+			}
+			assertThat(statement.executeUpdate()).isEqualTo(1);
+		}
 	}
 
 	@AfterEach
@@ -336,6 +356,69 @@ class TradingEngineIT {
 		Map<String, Object> after = snapshot();
 		assertThat(after.get("ledger_entries")).isEqualTo(before.get("ledger_entries"));
 		assertThat((long) after.get("command_sequence")).isEqualTo((long) before.get("command_sequence") + 1);
+	}
+
+	/**
+	 * A market is built for 10,000 bots with 20 orders resting each, so it starts with room for 200,000; and an older
+	 * market still at 50,000 was raised (V26).
+	 */
+	@Test
+	void aNewMarketHasRoomForTenThousandBotsOrders() {
+		assertThat(jdbc.queryForObject("SELECT max_open_orders_total FROM simulation", Integer.class)).isEqualTo(200_000);
+		assertThat(jdbc.queryForObject("""
+				SELECT column_default FROM information_schema.columns
+				WHERE table_name = 'simulation' AND column_name = 'max_open_orders_total'""", String.class))
+			.isEqualTo("200000");
+	}
+
+	/**
+	 * An order that would rest is refused once its account, or the whole market, has as many resting as allowed; one
+	 * that only trades is not. The market's count comes from the books, so it follows cancels and survives a restart.
+	 * Other tests' orders may still rest in this shared market, so the limits are set from what rests now.
+	 */
+	@Test
+	void restingOrdersAreLimitedPerAccountAndAcrossTheMarket() throws Exception {
+		int perAccount = jdbc.queryForObject("SELECT max_open_orders_per_account FROM simulation", Integer.class);
+		int total = jdbc.queryForObject("SELECT max_open_orders_total FROM simulation", Integer.class);
+		try {
+			UUID busy = funded();
+			asOwner("UPDATE simulation SET max_open_orders_per_account = 2");
+			place(busy, Side.SELL, OrderType.LIMIT, "500.00", 1);
+			place(busy, Side.SELL, OrderType.LIMIT, "501.00", 1);
+			PlacementResult third = place(busy, Side.SELL, OrderType.LIMIT, "502.00", 1);
+			assertThat(third.rejection()).isEqualTo(RejectionCode.ORDER_LIMIT_EXCEEDED);
+			assertThat(orderState(third.orderId())).isEqualTo("REJECTED");
+			asOwner("UPDATE simulation SET max_open_orders_per_account = ?", perAccount);
+
+			int resting = jdbc.queryForObject(
+					"SELECT count(*) FROM orders WHERE state IN ('OPEN', 'PARTIALLY_FILLED')", Integer.class);
+			asOwner("UPDATE simulation SET max_open_orders_total = ?", resting + 2);
+			UUID seller = funded();
+			UUID buyer = funded();
+			PlacementResult ask = place(seller, Side.SELL, OrderType.LIMIT, "490.00", 2);
+			PlacementResult bid = place(buyer, Side.BUY, OrderType.LIMIT, "10.00", 1);
+			assertThat(ask.rejection()).isNull();
+			assertThat(bid.rejection()).isNull();
+			// Full now: another order that would rest is refused, whichever account sends it.
+			assertThat(place(buyer, Side.BUY, OrderType.LIMIT, "11.00", 1).rejection())
+				.isEqualTo(RejectionCode.ORDER_LIMIT_EXCEEDED);
+			// An order that trades in full rests nothing, so it is not refused.
+			PlacementResult taker = place(buyer, Side.BUY, OrderType.LIMIT, "490.00", 1);
+			assertThat(taker.rejection()).isNull();
+			assertThat(orderState(taker.orderId())).isEqualTo("FILLED");
+			// The ask still rests with one share left, so the market is still full.
+			assertThat(place(buyer, Side.BUY, OrderType.LIMIT, "12.00", 1).rejection())
+				.isEqualTo(RejectionCode.ORDER_LIMIT_EXCEEDED);
+			// A cancel makes room, and a restart rebuilds the count with the books.
+			engine.cancel(key(), new CancelOrder(bid.orderId(), buyer)).get();
+			assertThat(place(buyer, Side.BUY, OrderType.LIMIT, "13.00", 1).rejection()).isNull();
+			restartEngine();
+			assertThat(place(buyer, Side.BUY, OrderType.LIMIT, "14.00", 1).rejection())
+				.isEqualTo(RejectionCode.ORDER_LIMIT_EXCEEDED);
+		}
+		finally {
+			asOwner("UPDATE simulation SET max_open_orders_per_account = ?, max_open_orders_total = ?", perAccount, total);
+		}
 	}
 
 	@Test

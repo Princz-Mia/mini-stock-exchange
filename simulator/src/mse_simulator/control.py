@@ -1,4 +1,5 @@
-"""The simulator's control plane: which run to work on, and the heartbeat that holds its lease."""
+"""The simulator's control plane: which run to work on, its bots, and the heartbeat that holds its
+lease."""
 
 import logging
 from dataclasses import dataclass
@@ -11,6 +12,9 @@ logger = logging.getLogger(__name__)
 
 RUNNING = "RUNNING"
 STOPPED = "STOPPED"
+
+# The most bots one page holds, as Execution allows: 10,000 bots are ten pages.
+BOTS_PER_PAGE = 1000
 
 
 @dataclass(frozen=True)
@@ -42,7 +46,8 @@ class Assignment:
     totals: Totals
 
     @classmethod
-    def parse(cls, run: dict[str, Any]) -> Assignment:
+    def parse(cls, run: dict[str, Any], bots: list[dict[str, Any]]) -> Assignment:
+        """The run as the assignment gives it, with its bots as their pages gave them."""
         totals = run["totals"]
         return cls(
             run_id=UUID(run["runId"]),
@@ -55,7 +60,7 @@ class Assignment:
             instrument_ids=frozenset(UUID(item["instrumentId"]) for item in run["instruments"]),
             bots=tuple(
                 AssignedBot(UUID(bot["accountId"]), bot["strategy"], bot["credentialRef"])
-                for bot in run["bots"]
+                for bot in bots
             ),
             totals=Totals(
                 totals["placed"], totals["canceled"], totals["rejected"], totals["errors"]
@@ -81,15 +86,48 @@ class ControlClient:
         self._http = http
         self._base = execution_url
         self._headers = {"Authorization": f"Bearer {token}"}
+        # The last run's bots, kept because a run's bots never change: a worker asks again while
+        # another holds the lease, or after losing it, and reads the pages only for a new run.
+        self._bots_of: str | None = None
+        self._bots: list[dict[str, Any]] = []
 
     async def assignment(self) -> Assignment | None:
-        """The run to work on, or None. Raises on a transport error or an unexpected answer."""
+        """The run to work on with all its bots, or None. A run has no size limit, so its bots come
+        in pages, read once, since they never change. Raises on a transport error or an unexpected
+        answer, including pages that don't add up to the run's count; the caller asks again."""
         response = await self._http.get(
             f"{self._base}/internal/simulator/assignment", headers=self._headers
         )
         response.raise_for_status()
         run = response.json()["run"]
-        return None if run is None else Assignment.parse(run)
+        if run is None:
+            return None
+        if run["runId"] == self._bots_of:
+            return Assignment.parse(run, self._bots)
+        expected = run["botCount"]
+        bots: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {"limit": BOTS_PER_PAGE}
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = await self._http.get(
+                f"{self._base}/internal/simulator/runs/{run['runId']}/bots",
+                params=params,
+                headers=self._headers,
+            )
+            page.raise_for_status()
+            body = page.json()
+            bots.extend(body["bots"])
+            cursor = body["nextCursor"]
+            if not body["bots"] and cursor is not None:
+                # Each page must move on, or the reading would never end.
+                raise ValueError("a page with no bots names another")
+            if len(bots) > expected or (cursor is None and len(bots) != expected):
+                raise ValueError(f"the run's pages hold {len(bots)} bots, not {expected}")
+            if cursor is None:
+                self._bots_of, self._bots = run["runId"], bots
+                return Assignment.parse(run, bots)
 
     async def heartbeat(
         self,
