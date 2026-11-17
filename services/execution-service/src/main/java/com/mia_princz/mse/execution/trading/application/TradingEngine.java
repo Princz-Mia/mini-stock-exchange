@@ -72,7 +72,8 @@ public final class TradingEngine {
 	/** Each account's resting orders across all the books, kept by the books themselves. */
 	private final RestingOrders resting;
 
-	private final Map<UUID, String> symbols = new HashMap<>();
+	/** Every instrument as its public snapshot needs it, with its last trade sequence; changed only after commit. */
+	private final Map<UUID, TradingStore.Instrument> catalogue = new HashMap<>();
 
 	/** Each instrument's newest trades for its snapshots, kept like the books: changed only after a commit. */
 	private final Map<UUID, Tape> tapes = new HashMap<>();
@@ -132,7 +133,7 @@ public final class TradingEngine {
 			UUID simulation = market.simulationId();
 			long epoch = store.claimWriterEpoch(simulation);
 			Map<UUID, OrderBook> rebuilt = new HashMap<>();
-			Map<UUID, String> names = new HashMap<>();
+			Map<UUID, TradingStore.Instrument> rebuiltCatalogue = new HashMap<>();
 			Map<UUID, Tape> rebuiltTapes = new HashMap<>();
 			List<String> problems = new ArrayList<>();
 			// A restart in place rebuilds every book, so the count starts again from nothing.
@@ -144,7 +145,7 @@ public final class TradingEngine {
 					problems.add("Book for " + instrument.symbol() + " is crossed after rebuilding");
 				}
 				rebuilt.put(instrument.id(), book);
-				names.put(instrument.id(), instrument.symbol());
+				rebuiltCatalogue.put(instrument.id(), instrument);
 				rebuiltTapes.put(instrument.id(), new Tape(TAPE_TRADES, store.recentTrades(instrument.id(), TAPE_TRADES)));
 			}
 			problems.addAll(store.reconciliationProblems(simulation));
@@ -158,7 +159,7 @@ public final class TradingEngine {
 			simulationId = simulation;
 			writerEpoch = epoch;
 			books.putAll(rebuilt);
-			symbols.putAll(names);
+			catalogue.putAll(rebuiltCatalogue);
 			tapes.putAll(rebuiltTapes);
 			return null;
 		});
@@ -270,7 +271,7 @@ public final class TradingEngine {
 		try {
 			outcome = timed("place", () -> placeInTransaction(key, command, book));
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 		if (outcome.plan() != null) {
@@ -278,6 +279,10 @@ public final class TradingEngine {
 			try {
 				book.apply(outcome.plan());
 				tapes.get(command.instrumentId()).add(outcome.trades());
+				if (!outcome.trades().isEmpty()) {
+					long last = outcome.trades().getLast().tradeSequence();
+					catalogue.computeIfPresent(command.instrumentId(), (id, known) -> known.withLastTradeSequence(last));
+				}
 			}
 			catch (RuntimeException | Error ex) {
 				// Committed but not applied: the book no longer matches the database, whatever was thrown.
@@ -305,7 +310,8 @@ public final class TradingEngine {
 		try {
 			outcome = timed("cancel", () -> cancelInTransaction(key, command));
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException | BookOutOfStepException ex) {
+		catch (CommitOutcomeUnknownException | StaleWriterException | BookOutOfStepException
+				| TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 		long applying = nanoTime.getAsLong();
@@ -329,7 +335,9 @@ public final class TradingEngine {
 		return outcome.result();
 	}
 
-	private record AddedInstrument(InstrumentResult result, boolean fresh, int maxFillsPerCommand) {
+	/** {@code instrument} is the row as written when {@code fresh}, otherwise null. */
+	private record AddedInstrument(InstrumentResult result, boolean fresh, int maxFillsPerCommand,
+			TradingStore.Instrument instrument) {
 	}
 
 	private InstrumentResult processAddInstrument(CommandKey key, AddInstrument command) {
@@ -338,13 +346,13 @@ public final class TradingEngine {
 			ensureMarket();
 			added = timed("other", () -> addInstrumentInTransaction(key, command));
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 		if (added.fresh()) {
 			// Never replace a book that exists: it may hold resting orders.
 			books.putIfAbsent(command.instrumentId(), new OrderBook(added.maxFillsPerCommand(), resting));
-			symbols.putIfAbsent(command.instrumentId(), command.symbol());
+			catalogue.putIfAbsent(command.instrumentId(), added.instrument());
 			tapes.putIfAbsent(command.instrumentId(), new Tape(TAPE_TRADES, List.of()));
 		}
 		return added.result();
@@ -404,7 +412,7 @@ public final class TradingEngine {
 		TradingStore.Opening<InstrumentResult> opening = open(key, InstrumentResult.class);
 		Market market = opening.market();
 		if (opening.prior().isPresent()) {
-			return new AddedInstrument(replay(key, opening.prior().get()), false, market.maxFillsPerCommand());
+			return new AddedInstrument(replay(key, opening.prior().get()), false, market.maxFillsPerCommand(), null);
 		}
 		long sequence = opening.sequence();
 		InstrumentResult.Status refusal = !"SETUP".equals(market.state()) ? InstrumentResult.Status.NOT_IN_SETUP
@@ -414,19 +422,22 @@ public final class TradingEngine {
 					sequence);
 			return new AddedInstrument(remember(key, 409, new InstrumentResult(refusal, null, command.symbol(),
 					name(command.displayName()), command.referencePrice().cents(), sequence)), false,
-					market.maxFillsPerCommand());
+					market.maxFillsPerCommand(), null);
 		}
-		store.insertInstrument(simulationId, command.instrumentId(), command.symbol(), name(command.displayName()),
-				command.referencePrice().cents());
+		TradingStore.Instrument inserted = store.insertInstrument(simulationId, command.instrumentId(),
+				command.symbol(), name(command.displayName()), command.referencePrice().cents());
 		// The catalogue changed, so the new instrument's public state is published at this sequence.
-		snapshot(market, command.instrumentId(), new OrderBook(market.maxFillsPerCommand()), BookDelta.none(),
-				sequence);
+		snapshot(market, inserted, new OrderBook(market.maxFillsPerCommand()), BookDelta.none(), sequence, List.of());
 		store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_ADD", "APPLIED", key.idempotencyKey(),
 				sequence);
 		return new AddedInstrument(remember(key, 201, new InstrumentResult(InstrumentResult.Status.CREATED,
 				command.instrumentId(), command.symbol(), name(command.displayName()), command.referencePrice().cents(),
 				sequence)), true,
-				market.maxFillsPerCommand());
+				market.maxFillsPerCommand(), inserted);
+	}
+
+	/** {@code instrument} is the row as written when the edit applied, otherwise null. */
+	private record EditedInstrument(InstrumentEdit result, TradingStore.Instrument instrument) {
 	}
 
 	/** Without a market there is no instrument to edit, and nothing to commit the answer to. */
@@ -435,20 +446,25 @@ public final class TradingEngine {
 			return new InstrumentEdit(InstrumentEdit.Status.UNKNOWN_INSTRUMENT, command.instrumentId(), null,
 					name(command.displayName()), command.referencePrice().cents(), 0);
 		}
+		EditedInstrument edited;
 		try {
-			return timed("other", () -> editInstrumentInTransaction(key, command));
+			edited = timed("other", () -> editInstrumentInTransaction(key, command));
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
+		if (edited.instrument() != null) {
+			catalogue.put(command.instrumentId(), edited.instrument());
+		}
+		return edited.result();
 	}
 
 	/** An unknown instrument is answered as such in any state; a known one is edited only in SETUP. */
-	private InstrumentEdit editInstrumentInTransaction(CommandKey key, EditInstrument command) {
+	private EditedInstrument editInstrumentInTransaction(CommandKey key, EditInstrument command) {
 		TradingStore.Opening<InstrumentEdit> opening = open(key, InstrumentEdit.class);
 		Market market = opening.market();
 		if (opening.prior().isPresent()) {
-			return replay(key, opening.prior().get());
+			return new EditedInstrument(replay(key, opening.prior().get()), null);
 		}
 		long sequence = opening.sequence();
 		long cents = command.referencePrice().cents();
@@ -459,21 +475,22 @@ public final class TradingEngine {
 		if (refusal != null) {
 			store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_EDIT", "NOT_ALLOWED",
 					key.idempotencyKey(), sequence);
-			return remember(key, refusal == InstrumentEdit.Status.UNKNOWN_INSTRUMENT ? 404 : 409,
+			return new EditedInstrument(remember(key, refusal == InstrumentEdit.Status.UNKNOWN_INSTRUMENT ? 404 : 409,
 					new InstrumentEdit(refusal, command.instrumentId(), symbol.orElse(null), displayName, cents,
-							sequence));
+							sequence)), null);
 		}
-		store.updateInstrument(simulationId, command.instrumentId(), cents, displayName);
+		TradingStore.Instrument updated = store.updateInstrument(simulationId, command.instrumentId(), cents,
+				displayName);
 		OrderBook book = books.get(command.instrumentId());
 		if (book == null) {
 			throw new IllegalStateException("No book for instrument " + command.instrumentId());
 		}
 		// The catalogue changed, so the instrument's public state is published again at this sequence.
-		snapshot(market, command.instrumentId(), book, BookDelta.none(), sequence);
+		snapshot(market, updated, book, BookDelta.none(), sequence, List.of());
 		store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_EDIT", "APPLIED", key.idempotencyKey(),
 				sequence);
-		return remember(key, 200, new InstrumentEdit(InstrumentEdit.Status.UPDATED, command.instrumentId(),
-				symbol.get(), displayName, cents, sequence));
+		return new EditedInstrument(remember(key, 200, new InstrumentEdit(InstrumentEdit.Status.UPDATED,
+				command.instrumentId(), symbol.get(), displayName, cents, sequence)), updated);
 	}
 
 	private static String name(DisplayName displayName) {
@@ -490,14 +507,14 @@ public final class TradingEngine {
 		try {
 			deletion = timed("other", () -> deleteInstrumentInTransaction(key, command));
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 		if (deletion.status() == InstrumentDeletion.Status.DELETED) {
 			// On this thread, so the next order for it finds no book and is refused before any transaction. Removing is
 			// idempotent, so a replayed answer changes nothing.
 			books.remove(command.instrumentId());
-			symbols.remove(command.instrumentId());
+			catalogue.remove(command.instrumentId());
 			tapes.remove(command.instrumentId());
 		}
 		return deletion;
@@ -505,7 +522,7 @@ public final class TradingEngine {
 
 	/**
 	 * An unknown instrument is answered as such in any state; a known one is deleted only in SETUP and only while
-	 * nothing refers to it. Its removed snapshot is written before the row goes, as it reads the row.
+	 * nothing refers to it.
 	 */
 	private InstrumentDeletion deleteInstrumentInTransaction(CommandKey key, DeleteInstrument command) {
 		TradingStore.Opening<InstrumentDeletion> opening = open(key, InstrumentDeletion.class);
@@ -533,8 +550,8 @@ public final class TradingEngine {
 					new InstrumentDeletion(refusal, command.instrumentId(), symbol.orElse(null), usage, sequence));
 		}
 		// Nothing has traded or rests in SETUP, so the last public state is an empty market.
-		store.insertRemovedSnapshot(new TradingStore.MarketView(simulationId, command.instrumentId(), market, List.of(),
-				List.of(), List.of(), sequence, clock.instant()));
+		store.insertRemovedSnapshot(new TradingStore.MarketView(simulationId, known(command.instrumentId()), market,
+				List.of(), List.of(), List.of(), sequence, clock.instant()));
 		store.deleteInstrument(simulationId, command.instrumentId());
 		store.insertAudit(simulationId, command.actorUserId(), "INSTRUMENT_DELETE", "APPLIED", key.idempotencyKey(),
 				sequence);
@@ -547,7 +564,7 @@ public final class TradingEngine {
 			ensureMarket();
 			return timed("other", () -> provisionInTransaction(key, command));
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 	}
@@ -590,7 +607,7 @@ public final class TradingEngine {
 			ensureMarket();
 			return timed("other", () -> addTraderInTransaction(key, command));
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 	}
@@ -640,7 +657,7 @@ public final class TradingEngine {
 			ensureMarket();
 			return timed("other", () -> botsInTransaction(key, command));
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 	}
@@ -703,7 +720,7 @@ public final class TradingEngine {
 		try {
 			return timed("other", () -> revokeInTransaction(key, command));
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 	}
@@ -740,7 +757,7 @@ public final class TradingEngine {
 		try {
 			return timed("other", () -> startRunInTransaction(key, command));
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 	}
@@ -815,7 +832,7 @@ public final class TradingEngine {
 		try {
 			return timed("other", () -> stopRunInTransaction(key, command));
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 	}
@@ -846,7 +863,7 @@ public final class TradingEngine {
 		try {
 			return timed("other", () -> controlInTransaction(key, command));
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException ex) {
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 	}
@@ -868,8 +885,10 @@ public final class TradingEngine {
 		store.updateMarketState(simulationId, action.to());
 		// Every instrument's public state carries the venue state, so each one gets a snapshot at this sequence.
 		Market changed = market.withState(action.to());
-		for (TradingStore.Instrument instrument : store.instruments(simulationId)) {
-			snapshot(changed, instrument.id(), books.get(instrument.id()), BookDelta.none(), sequence);
+		List<TradingStore.Instrument> listed = new ArrayList<>(catalogue.values());
+		listed.sort(java.util.Comparator.comparing(TradingStore.Instrument::symbol));
+		for (TradingStore.Instrument instrument : listed) {
+			snapshot(changed, instrument, books.get(instrument.id()), BookDelta.none(), sequence, List.of());
 		}
 		store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "APPLIED", key.idempotencyKey(),
 				sequence);
@@ -972,10 +991,27 @@ public final class TradingEngine {
 	 */
 	private void snapshot(Market market, UUID instrumentId, OrderBook book, BookDelta delta, long sequence,
 			List<TapeTrade> newTrades) {
-		Tape tape = tapes.get(instrumentId);
-		store.insertMarketSnapshot(new TradingStore.MarketView(simulationId, instrumentId, market,
+		snapshot(market, known(instrumentId), book, delta, sequence, newTrades);
+	}
+
+	/** {@code instrument} as it is before this command; its last trade sequence moves to the command's newest. */
+	private void snapshot(Market market, TradingStore.Instrument instrument, OrderBook book, BookDelta delta,
+			long sequence, List<TapeTrade> newTrades) {
+		Tape tape = tapes.get(instrument.id());
+		TradingStore.Instrument after = newTrades.isEmpty() ? instrument
+				: instrument.withLastTradeSequence(newTrades.getLast().tradeSequence());
+		store.insertMarketSnapshot(new TradingStore.MarketView(simulationId, after, market,
 				book.depthAfter(delta, Side.BUY, SNAPSHOT_LEVELS), book.depthAfter(delta, Side.SELL, SNAPSHOT_LEVELS),
 				tape == null ? List.copyOf(newTrades) : tape.with(newTrades), sequence, clock.instant()));
+	}
+
+	/** The instrument as the writer knows it; one that the database has but the writer does not is out of step. */
+	private TradingStore.Instrument known(UUID instrumentId) {
+		TradingStore.Instrument instrument = catalogue.get(instrumentId);
+		if (instrument == null) {
+			throw new TradingStore.OutOfStepException("The writer does not know instrument " + instrumentId);
+		}
+		return instrument;
 	}
 
 	/** Writes the order's trades and settlement; returns its trades for the tape, oldest first. */
@@ -986,11 +1022,18 @@ public final class TradingEngine {
 		List<TapeTrade> tape = new ArrayList<>(plan.fills().size());
 		Set<UUID> touched = new LinkedHashSet<>();
 		touched.add(command.accountId());
+		// Trades are numbered from the writer's own counter, which moves only after the commit. The row is moved once,
+		// first, so a counter that disagrees halts the writer before any trade is written under a number already taken.
+		long before = known(command.instrumentId()).lastTradeSequence();
+		if (!plan.fills().isEmpty()) {
+			store.advanceTradeSequence(command.instrumentId(), before, before + plan.fills().size());
+		}
+		long tradeSequence = before;
 		for (int i = 0; i < plan.fills().size(); i++) {
 			Fill fill = plan.fills().get(i);
 			store.recordMakerFill(fill.makerOrderId(), fill.quantity());
 			TradingStore.Trade trade = store.insertTrade(simulationId, command.instrumentId(), plan.taker(), fill,
-					executedAt, sequence);
+					++tradeSequence, executedAt, sequence);
 			trades.put(i, trade);
 			tape.add(new TapeTrade(trade.id(), trade.tradeSequence(), fill.price().cents(), fill.quantity(),
 					command.side(), executedAt));
@@ -1004,7 +1047,8 @@ public final class TradingEngine {
 		settlement.balanceChanges().forEach(store::applyBalance);
 		store.touchAccounts(touched);
 		for (int i = 0; i < plan.fills().size(); i++) {
-			store.insertTradeEvent(simulationId, command.instrumentId(), symbols.get(command.instrumentId()), trades.get(i),
+			store.insertTradeEvent(simulationId, command.instrumentId(), known(command.instrumentId()).symbol(),
+					trades.get(i),
 					plan.fills().get(i), executedAt, sequence);
 		}
 		return tape;

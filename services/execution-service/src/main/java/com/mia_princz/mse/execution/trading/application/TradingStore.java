@@ -28,7 +28,29 @@ public interface TradingStore {
 
 	}
 
-	record Instrument(UUID id, String symbol) {
+	/**
+	 * An instrument as the writer keeps it: what its public snapshot carries, and the sequence of its newest committed
+	 * trade. Read at startup, and taken from the row itself whenever an instrument command writes it.
+	 */
+	record Instrument(UUID id, String symbol, String displayName, long referencePriceCents, long tickCents,
+			long lotSize, int ruleVersion, long lastTradeSequence) {
+
+		public Instrument withLastTradeSequence(long sequence) {
+			return new Instrument(id, symbol, displayName, referencePriceCents, tickCents, lotSize, ruleVersion,
+					sequence);
+		}
+
+	}
+
+	/** A row the writer keeps in memory was not as the writer believed; the writer must halt. */
+	final class OutOfStepException extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+
+		public OutOfStepException(String message) {
+			super(message);
+		}
+
 	}
 
 	record Available(long cashCents, long shares) {
@@ -97,7 +119,7 @@ public interface TradingStore {
 	 * Sets the fields an operator edits, the display name null for none; the database refuses it once the market has
 	 * left SETUP.
 	 */
-	void updateInstrument(UUID simulationId, UUID instrumentId, long referencePriceCents, String displayName);
+	Instrument updateInstrument(UUID simulationId, UUID instrumentId, long referencePriceCents, String displayName);
 
 	/**
 	 * Everything that refers to the instrument. The holders are named up to {@code holdersNamed}; {@code otherReferences}
@@ -177,8 +199,8 @@ public interface TradingStore {
 	void insertGenesis(UUID simulationId, UUID accountId, String accountKind, long commandSequence, long cashCents,
 			List<ProvisionAccount.Holding> holdings);
 
-	/** The display name is null for none. */
-	void insertInstrument(UUID simulationId, UUID instrumentId, String symbol, String displayName,
+	/** The display name is null for none. Returns the row as written, its defaults included. */
+	Instrument insertInstrument(UUID simulationId, UUID instrumentId, String symbol, String displayName,
 			long referencePriceCents);
 
 	Available available(UUID accountId, UUID instrumentId);
@@ -194,8 +216,15 @@ public interface TradingStore {
 
 	void cancelOrder(UUID orderId, long quantity, String reason);
 
-	Trade insertTrade(UUID simulationId, UUID instrumentId, OrderRequest taker, Fill fill, Instant executedAt,
-			long commandSequence);
+	/** {@code tradeSequence} is the writer's, the next after the instrument's last; see advanceTradeSequence. */
+	Trade insertTrade(UUID simulationId, UUID instrumentId, OrderRequest taker, Fill fill, long tradeSequence,
+			Instant executedAt, long commandSequence);
+
+	/**
+	 * Moves the instrument's last trade sequence from {@code from} to {@code to}, once per command that traded in it.
+	 * Throws {@link OutOfStepException} if the row was not at {@code from}.
+	 */
+	void advanceTradeSequence(UUID instrumentId, long from, long to);
 
 	void insertBatch(UUID simulationId, SettlementPlan.Cause cause, UUID tradeId, long commandSequence,
 			List<Posting> postings);
@@ -219,11 +248,11 @@ public interface TradingStore {
 			Instant executedAt, long commandSequence);
 
 	/**
-	 * The public state of one instrument once the current command commits: depth from the book plus the command's
-	 * changes, the tape newest first with the command's own trades, and the rest read from the database inside the
-	 * same transaction.
+	 * The public state of one instrument once the current command commits: the instrument as it will be (its last
+	 * trade sequence included), depth from the book plus the command's changes, and the tape newest first with the
+	 * command's own trades. Nothing is read from the database.
 	 */
-	record MarketView(UUID simulationId, UUID instrumentId, Market market, List<DepthLevel> bids,
+	record MarketView(UUID simulationId, Instrument instrument, Market market, List<DepthLevel> bids,
 			List<DepthLevel> asks, List<TapeTrade> recentTrades, long commandSequence, Instant generatedAt) {
 	}
 
@@ -233,10 +262,7 @@ public interface TradingStore {
 	/** Writes the instrument's {@code MarketSnapshot} to the outbox, in the command's transaction. */
 	void insertMarketSnapshot(MarketView view);
 
-	/**
-	 * Writes the instrument's last {@code MarketSnapshot}, which says it was removed, to the outbox. It reads the
-	 * catalogue row, so it runs before the row is deleted, in the same transaction.
-	 */
+	/** Writes the instrument's last {@code MarketSnapshot}, which says it was removed, to the outbox. */
 	void insertRemovedSnapshot(MarketView view);
 
 }
