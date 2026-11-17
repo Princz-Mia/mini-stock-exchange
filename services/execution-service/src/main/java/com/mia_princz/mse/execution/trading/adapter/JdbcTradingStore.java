@@ -190,15 +190,6 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public long nextCommandSequence(UUID simulationId) {
-		return jdbc.sql("UPDATE simulation SET last_command_sequence = last_command_sequence + 1 WHERE id = ? "
-				+ "RETURNING last_command_sequence")
-			.param(simulationId)
-			.query(Long.class)
-			.single();
-	}
-
-	@Override
 	public void updateMarketState(UUID simulationId, String state) {
 		expectOne(jdbc.sql("UPDATE simulation SET state = ?, opened_at = COALESCE(opened_at, now()) WHERE id = ?")
 			.params(state, simulationId)
@@ -631,18 +622,41 @@ public final class JdbcTradingStore implements TradingStore {
 		}
 	}
 
+	/**
+	 * One round trip instead of three. The UPDATE takes the row lock and checks the epoch; the sequence rises only when
+	 * the key has no stored answer. The lookup shares the statement's snapshot, taken before any wait for the row lock:
+	 * only this writer stores answers, and a writer that takes over first commits its new epoch, so no answer for the
+	 * key can be committed between that snapshot and the lock.
+	 */
 	@Override
-	public <T> Optional<StoredResult<T>> findResult(UUID simulationId, CommandKey key, Class<T> type) {
+	public <T> Optional<Opening<T>> open(UUID simulationId, long writerEpoch, CommandKey key, Class<T> type) {
 		return jdbc.sql("""
-				SELECT route, request_hash, response_body::text AS body FROM command_result
-				WHERE simulation_id = ? AND principal_id = ? AND idempotency_key = ?""")
-			.params(simulationId, key.principalId(), key.idempotencyKey())
+				WITH prior AS (
+				    SELECT route, request_hash, response_body::text AS body FROM command_result
+				    WHERE simulation_id = ? AND principal_id = ? AND idempotency_key = ?),
+				market AS (
+				    UPDATE simulation
+				    SET last_command_sequence = last_command_sequence
+				        + CASE WHEN EXISTS (SELECT 1 FROM prior) THEN 0 ELSE 1 END
+				    WHERE id = ? AND writer_epoch = ?
+				    RETURNING id, state, writer_epoch, max_open_orders_per_account, max_open_orders_total,
+				        max_fills_per_command, last_command_sequence)
+				SELECT market.*, prior.route, prior.request_hash, prior.body
+				FROM market LEFT JOIN prior ON true""")
+			.params(simulationId, key.principalId(), key.idempotencyKey(), simulationId, writerEpoch)
 			.query((row, index) -> {
+				Market market = new Market(row.getObject("id", UUID.class), row.getString("state"),
+						row.getLong("writer_epoch"), row.getInt("max_open_orders_per_account"),
+						row.getInt("max_open_orders_total"), row.getInt("max_fills_per_command"));
 				String route = row.getString("route");
-				byte[] hash = row.getBytes("request_hash");
-				// Another route's answer need not fit this route's type; the caller refuses it as a conflict.
-				return new StoredResult<>(route, hash,
-						key.sameRequest(route, hash) ? json.readValue(row.getString("body"), type) : null);
+				Optional<StoredResult<T>> prior = Optional.empty();
+				if (route != null) {
+					byte[] hash = row.getBytes("request_hash");
+					// Another route's answer need not fit this route's type; the caller refuses it as a conflict.
+					prior = Optional.of(new StoredResult<>(route, hash,
+							key.sameRequest(route, hash) ? json.readValue(row.getString("body"), type) : null));
+				}
+				return new Opening<>(market, row.getLong("last_command_sequence"), prior);
 			})
 			.optional();
 	}

@@ -50,6 +50,13 @@ public interface TradingStore {
 	record StoredResult<T>(String route, byte[] requestHash, T result) {
 	}
 
+	/**
+	 * A command's start: the locked market, the command's sequence, and the stored answer if its key was seen before.
+	 * With a stored answer, {@code sequence} is the last one taken, not a new one.
+	 */
+	record Opening<T>(Market market, long sequence, Optional<StoredResult<T>> prior) {
+	}
+
 	/** An order row as cancelling needs it, locked for the rest of the transaction. */
 	record ExistingOrder(UUID id, UUID accountId, UUID instrumentId, String state, long working) {
 	}
@@ -71,8 +78,6 @@ public interface TradingStore {
 
 	/** Every disagreement between balances, the ledger and open orders. Empty means consistent. */
 	List<String> reconciliationProblems(UUID simulationId);
-
-	long nextCommandSequence(UUID simulationId);
 
 	/** Moves the market to {@code state}; the first move to OPEN also records when the market opened. */
 	void updateMarketState(UUID simulationId, String state);
@@ -198,7 +203,13 @@ public interface TradingStore {
 
 	void touchAccounts(Collection<UUID> accountIds);
 
-	<T> Optional<StoredResult<T>> findResult(UUID simulationId, CommandKey key, Class<T> type);
+	/**
+	 * Opens a trading command in one statement, in the order every command needs: locks the market row if
+	 * {@code writerEpoch} still owns it, looks up the stored answer for {@code key}, and takes the next command sequence
+	 * unless there is a stored answer (a replay takes none, so sequences stay gap-free). Empty when another writer has
+	 * claimed the market since.
+	 */
+	<T> Optional<Opening<T>> open(UUID simulationId, long writerEpoch, CommandKey key, Class<T> type);
 
 	/** {@code status} is the HTTP status the stored result is replayed with. */
 	void insertResult(UUID simulationId, CommandKey key, int status, Object result, long commandSequence);

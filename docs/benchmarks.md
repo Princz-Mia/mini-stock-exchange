@@ -39,6 +39,18 @@ About 6% more throughput and 5 to 8% lower latency. Most of a command's time is 
 
 A durable commit costs about 5 ms a command here. The bench reaches PostgreSQL from the Windows host through Docker, so each round trip costs more than inside Compose, where the steady-load run's p50 is 5.1 ms with fsync on.
 
+**One opening statement instead of three, 2026-11-17.** Each command used to open its transaction with three round trips: lock the market row (checking the writer epoch), look up the idempotency key, and take the next command sequence. One statement now does all three. Two runs each with fsync on, alternating, same digest:
+
+| | Before | After |
+| --- | --- | --- |
+| Throughput | 105 to 106 commands a second | 114 commands a second |
+| Mean | 9.4 to 9.5 ms | 8.8 ms |
+| p50 | 7.6 to 7.7 ms | 7.0 ms |
+| p95 | 20.1 to 20.5 ms | 19.3 to 19.5 ms |
+| p99 | 24.9 to 25.5 ms | 24.3 to 24.5 ms |
+
+About 0.7 ms less per command, 8% more throughput. The fsync-on figures are higher than the 77 a second above, measured a day earlier on the same machine, so compare runs from the same session only.
+
 ## Steady load
 
 **Scenario:** five instruments and 10,000 bots (2,000 market makers, 2,000 momentum, 6,000 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. Until 2026-11-15 the scenario was 1,000 bots; its last result is kept below. Neither is a limit: the exchange limits neither the bot population nor the bots in one run, and `--bots` sets the number.
