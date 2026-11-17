@@ -61,6 +61,17 @@ About 0.7 ms less per command, 8% more throughput. The fsync-on figures are high
 
 A small gain: one statement fewer for every order, two for one that rests. Cancels and the fills behind the p95 and p99 are unchanged.
 
+**The writer keeps each instrument and numbers trades itself, 2026-11-17.** A market snapshot no longer reads the instrument's row, and trades are numbered from a counter the writer keeps, written once per command that traded instead of once per trade. Two runs each with fsync on, alternating with the version above, same digest:
+
+| | Before | After |
+| --- | --- | --- |
+| Throughput | 118 commands a second | 123 commands a second |
+| Mean | 8.5 ms | 8.1 ms |
+| p95 | 18.9 to 19.2 ms | 17.8 to 18.0 ms |
+| p99 | 24.3 to 24.5 ms | 22.6 to 22.8 ms |
+
+The tail moved this time: the commands with trades, which make it, lost a statement for each trade. Against the first row of this section, 105 a second, the three changes together are about 17% more, each step measured against the one before in the same session.
+
 ## Steady load
 
 **Scenario:** five instruments and 10,000 bots (2,000 market makers, 2,000 momentum, 6,000 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. Until 2026-11-15 the scenario was 1,000 bots; its last result is kept below. Neither is a limit: the exchange limits neither the bot population nor the bots in one run, and `--bots` sets the number.

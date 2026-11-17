@@ -53,6 +53,9 @@ import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.execution.trading.adapter.JdbcTradingStore;
 import com.mia_princz.mse.execution.trading.adapter.SpringTransactionRunner;
 import com.mia_princz.mse.execution.trading.application.AddInstrument;
+import com.mia_princz.mse.execution.trading.application.EditInstrument;
+import com.mia_princz.mse.execution.trading.application.MarketControl;
+import com.mia_princz.mse.execution.trading.application.MarketTransition;
 import com.mia_princz.mse.execution.trading.application.InstrumentResult;
 import com.mia_princz.mse.execution.trading.application.WriterTimings;
 import com.mia_princz.mse.execution.trading.application.AccountChanges;
@@ -72,6 +75,7 @@ import com.mia_princz.mse.execution.trading.application.TradingStore;
 import com.mia_princz.mse.execution.trading.application.TransactionRunner.CommitOutcomeUnknownException;
 import com.mia_princz.mse.execution.trading.application.TransactionRunner;
 import com.mia_princz.mse.execution.trading.domain.DepthLevel;
+import com.mia_princz.mse.execution.trading.domain.DisplayName;
 import com.mia_princz.mse.execution.trading.domain.OrderType;
 import com.mia_princz.mse.execution.trading.domain.Price;
 import com.mia_princz.mse.execution.trading.domain.Quantity;
@@ -285,6 +289,11 @@ class TradingEngineIT {
 					() -> place(seller, Side.SELL, OrderType.LIMIT, "100.00", 3));
 			statements.count(counts, "one fill", () -> place(buyer, Side.BUY, OrderType.LIMIT, "100.00", 1));
 			statements.count(counts, "cancel", () -> engine.cancel(key(), new CancelOrder(resting.orderId(), seller)).get());
+			// With the resting order canceled, these three asks are the best and the buy sweeps them.
+			for (String price : List.of("100.10", "100.20", "100.30")) {
+				place(seller, Side.SELL, OrderType.LIMIT, price, 1);
+			}
+			statements.count(counts, "three fills", () -> place(buyer, Side.BUY, OrderType.LIMIT, "100.30", 3));
 			statements.count(counts, "cancel of an unknown order",
 					() -> engine.cancel(key(), new CancelOrder(UUID.randomUUID(), seller)).get());
 			statements.count(counts, "insufficient cash",
@@ -309,9 +318,12 @@ class TradingEngineIT {
 				jdbc.update("UPDATE simulation SET state = 'OPEN'");
 			}
 			// Each command opens with one statement: the lock, the epoch check, the key's lookup and its sequence. An
-			// order reads cash and shares in one more, and the writer counts each account's resting orders itself.
-			assertThat(counts).containsExactly(Map.entry("resting order", "11 statements, 1 commit"),
-					Map.entry("one fill", "24 statements, 1 commit"), Map.entry("cancel", "11 statements, 1 commit"),
+			// order reads cash and shares in one more, and the writer counts each account's resting orders itself. A
+			// snapshot reads nothing, and trades are numbered in memory, the counter written once per command.
+			assertThat(counts).containsExactly(Map.entry("resting order", "10 statements, 1 commit"),
+					Map.entry("one fill", "23 statements, 1 commit"), Map.entry("cancel", "10 statements, 1 commit"),
+					// Three makers filled in full: the counter is still written once for the command, not once per fill.
+					Map.entry("three fills", "41 statements, 1 commit"),
 					Map.entry("cancel of an unknown order", "3 statements, 1 commit"),
 					Map.entry("insufficient cash", "4 statements, 1 commit"),
 					Map.entry("a repeated key", "1 statements, 1 commit"),
@@ -1336,7 +1348,9 @@ class TradingEngineIT {
 				accounts.add(funded());
 			}
 			Map<UUID, List<UUID>> mine = new HashMap<>();
-			String[] failures = { "insertTradeEvent", "insertMarketSnapshot", "touchAccounts", "insertOrder" };
+			// insertResult runs after the snapshot, the last write of every command.
+			String[] failures = { "insertTradeEvent", "insertMarketSnapshot", "touchAccounts", "insertOrder",
+					"insertResult" };
 			int injected = 0;
 			int refused = 0;
 			int filled = 0;
@@ -1388,6 +1402,28 @@ class TradingEngineIT {
 			Map<UUID, Integer> inDatabase = restingInDatabase();
 			assertThat(accounts).as("none of these accounts above its limit")
 				.allSatisfy((account) -> assertThat(inDatabase.getOrDefault(account, 0)).isLessThanOrEqualTo(4));
+
+			List<Long> sequences = jdbc.queryForList(
+					"SELECT trade_sequence FROM trades WHERE instrument_id = ? ORDER BY trade_sequence", Long.class,
+					instrument);
+			assertThat(sequences).as("trades numbered without gaps, through rollbacks")
+				.containsExactlyElementsOf(java.util.stream.LongStream.rangeClosed(1, sequences.size()).boxed().toList());
+			assertThat(jdbc.queryForObject("SELECT last_trade_sequence FROM instrument WHERE id = ?", Long.class,
+					instrument))
+				.isEqualTo(sequences.size());
+			// Every snapshot names the newest trade committed with or before its own command.
+			List<Map<String, Object>> snapshots = jdbc.queryForList("""
+					SELECT o.payload, o.command_sequence,
+					    (SELECT coalesce(max(t.trade_sequence), 0) FROM trades t
+					     WHERE t.instrument_id = ? AND t.command_sequence <= o.command_sequence) AS newest
+					FROM outbox o WHERE o.topic = 'mse.market.v1' AND o.event_key = ?""", instrument,
+					simulation + "|" + instrument);
+			assertThat(snapshots).as("snapshots checked").hasSizeGreaterThan(500);
+			for (Map<String, Object> row : snapshots) {
+				assertThat(WireEvents.decodeSnapshot((byte[]) row.get("payload")).getLastTradeSequence())
+					.as("snapshot at command %s", row.get("command_sequence"))
+					.isEqualTo(((Number) row.get("newest")).longValue());
+			}
 
 			restartEngine();
 			assertThat(resting.counts()).as("rebuilt").isEqualTo(restingInDatabase());
@@ -1473,6 +1509,99 @@ class TradingEngineIT {
 		assertThat(place(trader, Side.SELL, OrderType.LIMIT, "900.00", 101).rejection())
 			.isEqualTo(RejectionCode.INSUFFICIENT_SHARES);
 		assertThat(place(trader, Side.SELL, OrderType.LIMIT, "900.00", 100).rejection()).isNull();
+	}
+
+	/**
+	 * The writer numbers trades from its own counter and moves the row once, guarded by the value it expects. A row that
+	 * moved without it halts the writer instead of committing a trade under a number the row disagrees with, and a
+	 * restart refuses to start until the counter names the newest trade again.
+	 */
+	@Test
+	void aTradeCounterOutOfStepHaltsTheWriterAndStopsStartup() throws Exception {
+		UUID seller = funded();
+		UUID buyer = funded();
+		place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
+		place(buyer, Side.BUY, OrderType.LIMIT, "100.00", 1);
+		long counted = jdbc.queryForObject("SELECT last_trade_sequence FROM instrument WHERE id = ?", Long.class,
+				instrument);
+		asOwner("UPDATE instrument SET last_trade_sequence = last_trade_sequence + 5 WHERE id = ?", instrument);
+		try {
+			CompletableFuture<PlacementResult> traded = engine.place(key(),
+					order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 1));
+
+			assertThatThrownBy(traded::get).hasCauseInstanceOf(WriterHaltException.class);
+			assertThat(writer.isAvailable()).isFalse();
+			assertThat(jdbc.queryForObject("SELECT count(*) FROM trades WHERE instrument_id = ?", Long.class, instrument))
+				.as("the trade rolled back")
+				.isEqualTo(1);
+			assertThatThrownBy(this::restartEngine).isInstanceOf(ReconciliationException.class)
+				.hasMessageContaining("has last trade sequence " + (counted + 5) + " but its newest trade is " + counted);
+		}
+		finally {
+			// From the trades stored, not the value read before: if the guard regressed, the trade committed, and the
+			// counter must still name the newest trade for every later test's startup.
+			asOwner("""
+					UPDATE instrument SET last_trade_sequence =
+					    (SELECT coalesce(max(trade_sequence), 0) FROM trades WHERE instrument_id = ?)
+					WHERE id = ?""", instrument, instrument);
+		}
+		restartEngine();
+		assertThat(place(buyer, Side.BUY, OrderType.LIMIT, "100.00", 1).filled()).isEqualTo(1);
+		assertThat(jdbc.queryForObject("SELECT max(trade_sequence) FROM trades WHERE instrument_id = ?", Long.class,
+				instrument))
+			.isEqualTo(counted + 1);
+	}
+
+	/**
+	 * An edit or an add whose transaction rolls back after its snapshot was written changes nothing the writer keeps:
+	 * the next market-wide snapshot still carries the committed instrument, and none for the instrument never added.
+	 */
+	@Test
+	void anInstrumentCommandThatRollsBackLeavesTheCatalogueAsCommitted() throws Exception {
+		UUID operator = UUID.randomUUID();
+		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, 'unused', 'OPERATOR')",
+				operator, "op-" + operator.toString().substring(0, 8));
+		UUID neverAdded = UUID.randomUUID();
+		jdbc.update("UPDATE simulation SET state = 'SETUP', opened_at = NULL");
+		try {
+			for (String last : List.of("insertResult", "insertAudit")) {
+				failAt.set(last);
+				try {
+					assertThatThrownBy(() -> engine
+						.editInstrument(key(),
+								new EditInstrument(instrument, Price.parse("123.45"), new DisplayName("Never"), operator))
+						.get()).hasRootCauseMessage("injected failure before commit");
+					assertThatThrownBy(() -> engine
+						.addInstrument(key(), new AddInstrument(neverAdded, symbol(SYMBOLS.incrementAndGet()), null,
+								Price.parse("10.00"), operator))
+						.get()).hasRootCauseMessage("injected failure before commit");
+				}
+				finally {
+					failAt.set(null);
+				}
+			}
+			MarketTransition opened = engine.control(key(), new MarketControl(MarketControl.Action.OPEN, operator))
+				.get();
+
+			assertThat(opened.status()).isEqualTo(MarketTransition.Status.APPLIED);
+			List<byte[]> published = jdbc.queryForList("""
+					SELECT payload FROM outbox WHERE topic = 'mse.market.v1' AND command_sequence = ?""", byte[].class,
+					opened.commandSequence());
+			List<MarketSnapshot> snapshots = new ArrayList<>();
+			for (byte[] payload : published) {
+				snapshots.add(WireEvents.decodeSnapshot(payload));
+			}
+			assertThat(snapshots).extracting(MarketSnapshot::getInstrumentId).doesNotContain(neverAdded).contains(instrument);
+			MarketSnapshot ours = snapshots.stream()
+				.filter((snapshot) -> snapshot.getInstrumentId().equals(instrument))
+				.findFirst()
+				.orElseThrow();
+			assertThat(ours.getRules().getReferencePriceCents()).isEqualTo(10_000);
+			assertThat(ours.getDisplayName()).isNull();
+		}
+		finally {
+			jdbc.update("UPDATE simulation SET state = 'OPEN', opened_at = coalesce(opened_at, now())");
+		}
 	}
 
 	private Map<UUID, Integer> restingInDatabase() {

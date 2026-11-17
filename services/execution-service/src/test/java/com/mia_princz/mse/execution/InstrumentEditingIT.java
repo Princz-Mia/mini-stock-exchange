@@ -187,6 +187,11 @@ class InstrumentEditingIT {
 		HttpResponse<String> opened = operator.post("/api/v1/admin/market/open", "", "Idempotency-Key",
 				UUID.randomUUID().toString());
 		assertThat(opened.statusCode()).as(opened.body()).isEqualTo(200);
+		// Later snapshots carry the edits too: the writer keeps each instrument as its last edit left it.
+		MarketSnapshot atOpen = snapshotAt(Long.parseLong(field(opened, "commandSequence")), nova);
+		assertThat(atOpen.getVenueState()).isEqualTo(VenueState.OPEN);
+		assertThat(atOpen.getDisplayName()).isEqualTo("Nova Dynamics");
+		assertThat(atOpen.getRules().getReferencePriceCents()).isEqualTo(12_050);
 		UUID lateNameKey = UUID.randomUUID();
 		assertThat(code(edit(operator, lateNameKey, nova, "120.50", "Another"), 409))
 			.isEqualTo("MARKET_NOT_IN_SETUP");
@@ -261,6 +266,13 @@ class InstrumentEditingIT {
 		return WireEvents.decodeSnapshot(jdbc.queryForObject(
 				"SELECT payload FROM outbox WHERE topic = 'mse.market.v1' AND command_sequence = ?", byte[].class,
 				sequence));
+	}
+
+	/** The snapshot of one instrument, at a command that published one for every instrument. */
+	private MarketSnapshot snapshotAt(long sequence, UUID instrument) throws Exception {
+		return WireEvents.decodeSnapshot(jdbc.queryForObject("""
+				SELECT payload FROM outbox WHERE topic = 'mse.market.v1' AND command_sequence = ?
+				AND event_key LIKE '%|' || ?""", byte[].class, sequence, instrument.toString()));
 	}
 
 	private long outboxAt(long sequence) {

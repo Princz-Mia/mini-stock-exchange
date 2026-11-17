@@ -176,6 +176,17 @@ public final class JdbcTradingStore implements TradingStore {
 			.query((row, index) -> "Account " + row.getObject("account_id") + " reserves " + row.getLong("reserved") + " in "
 					+ asset(row.getObject("asset", UUID.class)) + " but its open orders hold " + row.getLong("held"))
 			.list());
+		// The writer numbers trades in memory, so each instrument's counter must name its newest trade.
+		problems.addAll(jdbc.sql("""
+				SELECT i.symbol, i.last_trade_sequence, coalesce(t.newest, 0) AS newest
+				FROM instrument i
+				LEFT JOIN (SELECT instrument_id, max(trade_sequence) AS newest FROM trades GROUP BY instrument_id) t
+				    ON t.instrument_id = i.id
+				WHERE i.simulation_id = :simulation AND i.last_trade_sequence <> coalesce(t.newest, 0)""")
+			.param("simulation", simulationId)
+			.query((row, index) -> "Instrument " + row.getString("symbol") + " has last trade sequence "
+					+ row.getLong("last_trade_sequence") + " but its newest trade is " + row.getLong("newest"))
+			.list());
 		// The commit-time trigger already enforces this; checking again costs little and covers a dropped trigger.
 		problems.addAll(jdbc.sql("""
 				SELECT e.batch_id FROM ledger_entry e JOIN journal_batch b ON b.id = e.batch_id
@@ -224,11 +235,14 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void updateInstrument(UUID simulationId, UUID instrumentId, long referencePriceCents, String displayName) {
-		expectOne(jdbc.sql("""
-				UPDATE instrument SET reference_price_cents = ?, display_name = ? WHERE simulation_id = ? AND id = ?""")
+	public Instrument updateInstrument(UUID simulationId, UUID instrumentId, long referencePriceCents,
+			String displayName) {
+		return jdbc.sql("""
+				UPDATE instrument SET reference_price_cents = ?, display_name = ? WHERE simulation_id = ? AND id = ?
+				RETURNING id, symbol, display_name, reference_price_cents, tick_cents, lot_size, rule_version, last_trade_sequence""")
 			.params(referencePriceCents, displayName, simulationId, instrumentId)
-			.update(), "update instrument");
+			.query((row, index) -> instrument(row))
+			.single();
 	}
 
 	@Override
@@ -453,21 +467,29 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void insertInstrument(UUID simulationId, UUID instrumentId, String symbol, String displayName,
+	public Instrument insertInstrument(UUID simulationId, UUID instrumentId, String symbol, String displayName,
 			long referencePriceCents) {
-		expectOne(jdbc.sql("""
+		return jdbc.sql("""
 				INSERT INTO instrument (id, simulation_id, symbol, display_name, reference_price_cents)
-				VALUES (?, ?, ?, ?, ?)""")
+				VALUES (?, ?, ?, ?, ?)
+				RETURNING id, symbol, display_name, reference_price_cents, tick_cents, lot_size, rule_version, last_trade_sequence""")
 			.params(instrumentId, simulationId, symbol, displayName, referencePriceCents)
-			.update(), "insert instrument");
+			.query((row, index) -> instrument(row))
+			.single();
 	}
 
 	@Override
 	public List<Instrument> instruments(UUID simulationId) {
-		return jdbc.sql("SELECT id, symbol FROM instrument WHERE simulation_id = ? ORDER BY symbol")
+		return jdbc.sql("SELECT id, symbol, display_name, reference_price_cents, tick_cents, lot_size, rule_version, last_trade_sequence FROM instrument WHERE simulation_id = ? ORDER BY symbol")
 			.param(simulationId)
-			.query((row, index) -> new Instrument(row.getObject("id", UUID.class), row.getString("symbol")))
+			.query((row, index) -> instrument(row))
 			.list();
+	}
+
+	private static Instrument instrument(java.sql.ResultSet row) throws java.sql.SQLException {
+		return new Instrument(row.getObject("id", UUID.class), row.getString("symbol"), row.getString("display_name"),
+				row.getLong("reference_price_cents"), row.getLong("tick_cents"), row.getLong("lot_size"),
+				row.getInt("rule_version"), row.getLong("last_trade_sequence"));
 	}
 
 	@Override
@@ -545,14 +567,8 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public Trade insertTrade(UUID simulationId, UUID instrumentId, OrderRequest taker, Fill fill, Instant executedAt,
-			long commandSequence) {
-		long tradeSequence = jdbc
-			.sql("UPDATE instrument SET last_trade_sequence = last_trade_sequence + 1 WHERE id = ? "
-					+ "RETURNING last_trade_sequence")
-			.param(instrumentId)
-			.query(Long.class)
-			.single();
+	public Trade insertTrade(UUID simulationId, UUID instrumentId, OrderRequest taker, Fill fill, long tradeSequence,
+			Instant executedAt, long commandSequence) {
 		boolean takerBuys = taker.side() == Side.BUY;
 		UUID id = UUID.randomUUID();
 		expectOne(jdbc.sql("""
@@ -565,6 +581,16 @@ public final class JdbcTradingStore implements TradingStore {
 					Timestamp.from(executedAt), commandSequence)
 			.update(), "insert trade");
 		return new Trade(id, tradeSequence);
+	}
+
+	@Override
+	public void advanceTradeSequence(UUID instrumentId, long from, long to) {
+		int changed = jdbc.sql("UPDATE instrument SET last_trade_sequence = ? WHERE id = ? AND last_trade_sequence = ?")
+			.params(to, instrumentId, from)
+			.update();
+		if (changed != 1) {
+			throw new OutOfStepException("Instrument " + instrumentId + " was not at trade sequence " + from);
+		}
 	}
 
 	@Override
@@ -728,19 +754,14 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	private void insertSnapshot(MarketView view, boolean removed) {
-		MarketSnapshot.Builder snapshot = jdbc.sql("""
-				SELECT symbol, display_name, reference_price_cents, tick_cents, lot_size, rule_version,
-				    last_trade_sequence
-				FROM instrument WHERE id = ? AND simulation_id = ?""")
-			.params(view.instrumentId(), view.simulationId())
-			.query((row, index) -> MarketSnapshot.newBuilder()
-				.setSymbol(row.getString("symbol"))
-				.setDisplayName(row.getString("display_name"))
-				.setLastTradeSequence(row.getLong("last_trade_sequence"))
-				.setRules(new MarketRules(row.getInt("rule_version"), row.getLong("reference_price_cents"),
-						row.getLong("tick_cents"), row.getLong("lot_size"), Quantity.MIN_SHARES, Quantity.MAX_SHARES,
-						Price.MAX_CENTS, view.market().maxOpenOrdersPerAccount(), view.market().maxFillsPerCommand())))
-			.single();
+		Instrument instrument = view.instrument();
+		MarketSnapshot.Builder snapshot = MarketSnapshot.newBuilder()
+			.setSymbol(instrument.symbol())
+			.setDisplayName(instrument.displayName())
+			.setLastTradeSequence(instrument.lastTradeSequence())
+			.setRules(new MarketRules(instrument.ruleVersion(), instrument.referencePriceCents(), instrument.tickCents(),
+					instrument.lotSize(), Quantity.MIN_SHARES, Quantity.MAX_SHARES, Price.MAX_CENTS,
+					view.market().maxOpenOrdersPerAccount(), view.market().maxFillsPerCommand()));
 		List<PublicTrade> recent = view.recentTrades()
 			.stream()
 			.map((trade) -> new PublicTrade(trade.tradeId(), trade.tradeSequence(), trade.priceCents(), trade.quantity(),
@@ -748,7 +769,7 @@ public final class JdbcTradingStore implements TradingStore {
 			.toList();
 		MarketSnapshot event = snapshot.setEventId(UUID.randomUUID())
 			.setSimulationId(view.simulationId())
-			.setInstrumentId(view.instrumentId())
+			.setInstrumentId(instrument.id())
 			.setVenueState(VenueState.valueOf(view.market().state()))
 			.setBids(levels(view.bids()))
 			.setAsks(levels(view.asks()))
@@ -772,7 +793,7 @@ public final class JdbcTradingStore implements TradingStore {
 		expectOne(jdbc.sql("""
 				INSERT INTO outbox (event_id, topic, event_key, schema_fingerprint, payload, command_sequence)
 				VALUES (?, ?, ?, ?, ?, ?)""")
-			.params(event.getEventId(), MARKET_TOPIC, view.simulationId() + "|" + view.instrumentId(),
+			.params(event.getEventId(), MARKET_TOPIC, view.simulationId() + "|" + instrument.id(),
 					SNAPSHOT_FINGERPRINT, payload, view.commandSequence())
 			.update(), "insert market snapshot");
 	}
