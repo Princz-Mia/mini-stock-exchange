@@ -53,3 +53,17 @@ def test_worker_writes_a_heartbeat_and_stops_on_request(tmp_path, monkeypatch) -
     assert is_healthy(heartbeat)
     assert not is_healthy(heartbeat, now=time.time() + 60)
     assert not is_healthy(tmp_path / "missing")
+
+
+def test_httpcore_finds_sniffio() -> None:
+    """Without it, httpcore retries a failed import on every request: a search of the module path
+    that cost about 0.4 ms a call. It is pinned for that reason; this keeps the pin from going."""
+    from httpcore._synchronization import current_async_library
+
+    async def detect() -> str:
+        return current_async_library()
+
+    assert asyncio.run(detect()) == "asyncio"
+    import sniffio
+
+    assert sniffio.__version__ == "1.3.1"

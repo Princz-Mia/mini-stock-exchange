@@ -12,7 +12,11 @@ class Settings(BaseModel):
 
     execution_url: HttpUrl
     market_data_url: HttpUrl
+    # Trading calls (orders and cancels) in flight at once, across every bot.
     max_in_flight: int = Field(default=32, ge=1, le=256)
+    # Reads (balances, open orders) in flight at once, apart from trading calls, so a run's reads
+    # never hold back its commands.
+    max_reads_in_flight: int = Field(default=64, ge=1, le=512)
     heartbeat_seconds: float = Field(default=5.0, gt=0)
     # One <accountId>.token file per bot, written once by the exchange at provisioning.
     token_directory: Path = Path("/run/mse/bot-tokens")

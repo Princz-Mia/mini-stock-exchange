@@ -23,7 +23,9 @@ async def heartbeat(settings: Settings, stop: asyncio.Event) -> None:
 
 
 async def run(settings: Settings, stop: asyncio.Event) -> None:
-    limits = httpx.Limits(max_connections=settings.max_in_flight)
+    # Room for every trading call and read at once, and a few for the control plane and the market.
+    connections = settings.max_in_flight + settings.max_reads_in_flight + 8
+    limits = httpx.Limits(max_connections=connections, max_keepalive_connections=connections)
     async with httpx.AsyncClient(limits=limits, timeout=10.0) as http:
         await asyncio.gather(heartbeat(settings, stop), Runner(settings, http).run(stop))
 

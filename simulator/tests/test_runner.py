@@ -121,6 +121,8 @@ class Exchange:
         self.trend: int | None = None
         self.polls = 0
         self.pages = 0
+        # When set, every market poll after the first waits until released.
+        self.market_stall: asyncio.Event | None = None
 
     def open_order(
         self, bot_token: str, instrument: str = INSTRUMENT, side: str = "BUY", limit="99.00"
@@ -179,6 +181,8 @@ class Exchange:
             return httpx.Response(200, json={"state": "OPEN"})
         if path == "/api/v1/instruments":
             self.polls += 1
+            if self.market_stall is not None and self.polls > 1:
+                await self.market_stall.wait()
             last = None
             if self.trend is not None:
                 cents = 10_000 + self.trend * self.polls
@@ -531,6 +535,61 @@ def test_building_a_large_run_yields_to_the_event_loop(tmp_path, monkeypatch) ->
     assert len(built) == 6
     between = events[built[0] : built[-1]]
     assert between.count("other") >= 2, "other work runs between batches of bots"
+
+
+def test_a_stalled_market_poll_does_not_stop_the_bots(tmp_path) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 2)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["NOISE", "NOISE"])
+    exchange.market_stall = asyncio.Event()
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens", market_poll_seconds=0.01), http)
+            task = asyncio.create_task(runner.follow(assigned(exchange.run)))
+            for _ in range(300):
+                if exchange.polls >= 2 and len(exchange.placed) >= 6:
+                    break
+                await asyncio.sleep(0.01)
+            assert exchange.polls >= 2, "the second poll is waiting"
+            assert len(exchange.placed) >= 6, "steps go on while the market poll is stuck"
+            assert runner.activity.steps >= 6 and runner.activity.reads >= 12
+            exchange.market_stall.set()
+            exchange.desired = "STOPPED"
+            await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+
+
+def test_the_trading_loop_never_ticks_faster_than_its_floor(tmp_path) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 1)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["NOISE"], commandsPerSecond="2000.00")
+    pauses: list[float] = []
+
+    async def scenario() -> None:
+        async def sleep(seconds: float) -> None:
+            pauses.append(seconds)
+            if len(pauses) > 20:
+                exchange.desired = "STOPPED"
+            await asyncio.sleep(0)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http, sleep=sleep)
+            runner.start_run(assigned(exchange.run))
+            await runner.load_bots()
+            runner._lease_until = float("inf")
+            stop = asyncio.Event()
+            trading = asyncio.create_task(runner._trade(stop))
+            for _ in range(200):
+                if len(pauses) > 10:
+                    break
+                await asyncio.sleep(0)
+            stop.set()
+            await asyncio.wait_for(trading, 5)
+
+    asyncio.run(scenario())
+    assert pauses and min(pauses) >= runner_module.MIN_TICK, "1/2000 s would spin the loop"
 
 
 def test_market_data_that_is_not_live_pauses_new_orders(tmp_path) -> None:
