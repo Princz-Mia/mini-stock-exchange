@@ -143,3 +143,53 @@ All budgets met.
 | Execution JVM | Oracle JDK 25.0.5, `-XX:MaxRAMPercentage=75` |
 | PostgreSQL | 18.6, `fsync=on`, `synchronous_commit=on` |
 | Container limits | Execution 2 GiB, 2 CPUs; PostgreSQL 2 GiB, 2 CPUs; Kafka 2 GiB, 2 CPUs; Market Data 1.5 GiB, 1.5 CPUs; Flink JobManager 1.5 GiB, 1 CPU; Flink TaskManager 1.8 GiB, 2 CPUs; simulator 512 MiB, 1 CPU; proxy 256 MiB, 0.5 CPU |
+
+## Highest rate
+
+The rate at which the exchange still meets the budgets above, found two ways on 2026-11-17, same environment as the 2026-11-08 run (container limits unchanged), with durable PostgreSQL. Both modes are described in the README's "Load test" section.
+
+### Ramp, 10,000 bots
+
+```powershell
+uv run --project simulator python -m mse_simulator.loadtest --ramp
+```
+
+A new bot run at each rate, 30 s of warm-up (2 minutes for the first), 2 minutes measured. **Highest rate that met every budget: 150 commands a second.**
+
+| Rate | Admitted | Within 150 ms | Within 500 ms | p99 (estimate) | Queue peak | Refused for load | Writer service time | Met |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 100/s | 96.8/s | 100.00% | 100.00% | 24.1 ms | 1 | 0 | 5.7 ms | yes |
+| 125/s | 116.9/s | 100.00% | 100.00% | 26.9 ms | 1 | 0 | 5.4 ms | yes |
+| 150/s | 143.4/s | 99.81% | 100.00% | 141.6 ms | 5 | 0 | 5.6 ms | yes |
+| 175/s | 137.7/s | 87.58% | 100.00% | 218.2 ms | 31 | 0 | 5.7 ms | no: p95, and under 90% of the rate admitted |
+
+Processor use, mean / peak in percent of one CPU:
+
+| Rate | Execution | PostgreSQL | Simulator | Kafka | Market Data |
+| --- | --- | --- | --- | --- | --- |
+| 100/s | 34 / 39 | 50 / 55 | 26 / 44 | 10 / 43 | 11 / 15 |
+| 125/s | 41 / 50 | 60 / 87 | 30 / 36 | 18 / 115 | 12 / 18 |
+| 150/s | 48 / 58 | 71 / 93 | 43 / 97 | 23 / 161 | 15 / 24 |
+| 175/s | 54 / 67 | 74 / 96 | 93 / 98 | 27 / 121 | 14 / 18 |
+
+- One writer handles a command in about 5.6 ms, so it tops out near 178 a second, and queueing pushes the p95 past 150 ms before that.
+- The bots offer about 95% of the asked rate. At 175 a second the simulator also reached its 1-CPU limit (about 3 ms of processor per bot command at the lower rates), so that step is limited by the generator as well as the writer.
+
+### Open-loop stress, no bots
+
+```powershell
+uv run --project simulator python -m mse_simulator.loadtest --stress
+```
+
+Trader logins send at fixed times from the host through the proxy, 10 s of warm-up (2 minutes for the first rate), 60 s measured, latency from each command's planned time. **Highest rate that met every budget: 150 commands a second.**
+
+| Rate | Answered | Refused or timed out | Failed | p50 | p95 | p99 | Generator lag p99 | Met |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 100/s | 100.0/s | 0 | 0 | 12.5 ms | 24.4 ms | 28.8 ms | 15.0 ms | yes |
+| 125/s | 125.0/s | 0 | 0 | 12.4 ms | 16.7 ms | 21.9 ms | 8.1 ms | yes |
+| 150/s | 150.0/s | 0 | 0 | 12.6 ms | 17.9 ms | 23.9 ms | 8.3 ms | yes |
+| 175/s | 175.0/s | 0 | 0 | 13.2 ms | 171.1 ms | 362.3 ms | 8.1 ms | no: p95 |
+
+Without the bots' generator in the way, the limit is the same: 175 a second is just under the writer's capacity, so commands queue and the p95 passes 150 ms. These latencies include the proxy and Docker Desktop's port forwarding.
+
+The accounting checks passed after both runs.

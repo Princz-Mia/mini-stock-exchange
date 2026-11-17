@@ -129,3 +129,14 @@ def test_a_steady_queue_is_not_growth_but_a_rising_one_is() -> None:
     assert queue_growth(rising).last_minute > queue_growth(rising).first_minute
     with pytest.raises(ValueError):
         queue_growth([])
+
+
+def test_queue_growth_can_be_judged_over_a_shorter_span() -> None:
+    # A minute in which the queue grows the whole time: a minute at each end is the same samples,
+    # so it cannot show growth; a third at each end does.
+    samples = [(float(at), 1.0 + at) for at in range(0, 61, 5)]
+
+    assert not queue_growth(samples).grew
+    third = queue_growth(samples, span=20.0)
+    assert third.grew
+    assert (third.first_minute, third.last_minute) == (11.0, 51.0)
