@@ -7,9 +7,14 @@ From the repository root, with Docker running:
 The stack runs as its own Compose project ("mse-load") with its own ports, volumes and freshly
 random passwords, so a development stack or a gate run is never touched; it is deleted
 afterwards unless --keep-stack is given. The exit code is 0 only when every budget is met.
+
+--ramp (bot runs) and --stress (open loop, no bots) instead look for the highest rate that meets
+the budgets, stopping at the first rate that misses one; their exit code is 0 when at least one
+rate met every budget and the accounting checks afterwards passed.
 """
 
 import argparse
+import asyncio
 import json
 import logging
 import math
@@ -27,7 +32,7 @@ from pathlib import Path
 
 import httpx
 
-from mse_simulator.loadtest import diagnostics, stats
+from mse_simulator.loadtest import diagnostics, ramp, stats, stress
 from mse_simulator.population import split_text, strategy_split
 
 logger = logging.getLogger("mse_simulator.loadtest")
@@ -44,6 +49,9 @@ FAILURE_BUDGET = 0.001
 LATENCY = "mse_commands_seconds_bucket"
 # The longest the bots may take to load before the run counts as failed to start.
 LOADING = 600
+# The first rate on a fresh stack warms up at least this long: the JVM is still compiling, and a
+# 30-second warm-up once failed a rate that passed warm.
+FIRST_WARMUP = 120
 
 
 @dataclass
@@ -55,6 +63,14 @@ class Options:
     duration: int
     seed: int
     keep_stack: bool
+    # With a ramp: one run after another at these rates, each warmed up and measured on its own.
+    ramp: list[float] | None = None
+    step_warmup: int = 30
+    step_duration: int = 120
+    # With stress: no bots; trader logins send at each of these rates, open loop.
+    stress: list[float] | None = None
+    stress_warmup: int = 10
+    stress_duration: int = 60
 
 
 @dataclass
@@ -78,6 +94,9 @@ class Phases:
 @dataclass
 class Window:
     probe: list[tuple[str, float, int]] = field(default_factory=list)
+    # Probe answers of 503 that were not a busy refusal (TRADING_UNAVAILABLE: the writer stopped),
+    # which Execution counts nowhere.
+    unavailable: int = 0
     queue: list[tuple[float, float]] = field(default_factory=list)
     feeds: list[tuple[float, str]] = field(default_factory=list)
     outbox: list[tuple[float, int]] = field(default_factory=list)
@@ -264,9 +283,15 @@ def wait_for(what: str, condition, timeout: float, interval: float = 2.0):
         time.sleep(interval)
 
 
-def set_up(operator: Session, bots: int, trader_password: str) -> list[str]:
+def set_up(
+    operator: Session,
+    bots: int,
+    trader_password: str,
+    logins: list[tuple[str, str]] | None = None,
+) -> list[str]:
     """Five instruments at 100.00, a trader for the probe, added and funded as the operator adds
-    one, the bots tagged in the split the run uses, and an open market."""
+    one, any further trader logins (username, password) with cash only, the bots tagged in the
+    split the run uses, and an open market."""
     instruments = [
         operator.expect(
             201, "/api/v1/admin/instruments", {"symbol": symbol, "referencePrice": "100.00"}
@@ -284,6 +309,12 @@ def set_up(operator: Session, bots: int, trader_password: str) -> list[str]:
             "holdings": holdings,
         },
     )
+    for username, password in logins or []:
+        operator.expect(
+            201,
+            "/api/v1/admin/traders",
+            {"username": username, "password": password, "cash": "1000000.00"},
+        )
     bot_holdings = [{"instrumentId": instrument, "quantity": 200} for instrument in instruments]
     for strategy, total in strategy_split(bots).items():
         for start in range(0, total, 100):
@@ -343,10 +374,12 @@ def measure(
         began = time.perf_counter()
         placed = trader.command("/api/v1/orders", order)
         result.probe.append(("place", time.perf_counter() - began, placed.status_code))
+        result.unavailable += unavailable(placed)
         if placed.status_code == 201:
             began = time.perf_counter()
             canceled = trader.command(f"/api/v1/orders/{placed.json()['orderId']}/cancel")
             result.probe.append(("cancel", time.perf_counter() - began, canceled.status_code))
+            result.unavailable += unavailable(canceled)
         if tick % 5 == 0:
             execution = stack.scrape()
             result.queue.append((now, stats.total(execution, "mse_writer_queue_depth")))
@@ -364,6 +397,22 @@ def measure(
     done.set()
     sampler.join(timeout=70)
     return result
+
+
+def unavailable(response: httpx.Response) -> int:
+    """1 for a 503 that is not a busy refusal, which Execution's counters leave out."""
+    if response.status_code != 503:
+        return 0
+    try:
+        return 0 if response.json().get("code") == "EXCHANGE_BUSY" else 1
+    except ValueError:
+        return 1
+
+
+def restart_line(restarted: float) -> str:
+    if math.isnan(restarted):
+        return "- Restarting Execution: not done, since the checks did not run."
+    return f"- Restarting Execution, its reconciliation included: {restarted:.0f} s."
 
 
 def snapshot(stack: Stack, operator: Session) -> Snapshot:
@@ -627,11 +676,20 @@ def summarize(
         f"({len(window.outbox)} samples).",
         f"- Public feed not LIVE in {stale} of {len(window.feeds)} samples.",
         "",
+        *environment_lines(env),
+    ]
+    return "\n".join(lines), passed
+
+
+def environment_lines(
+    env: dict, generator: str = "the simulator container on the same host"
+) -> list[str]:
+    return [
         "## Environment",
         "",
         f"- Host: {env['host']}; Docker {env['docker']}; {env['cpus']} CPUs and "
         f"{env['memory_gib']} GiB "
-        "visible to Docker. Generator: the simulator container on the same host.",
+        f"visible to Docker. Generator: {generator}.",
         f"- Commit: {env['commit']}.",
         f"- Execution JVM: {env['java']}; {env['jvm_args']}.",
         f"- PostgreSQL: {env['postgres']}.",
@@ -643,10 +701,332 @@ def summarize(
         + ".",
         "",
     ]
-    return "\n".join(lines), passed
+
+
+def begin_run(operator: Session, options: Options, rate: str, minutes: int) -> dict:
+    """Starts a bot run with every bot, in the split the bots were tagged with."""
+    split = strategy_split(options.bots)
+    return operator.expect(
+        201,
+        "/api/v1/admin/bot-runs",
+        {
+            "marketMakers": split["MARKET_MAKER"],
+            "momentum": split["MOMENTUM"],
+            "noise": split["NOISE"],
+            "seed": options.seed,
+            "commandsPerSecond": rate,
+            "maxOrderQuantity": 10,
+            "maxPosition": 200,
+            "durationMinutes": minutes,
+        },
+    )
+
+
+def run_ramp(options: Options) -> int:
+    """One run after another at rising rates on one market and its bots, each warmed up, measured
+    and stopped; the ramp ends at the first rate that misses a budget. The accounting checks run
+    once, after the last step."""
+    assert options.ramp is not None
+    stack = Stack(options.root)
+    logger.info("starting a clean stack as Compose project %s", PROJECT)
+    stack.compose("down", "-v", "--remove-orphans", check=False)
+    try:
+        stack.compose("up", "-d", "--build", "--wait", "--wait-timeout", "600", timeout=1800)
+        stack.sql("postgres", "execution_db", "CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
+        operator = Session("operator", stack.passwords["operator"])
+        instruments = set_up(operator, options.bots, stack.passwords["trader"])
+        wait_for(
+            "Market Data to list the instruments",
+            lambda: len(listing()["instruments"]) >= len(SYMBOLS),
+            120,
+        )
+        trader = Session("trader", stack.passwords["trader"])
+        minutes = (
+            math.ceil(
+                (max(options.step_warmup, FIRST_WARMUP) + options.step_duration + LOADING) / 60
+            )
+            + 3
+        )
+        steps: list[ramp.Step] = []
+        skipped: list[float] = []
+        broke = None
+        stopped = True
+        for index, rate in enumerate(options.ramp):
+            try:
+                warmup = (
+                    max(options.step_warmup, FIRST_WARMUP) if index == 0 else options.step_warmup
+                )
+                result = ramp_step(
+                    stack, operator, trader, instruments[0], options, rate, minutes, warmup
+                )
+            except Exception as error:  # noqa: BLE001 - the steps before it are still reported
+                # The rate most likely to break the measurement is the one that overloads the
+                # exchange; the steps measured before it are kept and reported.
+                logger.exception(
+                    "step %d at %.0f commands/s could not be measured", index + 1, rate
+                )
+                broke = f"{rate:,.0f}/s ({type(error).__name__}: {error})"
+                skipped = options.ramp[index + 1 :]
+                stopped = stop_any_run(operator)
+                break
+            steps.append(result)
+            logger.info(
+                "step %d: offered %.1f/s, committed %.1f/s, %s",
+                index + 1,
+                result.offered_rate,
+                result.committed_rate,
+                "met every budget" if result.passed else "missed: " + ", ".join(result.missed()),
+            )
+            if not result.passed:
+                skipped = options.ramp[index + 1 :]
+                break
+        env = read_environment(stack)
+        if stopped:
+            logger.info("checking accounting and the public side")
+            checks, restarted = checked(stack, instruments)
+        else:
+            checks = {
+                "The last run was confirmed stopped, so the accounting checks could run": False
+            }
+            restarted = math.nan
+        lines = [
+            f"# Ramp: {datetime.now(UTC):%Y-%m-%d %H:%M} UTC",
+            "",
+            f"- {len(SYMBOLS)} instruments; {options.bots} bots "
+            f"({split_text(strategy_split(options.bots))}), seed {options.seed}.",
+            f"- Each step: a new run at its rate, {options.step_warmup} s of warm-up (the first "
+            f"{max(options.step_warmup, FIRST_WARMUP)} s), then "
+            f"{options.step_duration} s measured, then stopped.",
+            "",
+            *ramp.report(steps, skipped, broke),
+            "## After the last step",
+            "",
+            *[f"- {name}: {'yes' if met else 'no'}" for name, met in checks.items()],
+            restart_line(restarted),
+            "",
+            *environment_lines(env),
+        ]
+        report = "\n".join(lines)
+        path = stack.run_dir / f"ramp-{datetime.now(UTC):%Y%m%d-%H%M}.md"
+        path.write_text(report, encoding="utf-8")
+        print(report)
+        logger.info("report written to %s", path)
+        return 0 if all(checks.values()) and ramp.highest_passing(steps) is not None else 1
+    finally:
+        if options.keep_stack:
+            logger.info("stack kept: docker compose -p %s", PROJECT)
+        else:
+            stack.compose("down", "-v", "--remove-orphans", check=False)
+
+
+def ramp_step(
+    stack: Stack,
+    operator: Session,
+    trader: Session,
+    instrument: str,
+    options: Options,
+    rate: float,
+    minutes: int,
+    warmup: int,
+) -> ramp.Step:
+    """One step: a new run at the rate, warmed up, measured and stopped."""
+    started = begin_run(operator, options, f"{rate:.2f}", minutes)
+    logger.info("%.0f commands/s: run %s", rate, started["runId"])
+    wait_for("the run to be RUNNING", lambda: activity(operator)["status"] == "RUNNING", 180)
+    wait_for("the bots to trade", lambda: activity(operator)["activity"]["placed"] > 0, LOADING)
+    time.sleep(warmup)
+    before = snapshot(stack, operator)
+    sampled = diagnostics.Sampled()
+    window = measure(stack, operator, trader, instrument, options.step_duration, sampled)
+    after = snapshot(stack, operator)
+    operator.expect(200, f"/api/v1/admin/bot-runs/{started['runId']}/stop")
+    wait_for("the run to stop", lambda: activity(operator)["status"] == "STOPPED", 600)
+    return ramp.step(
+        rate,
+        before.metrics,
+        after.metrics,
+        before.activity,
+        after.activity,
+        after.at - before.at,
+        window.probe,
+        window.queue,
+        sampled,
+        window.unavailable,
+    )
+
+
+def stop_any_run(operator: Session) -> bool:
+    """Stops the latest run after a step broke, sending the stop until it is taken and waiting for
+    the worker to confirm (STOPPING becomes STOPPED). False if that could not be confirmed, so the
+    accounting checks do not run beside a run still trading."""
+    try:
+        latest = activity(operator)
+        if latest["status"] == "STOPPED":
+            return True
+
+        def stop_taken() -> bool:
+            status = operator.command(f"/api/v1/admin/bot-runs/{latest['runId']}/stop").status_code
+            # 409: the run is not running, already stopping or stopped.
+            return status in (200, 409)
+
+        wait_for("the stop to be taken", stop_taken, 120)
+        wait_for("the run to stop", lambda: activity(operator)["status"] == "STOPPED", 600)
+        return True
+    except Exception:  # noqa: BLE001 - the report is still written
+        logger.exception("could not stop the run")
+        return False
+
+
+def read_environment(stack: Stack) -> dict:
+    """The environment for the report, or placeholders if it could not be read: the measured
+    rates are reported either way."""
+    try:
+        return environment(stack)
+    except Exception:  # noqa: BLE001 - the report is still written
+        logger.exception("the environment could not be read")
+        unknown = "not read"
+        return {
+            key: unknown
+            for key in ("host", "docker", "cpus", "memory_gib", "commit", "java", "jvm_args")
+        } | {"postgres": unknown, "limits": {}}
+
+
+def checked(stack: Stack, instruments: list[str]) -> tuple[dict, float]:
+    """The accounting checks, or one failed check if they could not run at all."""
+    try:
+        return correctness(stack, instruments)
+    except Exception as error:  # noqa: BLE001 - the measured steps are still reported
+        logger.exception("the accounting checks could not run")
+        return {f"The accounting checks ran ({type(error).__name__}: {error})": False}, math.nan
+
+
+def run_stress(options: Options) -> int:
+    """Open-loop stress on a market with no bots: trader logins send commands at fixed times, at
+    each rate in turn, ending at the first rate that misses a budget. The accounting checks run
+    once, after the last rate."""
+    assert options.stress is not None
+    stack = Stack(options.root)
+    logger.info("starting a clean stack as Compose project %s", PROJECT)
+    stack.compose("down", "-v", "--remove-orphans", check=False)
+    try:
+        stack.compose("up", "-d", "--build", "--wait", "--wait-timeout", "600", timeout=1800)
+        operator = Session("operator", stack.passwords["operator"])
+        # Traders can only be added before the market opens, which set_up does last.
+        credentials = [
+            (f"stress-{index:04d}", secrets.token_urlsafe(24))
+            for index in range(stress.traders(max(options.stress)))
+        ]
+        instruments = set_up(operator, 0, stack.passwords["trader"], credentials)
+        logger.info("%d trader logins added", len(credentials))
+        wait_for(
+            "Market Data to list the instruments",
+            lambda: len(listing()["instruments"]) >= len(SYMBOLS),
+            120,
+        )
+        logins = [
+            (username, password, instruments[index % len(instruments)])
+            for index, (username, password) in enumerate(credentials)
+        ]
+        results, skipped, broke = asyncio.run(stress_rates(options, logins))
+        env = read_environment(stack)
+        logger.info("checking accounting and the public side")
+        checks, restarted = checked(stack, instruments)
+        lines = [
+            f"# Stress: {datetime.now(UTC):%Y-%m-%d %H:%M} UTC",
+            "",
+            f"- {len(SYMBOLS)} instruments, no bots; each trader login sends at most "
+            f"{stress.PER_TRADER} commands a second, from this machine through port {WEB_PORT}.",
+            f"- Each rate: {options.stress_warmup} s of warm-up (the first "
+            f"{max(options.stress_warmup, FIRST_WARMUP)} s), then {options.stress_duration} s "
+            "measured; latency counts from each command's planned time.",
+            "",
+            *stress.report(results, skipped, broke),
+            "## After the last rate",
+            "",
+            *[f"- {name}: {'yes' if met else 'no'}" for name, met in checks.items()],
+            restart_line(restarted),
+            "",
+            *environment_lines(env, f"this machine, through the proxy on port {WEB_PORT}"),
+        ]
+        report = "\n".join(lines)
+        path = stack.run_dir / f"stress-{datetime.now(UTC):%Y%m%d-%H%M}.md"
+        path.write_text(report, encoding="utf-8")
+        print(report)
+        logger.info("report written to %s", path)
+        return 0 if all(checks.values()) and stress.highest_passing(results) is not None else 1
+    finally:
+        if options.keep_stack:
+            logger.info("stack kept: docker compose -p %s", PROJECT)
+        else:
+            stack.compose("down", "-v", "--remove-orphans", check=False)
+
+
+async def stress_rates(
+    options: Options, logins: list[tuple[str, str, str]]
+) -> tuple[list[stress.Result], list[float], str | None]:
+    """Signs every login in, then fires each rate in turn, each starting with no open orders. A
+    rate that cannot be measured ends the run; the rates before it are still returned."""
+    assert options.stress is not None
+    base_url = f"http://{HOST}:{WEB_PORT}"
+    gate = asyncio.Semaphore(8)
+    traders: list[stress.Trader] = []
+
+    async def sign_in(username: str, password: str, instrument: str) -> None:
+        async with gate:
+            traders.append(await stress.sign_in(base_url, username, password, instrument))
+
+    async def tidy(trader: stress.Trader) -> None:
+        async with gate:
+            await trader.tidy()
+
+    results: list[stress.Result] = []
+    skipped: list[float] = []
+    broke = None
+    try:
+        await asyncio.gather(*(sign_in(*login) for login in logins))
+        for index, rate in enumerate(options.stress):
+            logger.info("rate %d: %.0f commands/s", index + 1, rate)
+            warmup = (
+                max(options.stress_warmup, FIRST_WARMUP) if index == 0 else options.stress_warmup
+            )
+            try:
+                await asyncio.gather(*(tidy(trader) for trader in traders))
+                sent = await stress.fire(
+                    traders[: stress.traders(rate)],
+                    rate,
+                    warmup + options.stress_duration,
+                )
+            except Exception as error:  # noqa: BLE001 - the rates before it are still reported
+                logger.exception(
+                    "rate %d at %.0f commands/s could not be measured", index + 1, rate
+                )
+                broke = f"{rate:,.0f}/s ({type(error).__name__}: {error})"
+                skipped = options.stress[index + 1 :]
+                break
+            result = stress.measured(rate, warmup, options.stress_duration, sent)
+            results.append(result)
+            logger.info(
+                "rate %d: answered %.1f/s, p99 %s, %s",
+                index + 1,
+                result.answered_rate,
+                result.latency(0.99),
+                "met every budget" if result.passed else "missed: " + ", ".join(result.missed()),
+            )
+            if not result.passed:
+                skipped = options.stress[index + 1 :]
+                break
+            # Let the writer's queue empty before the next rate.
+            await asyncio.sleep(5)
+    finally:
+        await asyncio.gather(*(trader.client.aclose() for trader in traders))
+    return results, skipped, broke
 
 
 def run(options: Options) -> int:
+    if options.ramp is not None:
+        return run_ramp(options)
+    if options.stress is not None:
+        return run_stress(options)
     stack = Stack(options.root)
     logger.info("starting a clean stack as Compose project %s", PROJECT)
     stack.compose("down", "-v", "--remove-orphans", check=False)
@@ -664,24 +1044,10 @@ def run(options: Options) -> int:
             120,
         )
         trader = Session("trader", stack.passwords["trader"])
-        split = strategy_split(options.bots)
         # Room for the bots to load (up to LOADING seconds) as well as the warm-up and the window;
         # the run is stopped by hand at the end anyway.
         minutes = math.ceil((options.warmup + options.duration + LOADING) / 60) + 3
-        started = operator.expect(
-            201,
-            "/api/v1/admin/bot-runs",
-            {
-                "marketMakers": split["MARKET_MAKER"],
-                "momentum": split["MOMENTUM"],
-                "noise": split["NOISE"],
-                "seed": options.seed,
-                "commandsPerSecond": options.rate,
-                "maxOrderQuantity": 10,
-                "maxPosition": 200,
-                "durationMinutes": minutes,
-            },
-        )
+        started = begin_run(operator, options, options.rate, minutes)
         logger.info("run %s started; waiting for a worker", started["runId"])
         began = time.monotonic()
         wait_for("the run to be RUNNING", lambda: activity(operator)["status"] == "RUNNING", 180)
@@ -750,12 +1116,61 @@ def parse(argv: list[str]) -> Options:
     parser.add_argument("--duration", type=int, default=600, help="seconds measured")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--keep-stack", action="store_true")
+    parser.add_argument(
+        "--ramp",
+        nargs="?",
+        const="100,125,150,175,200,250,300,400,500,750,1000",
+        help="instead of one steady run, a run at each of these rising rates (commands/s, "
+        "comma-separated; default 100 to 1000), ending at the first that misses a budget",
+    )
+    parser.add_argument("--step-warmup", type=int, default=30, help="seconds before each step")
+    parser.add_argument("--step-duration", type=int, default=120, help="seconds each step measures")
+    parser.add_argument(
+        "--stress",
+        nargs="?",
+        const="100,125,150,175,200,250,300,400,500,750,1000,1500,2000",
+        help="instead of bots, trader logins sending at fixed times at each of these rising rates "
+        "(commands/s, comma-separated; default 100 to 2000), stopping at the first that misses "
+        "a budget",
+    )
+    parser.add_argument("--stress-warmup", type=int, default=10, help="seconds before each rate")
+    parser.add_argument(
+        "--stress-duration", type=int, default=60, help="seconds each rate measures"
+    )
     args = parser.parse_args(argv)
+    if args.ramp is not None and args.stress is not None:
+        parser.error("--ramp and --stress are separate runs; choose one")
+    if min(args.warmup, args.step_warmup, args.stress_warmup) < 0:
+        parser.error("a warm-up cannot be negative")
+    if args.stress_duration < 1:
+        parser.error("--stress-duration must be at least 1 s")
+    if args.step_duration < ramp.MIN_STEP_SECONDS:
+        parser.error(
+            f"--step-duration must be at least {ramp.MIN_STEP_SECONDS} s, so that its first and "
+            "last thirds can show the queue growing"
+        )
     root = Path.cwd()
     if not (root / "compose.yaml").exists():
         parser.error("run from the repository root, where compose.yaml is")
+    try:
+        rates = None if args.ramp is None else ramp.rates(args.ramp)
+        stress_rates = None if args.stress is None else ramp.rates(args.stress)
+    except ValueError as error:
+        parser.error(str(error))
     return Options(
-        root, args.rate, args.bots, args.warmup, args.duration, args.seed, args.keep_stack
+        root,
+        args.rate,
+        args.bots,
+        args.warmup,
+        args.duration,
+        args.seed,
+        args.keep_stack,
+        rates,
+        args.step_warmup,
+        args.step_duration,
+        stress_rates,
+        args.stress_warmup,
+        args.stress_duration,
     )
 
 

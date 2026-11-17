@@ -127,17 +127,20 @@ class QueueVerdict:
     grew: bool
 
 
-def queue_growth(samples: list[tuple[float, float]], allowance: float = 5.0) -> QueueVerdict:
+def queue_growth(
+    samples: list[tuple[float, float]], allowance: float = 5.0, span: float = 60.0
+) -> QueueVerdict:
     """Whether the writer queue grew over the window, from (seconds into the window, depth) samples.
 
-    Sustained growth means the last minute's average depth is above the first minute's by more
-    than a few commands. A momentary peak is not growth; it is reported beside the verdict.
+    Sustained growth means the average depth over the last span (a minute unless given) is above
+    the first span's by more than a few commands. A momentary peak is not growth; it is reported
+    beside the verdict. The span must be under half the window, or the two ends overlap.
     """
     if not samples:
         raise ValueError("no queue samples")
     end = max(at for at, _ in samples)
-    first = [depth for at, depth in samples if at <= 60] or [samples[0][1]]
-    last = [depth for at, depth in samples if at >= end - 60] or [samples[-1][1]]
+    first = [depth for at, depth in samples if at <= span] or [samples[0][1]]
+    last = [depth for at, depth in samples if at >= end - span] or [samples[-1][1]]
     first_mean = sum(first) / len(first)
     last_mean = sum(last) / len(last)
     return QueueVerdict(
