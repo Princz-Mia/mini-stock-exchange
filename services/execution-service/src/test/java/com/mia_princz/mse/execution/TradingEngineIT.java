@@ -294,13 +294,14 @@ class TradingEngineIT {
 			finally {
 				jdbc.update("UPDATE simulation SET state = 'OPEN'");
 			}
-			assertThat(counts).containsExactly(Map.entry("resting order", "15 statements, 1 commit"),
-					Map.entry("one fill", "27 statements, 1 commit"), Map.entry("cancel", "13 statements, 1 commit"),
-					Map.entry("cancel of an unknown order", "5 statements, 1 commit"),
-					Map.entry("insufficient cash", "7 statements, 1 commit"),
-					Map.entry("a repeated key", "2 statements, 1 commit"),
-					Map.entry("order limit reached", "8 statements, 1 commit"),
-					Map.entry("market not open", "5 statements, 1 commit"));
+			// Each command opens with one statement: the lock, the epoch check, the key's lookup and its sequence.
+			assertThat(counts).containsExactly(Map.entry("resting order", "13 statements, 1 commit"),
+					Map.entry("one fill", "25 statements, 1 commit"), Map.entry("cancel", "11 statements, 1 commit"),
+					Map.entry("cancel of an unknown order", "3 statements, 1 commit"),
+					Map.entry("insufficient cash", "5 statements, 1 commit"),
+					Map.entry("a repeated key", "1 statements, 1 commit"),
+					Map.entry("order limit reached", "6 statements, 1 commit"),
+					Map.entry("market not open", "3 statements, 1 commit"));
 		}
 		finally {
 			restartEngine();
@@ -1240,6 +1241,26 @@ class TradingEngineIT {
 		assertThat(again).isEqualTo(first);
 		assertThat(snapshot()).as("no new sequence, order, trade or ledger row").isEqualTo(before);
 		assertThat(cash(buyer)).containsExactly(STARTING_CASH - 30_000, 0L);
+	}
+
+	@Test
+	void aReplayOrAConflictTakesNoSequenceSoTheNextCommandFollowsOn() throws Exception {
+		UUID buyer = funded();
+		UUID idempotencyKey = UUID.randomUUID();
+		CommandKey key = key(buyer, idempotencyKey, "buy 1 at 10.00");
+		PlaceOrder order = order(buyer, Side.BUY, OrderType.LIMIT, "10.00", 1);
+		PlacementResult first = engine.place(key, order).get();
+		assertThat(commandSequence()).isEqualTo(first.commandSequence());
+
+		assertThat(engine.place(key, order).get().commandSequence()).isEqualTo(first.commandSequence());
+		assertThatThrownBy(() -> engine
+			.place(key(buyer, idempotencyKey, "buy 2 at 10.00"), order(buyer, Side.BUY, OrderType.LIMIT, "10.00", 2))
+			.get()).hasCauseInstanceOf(IdempotencyConflictException.class);
+		CancelResult cancel = engine.cancel(key(), new CancelOrder(first.orderId(), buyer)).get();
+
+		assertThat(cancel.commandSequence()).as("gap-free after a replay and a conflict")
+			.isEqualTo(first.commandSequence() + 1);
+		assertThat(commandSequence()).isEqualTo(cancel.commandSequence());
 	}
 
 	@Test

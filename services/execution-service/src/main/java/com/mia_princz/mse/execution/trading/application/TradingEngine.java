@@ -373,16 +373,12 @@ public final class TradingEngine {
 	}
 
 	private AddedInstrument addInstrumentInTransaction(CommandKey key, AddInstrument command) {
-		Market market = store.lockMarket();
-		if (market.writerEpoch() != writerEpoch) {
-			throw new StaleWriterException();
+		TradingStore.Opening<InstrumentResult> opening = open(key, InstrumentResult.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return new AddedInstrument(replay(key, opening.prior().get()), false, market.maxFillsPerCommand());
 		}
-		Optional<TradingStore.StoredResult<InstrumentResult>> prior = store.findResult(simulationId, key,
-				InstrumentResult.class);
-		if (prior.isPresent()) {
-			return new AddedInstrument(replay(key, prior.get()), false, market.maxFillsPerCommand());
-		}
-		long sequence = store.nextCommandSequence(simulationId);
+		long sequence = opening.sequence();
 		InstrumentResult.Status refusal = !"SETUP".equals(market.state()) ? InstrumentResult.Status.NOT_IN_SETUP
 				: store.symbolTaken(simulationId, command.symbol()) ? InstrumentResult.Status.SYMBOL_TAKEN : null;
 		if (refusal != null) {
@@ -421,16 +417,12 @@ public final class TradingEngine {
 
 	/** An unknown instrument is answered as such in any state; a known one is edited only in SETUP. */
 	private InstrumentEdit editInstrumentInTransaction(CommandKey key, EditInstrument command) {
-		Market market = store.lockMarket();
-		if (market.writerEpoch() != writerEpoch) {
-			throw new StaleWriterException();
+		TradingStore.Opening<InstrumentEdit> opening = open(key, InstrumentEdit.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return replay(key, opening.prior().get());
 		}
-		Optional<TradingStore.StoredResult<InstrumentEdit>> prior = store.findResult(simulationId, key,
-				InstrumentEdit.class);
-		if (prior.isPresent()) {
-			return replay(key, prior.get());
-		}
-		long sequence = store.nextCommandSequence(simulationId);
+		long sequence = opening.sequence();
 		long cents = command.referencePrice().cents();
 		String displayName = name(command.displayName());
 		Optional<String> symbol = store.instrumentSymbol(simulationId, command.instrumentId());
@@ -488,16 +480,12 @@ public final class TradingEngine {
 	 * nothing refers to it. Its removed snapshot is written before the row goes, as it reads the row.
 	 */
 	private InstrumentDeletion deleteInstrumentInTransaction(CommandKey key, DeleteInstrument command) {
-		Market market = store.lockMarket();
-		if (market.writerEpoch() != writerEpoch) {
-			throw new StaleWriterException();
+		TradingStore.Opening<InstrumentDeletion> opening = open(key, InstrumentDeletion.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return replay(key, opening.prior().get());
 		}
-		Optional<TradingStore.StoredResult<InstrumentDeletion>> prior = store.findResult(simulationId, key,
-				InstrumentDeletion.class);
-		if (prior.isPresent()) {
-			return replay(key, prior.get());
-		}
-		long sequence = store.nextCommandSequence(simulationId);
+		long sequence = opening.sequence();
 		Optional<String> symbol = store.instrumentSymbol(simulationId, command.instrumentId());
 		InstrumentDeletion.Status refusal = symbol.isEmpty() ? InstrumentDeletion.Status.UNKNOWN_INSTRUMENT
 				: !"SETUP".equals(market.state()) ? InstrumentDeletion.Status.NOT_IN_SETUP : null;
@@ -537,16 +525,12 @@ public final class TradingEngine {
 	}
 
 	private AccountResult provisionInTransaction(CommandKey key, ProvisionAccount command) {
-		Market market = store.lockMarket();
-		if (market.writerEpoch() != writerEpoch) {
-			throw new StaleWriterException();
+		TradingStore.Opening<AccountResult> opening = open(key, AccountResult.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return replay(key, opening.prior().get());
 		}
-		Optional<TradingStore.StoredResult<AccountResult>> prior = store.findResult(simulationId, key,
-				AccountResult.class);
-		if (prior.isPresent()) {
-			return replay(key, prior.get());
-		}
-		long sequence = store.nextCommandSequence(simulationId);
+		long sequence = opening.sequence();
 		AccountResult.Status refusal = null;
 		if (!"SETUP".equals(market.state())) {
 			refusal = AccountResult.Status.NOT_IN_SETUP;
@@ -588,16 +572,12 @@ public final class TradingEngine {
 	 * what they were given, or nothing was added. A username is taken whatever its case.
 	 */
 	private TraderResult addTraderInTransaction(CommandKey key, AddTrader command) {
-		Market market = store.lockMarket();
-		if (market.writerEpoch() != writerEpoch) {
-			throw new StaleWriterException();
+		TradingStore.Opening<TraderResult> opening = open(key, TraderResult.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return replay(key, opening.prior().get());
 		}
-		Optional<TradingStore.StoredResult<TraderResult>> prior = store.findResult(simulationId, key,
-				TraderResult.class);
-		if (prior.isPresent()) {
-			return replay(key, prior.get());
-		}
-		long sequence = store.nextCommandSequence(simulationId);
+		long sequence = opening.sequence();
 		Long cash = command.funded() ? command.cashCents() : null;
 		TraderResult.Status refusal = null;
 		if (!"SETUP".equals(market.state())) {
@@ -655,15 +635,12 @@ public final class TradingEngine {
 	 * fails, the stray tokens belong to accounts that never existed, so they authenticate nothing.
 	 */
 	private BotsResult botsInTransaction(CommandKey key, ProvisionBots command) {
-		Market market = store.lockMarket();
-		if (market.writerEpoch() != writerEpoch) {
-			throw new StaleWriterException();
+		TradingStore.Opening<BotsResult> opening = open(key, BotsResult.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return replay(key, opening.prior().get());
 		}
-		Optional<TradingStore.StoredResult<BotsResult>> prior = store.findResult(simulationId, key, BotsResult.class);
-		if (prior.isPresent()) {
-			return replay(key, prior.get());
-		}
-		long sequence = store.nextCommandSequence(simulationId);
+		long sequence = opening.sequence();
 		int population = store.botCount(simulationId);
 		BotsResult.Status refusal = null;
 		if (!"SETUP".equals(market.state())) {
@@ -708,16 +685,12 @@ public final class TradingEngine {
 	 * running without it. Revoking again revokes nothing and says so.
 	 */
 	private TokenRevocation revokeInTransaction(CommandKey key, RevokeBotToken command) {
-		Market market = store.lockMarket();
-		if (market.writerEpoch() != writerEpoch) {
-			throw new StaleWriterException();
+		TradingStore.Opening<TokenRevocation> opening = open(key, TokenRevocation.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return replay(key, opening.prior().get());
 		}
-		Optional<TradingStore.StoredResult<TokenRevocation>> prior = store.findResult(simulationId, key,
-				TokenRevocation.class);
-		if (prior.isPresent()) {
-			return replay(key, prior.get());
-		}
-		long sequence = store.nextCommandSequence(simulationId);
+		long sequence = opening.sequence();
 		if (!store.isBotAccount(simulationId, command.accountId())) {
 			store.insertAudit(simulationId, command.actorUserId(), "BOT_TOKEN_REVOKE", "NOT_ALLOWED",
 					key.idempotencyKey(), sequence);
@@ -750,16 +723,12 @@ public final class TradingEngine {
 	 * bots are never assigned. A strategy with too few tagged bots refuses the run, naming the first one short.
 	 */
 	private BotRunResult startRunInTransaction(CommandKey key, StartBotRun command) {
-		Market market = store.lockMarket();
-		if (market.writerEpoch() != writerEpoch) {
-			throw new StaleWriterException();
+		TradingStore.Opening<BotRunResult> opening = open(key, BotRunResult.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return replay(key, opening.prior().get());
 		}
-		Optional<TradingStore.StoredResult<BotRunResult>> prior = store.findResult(simulationId, key,
-				BotRunResult.class);
-		if (prior.isPresent()) {
-			return replay(key, prior.get());
-		}
-		long sequence = store.nextCommandSequence(simulationId);
+		long sequence = opening.sequence();
 		Instant now = clock.instant();
 		BotRunResult.Status refusal = null;
 		Optional<TradingStore.RunningBotRun> running = store.runningBotRun(simulationId);
@@ -824,16 +793,12 @@ public final class TradingEngine {
 	}
 
 	private BotRunResult stopRunInTransaction(CommandKey key, StopBotRun command) {
-		Market market = store.lockMarket();
-		if (market.writerEpoch() != writerEpoch) {
-			throw new StaleWriterException();
+		TradingStore.Opening<BotRunResult> opening = open(key, BotRunResult.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return replay(key, opening.prior().get());
 		}
-		Optional<TradingStore.StoredResult<BotRunResult>> prior = store.findResult(simulationId, key,
-				BotRunResult.class);
-		if (prior.isPresent()) {
-			return replay(key, prior.get());
-		}
-		long sequence = store.nextCommandSequence(simulationId);
+		long sequence = opening.sequence();
 		Optional<String> state = store.botRunState(simulationId, command.runId());
 		BotRunResult.Status status = state.isEmpty() ? BotRunResult.Status.NOT_FOUND
 				: "RUNNING".equals(state.get()) ? BotRunResult.Status.STOPPED : BotRunResult.Status.NOT_RUNNING;
@@ -859,16 +824,12 @@ public final class TradingEngine {
 	}
 
 	private MarketTransition controlInTransaction(CommandKey key, MarketControl command) {
-		Market market = store.lockMarket();
-		if (market.writerEpoch() != writerEpoch) {
-			throw new StaleWriterException();
+		TradingStore.Opening<MarketTransition> opening = open(key, MarketTransition.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return replay(key, opening.prior().get());
 		}
-		Optional<TradingStore.StoredResult<MarketTransition>> prior = store.findResult(simulationId, key,
-				MarketTransition.class);
-		if (prior.isPresent()) {
-			return replay(key, prior.get());
-		}
-		long sequence = store.nextCommandSequence(simulationId);
+		long sequence = opening.sequence();
 		MarketControl.Action action = command.action();
 		if (!action.from().equals(market.state())) {
 			store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "NOT_ALLOWED",
@@ -888,15 +849,12 @@ public final class TradingEngine {
 	}
 
 	private CancelOutcome cancelInTransaction(CommandKey key, CancelOrder command) {
-		Market market = store.lockMarket();
-		if (market.writerEpoch() != writerEpoch) {
-			throw new StaleWriterException();
+		TradingStore.Opening<CancelResult> opening = open(key, CancelResult.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return new CancelOutcome(replay(key, opening.prior().get()), null);
 		}
-		Optional<TradingStore.StoredResult<CancelResult>> prior = store.findResult(simulationId, key, CancelResult.class);
-		if (prior.isPresent()) {
-			return new CancelOutcome(replay(key, prior.get()), null);
-		}
-		long sequence = store.nextCommandSequence(simulationId);
+		long sequence = opening.sequence();
 		TradingStore.ExistingOrder order = store.lockOrder(command.orderId())
 			.filter((existing) -> existing.accountId().equals(command.accountId()))
 			.orElse(null);
@@ -933,16 +891,12 @@ public final class TradingEngine {
 	}
 
 	private Outcome placeInTransaction(CommandKey key, PlaceOrder command, OrderBook book) {
-		Market market = store.lockMarket();
-		if (market.writerEpoch() != writerEpoch) {
-			throw new StaleWriterException();
+		TradingStore.Opening<PlacementResult> opening = open(key, PlacementResult.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return new Outcome(replay(key, opening.prior().get()), null, List.of(), false);
 		}
-		Optional<TradingStore.StoredResult<PlacementResult>> prior = store.findResult(simulationId, key,
-				PlacementResult.class);
-		if (prior.isPresent()) {
-			return new Outcome(replay(key, prior.get()), null, List.of(), false);
-		}
-		long sequence = store.nextCommandSequence(simulationId);
+		long sequence = opening.sequence();
 		if (!"OPEN".equals(market.state())) {
 			return reject(key, command, RejectionCode.MARKET_NOT_OPEN, sequence);
 		}
@@ -1107,6 +1061,15 @@ public final class TradingEngine {
 			super("Unknown instrument " + instrumentId);
 		}
 
+	}
+
+	/**
+	 * Opens a command in one statement: locks the market row while this writer still owns it, looks up the key's stored
+	 * answer, and takes the next command sequence unless there is one. A market that another writer has taken over
+	 * fences this one.
+	 */
+	private <T> TradingStore.Opening<T> open(CommandKey key, Class<T> type) {
+		return store.open(simulationId, writerEpoch, key, type).orElseThrow(StaleWriterException::new);
 	}
 
 	static final class StaleWriterException extends RuntimeException {
