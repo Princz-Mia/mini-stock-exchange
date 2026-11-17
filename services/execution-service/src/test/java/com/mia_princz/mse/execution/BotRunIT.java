@@ -94,12 +94,16 @@ class BotRunIT {
 		assertThat(fields(start(operator, UUID.randomUUID(), "{\"commandsPerSecond\":\"0.00\",\"durationMinutes\":0}")))
 			.containsExactlyInAnyOrder("noise", "commandsPerSecond", "durationMinutes");
 		assertThat(fields(start(operator, UUID.randomUUID(), """
-				{"noise":-1,"seed":-1,"commandsPerSecond":"200.01","maxOrderQuantity":0,"maxPosition":1000001,
+				{"noise":-1,"seed":-1,"commandsPerSecond":"2000.01","maxOrderQuantity":0,"maxPosition":1000001,
 				"instrumentIds":["%s","%s"]}""".formatted(nova, nova))))
 			.containsExactlyInAnyOrder("noise", "seed", "commandsPerSecond", "maxOrderQuantity", "maxPosition",
 					"instrumentIds");
 		assertThat(fields(start(operator, UUID.randomUUID(), "{\"noise\":1,\"commandsPerSecond\":\"1.5\"}")))
 			.containsExactly("commandsPerSecond");
+		// The highest rate a run may ask for passes validation: this run is refused only for want of bots. The contract
+		// allows it too, so a client that checks requests against the contract can send it.
+		CONTRACT.assertSchema("BotRunRequest", run(2, 2, 1, "2000.00"));
+		assertThat(code(start(operator, UUID.randomUUID(), run(2, 2, 1, "2000.00")), 422)).isEqualTo("NOT_ENOUGH_BOTS");
 
 		// More bots of a strategy than are tagged with it, or an instrument the market lacks, are committed refusals.
 		// The refusal names the first strategy short, in assignment order, although five bots exist for five asked.

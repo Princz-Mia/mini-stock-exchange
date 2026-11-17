@@ -1151,7 +1151,7 @@ export interface components {
             readonly momentum?: number;
             /** Format: int64 */
             readonly seed?: number;
-            /** @description Trading commands per second across all the run's bots, from 0.01 to 200.00. */
+            /** @description Trading commands per second across all the run's bots, from 0.01 to 2000.00. */
             readonly commandsPerSecond: string;
             /** @default 10 */
             readonly maxOrderQuantity: number;
