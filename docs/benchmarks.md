@@ -72,6 +72,17 @@ A small gain: one statement fewer for every order, two for one that rests. Cance
 
 The tail moved this time: the commands with trades, which make it, lost a statement for each trade. Against the first row of this section, 105 a second, the three changes together are about 17% more, each step measured against the one before in the same session.
 
+**A command's writes in one statement per kind of row, 2026-11-17.** Each command now collects its writes (maker fills, trades, journal postings, balances, account versions, outbox events) and sends them just before its answer, one statement per kind of row, so the number of statements no longer grows with the number of fills: any number of fills costs 11. Two runs each with fsync on, alternating with the version above, same digest:
+
+| | Before | After |
+| --- | --- | --- |
+| Throughput | 122 to 123 commands a second | 181 to 182 commands a second |
+| Mean | 8.2 ms | 5.5 ms |
+| p95 | 18.5 ms | 7.8 ms |
+| p99 | 23.1 to 23.5 ms | 8.8 ms |
+
+The largest step so far, and the tail most of all: commands with fills now cost the same statements as any other. From the first row of this section the bench has gone from 105 to 182 commands a second.
+
 ## Steady load
 
 **Scenario:** five instruments and 10,000 bots (2,000 market makers, 2,000 momentum, 6,000 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. Until 2026-11-15 the scenario was 1,000 bots; its last result is kept below. Neither is a limit: the exchange limits neither the bot population nor the bots in one run, and `--bots` sets the number.
