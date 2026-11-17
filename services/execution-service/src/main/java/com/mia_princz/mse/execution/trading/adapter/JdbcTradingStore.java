@@ -532,8 +532,8 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public Optional<ExistingOrder> lockOrder(UUID orderId) {
-		return jdbc.sql("SELECT id, account_id, instrument_id, state, working_quantity FROM orders WHERE id = ? FOR UPDATE")
+	public Optional<ExistingOrder> findOrder(UUID orderId) {
+		return jdbc.sql("SELECT id, account_id, instrument_id, state, working_quantity FROM orders WHERE id = ?")
 			.param(orderId)
 			.query((row, index) -> new ExistingOrder(row.getObject("id", UUID.class),
 					row.getObject("account_id", UUID.class), row.getObject("instrument_id", UUID.class),
@@ -542,15 +542,17 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void cancelOrder(UUID orderId, long quantity, String reason) {
-		expectOne(jdbc.sql("""
+	public boolean cancelOrder(UUID orderId, UUID accountId, long quantity, String reason) {
+		return jdbc.sql("""
 				UPDATE orders SET canceled_quantity = canceled_quantity + :quantity, working_quantity = 0,
 				    state = 'CANCELED', reason = :reason, version = version + 1, updated_at = now()
-				WHERE id = :id AND working_quantity = :quantity AND state IN ('OPEN', 'PARTIALLY_FILLED')""")
+				WHERE id = :id AND account_id = :account AND working_quantity = :quantity
+				    AND state IN ('OPEN', 'PARTIALLY_FILLED')""")
 			.param("quantity", quantity)
 			.param("reason", reason)
 			.param("id", orderId)
-			.update(), "cancel order " + orderId);
+			.param("account", accountId)
+			.update() == 1;
 	}
 
 	@Override

@@ -321,9 +321,10 @@ class TradingEngineIT {
 			// Each command opens with one statement: the lock, the epoch check, the key's lookup and its sequence. An
 			// order reads cash and shares in one more, and the writer counts each account's resting orders itself. A
 			// snapshot reads nothing, and trades are numbered in memory, the counter written once per command. The
-			// rest of a command's writes go in one statement per kind of row, whatever the number of fills.
+			// rest of a command's writes go in one statement per kind of row, whatever the number of fills. A cancel of
+			// an order resting in the book updates it without reading it first.
 			assertThat(counts).containsExactly(Map.entry("resting order", "8 statements, 1 commit"),
-					Map.entry("one fill", "11 statements, 1 commit"), Map.entry("cancel", "8 statements, 1 commit"),
+					Map.entry("one fill", "11 statements, 1 commit"), Map.entry("cancel", "7 statements, 1 commit"),
 					Map.entry("three fills", "11 statements, 1 commit"),
 					Map.entry("cancel of an unknown order", "3 statements, 1 commit"),
 					Map.entry("insufficient cash", "4 statements, 1 commit"),
@@ -1793,6 +1794,61 @@ class TradingEngineIT {
 		assertThat(snapshot()).as("nothing committed").isEqualTo(before);
 		restartEngine();
 		assertThat(place(buyer, Side.BUY, OrderType.LIMIT, "100.00", 2).filled()).isEqualTo(2);
+	}
+
+	/**
+	 * A cancel of an order the book holds updates the row without reading it, guarded by what the book says: still
+	 * resting, the caller's, with exactly the book's quantity working. A row that differs halts the writer.
+	 */
+	@Test
+	void aCancelOfAnOrderTheDatabaseHoldsDifferentlyHaltsTheWriter() throws Exception {
+		UUID seller = funded();
+		PlacementResult sell = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
+		Map<String, Object> before = snapshot();
+		asOwner("UPDATE orders SET working_quantity = 3, canceled_quantity = 2 WHERE id = ?", sell.orderId());
+		try {
+			CompletableFuture<CancelResult> canceled = engine.cancel(key(), new CancelOrder(sell.orderId(), seller));
+
+			assertThatThrownBy(canceled::get).hasCauseInstanceOf(WriterHaltException.class);
+			assertThat(writer.isAvailable()).isFalse();
+		}
+		finally {
+			asOwner("UPDATE orders SET working_quantity = 5, canceled_quantity = 0 WHERE id = ?", sell.orderId());
+		}
+		assertThat(snapshot()).as("nothing committed").isEqualTo(before);
+		restartEngine();
+		assertThat(engine.cancel(key(), new CancelOrder(sell.orderId(), seller)).get().status())
+			.isEqualTo(CancelResult.Status.CANCELED);
+	}
+
+	/** An order the database has resting but the book does not: the book is out of step, so the writer halts. */
+	@Test
+	void aCancelOfAnOrderRestingOnlyInTheDatabaseHaltsTheWriter() throws Exception {
+		UUID seller = funded();
+		UUID hidden = UUID.randomUUID();
+		asOwner("""
+				INSERT INTO orders (id, simulation_id, account_id, instrument_id, side, type, time_in_force, bound_cents,
+				    requested_quantity, working_quantity, state, accepted_sequence)
+				VALUES (?, ?, ?, ?, 'SELL', 'LIMIT', 'GTC', 50000, 2, 2, 'OPEN', ?)""", hidden, simulation, seller, instrument,
+				9_000_000_000_000L + SYMBOLS.incrementAndGet());
+		Map<String, Object> before = snapshot();
+		try {
+			CompletableFuture<CancelResult> canceled = engine.cancel(key(), new CancelOrder(hidden, seller));
+
+			assertThatThrownBy(canceled::get).hasCauseInstanceOf(WriterHaltException.class);
+			assertThat(writer.isAvailable()).isFalse();
+			// Halted before the commit: no answer stored, no sequence taken. A halt after committing an answer would
+			// leave a false one to replay for the key.
+			assertThat(snapshot()).as("nothing committed").isEqualTo(before);
+			assertThat(orderState(hidden)).isEqualTo("OPEN");
+		}
+		finally {
+			// Canceled, it holds nothing, so the next startup's reconciliation has nothing to find.
+			asOwner("""
+					UPDATE orders SET state = 'CANCELED', working_quantity = 0, canceled_quantity = 2, reason = 'TEST'
+					WHERE id = ?""", hidden);
+		}
+		restartEngine();
 	}
 
 	/** An account with cash and no position at all: its first buy creates its position row. */
