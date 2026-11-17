@@ -31,6 +31,7 @@ import com.mia_princz.mse.execution.trading.domain.DisplayName;
 import com.mia_princz.mse.execution.trading.domain.Fill;
 import com.mia_princz.mse.execution.trading.domain.MatchPlan;
 import com.mia_princz.mse.execution.trading.domain.OrderBook;
+import com.mia_princz.mse.execution.trading.domain.RestingOrders;
 import com.mia_princz.mse.execution.trading.domain.OrderRequest;
 import com.mia_princz.mse.execution.trading.domain.RejectionCode;
 import com.mia_princz.mse.execution.trading.domain.Settlement;
@@ -68,6 +69,9 @@ public final class TradingEngine {
 
 	private final Map<UUID, OrderBook> books = new HashMap<>();
 
+	/** Each account's resting orders across all the books, kept by the books themselves. */
+	private final RestingOrders resting;
+
 	private final Map<UUID, String> symbols = new HashMap<>();
 
 	/** Each instrument's newest trades for its snapshots, kept like the books: changed only after a commit. */
@@ -98,6 +102,15 @@ public final class TradingEngine {
 	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
 			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings,
 			LongSupplier nanoTime) {
+		this(store, transactions, writer, clock, botCredentials, accountChanges, timings, nanoTime,
+				new RestingOrders());
+	}
+
+	/** {@code resting} is the books' shared count of each account's resting orders, replaceable in tests. */
+	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
+			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings, LongSupplier nanoTime,
+			RestingOrders resting) {
+		this.resting = resting;
 		this.store = store;
 		this.transactions = transactions;
 		this.writer = writer;
@@ -122,8 +135,10 @@ public final class TradingEngine {
 			Map<UUID, String> names = new HashMap<>();
 			Map<UUID, Tape> rebuiltTapes = new HashMap<>();
 			List<String> problems = new ArrayList<>();
+			// A restart in place rebuilds every book, so the count starts again from nothing.
+			resting.clear();
 			for (TradingStore.Instrument instrument : store.instruments(simulation)) {
-				OrderBook book = new OrderBook(market.maxFillsPerCommand());
+				OrderBook book = new OrderBook(market.maxFillsPerCommand(), resting);
 				store.activeOrders(instrument.id()).forEach(book::restore);
 				if (book.isCrossed()) {
 					problems.add("Book for " + instrument.symbol() + " is crossed after rebuilding");
@@ -133,6 +148,10 @@ public final class TradingEngine {
 				rebuiltTapes.put(instrument.id(), new Tape(TAPE_TRADES, store.recentTrades(instrument.id(), TAPE_TRADES)));
 			}
 			problems.addAll(store.reconciliationProblems(simulation));
+			Map<UUID, Integer> counted = store.restingOrdersByAccount(simulation);
+			if (!counted.equals(resting.counts())) {
+				problems.add("Resting orders per account differ between the books and the database");
+			}
 			if (!problems.isEmpty()) {
 				throw new ReconciliationException(problems);
 			}
@@ -260,7 +279,8 @@ public final class TradingEngine {
 				book.apply(outcome.plan());
 				tapes.get(command.instrumentId()).add(outcome.trades());
 			}
-			catch (RuntimeException ex) {
+			catch (RuntimeException | Error ex) {
+				// Committed but not applied: the book no longer matches the database, whatever was thrown.
 				throw new WriterHaltException("The book could not apply a committed plan", ex);
 			}
 			timings.record(WriterTimings.Phase.APPLY, "place", nanoTime.getAsLong() - applying);
@@ -289,8 +309,16 @@ public final class TradingEngine {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 		long applying = nanoTime.getAsLong();
-		if (outcome.instrumentId() != null && outcome.result().status() == CancelResult.Status.CANCELED
-				&& books.get(outcome.instrumentId()).cancel(command.orderId()).isEmpty()) {
+		boolean removed = true;
+		if (outcome.instrumentId() != null && outcome.result().status() == CancelResult.Status.CANCELED) {
+			try {
+				removed = books.get(outcome.instrumentId()).cancel(command.orderId()).isPresent();
+			}
+			catch (RuntimeException | Error ex) {
+				throw new WriterHaltException("The book could not apply a committed cancel", ex);
+			}
+		}
+		if (!removed) {
 			throw new WriterHaltException("A committed cancel found no order in the book",
 					new BookOutOfStepException(command.orderId()));
 		}
@@ -315,7 +343,7 @@ public final class TradingEngine {
 		}
 		if (added.fresh()) {
 			// Never replace a book that exists: it may hold resting orders.
-			books.putIfAbsent(command.instrumentId(), new OrderBook(added.maxFillsPerCommand()));
+			books.putIfAbsent(command.instrumentId(), new OrderBook(added.maxFillsPerCommand(), resting));
 			symbols.putIfAbsent(command.instrumentId(), command.symbol());
 			tapes.putIfAbsent(command.instrumentId(), new Tape(TAPE_TRADES, List.of()));
 		}
@@ -915,7 +943,7 @@ public final class TradingEngine {
 		if (plan.outcome() == MatchPlan.Outcome.EXECUTION_LIMIT_EXCEEDED) {
 			return reject(key, command, RejectionCode.EXECUTION_LIMIT_EXCEEDED, sequence);
 		}
-		if (plan.rests() && (store.openOrders(command.accountId()) >= market.maxOpenOrdersPerAccount()
+		if (plan.rests() && (resting.of(command.accountId()) >= market.maxOpenOrdersPerAccount()
 				|| restingOrders() >= market.maxOpenOrdersTotal())) {
 			return reject(key, command, RejectionCode.ORDER_LIMIT_EXCEEDED, sequence);
 		}

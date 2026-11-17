@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -471,26 +472,26 @@ public final class JdbcTradingStore implements TradingStore {
 
 	@Override
 	public Available available(UUID accountId, UUID instrumentId) {
-		long cash = jdbc.sql("SELECT total_cents - reserved_cents FROM cash_balance WHERE account_id = ?")
-			.param(accountId)
-			.query(Long.class)
-			.optional()
-			.orElse(0L);
-		long shares = jdbc
-			.sql("SELECT total_quantity - reserved_quantity FROM position WHERE account_id = ? AND instrument_id = ?")
-			.params(accountId, instrumentId)
-			.query(Long.class)
-			.optional()
-			.orElse(0L);
-		return new Available(cash, shares);
+		// One round trip for both; an account or position with no row has nothing available.
+		return jdbc.sql("""
+				SELECT coalesce((SELECT total_cents - reserved_cents FROM cash_balance WHERE account_id = ?), 0) AS cash,
+				    coalesce((SELECT total_quantity - reserved_quantity FROM position
+				              WHERE account_id = ? AND instrument_id = ?), 0) AS shares""")
+			.params(accountId, accountId, instrumentId)
+			.query((row, index) -> new Available(row.getLong("cash"), row.getLong("shares")))
+			.single();
 	}
 
 	@Override
-	public int openOrders(UUID accountId) {
-		return jdbc.sql("SELECT count(*) FROM orders WHERE account_id = ? AND state IN ('OPEN', 'PARTIALLY_FILLED')")
-			.param(accountId)
-			.query(Integer.class)
-			.single();
+	public Map<UUID, Integer> restingOrdersByAccount(UUID simulationId) {
+		Map<UUID, Integer> counts = new HashMap<>();
+		jdbc.sql("""
+				SELECT account_id, count(*) AS resting FROM orders
+				WHERE simulation_id = ? AND state IN ('OPEN', 'PARTIALLY_FILLED') GROUP BY account_id""")
+			.param(simulationId)
+			.query((row, index) -> counts.put(row.getObject("account_id", UUID.class), row.getInt("resting")))
+			.list();
+		return counts;
 	}
 
 	@Override

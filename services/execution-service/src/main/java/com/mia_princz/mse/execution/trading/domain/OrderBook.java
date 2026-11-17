@@ -35,11 +35,19 @@ public final class OrderBook {
 
 	private long lastAcceptedSequence = Long.MIN_VALUE;
 
+	private final RestingOrders resting;
+
 	public OrderBook(int maxFillsPerCommand) {
+		this(maxFillsPerCommand, new RestingOrders());
+	}
+
+	/** A book that counts its orders per account in {@code resting}, which other books may share. */
+	public OrderBook(int maxFillsPerCommand, RestingOrders resting) {
 		if (maxFillsPerCommand < 1) {
 			throw new IllegalArgumentException("maxFillsPerCommand must be positive");
 		}
 		this.maxFillsPerCommand = maxFillsPerCommand;
+		this.resting = resting;
 	}
 
 	/** Computes what the order would do. The book is not changed. */
@@ -243,6 +251,7 @@ public final class OrderBook {
 		level.quantity += node.remaining;
 		level.orderCount++;
 		orders.put(node.orderId, node);
+		resting.added(node.accountId);
 	}
 
 	private void remove(OrderNode node) {
@@ -265,6 +274,7 @@ public final class OrderBook {
 			levels(node.side).remove(level.priceCents);
 		}
 		orders.remove(node.orderId);
+		resting.removed(node.accountId);
 	}
 
 	private static final class PriceLevel {

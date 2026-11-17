@@ -16,6 +16,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.Comparator;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -51,6 +52,8 @@ import com.mia_princz.mse.contracts.events.VenueState;
 import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.execution.trading.adapter.JdbcTradingStore;
 import com.mia_princz.mse.execution.trading.adapter.SpringTransactionRunner;
+import com.mia_princz.mse.execution.trading.application.AddInstrument;
+import com.mia_princz.mse.execution.trading.application.InstrumentResult;
 import com.mia_princz.mse.execution.trading.application.WriterTimings;
 import com.mia_princz.mse.execution.trading.application.AccountChanges;
 import com.mia_princz.mse.execution.trading.application.CancelOrder;
@@ -73,6 +76,7 @@ import com.mia_princz.mse.execution.trading.domain.OrderType;
 import com.mia_princz.mse.execution.trading.domain.Price;
 import com.mia_princz.mse.execution.trading.domain.Quantity;
 import com.mia_princz.mse.execution.trading.domain.RejectionCode;
+import com.mia_princz.mse.execution.trading.domain.RestingOrders;
 import com.mia_princz.mse.execution.trading.domain.Side;
 
 /**
@@ -113,6 +117,15 @@ class TradingEngineIT {
 	/** The store method that throws, simulating a failure after every earlier write but before the commit. */
 	private final AtomicReference<String> failAt = new AtomicReference<>();
 
+	/**
+	 * When set, the books' count of resting orders goes wrong on this call: "added" or "removed" throw an Error, and
+	 * "miscount" counts nothing.
+	 */
+	private final AtomicReference<String> failBookAt = new AtomicReference<>();
+
+	/** The books' count of each account's resting orders, as the current engine keeps it. */
+	private FailingRestingOrders resting;
+
 	private CommandWriter writer;
 
 	private TradingStore store;
@@ -141,11 +154,12 @@ class TradingEngineIT {
 
 		store = new JdbcTradingStore(JdbcClient.create(dataSource), JsonMapper.builder().build());
 		writer = new CommandWriter("test-writer", 1_000);
+		resting = new FailingRestingOrders();
 		engine = new TradingEngine(failingBeforeCommit(store), losingAnswers(new SpringTransactionRunner(transactionManager)),
 				writer,
 				Clock.systemUTC(), (account) -> {
 					throw new UnsupportedOperationException("no bots in these tests");
-				}, AccountChanges.NONE, timings, System::nanoTime);
+				}, AccountChanges.NONE, timings, System::nanoTime, resting);
 		engine.start();
 	}
 
@@ -294,13 +308,14 @@ class TradingEngineIT {
 			finally {
 				jdbc.update("UPDATE simulation SET state = 'OPEN'");
 			}
-			// Each command opens with one statement: the lock, the epoch check, the key's lookup and its sequence.
-			assertThat(counts).containsExactly(Map.entry("resting order", "13 statements, 1 commit"),
-					Map.entry("one fill", "25 statements, 1 commit"), Map.entry("cancel", "11 statements, 1 commit"),
+			// Each command opens with one statement: the lock, the epoch check, the key's lookup and its sequence. An
+			// order reads cash and shares in one more, and the writer counts each account's resting orders itself.
+			assertThat(counts).containsExactly(Map.entry("resting order", "11 statements, 1 commit"),
+					Map.entry("one fill", "24 statements, 1 commit"), Map.entry("cancel", "11 statements, 1 commit"),
 					Map.entry("cancel of an unknown order", "3 statements, 1 commit"),
-					Map.entry("insufficient cash", "5 statements, 1 commit"),
+					Map.entry("insufficient cash", "4 statements, 1 commit"),
 					Map.entry("a repeated key", "1 statements, 1 commit"),
-					Map.entry("order limit reached", "6 statements, 1 commit"),
+					Map.entry("order limit reached", "4 statements, 1 commit"),
 					Map.entry("market not open", "3 statements, 1 commit"));
 		}
 		finally {
@@ -1043,6 +1058,29 @@ class TradingEngineIT {
 		};
 	}
 
+	/** Counts as the books do, and throws an Error where {@link #failBookAt} says, after the command committed. */
+	private final class FailingRestingOrders extends RestingOrders {
+
+		@Override
+		public void added(UUID accountId) {
+			if ("added".equals(failBookAt.get())) {
+				throw new AssertionError("injected error while applying");
+			}
+			if (!"miscount".equals(failBookAt.get())) {
+				super.added(accountId);
+			}
+		}
+
+		@Override
+		public void removed(UUID accountId) {
+			if ("removed".equals(failBookAt.get())) {
+				throw new AssertionError("injected error while applying");
+			}
+			super.removed(accountId);
+		}
+
+	}
+
 	private TradingStore failingBeforeCommit(TradingStore store) {
 		return (TradingStore) Proxy.newProxyInstance(TradingStore.class.getClassLoader(),
 				new Class<?>[] { TradingStore.class }, (proxy, method, args) -> {
@@ -1203,11 +1241,12 @@ class TradingEngineIT {
 	private void replaceEngine() throws InterruptedException {
 		writer.close(Duration.ofSeconds(5));
 		writer = new CommandWriter("test-writer", 1_000);
+		resting = new FailingRestingOrders();
 		engine = new TradingEngine(failingBeforeCommit(store), losingAnswers(new SpringTransactionRunner(transactionManager)),
 				writer,
 				Clock.systemUTC(), (account) -> {
 					throw new UnsupportedOperationException("no bots in these tests");
-				}, AccountChanges.NONE, timings, System::nanoTime);
+				}, AccountChanges.NONE, timings, System::nanoTime, resting);
 	}
 
 	/** A fresh idempotency key for a command whose repeat behaviour the test does not care about. */
@@ -1241,6 +1280,208 @@ class TradingEngineIT {
 		assertThat(again).isEqualTo(first);
 		assertThat(snapshot()).as("no new sequence, order, trade or ledger row").isEqualTo(before);
 		assertThat(cash(buyer)).containsExactly(STARTING_CASH - 30_000, 0L);
+	}
+
+	/**
+	 * After a commit, the book must take the plan whatever goes wrong; an Error (not only an exception) leaves the book
+	 * behind the database just the same, so the writer halts, and a restart rebuilds the book from what committed.
+	 */
+	@Test
+	void anErrorWhileApplyingACommittedCommandHaltsTheWriter() throws Exception {
+		UUID seller = funded();
+		PlaceOrder sell = order(seller, Side.SELL, OrderType.LIMIT, "100.00", 3);
+		failBookAt.set("added");
+		try {
+			CompletableFuture<PlacementResult> placed = engine.place(key(), sell);
+
+			assertThatThrownBy(placed::get).hasCauseInstanceOf(WriterHaltException.class);
+			assertThat(writer.isAvailable()).as("the writer halted").isFalse();
+		}
+		finally {
+			failBookAt.set(null);
+		}
+		assertThat(orderState(sell.orderId())).as("committed before the book failed").isEqualTo("OPEN");
+
+		restartEngine();
+		assertThat(engine.depth(instrument, Side.SELL).get())
+			.containsExactly(new DepthLevel(Price.parse("100.00"), 3, 1));
+
+		failBookAt.set("removed");
+		try {
+			CompletableFuture<CancelResult> canceled = engine.cancel(key(), new CancelOrder(sell.orderId(), seller));
+
+			assertThatThrownBy(canceled::get).hasCauseInstanceOf(WriterHaltException.class);
+			assertThat(writer.isAvailable()).as("the writer halted").isFalse();
+		}
+		finally {
+			failBookAt.set(null);
+		}
+		restartEngine();
+		assertThat(engine.depth(instrument, Side.SELL).get()).as("the committed cancel, rebuilt").isEmpty();
+	}
+
+	/**
+	 * The writer counts each account's resting orders itself instead of asking the database before every order that
+	 * would rest. A seeded mix of crossing and resting orders and cancels, with failures injected before some commits,
+	 * against a small per-account limit, keeps the count equal to the database's throughout and after a restart.
+	 */
+	@Test
+	void theWriterCountsRestingOrdersExactlyThroughFailuresAndARestart() throws Exception {
+		int perAccount = jdbc.queryForObject("SELECT max_open_orders_per_account FROM simulation", Integer.class);
+		asOwner("UPDATE simulation SET max_open_orders_per_account = 4");
+		try {
+			java.util.Random random = new java.util.Random(20_261_117L);
+			List<UUID> accounts = new ArrayList<>();
+			for (int i = 0; i < 6; i++) {
+				accounts.add(funded());
+			}
+			Map<UUID, List<UUID>> mine = new HashMap<>();
+			String[] failures = { "insertTradeEvent", "insertMarketSnapshot", "touchAccounts", "insertOrder" };
+			int injected = 0;
+			int refused = 0;
+			int filled = 0;
+			for (int step = 1; step <= 1_500; step++) {
+				UUID account = accounts.get(random.nextInt(accounts.size()));
+				List<UUID> open = mine.computeIfAbsent(account, (ignored) -> new ArrayList<>());
+				boolean failing = random.nextInt(20) == 0;
+				if (failing) {
+					failAt.set(failures[random.nextInt(failures.length)]);
+					injected++;
+				}
+				try {
+					if (!open.isEmpty() && random.nextInt(3) == 0) {
+						UUID order = open.remove(random.nextInt(open.size()));
+						CancelResult result = engine.cancel(key(), new CancelOrder(order, account)).get();
+						assertThat(result.status()).isNotEqualTo(CancelResult.Status.NOT_FOUND);
+					}
+					else {
+						Side side = random.nextBoolean() ? Side.BUY : Side.SELL;
+						String price = (side == Side.BUY ? 98 + random.nextInt(4) : 100 + random.nextInt(4)) + ".00";
+						PlacementResult result = engine
+							.place(key(), order(account, side, OrderType.LIMIT, price, 1 + random.nextInt(5)))
+							.get();
+						if (result.state() == OrderState.REJECTED) {
+							refused++;
+						}
+						if (result.state() == OrderState.OPEN || result.state() == OrderState.PARTIALLY_FILLED) {
+							open.add(result.orderId());
+						}
+						if (result.filled() > 0) {
+							filled++;
+						}
+					}
+				}
+				catch (java.util.concurrent.ExecutionException ex) {
+					assertThat(failing).as("only an injected failure fails a command").isTrue();
+					assertThat(ex).hasRootCauseMessage("injected failure before commit");
+				}
+				finally {
+					failAt.set(null);
+				}
+				if (step % 250 == 0) {
+					assertThat(resting.counts()).as("after %d commands", step).isEqualTo(restingInDatabase());
+				}
+			}
+			assertThat(injected).as("failures injected").isGreaterThan(20);
+			assertThat(refused).as("orders refused at the per-account limit").isGreaterThan(20);
+			assertThat(filled).as("orders that traded").isGreaterThan(100);
+			Map<UUID, Integer> inDatabase = restingInDatabase();
+			assertThat(accounts).as("none of these accounts above its limit")
+				.allSatisfy((account) -> assertThat(inDatabase.getOrDefault(account, 0)).isLessThanOrEqualTo(4));
+
+			restartEngine();
+			assertThat(resting.counts()).as("rebuilt").isEqualTo(restingInDatabase());
+			assertLedgerMatchesBalances();
+		}
+		finally {
+			asOwner("UPDATE simulation SET max_open_orders_per_account = ?", perAccount);
+		}
+	}
+
+	@Test
+	void aCountOfRestingOrdersThatDisagreesWithTheDatabaseStopsStartup() throws Exception {
+		place(funded(), Side.SELL, OrderType.LIMIT, "100.00", 2);
+		replaceEngine();
+		failBookAt.set("miscount");
+		try {
+			assertThatThrownBy(engine::start).isInstanceOf(ReconciliationException.class)
+				.hasMessageContaining("Resting orders per account differ between the books and the database");
+		}
+		finally {
+			failBookAt.set(null);
+		}
+		restartEngine();
+	}
+
+	/** A book made for an instrument added while the writer runs counts into the same per-account total. */
+	@Test
+	void anInstrumentAddedWhileRunningSharesTheCountOfRestingOrders() throws Exception {
+		int perAccount = jdbc.queryForObject("SELECT max_open_orders_per_account FROM simulation", Integer.class);
+		UUID operator = UUID.randomUUID();
+		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, 'unused', 'OPERATOR')",
+				operator, "op-" + operator.toString().substring(0, 8));
+		UUID added = UUID.randomUUID();
+		jdbc.update("UPDATE simulation SET state = 'SETUP', opened_at = NULL");
+		try {
+			assertThat(engine
+				.addInstrument(key(),
+						new AddInstrument(added, symbol(SYMBOLS.incrementAndGet()), null, Price.parse("50.00"), operator))
+				.get()
+				.status()).isEqualTo(InstrumentResult.Status.CREATED);
+		}
+		finally {
+			jdbc.update("UPDATE simulation SET state = 'OPEN', opened_at = now()");
+		}
+		UUID buyer = funded();
+		asOwner("UPDATE simulation SET max_open_orders_per_account = 2");
+		try {
+			PlacementResult first = engine
+				.place(key(), new PlaceOrder(UUID.randomUUID(), buyer, added, Side.BUY, OrderType.LIMIT,
+						Price.parse("10.00"), new Quantity(1)))
+				.get();
+			PlacementResult second = place(buyer, Side.BUY, OrderType.LIMIT, "10.00", 1);
+			PlacementResult third = engine
+				.place(key(), new PlaceOrder(UUID.randomUUID(), buyer, added, Side.BUY, OrderType.LIMIT,
+						Price.parse("11.00"), new Quantity(1)))
+				.get();
+
+			assertThat(first.rejection()).isNull();
+			assertThat(second.rejection()).isNull();
+			assertThat(third.rejection()).as("one resting in each book makes two")
+				.isEqualTo(RejectionCode.ORDER_LIMIT_EXCEEDED);
+			assertThat(resting.of(buyer)).isEqualTo(2);
+		}
+		finally {
+			asOwner("UPDATE simulation SET max_open_orders_per_account = ?", perAccount);
+		}
+	}
+
+	/** Cash or shares held for a resting order are not available to the next order. */
+	@Test
+	void whatARestingOrderHoldsIsNotAvailableAgain() throws Exception {
+		UUID trader = funded();
+		// 1,000 at 99.00 holds 99,000.00 of the 100,000.00, and the sell holds all but 100 of the shares.
+		assertThat(STARTING_CASH).isEqualTo(10_000_000);
+		assertThat(place(trader, Side.BUY, OrderType.LIMIT, "99.00", 1_000).rejection()).isNull();
+		assertThat(place(trader, Side.SELL, OrderType.LIMIT, "900.00", STARTING_SHARES - 100).rejection()).isNull();
+
+		assertThat(place(trader, Side.BUY, OrderType.LIMIT, "100.00", 11).rejection())
+			.as("1,100.00 is more than the 1,000.00 left")
+			.isEqualTo(RejectionCode.INSUFFICIENT_CASH);
+		assertThat(place(trader, Side.BUY, OrderType.LIMIT, "100.00", 10).rejection()).as("exactly what is left")
+			.isNull();
+		assertThat(place(trader, Side.SELL, OrderType.LIMIT, "900.00", 101).rejection())
+			.isEqualTo(RejectionCode.INSUFFICIENT_SHARES);
+		assertThat(place(trader, Side.SELL, OrderType.LIMIT, "900.00", 100).rejection()).isNull();
+	}
+
+	private Map<UUID, Integer> restingInDatabase() {
+		Map<UUID, Integer> counts = new HashMap<>();
+		jdbc.query("SELECT account_id, count(*) FROM orders WHERE state IN ('OPEN', 'PARTIALLY_FILLED') GROUP BY account_id",
+				(row) -> {
+					counts.put(row.getObject(1, UUID.class), row.getInt(2));
+				});
+		return counts;
 	}
 
 	@Test

@@ -183,7 +183,8 @@ public interface TradingStore {
 
 	Available available(UUID accountId, UUID instrumentId);
 
-	int openOrders(UUID accountId);
+	/** Each account with open or partially filled orders, and how many, to check the writer's own count. */
+	Map<UUID, Integer> restingOrdersByAccount(UUID simulationId);
 
 	void insertOrder(NewOrder order);
 

@@ -51,6 +51,16 @@ A durable commit costs about 5 ms a command here. The bench reaches PostgreSQL f
 
 About 0.7 ms less per command, 8% more throughput. The fsync-on figures are higher than the 77 a second above, measured a day earlier on the same machine, so compare runs from the same session only.
 
+**The writer counts each account's resting orders itself, and reads cash and shares in one statement, 2026-11-17.** Before an order rests, the per-account open-order limit was checked with a count in the database; the books now keep that count. Two runs each with fsync on, alternating with the version above, same digest:
+
+| | Before | After |
+| --- | --- | --- |
+| Throughput | 110 to 113 commands a second | 115 commands a second |
+| Mean | 8.9 to 9.1 ms | 8.7 ms |
+| p50 | 7.1 to 7.2 ms | 6.6 ms |
+
+A small gain: one statement fewer for every order, two for one that rests. Cancels and the fills behind the p95 and p99 are unchanged.
+
 ## Steady load
 
 **Scenario:** five instruments and 10,000 bots (2,000 market makers, 2,000 momentum, 6,000 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. Until 2026-11-15 the scenario was 1,000 bots; its last result is kept below. Neither is a limit: the exchange limits neither the bot population nor the bots in one run, and `--bots` sets the number.
