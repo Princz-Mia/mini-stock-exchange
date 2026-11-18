@@ -25,8 +25,6 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import tools.jackson.databind.json.JsonMapper;
 
-import com.mia_princz.mse.contracts.events.MarketSnapshot;
-import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.contracts.events.WireEvents;
 
 @Configuration(proxyBeanMethods = false)
@@ -100,29 +98,17 @@ class ProjectionConfiguration {
 	@ConditionalOnProperty(name = "mse.market-feed.enabled", matchIfMissing = true)
 	MarketFeedConsumer marketFeed(FeedFactory feeds, SnapshotProjection projection,
 			ApplicationEventPublisher events) {
-		return feeds.create(SnapshotProjection.TOPIC, (payload) -> {
-			MarketSnapshot snapshot = WireEvents.decodeSnapshot(payload);
-			boolean changed = projection.apply(snapshot);
-			if (changed) {
-				// Inside the batch transaction; after-commit listeners see it only if the batch commits.
-				events.publishEvent(new SnapshotProjected(snapshot.getInstrumentId()));
-			}
-			return changed;
-		});
+		// Inside the batch transaction; after-commit listeners see it only if the batch commits.
+		return feeds.create(SnapshotProjection.TOPIC,
+				projection.handler((instrument) -> events.publishEvent(new SnapshotProjected(instrument))));
 	}
 
 	@Bean(initMethod = "start", destroyMethod = "close")
 	@ConditionalOnProperty(name = "mse.trade-feed.enabled", matchIfMissing = true)
 	MarketFeedConsumer tradeFeed(FeedFactory feeds, TradeProjection projection, ApplicationEventPublisher events) {
-		return feeds.create(TradeProjection.TOPIC, (payload) -> {
-			TradeExecuted trade = WireEvents.decodeTrade(payload);
-			boolean added = projection.apply(trade);
-			if (added) {
-				// The live frame carries the session figures, which this trade changed; a snapshot may have come first.
-				events.publishEvent(new SnapshotProjected(trade.getInstrumentId()));
-			}
-			return added;
-		});
+		// The live frame carries the session figures, which a new trade changed; a snapshot may have come first.
+		return feeds.create(TradeProjection.TOPIC,
+				projection.handler((instrument) -> events.publishEvent(new SnapshotProjected(instrument))));
 	}
 
 	@Bean(initMethod = "start", destroyMethod = "close")
