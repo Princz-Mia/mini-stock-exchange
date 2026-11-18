@@ -84,6 +84,110 @@ public final class OrderBook {
 		return new MatchPlan(taker, revision, fills, outcome(taker, remaining, stopped));
 	}
 
+	/** A place to hold a run of commands' changes until they commit; the book does not change meanwhile. */
+	public BookOverlay overlay() {
+		return new BookOverlay(this);
+	}
+
+	/**
+	 * Computes what the order would do once the changes in {@code overlay} are applied, in the same price-time order
+	 * as {@link #plan(OrderRequest)}: at each price the book's own orders first, then those the run rested there, in
+	 * the order they rested. The plan is pinned to the revision the book will be at by then. Nothing changes.
+	 */
+	MatchPlan plan(OrderRequest taker, BookOverlay overlay) {
+		if (!overlay.belongsTo(this)) {
+			throw new IllegalArgumentException("The overlay belongs to another book");
+		}
+		if (overlay.changes() == 0) {
+			// Nothing recorded yet: the book as it stands, at its own revision.
+			return plan(taker);
+		}
+		if (orders.containsKey(taker.orderId()) || overlay.rests(taker.orderId())) {
+			throw new IllegalArgumentException("Order is already in the book: " + taker.orderId());
+		}
+		if (taker.acceptedSequence() <= Math.max(lastAcceptedSequence, overlay.lastAcceptedSequence())) {
+			throw new IllegalArgumentException("Accepted sequence must increase");
+		}
+		Side makers = taker.side().opposite();
+		Comparator<Long> order = makers == Side.BUY ? Comparator.reverseOrder() : Comparator.naturalOrder();
+		Iterator<PriceLevel> booked = levels(makers).values().iterator();
+		Iterator<Map.Entry<Long, List<BookOverlay.Pending>>> rested = overlay.levels(makers).entrySet().iterator();
+		PriceLevel level = booked.hasNext() ? booked.next() : null;
+		Map.Entry<Long, List<BookOverlay.Pending>> added = rested.hasNext() ? rested.next() : null;
+		Matching matching = new Matching(taker);
+		while (matching.step == Step.MORE && (level != null || added != null)) {
+			int position = level == null ? 1 : added == null ? -1 : order.compare(level.priceCents, added.getKey());
+			if (!taker.crosses(position <= 0 ? level.priceCents : added.getKey())) {
+				break;
+			}
+			if (position <= 0) {
+				// The book's own orders at this price first, as they were queued.
+				for (OrderNode node = level.head; node != null && matching.step == Step.MORE; node = node.next) {
+					matching.take(node.orderId, node.accountId, node.price, overlay.left(node.orderId, node.remaining));
+				}
+				level = booked.hasNext() ? booked.next() : null;
+			}
+			if (position >= 0) {
+				// Then the run's, behind them, in the order they rested.
+				for (BookOverlay.Pending each : added.getValue()) {
+					if (matching.step != Step.MORE) {
+						break;
+					}
+					matching.take(each.orderId, each.accountId, each.price, each.remaining);
+				}
+				added = rested.hasNext() ? rested.next() : null;
+			}
+		}
+		if (matching.step == Step.LIMIT) {
+			return new MatchPlan(taker, overlay.revision(), List.of(), MatchPlan.Outcome.EXECUTION_LIMIT_EXCEEDED);
+		}
+		MatchPlan.Outcome stopped = matching.step == Step.SELF_TRADE ? MatchPlan.Outcome.SELF_TRADE_PREVENTED : null;
+		return new MatchPlan(taker, overlay.revision(), matching.fills, outcome(taker, matching.remaining, stopped));
+	}
+
+	private enum Step {
+		MORE, FILLED, SELF_TRADE, LIMIT
+	}
+
+	/** One overlaid plan's progress through the makers, in priority order. */
+	private final class Matching {
+
+		private final OrderRequest taker;
+
+		private final List<Fill> fills = new ArrayList<>();
+
+		private long remaining;
+
+		private Step step = Step.MORE;
+
+		private Matching(OrderRequest taker) {
+			this.taker = taker;
+			this.remaining = taker.quantity().shares();
+		}
+
+		/** Offers the next maker, with what is left of it once the run so far is applied. */
+		private void take(UUID orderId, UUID accountId, Price price, long left) {
+			if (left == 0) {
+				return;
+			}
+			if (accountId.equals(taker.accountId())) {
+				step = Step.SELF_TRADE;
+				return;
+			}
+			if (fills.size() == maxFillsPerCommand) {
+				step = Step.LIMIT;
+				return;
+			}
+			long quantity = Math.min(remaining, left);
+			fills.add(new Fill(orderId, accountId, price, quantity, left - quantity));
+			remaining -= quantity;
+			if (remaining == 0) {
+				step = Step.FILLED;
+			}
+		}
+
+	}
+
 	private static MatchPlan.Outcome outcome(OrderRequest taker, long remaining, MatchPlan.Outcome stopped) {
 		if (remaining == 0) {
 			return MatchPlan.Outcome.FILLED;

@@ -11,6 +11,15 @@ The order book alone, with no database (JMH, `MatcherBenchmark`). Each invocatio
 | 200 resting orders | 427 ± 13 ns |
 | 5,000 resting orders | 596 ± 22 ns |
 
+**In runs of 32, 2026-11-18.** The same commands planned the way a batching writer will plan them: each against an overlay of its run's earlier commands, with the same snapshot depth, the run applied to the book at its end. Same checksum and final book as one by one.
+
+| Book | One by one | In runs of 32 |
+| --- | --- | --- |
+| 200 resting orders | 443 ± 10 ns | 1,166 ± 25 ns |
+| 5,000 resting orders | 592 ± 15 ns | 1,360 ± 16 ns |
+
+The overlay adds about 0.7 to 0.8 µs a command, mostly combining the run's depth changes for each snapshot. A durable commit costs about 2 ms, so that is the price of sharing it.
+
 ## Writer replay
 
 The same seeded 12,000 commands (2,000 warm-up, 10,000 measured), one at a time, through the real engine and PostgreSQL in Testcontainers (`EngineReplayBench`). Every run below produced the same digest of answers, so they did identical work.
