@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import httpx
 
-from mse_simulator.loadtest import stats
+from mse_simulator.loadtest import diagnostics, stats
 
 # A person's account may send 10 trading commands a second; each trader login stays well under it.
 PER_TRADER = 8
@@ -201,6 +201,8 @@ class Result:
     rate: float
     seconds: float
     sent: list[Sent]
+    # The publication backlog and the feeds' lag over the same window; None if not sampled.
+    downstream: diagnostics.Downstream | None = None
 
     @property
     def planned(self) -> int:
@@ -252,6 +254,8 @@ class Result:
             f"at least {ANSWERED_SHARE:.0%} answered": self.planned > 0
             and len(self.ok) >= ANSWERED_SHARE * self.planned,
             "the generator kept up": lag is not None and lag <= GENERATOR_LAG_BUDGET,
+            "publication and the feeds kept up": self.downstream is not None
+            and self.downstream.kept_up,
         }
 
     @property
@@ -262,8 +266,31 @@ class Result:
         return [name for name, met in self.verdicts().items() if not met]
 
 
-def measured(rate: float, warmup: float, seconds: float, sent: list[Sent]) -> Result:
-    """The commands planned after the warm-up, with their times from the warm-up's end."""
+def measured(
+    rate: float,
+    warmup: float,
+    seconds: float,
+    sent: list[Sent],
+    sampled: diagnostics.Sampled | None = None,
+) -> Result:
+    """The commands planned after the warm-up, with their times from the warm-up's end; and the
+    backlog, lag and feed state sampled while the measured commands were planned, judged between
+    the window's first and last thirds. Samples after the plan's end, while the last answers come
+    in and nothing new is sent, are left out: the relay and the feeds catch up then."""
+    downstream = None
+    if sampled is not None:
+
+        def inside(series: list[tuple[float, float]]) -> list[tuple[float, float]]:
+            return [
+                (at - warmup, value) for at, value in series if warmup <= at <= warmup + seconds
+            ]
+
+        window = diagnostics.Sampled(
+            feed_lag={topic: inside(series) for topic, series in sampled.feed_lag.items()},
+            feed_live={topic: inside(series) for topic, series in sampled.feed_live.items()},
+            backlog=inside(sampled.backlog),
+        )
+        downstream = diagnostics.downstream(window, rate, seconds / 3)
     return Result(
         rate,
         seconds,
@@ -277,6 +304,7 @@ def measured(rate: float, warmup: float, seconds: float, sent: list[Sent]) -> Re
             for each in sent
             if each.intended >= warmup
         ],
+        downstream,
     )
 
 
@@ -288,6 +316,29 @@ def highest_passing(results: list[Result]) -> Result | None:
             break
         best = each
     return best
+
+
+def downstream_lines(flows: list[tuple[float, diagnostics.Downstream | None]]) -> list[str]:
+    """What fell behind at each rate, and apart from it the rates not sampled enough to tell."""
+    behind = [
+        f"{rate:,.0f}/s: {flow.describe()}" for rate, flow in flows if flow and flow.fell_behind()
+    ]
+    unsampled = [
+        f"{rate:,.0f}/s" + (f" ({flow.describe()})" if flow else "")
+        for rate, flow in flows
+        if flow is None or (not flow.measured and not flow.fell_behind())
+    ]
+    lines = []
+    if behind:
+        lines += ["", "Publication or a feed fell behind: " + "; ".join(behind) + "."]
+    if unsampled:
+        lines += [
+            "",
+            "Publication and the feeds were not sampled enough to judge: "
+            + "; ".join(unsampled)
+            + ".",
+        ]
+    return lines
 
 
 def report(results: list[Result], skipped: list[float], broke: str | None = None) -> list[str]:
@@ -305,17 +356,21 @@ def report(results: list[Result], skipped: list[float], broke: str | None = None
         + ".**",
         "",
         "| Rate | Traders | Planned | Answered | Refused or timed out | Failed | p50 | p95 | p99 | "
-        "Generator lag p99 | Met |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "Generator lag p99 | Backlog peak | Feed lag peak | Met |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for each in results:
         met = "yes" if each.passed else "no: " + ", ".join(each.missed())
+        flow = each.downstream
+        backlog = "n/a" if flow is None else f"{flow.peak(diagnostics.BACKLOG):,.0f}"
+        lag = "n/a" if flow is None else f"{flow.lag_peak:,.0f}"
         lines.append(
             f"| {each.rate:,.0f}/s | {traders(each.rate)} | {each.planned:,} | "
             f"{each.answered_rate:,.1f}/s | {each.overloaded:,} | {each.failed:,} | "
             f"{ms(each.latency(0.5))} | {ms(each.latency(0.95))} | {ms(each.latency(0.99))} | "
-            f"{ms(each.generator_lag)} | {met} |"
+            f"{ms(each.generator_lag)} | {backlog} | {lag} | {met} |"
         )
+    lines += downstream_lines([(each.rate, each.downstream) for each in results])
     unanswered = [
         f"{each.rate:,.0f}/s: "
         + ", ".join(f"{status or 'none'} x {count:,}" for status, count in each.by_status().items())

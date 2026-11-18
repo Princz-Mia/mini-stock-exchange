@@ -1,6 +1,7 @@
 # Only for the load test: statement and I/O statistics, so a command's time can be split into the database's work,
 # the network and the WAL flush. Durability is unchanged: fsync and synchronous_commit keep their defaults (on).
 # An override's command replaces compose.yaml's whole list, so its durable settings are repeated here first.
+# Also a higher publication backlog limit, below.
 services:
   postgres:
     command:
@@ -23,3 +24,11 @@ services:
       - track_io_timing=on
       - -c
       - track_wal_io_timing=on
+  execution-service:
+    environment:
+      # A high rate can pile up events faster than the relay publishes them for a while. With the default limit
+      # (50,000 events or 256 MiB) new orders would then be refused within seconds, and the run would report
+      # refusals where the real finding is that publication fell behind, which the load test now judges itself.
+      # The limits in force are read back from Execution and stated in every report.
+      MSE_OUTBOX_ADMISSION_MAX_EVENTS: "500000"
+      MSE_OUTBOX_ADMISSION_MAX_BYTES: "1073741824"

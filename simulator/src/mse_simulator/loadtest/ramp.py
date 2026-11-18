@@ -6,7 +6,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from mse_simulator.loadtest import diagnostics, stats
+from mse_simulator.loadtest import diagnostics, stats, stress
 
 Samples = Mapping[tuple[str, stats.Labels], float]
 
@@ -70,9 +70,18 @@ class Step:
     # never admitted. The bots retry them with the same key.
     refused: float
     service_ms: float | None
-    lag_peak: float
+    # The publication backlog and the feeds' lag, judged between the window's thirds.
+    downstream: diagnostics.Downstream
     # Mean and peak processor per service, in percent of one CPU.
     cpu: dict[str, tuple[float, float]]
+
+    @property
+    def lag_peak(self) -> float:
+        return self.downstream.lag_peak
+
+    @property
+    def backlog_peak(self) -> float:
+        return self.downstream.peak(diagnostics.BACKLOG)
 
     @property
     def offered_rate(self) -> float:
@@ -104,6 +113,7 @@ class Step:
             and (self.unexpected + self.refused) / (self.admitted + self.refused) < FAILURE_BUDGET,
             f"admitted at least {ADMITTED_SHARE:.0%} of the rate": self.admitted_rate
             >= ADMITTED_SHARE * self.target,
+            "publication and the feeds kept up": self.downstream.kept_up,
         }
 
     @property
@@ -127,8 +137,9 @@ def step(
     unavailable: int = 0,
 ) -> Step:
     """A step's numbers from Execution's scrapes and the run's activity at each end of its window,
-    the probe trader's commands and the queue samples taken during it. The queue's growth is
-    judged between the window's first and last thirds."""
+    the probe trader's commands and the queue samples taken during it. The queue's growth, and the
+    publication backlog's and each feed lag's, are judged between the window's first and last
+    thirds."""
     histogram = stats.window(
         stats.bucket_counts(before, LATENCY), stats.bucket_counts(after, LATENCY)
     )
@@ -141,7 +152,6 @@ def step(
     probe_failures = sum(
         1 for _, _, status in probe if status >= 500 and status not in COUNTED_BY_EXECUTION
     )
-    lags = [lag for values in sampled.feed_lag.values() for lag in values]
     refused = sum(
         stats.total(after, name, **labels) - stats.total(before, name, **labels)
         for name, labels in (
@@ -164,7 +174,7 @@ def step(
         unexpected=failed + bot["errors"] + probe_failures + unavailable,
         refused=refused,
         service_ms=diagnostics.writer_split(before, after).service_ms,
-        lag_peak=max(lags, default=0.0),
+        downstream=diagnostics.downstream(sampled, target, seconds / 3),
         cpu=diagnostics.cpu_by_service(sampled),
     )
 
@@ -196,8 +206,8 @@ def report(steps: list[Step], skipped: list[float], broke: str | None = None) ->
     lines += [
         "",
         "| Rate | Offered | Admitted | Committed | Within 150 ms | Within 500 ms | p99 | "
-        "Queue peak | Refused | Service | Feed lag peak | Met |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "Queue peak | Refused | Service | Backlog peak | Feed lag peak | Met |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for each in steps:
         met = "yes" if each.passed else "no: " + ", ".join(each.missed())
@@ -206,8 +216,10 @@ def report(steps: list[Step], skipped: list[float], broke: str | None = None) ->
             f"| {each.target:,.0f}/s | {each.offered_rate:,.1f}/s | {each.admitted_rate:,.1f}/s | "
             f"{each.committed_rate:,.1f}/s | "
             f"{each.within_p95:.2%} | {each.within_p99:.2%} | {ms(p99)} | {each.queue.peak:.0f} | "
-            f"{each.refused:,.0f} | {ms(each.service_ms)} | {each.lag_peak:.0f} | {met} |"
+            f"{each.refused:,.0f} | {ms(each.service_ms)} | {each.backlog_peak:,.0f} | "
+            f"{each.lag_peak:,.0f} | {met} |"
         )
+    lines += stress.downstream_lines([(each.target, each.downstream) for each in steps])
     lines += [
         "",
         "Processor per step, mean / peak in percent of one CPU, sampled about every 12 s; the "

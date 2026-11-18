@@ -4,10 +4,13 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
+import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
@@ -36,6 +39,17 @@ class OutboxConfiguration {
 		Gauge.builder("mse.outbox.admission.open", admission, (a) -> a.isOpen() ? 1 : 0)
 			.description("1 while new orders are admitted, 0 while the publication backlog stops them")
 			.register(meters);
+		// The limits in force, so a load test reports what it ran with rather than what it asked for. One description
+		// for both, since Prometheus shows one per name.
+		String limit = "Publication backlog at which new orders stop, in events or in bytes";
+		Gauge.builder("mse.outbox.admission.limit", () -> maxEvents)
+			.description(limit)
+			.tag("limit", "events")
+			.register(meters);
+		Gauge.builder("mse.outbox.admission.limit", () -> maxBytes)
+			.description(limit)
+			.tag("limit", "bytes")
+			.register(meters);
 		return admission;
 	}
 
@@ -53,9 +67,26 @@ class OutboxConfiguration {
 		// Delivery safety is not left to configuration: every event is acknowledged by all replicas, once.
 		producerConfig.put(ProducerConfig.ACKS_CONFIG, "all");
 		producerConfig.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, true);
+		Timer batches = Timer.builder("mse.outbox.batch")
+			.description("A batch published in full, from reading it to marking it published")
+			.publishPercentileHistogram()
+			// One round may wait up to the acknowledgement timeout, past Micrometer's default top bucket of 30 s.
+			.maximumExpectedValue(Duration.ofMinutes(5))
+			.register(meters);
+		DistributionSummary rounds = DistributionSummary.builder("mse.outbox.batch.rounds")
+			.description("Waits for Kafka a published batch needed: the most events any one key had in it")
+			.publishPercentileHistogram()
+			// A batch never needs more rounds than it has events.
+			.minimumExpectedValue(1.0)
+			.maximumExpectedValue((double) batchSize)
+			.register(meters);
 		OutboxRelay relay = new OutboxRelay(new JdbcOutbox(jdbcClient),
 				() -> new KafkaProducer<>(producerConfig, new StringSerializer(), new ByteArraySerializer()),
-				ownership::isHeld, new OutboxRelay.Settings(batchSize, pollInterval, ackTimeout, maxBackoff), clock);
+				ownership::isHeld, new OutboxRelay.Settings(batchSize, pollInterval, ackTimeout, maxBackoff), clock,
+				(nanos, events, waits) -> {
+					batches.record(nanos, TimeUnit.NANOSECONDS);
+					rounds.record(waits);
+				});
 		Gauge.builder("mse.outbox.pending", relay, OutboxRelay::pendingEvents)
 			.description("Committed events not yet acknowledged by Kafka")
 			.register(meters);
