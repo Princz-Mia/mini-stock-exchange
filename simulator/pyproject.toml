@@ -7,6 +7,9 @@ dependencies = [
     "httpx==0.28.1",
     "numpy==2.5.4",
     "pydantic==2.14.2",
+    # httpcore looks for sniffio on every request and, without it, retries the failed import each
+    # time, a search of the module path that cost about 0.4 ms a call here.
+    "sniffio==1.3.1",
 ]
 
 [dependency-groups]

@@ -92,8 +92,10 @@ class BotRunSchemaIT {
 	@Test
 	void theRateIsPositiveAndBounded() {
 		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION, () -> run(f, f.simulation(), "0.00")));
-		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION, () -> run(f, f.simulation(), "200.01")));
-		db.inRolledBackTransaction((f) -> run(f, f.simulation(), "200.00"));
+		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION, () -> run(f, f.simulation(), "2000.01")));
+		db.inRolledBackTransaction((f) -> run(f, f.simulation(), "2000.00"));
+		db.inRolledBackTransaction((f) -> run(f, f.simulation(), "200.01"));
+		db.inRolledBackTransaction((f) -> run(f, f.simulation(), "0.01"));
 	}
 
 	@Test

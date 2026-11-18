@@ -101,6 +101,64 @@ final class MatcherWorkload {
 	}
 
 	/**
+	 * The same stream in runs of {@code run} commands, as a batching writer would do it: each command planned against
+	 * an overlay of the run's earlier commands, with the same snapshot depth, and the run applied to the book at its
+	 * end. Gives the same checksum as {@link #replay(OrderBook)}.
+	 */
+	long replayInRuns(OrderBook book, int run) {
+		long checksum = 0;
+		BookOverlay overlay = book.overlay();
+		List<Command> pending = new ArrayList<>(run);
+		List<MatchPlan> plans = new ArrayList<>(run);
+		for (Command command : commands) {
+			BookDelta delta;
+			MatchPlan plan = null;
+			if (command instanceof Place place) {
+				plan = overlay.plan(place.request());
+				delta = BookDelta.of(plan);
+				checksum += plan.filledQuantity();
+			}
+			else {
+				BookOrder order = overlay.find(((Cancel) command).orderId()).orElseThrow();
+				delta = BookDelta.cancel(order);
+			}
+			List<DepthLevel> bids = overlay.depthAfter(delta, Side.BUY, SNAPSHOT_LEVELS);
+			List<DepthLevel> asks = overlay.depthAfter(delta, Side.SELL, SNAPSHOT_LEVELS);
+			checksum = 31 * checksum + bids.size() * 7L + asks.size();
+			if (!bids.isEmpty()) {
+				checksum += bids.getFirst().quantity();
+			}
+			if (plan != null) {
+				overlay.record(plan);
+			}
+			else {
+				overlay.cancel(((Cancel) command).orderId());
+			}
+			pending.add(command);
+			plans.add(plan);
+			if (pending.size() == run) {
+				applyRun(book, pending, plans);
+				overlay = book.overlay();
+			}
+		}
+		applyRun(book, pending, plans);
+		return checksum;
+	}
+
+	private static void applyRun(OrderBook book, List<Command> pending, List<MatchPlan> plans) {
+		for (int i = 0; i < pending.size(); i++) {
+			if (plans.get(i) != null) {
+				book.apply(plans.get(i));
+			}
+			else {
+				book.cancel(((Cancel) pending.get(i)).orderId()).orElseThrow();
+			}
+		}
+		pending.clear();
+		plans.clear();
+	}
+
+	/**
 	 * Replays every command on the book, as the writer does in memory, and returns a checksum of what it saw: the
 	 * filled quantity and the snapshot depth, so the work can't be optimised away and two replays can be compared.
 	 */

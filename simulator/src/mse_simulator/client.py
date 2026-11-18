@@ -45,12 +45,15 @@ class TraderClient:
         jitter_seed: int,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         max_backoff: float = 5.0,
+        reads: asyncio.Semaphore | None = None,
     ) -> None:
         self.account_id = account_id
         self._http = http
         self._base = execution_url
         self._headers = {"Authorization": f"Bearer {token}"}
         self._in_flight = in_flight
+        # Reads have their own limit; without one they share the trading calls'.
+        self._reads = in_flight if reads is None else reads
         # A generator holds 2.5 KB of state, and most bots never retry: made on the first retry.
         self._jitter_seed = jitter_seed
         self._jitter: random.Random | None = None
@@ -70,7 +73,7 @@ class TraderClient:
         return (await self._read("/api/v1/orders?status=active"))["orders"]
 
     async def _read(self, path: str) -> dict[str, Any]:
-        async with self._in_flight:
+        async with self._reads:
             response = await self._http.get(f"{self._base}{path}", headers=self._headers)
         response.raise_for_status()
         return response.json()

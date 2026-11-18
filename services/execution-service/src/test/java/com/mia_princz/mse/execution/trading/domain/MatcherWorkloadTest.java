@@ -27,6 +27,22 @@ class MatcherWorkloadTest {
 		assertThat(workload.replay(workload.book())).isEqualTo(workload.replay(workload.book()));
 	}
 
+	/** Replaying in runs through an overlay does the same work and leaves the same book, whatever the run's length. */
+	@Test
+	void replayingInRunsDoesTheSameWorkAsOneByOne() {
+		MatcherWorkload workload = MatcherWorkload.record(13, 500, 4_000);
+		OrderBook expected = workload.book();
+		long checksum = workload.replay(expected);
+
+		for (int run : new int[] { 1, 7, 32, 4_000 }) {
+			OrderBook book = workload.book();
+			assertThat(workload.replayInRuns(book, run)).as("runs of %d", run).isEqualTo(checksum);
+			assertThat(book.orders(Side.BUY)).as("runs of %d", run).isEqualTo(expected.orders(Side.BUY));
+			assertThat(book.orders(Side.SELL)).as("runs of %d", run).isEqualTo(expected.orders(Side.SELL));
+			assertThat(book.revision()).as("runs of %d", run).isEqualTo(expected.revision());
+		}
+	}
+
 	@Test
 	void aDifferentSeedRecordsDifferentWork() {
 		assertThat(MatcherWorkload.record(1, 200, 1_000).commands())

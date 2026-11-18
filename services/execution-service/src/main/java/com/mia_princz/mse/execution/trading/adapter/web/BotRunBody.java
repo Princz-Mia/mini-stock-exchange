@@ -17,7 +17,8 @@ import com.mia_princz.mse.execution.trading.domain.Money;
 record BotRunBody(Integer marketMakers, Integer noise, Integer momentum, Long seed, String commandsPerSecond,
 		Integer maxOrderQuantity, Integer maxPosition, Integer durationMinutes, List<UUID> instrumentIds) {
 
-	static final long MAX_HUNDREDTHS_PER_SECOND = 20_000;
+	/** 2,000 commands a second, in hundredths; the database checks the same bound. */
+	static final long MAX_HUNDREDTHS_PER_SECOND = 200_000;
 
 	record Valid(int marketMakers, int noise, int momentum, Long seed, long commandsPerSecondHundredths,
 			int maxOrderQuantity, int maxPosition, Duration duration, List<UUID> instrumentIds) {
@@ -53,7 +54,7 @@ record BotRunBody(Integer marketMakers, Integer noise, Integer momentum, Long se
 		}
 		if (hundredths < 1 || hundredths > MAX_HUNDREDTHS_PER_SECOND) {
 			errors.add(new ApiException.FieldError("commandsPerSecond", "OUT_OF_RANGE",
-					"commandsPerSecond must be a decimal from 0.01 to 200.00"));
+					"commandsPerSecond must be a decimal from 0.01 to 2000.00"));
 		}
 		int quantity = bounded("maxOrderQuantity", maxOrderQuantity, 10, 1, 10_000, errors);
 		int position = bounded("maxPosition", maxPosition, 100, 1, 1_000_000, errors);

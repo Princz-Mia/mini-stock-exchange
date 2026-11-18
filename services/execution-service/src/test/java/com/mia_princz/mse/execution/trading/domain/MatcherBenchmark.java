@@ -58,4 +58,11 @@ public class MatcherBenchmark {
 		return workload.replay(book);
 	}
 
+	/** The same in runs of 32, planned against an overlay of each run's earlier commands, as a batching writer will. */
+	@Benchmark
+	@OperationsPerInvocation(COMMANDS)
+	public long commandInRunsOf32() {
+		return workload.replayInRuns(book, 32);
+	}
+
 }
