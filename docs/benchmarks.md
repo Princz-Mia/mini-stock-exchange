@@ -237,3 +237,17 @@ Trader logins send at fixed times from the host through the proxy, 10 s of warm-
 Without the bots' generator in the way, the limit is the same: 175 a second is just under the writer's capacity, so commands queue and the p95 passes 150 ms. These latencies include the proxy and Docker Desktop's port forwarding.
 
 The accounting checks passed after both runs.
+
+### Open-loop stress after the writer changes, and PostgreSQL's settings, 2026-11-18
+
+The same stress run after the writer changes recorded under "Writer replay" above (one statement to open a command, writer-owned counts and instrument data, a command's writes sent once per kind of row, a cancel from the book). Twice: first without, then with PostgreSQL's settings in `compose.yaml` (512 MB of shared buffers, 32 MB of WAL buffers, checkpoints every 15 minutes or 4 GB of WAL, WAL compressed with lz4; durability unchanged). Both runs sent the same 102,337 commands. **Highest rate that met every budget: 250 commands a second**, against 150 before the writer changes.
+
+| Rate | p95 without the settings | p99 without | p95 with | p99 with |
+| --- | --- | --- | --- | --- |
+| 200/s | 18.6 ms | 34.4 ms | 18.1 ms | 31.4 ms |
+| 250/s | 119.9 ms | 181.5 ms | 28.6 ms | 63.6 ms |
+| 300/s | 17.4 s | 23.5 s | 14.5 s | 20.8 s |
+
+- At 300 a second the writer is saturated either way.
+- With the settings, 76% fewer full-page images were written to the WAL (3,116 against 12,728) and 10% less WAL in all (5.6 KB a command against 6.2 KB), which is where the tail at 250 a second went.
+- Below 200 a second there is no measurable difference.
