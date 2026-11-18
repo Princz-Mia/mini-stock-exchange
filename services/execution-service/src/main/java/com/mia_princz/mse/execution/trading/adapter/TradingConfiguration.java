@@ -5,6 +5,7 @@ import java.time.Clock;
 
 import javax.sql.DataSource;
 
+import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.beans.factory.annotation.Value;
@@ -57,8 +58,18 @@ class TradingConfiguration {
 	}
 
 	@Bean(destroyMethod = "close")
-	CommandWriter commandWriter(@Value("${mse.trading.queue-capacity:256}") int capacity, MeterRegistry meters) {
-		CommandWriter writer = new CommandWriter("trading-writer", capacity);
+	CommandWriter commandWriter(@Value("${mse.trading.queue-capacity:256}") int capacity,
+			@Value("${mse.trading.max-batch:1}") int maxBatch, MeterRegistry meters) {
+		// Trading commands queued together run as one run of at most max-batch; one until group commit is turned on.
+		CommandWriter.checkRunLimit(maxBatch, capacity);
+		DistributionSummary runs = DistributionSummary.builder("mse.writer.run.size")
+			.description("Trading commands the writer took together as one run")
+			.baseUnit("commands")
+			.minimumExpectedValue(1.0)
+			.maximumExpectedValue((double) maxBatch)
+			.publishPercentileHistogram()
+			.register(meters);
+		CommandWriter writer = new CommandWriter("trading-writer", capacity, maxBatch, runs::record);
 		// Admitted commands not yet taken by the writer; growing under steady load means the writer is falling behind.
 		Gauge.builder("mse.writer.queue.depth", writer, CommandWriter::queueDepth)
 			.description("Commands admitted and waiting for the writer")

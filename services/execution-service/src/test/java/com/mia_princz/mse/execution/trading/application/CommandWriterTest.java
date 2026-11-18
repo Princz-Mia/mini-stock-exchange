@@ -185,8 +185,214 @@ class CommandWriterTest {
 			.hasCauseInstanceOf(InterruptedException.class);
 	}
 
+	/**
+	 * Commands queued together for one processor run together, up to the limit; any other command ends a run; the
+	 * order is the order of admission throughout.
+	 */
+	@Test
+	void commandsQueuedTogetherRunTogetherUpToTheLimitAndAnythingElseEndsARun() throws Exception {
+		List<Integer> sizes = Collections.synchronizedList(new ArrayList<>());
+		CommandWriter writer = writer(100, 2, sizes::add);
+		Recorder processor = new Recorder();
+		CountDownLatch release = new CountDownLatch(1);
+		writer.submit(() -> release.await(5, TimeUnit.SECONDS));
+		List<CompletableFuture<Object>> futures = new ArrayList<>();
+		for (String name : List.of("p1", "p2", "p3")) {
+			futures.add(writer.submitInRun(processor, name));
+		}
+		futures.add(writer.submit(() -> "control"));
+		for (String name : List.of("p4", "p5")) {
+			futures.add(writer.submitInRun(processor, name));
+		}
+
+		release.countDown();
+		CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).get();
+
+		assertThat(processor.runs).containsExactly(List.of("p1", "p2"), List.of("p3"), List.of("p4", "p5"));
+		assertThat(futures).extracting(CompletableFuture::join)
+			.containsExactly("done p1", "done p2", "done p3", "control", "done p4", "done p5");
+		assertThat(sizes).as("each run's size, and only runs").containsExactly(2, 1, 2);
+	}
+
+	/**
+	 * A run never waits for more commands: one queued alone runs alone, at once, whatever the limit, and a command
+	 * submitted a little later is a run of its own rather than one the first waited for.
+	 */
+	@Test
+	void aRunTakesOnlyWhatIsQueuedAndNeverWaitsForMore() throws Exception {
+		CommandWriter writer = writer(100, 32);
+		Recorder processor = new Recorder();
+
+		CompletableFuture<Object> alone = writer.submitInRun(processor, "alone");
+		Thread.sleep(200);
+		CompletableFuture<Object> later = writer.submitInRun(processor, "later");
+
+		assertThat(alone.get(1, TimeUnit.SECONDS)).isEqualTo("done alone");
+		assertThat(later.get(1, TimeUnit.SECONDS)).isEqualTo("done later");
+		assertThat(processor.runs).containsExactly(List.of("alone"), List.of("later"));
+	}
+
+	/**
+	 * A command of a run that halts the writer fails with the halt; the commands before it keep their results, those
+	 * after it fail as the processor says, and once the run is done the writer halts and fails the queue.
+	 */
+	@Test
+	void aHaltedOutcomeKeepsTheRunsOtherOutcomesThenHaltsTheWriter() throws Exception {
+		List<Integer> sizes = Collections.synchronizedList(new ArrayList<>());
+		CommandWriter writer = writer(100, 4, sizes::add);
+		WriterHaltException halt = new WriterHaltException("state unknown", new RuntimeException());
+		CommandWriter.RunProcessor<String> processor = (commands) -> List.of(CommandWriter.RunOutcome.done("kept"),
+				CommandWriter.RunOutcome.halted(halt),
+				CommandWriter.RunOutcome.failed(new WriterStoppedException("halted before this command ran")));
+		CountDownLatch release = new CountDownLatch(1);
+		writer.submit(() -> release.await(5, TimeUnit.SECONDS));
+		CompletableFuture<Object> before = writer.submitInRun(processor, "before");
+		CompletableFuture<Object> halting = writer.submitInRun(processor, "halting");
+		CompletableFuture<Object> after = writer.submitInRun(processor, "after");
+		CompletableFuture<String> queued = writer.submit(() -> "queued");
+
+		release.countDown();
+
+		assertThat(before.get()).isEqualTo("kept");
+		assertThatThrownBy(halting::get).hasCause(halt);
+		assertThatThrownBy(after::get).hasCauseInstanceOf(WriterStoppedException.class);
+		assertThatThrownBy(queued::get).hasCauseInstanceOf(WriterStoppedException.class);
+		assertThat(writer.isAvailable()).isFalse();
+		assertThat(sizes).containsExactly(3);
+	}
+
+	/** Commands for different processors never share a run, so each processor sees only its own. */
+	@Test
+	void commandsForDifferentProcessorsNeverShareARun() throws Exception {
+		CommandWriter writer = writer(100, 8);
+		Recorder first = new Recorder();
+		Recorder second = new Recorder();
+		CountDownLatch release = new CountDownLatch(1);
+		writer.submit(() -> release.await(5, TimeUnit.SECONDS));
+		List<CompletableFuture<Object>> futures = new ArrayList<>();
+		futures.add(writer.submitInRun(first, "a1"));
+		futures.add(writer.submitInRun(second, "b1"));
+		futures.add(writer.submitInRun(second, "b2"));
+		futures.add(writer.submitInRun(first, "a2"));
+
+		release.countDown();
+		CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).get();
+
+		assertThat(first.runs).containsExactly(List.of("a1"), List.of("a2"));
+		assertThat(second.runs).containsExactly(List.of("b1", "b2"));
+	}
+
+	/** By default every run holds one command, as before runs existed. */
+	@Test
+	void byDefaultEveryRunHoldsOneCommand() throws Exception {
+		CommandWriter writer = writer(100);
+		Recorder processor = new Recorder();
+		CountDownLatch release = new CountDownLatch(1);
+		writer.submit(() -> release.await(5, TimeUnit.SECONDS));
+		List<CompletableFuture<Object>> futures = new ArrayList<>();
+		for (String name : List.of("p1", "p2", "p3")) {
+			futures.add(writer.submitInRun(processor, name));
+		}
+
+		release.countDown();
+		CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).get();
+
+		assertThat(writer.maxRun()).isEqualTo(1);
+		assertThat(processor.runs).containsExactly(List.of("p1"), List.of("p2"), List.of("p3"));
+	}
+
+	/** A command of a run that fails fails alone; the others complete with their results. */
+	@Test
+	void aFailedCommandInARunFailsAlone() throws Exception {
+		CommandWriter writer = writer(100, 4);
+		CommandWriter.RunProcessor<String> processor = (commands) -> commands.stream()
+			.map((command) -> command.equals("bad") ? CommandWriter.RunOutcome.failed(new IllegalStateException(command))
+					: CommandWriter.RunOutcome.done("done " + command))
+			.toList();
+		CountDownLatch release = new CountDownLatch(1);
+		writer.submit(() -> release.await(5, TimeUnit.SECONDS));
+		CompletableFuture<Object> good = writer.submitInRun(processor, "good");
+		CompletableFuture<Object> bad = writer.submitInRun(processor, "bad");
+		CompletableFuture<Object> after = writer.submitInRun(processor, "after");
+
+		release.countDown();
+
+		assertThat(good.get()).isEqualTo("done good");
+		assertThatThrownBy(bad::get).hasCauseInstanceOf(IllegalStateException.class);
+		assertThat(after.get()).isEqualTo("done after");
+	}
+
+	/** A halt in a run fails every command of the run, then every queued command, and stops admission. */
+	@Test
+	void aHaltInARunFailsTheWholeRunThenTheQueue() throws Exception {
+		CommandWriter writer = writer(100, 2);
+		CommandWriter.RunProcessor<String> processor = (commands) -> {
+			throw new WriterHaltException("state unknown", new RuntimeException());
+		};
+		CountDownLatch release = new CountDownLatch(1);
+		writer.submit(() -> release.await(5, TimeUnit.SECONDS));
+		CompletableFuture<Object> first = writer.submitInRun(processor, "first");
+		CompletableFuture<Object> second = writer.submitInRun(processor, "second");
+		CompletableFuture<String> queued = writer.submit(() -> "queued");
+
+		release.countDown();
+
+		assertThatThrownBy(first::get).hasCauseInstanceOf(WriterHaltException.class);
+		assertThatThrownBy(second::get).hasCauseInstanceOf(WriterHaltException.class);
+		assertThatThrownBy(queued::get).hasCauseInstanceOf(WriterStoppedException.class);
+		assertThatThrownBy(() -> writer.submitInRun(processor, "refused")).isInstanceOf(WriterStoppedException.class);
+	}
+
+	/** A processor that answers for the wrong number of commands fails its run, and the writer goes on. */
+	@Test
+	void aBrokenProcessorFailsItsRunAndTheWriterGoesOn() throws Exception {
+		CommandWriter writer = writer(100, 4);
+		CountDownLatch release = new CountDownLatch(1);
+		writer.submit(() -> release.await(5, TimeUnit.SECONDS));
+		CommandWriter.RunProcessor<String> shortOfOne = (commands) -> List.of(CommandWriter.RunOutcome.done("one"));
+		CompletableFuture<Object> a = writer.submitInRun(shortOfOne, "a");
+		CompletableFuture<Object> b = writer.submitInRun(shortOfOne, "b");
+
+		release.countDown();
+
+		assertThatThrownBy(a::get).hasCauseInstanceOf(IllegalStateException.class);
+		assertThatThrownBy(b::get).hasCauseInstanceOf(IllegalStateException.class);
+		assertThat(writer.submit(() -> "still running").get()).isEqualTo("still running");
+	}
+
+	@Test
+	void aRunLimitOutsideOneToTheCapacityIsRefused() {
+		assertThatThrownBy(() -> new CommandWriter("w", 10, 0)).isInstanceOf(IllegalArgumentException.class);
+		assertThatThrownBy(() -> new CommandWriter("w", 10, 11)).isInstanceOf(IllegalArgumentException.class);
+	}
+
+	/** Records each run it is given and answers "done" for each command. */
+	private static final class Recorder implements CommandWriter.RunProcessor<String> {
+
+		final List<List<String>> runs = Collections.synchronizedList(new ArrayList<>());
+
+		@Override
+		public List<CommandWriter.RunOutcome> process(List<String> commands) {
+			runs.add(List.copyOf(commands));
+			return commands.stream().map((command) -> CommandWriter.RunOutcome.done("done " + command)).toList();
+		}
+
+	}
+
 	private CommandWriter writer(int capacity) {
 		CommandWriter writer = new CommandWriter("test-writer", capacity);
+		writers.add(writer);
+		return writer;
+	}
+
+	private CommandWriter writer(int capacity, int maxRun) {
+		CommandWriter writer = new CommandWriter("test-writer", capacity, maxRun);
+		writers.add(writer);
+		return writer;
+	}
+
+	private CommandWriter writer(int capacity, int maxRun, java.util.function.IntConsumer sizes) {
+		CommandWriter writer = new CommandWriter("test-writer", capacity, maxRun, sizes);
 		writers.add(writer);
 		return writer;
 	}
