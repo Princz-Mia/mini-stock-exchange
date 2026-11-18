@@ -59,6 +59,10 @@ BACKLOG = "publication backlog"
 # Each end of the window needs this many samples of a series before its growth is judged.
 MIN_SAMPLES_PER_SPAN = 2
 
+# A container's processor accounting under cgroup v2: how many scheduling periods it had, in how
+# many it used up its CPU limit and was held back, and for how long in all.
+CPU_STAT = ("cat", "/sys/fs/cgroup/cpu.stat")
+
 
 def rows(text: str) -> list[list[str]]:
     """psql -At output as rows of columns; blank lines and anything without a separator where one is
@@ -182,10 +186,13 @@ class WriterSplit:
     means: dict[str, dict[str, float]]
     service_ms: float | None
     ceiling: float | None
+    # Committed commands over the window, by command.
+    commands: dict[str, float] = field(default_factory=dict)
 
 
 def writer_split(before: Samples, after: Samples) -> WriterSplit:
     means: dict[str, dict[str, float]] = {}
+    counts: dict[str, float] = {}
     weighted = 0.0
     commands = 0.0
     for command in ("place", "cancel"):
@@ -208,9 +215,10 @@ def writer_split(before: Samples, after: Samples) -> WriterSplit:
         )
         weighted += service * done
         commands += done
+        counts[command] = done
     service_ms = weighted / commands if commands > 0 else None
     ceiling = 1000 / service_ms if service_ms else None
-    return WriterSplit(means, service_ms, ceiling)
+    return WriterSplit(means, service_ms, ceiling, counts)
 
 
 def reads_per_second(before: Samples, after: Samples, seconds: float) -> dict[str, float]:
@@ -238,9 +246,13 @@ class Sampled:
     feed_live: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
     # (seconds into the window, committed events not yet acknowledged by Kafka).
     backlog: list[tuple[float, float]] = field(default_factory=list)
+    # (seconds into the window, Execution's whole scrape), to time the writer over part of it.
+    execution: list[tuple[float, Samples]] = field(default_factory=list)
     pending: list[float] = field(default_factory=list)
     writer_pending: list[float] = field(default_factory=list)
     cpu: dict[str, list[float]] = field(default_factory=dict)
+    # (seconds into the window, percent of one CPU), by service, when the reading was timed.
+    cpu_at: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
 
     def scrape(self, market_data: Samples, execution: Samples, at: float) -> None:
         """One sample of each, taken at seconds into the window. A lag of -1 (not measured yet) and
@@ -253,6 +265,8 @@ class Sampled:
                 self.feed_live.setdefault(topic, []).append((at, value))
         if any(name == "mse_outbox_pending" for name, _ in execution):
             self.backlog.append((at, stats.total(execution, "mse_outbox_pending")))
+        if execution:
+            self.execution.append((at, execution))
         self.pending.append(
             stats.total(execution, "hikaricp_connections_pending", pool="execution")
         )
@@ -260,14 +274,17 @@ class Sampled:
             stats.total(execution, "hikaricp_connections_pending", pool="writer")
         )
 
-    def docker(self, text: str, project: str) -> None:
-        """docker stats lines of "name|12.34%"; containers named <project>-<service>-<n>."""
+    def docker(self, text: str, project: str, at: float | None = None) -> None:
+        """docker stats lines of "name|12.34%"; containers named <project>-<service>-<n>. With at,
+        the reading is also kept with its time, so part of the window can be taken later."""
         for line in text.strip().splitlines():
             name, _, percent = line.partition("|")
             if not name.startswith(f"{project}-") or not percent.endswith("%"):
                 continue
             service = name[len(project) + 1 :].rsplit("-", 1)[0]
             self.cpu.setdefault(service, []).append(float(percent[:-1]))
+            if at is not None:
+                self.cpu_at.setdefault(service, []).append((at, float(percent[:-1])))
 
 
 def lag_by_topic(sampled: Sampled) -> dict[str, tuple[float, float]]:
@@ -361,6 +378,37 @@ def downstream(sampled: Sampled, rate: float, span: float) -> Downstream:
         if any(value < 1 for _, value in series)
     )
     return Downstream(allowance, verdicts, tuple(unsampled), not_live)
+
+
+def cpu_stat(text: str) -> tuple[float, float, float] | None:
+    """Periods, throttled periods and throttled microseconds from a cgroup v2 cpu.stat; None if
+    the text has no throttling counters (no CPU limit, or cgroup v1)."""
+    values = {}
+    for line in text.strip().splitlines():
+        name, _, value = line.partition(" ")
+        if value.strip().isdigit():
+            values[name] = float(value)
+    if not {"nr_periods", "nr_throttled", "throttled_usec"} <= values.keys():
+        return None
+    return values["nr_periods"], values["nr_throttled"], values["throttled_usec"]
+
+
+def throttling(
+    before: Mapping[str, tuple[float, float, float]],
+    after: Mapping[str, tuple[float, float, float]],
+    seconds: float,
+) -> dict[str, tuple[float, float]]:
+    """Per service read at both ends: the share of scheduling periods in which it was held back at
+    its CPU limit, and the milliseconds a second it spent held back."""
+    shares = {}
+    for service in sorted(before.keys() & after.keys()):
+        periods = after[service][0] - before[service][0]
+        throttled = after[service][1] - before[service][1]
+        held = after[service][2] - before[service][2]
+        if periods <= 0 or seconds <= 0:
+            continue
+        shares[service] = (throttled / periods, held / 1000 / seconds)
+    return shares
 
 
 def cpu_by_service(sampled: Sampled) -> dict[str, tuple[float, float]]:

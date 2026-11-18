@@ -170,6 +170,7 @@ def test_the_feed_lag_and_the_pool_are_sampled_by_topic() -> None:
         "mse.trades.v1": (12, 4),
     }, "a lag of -1 means not measured yet and is left out"
     assert sampled.feed_lag["mse.trades.v1"] == [(0.0, 0), (5.0, 12), (10.0, 4)]
+    assert [at for at, _ in sampled.execution] == [0.0, 5.0, 10.0], "Execution's scrapes kept"
     assert sampled.backlog == [(0.0, 7), (10.0, 9)], "a backlog Execution did not report is no zero"
     assert max(sampled.pending) == 2, "the application pool alone"
     assert max(sampled.writer_pending) == 1, "the writer's pool apart"
@@ -247,6 +248,35 @@ def test_the_feed_state_is_sampled_by_topic() -> None:
     )
 
     assert sampled.feed_live == {"mse.market.v1": [(5.0, 0.0)], "mse.trades.v1": [(5.0, 1.0)]}
+
+
+def test_cgroup_cpu_counters_are_read_and_turned_into_throttling() -> None:
+    text = (
+        "usage_usec 912345\nuser_usec 800000\nsystem_usec 112345\nnr_periods 1000\n"
+        "nr_throttled 50\nthrottled_usec 2500000\nnr_bursts 0\nburst_usec 0\n"
+    )
+    assert diagnostics.cpu_stat(text) == (1000, 50, 2_500_000)
+    assert diagnostics.cpu_stat("usage_usec 1\nuser_usec 1\n") is None, "no CPU limit"
+
+    shares = diagnostics.throttling(
+        {"postgres": (1000, 50, 2_500_000), "web": (10, 0, 0), "kafka": (5, 0, 0)},
+        {"postgres": (1600, 230, 11_500_000), "web": (10, 0, 0)},
+        60.0,
+    )
+
+    # 180 of 600 periods held back, for 9 s in 60 s: 150 ms a second.
+    assert shares["postgres"] == (pytest.approx(0.30), pytest.approx(150.0))
+    assert "web" not in shares, "no periods passed"
+    assert "kafka" not in shares, "read at one end only"
+
+
+def test_timed_processor_readings_are_kept_with_their_time() -> None:
+    sampled = diagnostics.Sampled()
+    sampled.docker("mse-load-postgres-1|150.00%\n", "mse-load", 12.5)
+    sampled.docker("mse-load-postgres-1|50.00%\n", "mse-load")
+
+    assert sampled.cpu["postgres"] == [150.0, 50.0]
+    assert sampled.cpu_at == {"postgres": [(12.5, 150.0)]}, "an untimed reading is not timed"
 
 
 def test_processor_samples_are_read_by_service() -> None:
