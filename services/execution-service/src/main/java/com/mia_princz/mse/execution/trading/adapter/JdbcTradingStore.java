@@ -620,9 +620,9 @@ public final class JdbcTradingStore implements TradingStore {
 		return jdbc.sql("""
 				SELECT t.id, t.trade_sequence, t.price_cents, t.quantity, t.executed_at, o.side
 				FROM trades t JOIN orders o ON o.id = t.taker_order_id
-				WHERE t.instrument_id = ?
+				WHERE t.simulation_id = (SELECT simulation_id FROM instrument WHERE id = ?) AND t.instrument_id = ?
 				ORDER BY t.trade_sequence DESC LIMIT ?""")
-			.params(instrumentId, limit)
+			.params(instrumentId, instrumentId, limit)
 			.query((row, index) -> new TapeTrade(row.getObject("id", UUID.class), row.getLong("trade_sequence"),
 					row.getLong("price_cents"), row.getLong("quantity"), Side.valueOf(row.getString("side")),
 					row.getTimestamp("executed_at").toInstant()))
