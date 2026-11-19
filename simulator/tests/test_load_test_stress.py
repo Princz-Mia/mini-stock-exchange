@@ -134,6 +134,35 @@ def traders(exchange: Exchange, count: int) -> list[stress.Trader]:
     ]
 
 
+def test_a_command_that_raises_beyond_the_transport_fails_the_rate() -> None:
+    def broken(request: httpx.Request) -> httpx.Response:
+        raise RuntimeError("not a transport error")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(broken), base_url="http://exchange")
+    trader = stress.Trader(client, {}, "instrument")
+
+    with pytest.raises(RuntimeError, match="not a transport error"):
+        asyncio.run(stress.fire([trader], 50.0, 0.1))
+
+
+def test_answers_come_back_in_planned_order_whatever_order_they_arrive_in() -> None:
+    # Later commands answer first: the first of every ten waits longest.
+    exchange = Exchange()
+    plain = traders(exchange, 3)
+    waits = iter([0.05 if index % 10 == 0 else 0.0 for index in range(1000)])
+
+    class Slow(stress.Trader):
+        async def send(self, intended, clock):  # type: ignore[no-untyped-def]
+            await asyncio.sleep(next(waits))
+            return await super().send(intended, clock)
+
+    slow = [Slow(each.client, each.csrf, each.instrument) for each in plain]
+
+    sent = asyncio.run(stress.fire(slow, 200.0, 0.5))
+
+    assert [each.intended for each in sent] == stress.schedule(200.0, 0.5)
+
+
 def test_one_process_fires_only_its_share() -> None:
     exchange = Exchange()
 

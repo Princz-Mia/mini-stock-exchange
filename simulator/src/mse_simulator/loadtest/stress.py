@@ -219,20 +219,43 @@ async def fire(
 ) -> list[Sent]:
     """Sends each command of the schedule (or of one process's share of it) at its planned time,
     round-robin across the traders, without waiting for earlier answers; returns when every
-    command has been answered or has failed."""
+    command has been answered or has failed, in planned order.
+
+    A finished command is kept only as a tuple of numbers, which Python's collector stops
+    tracking, and its task is let go: kept whole, ten minutes of commands made each full
+    collection walk hundreds of thousands of objects, pausing the schedule for half a second."""
     plan = schedule(rate, seconds, offset, every)
     start = clock()
 
     def since() -> float:
         return clock() - start
 
-    tasks = []
+    answered: list[tuple[float, float, float, int]] = []
+    errors: list[BaseException] = []
+    pending: set[asyncio.Task[Sent]] = set()
+
+    def finished(task: asyncio.Task[Sent]) -> None:
+        pending.discard(task)
+        if task.cancelled():
+            errors.append(asyncio.CancelledError())
+        elif (error := task.exception()) is not None:
+            errors.append(error)
+        else:
+            sent = task.result()
+            answered.append((sent.intended, sent.started, sent.answered, sent.status))
+
     for index, at in enumerate(plan):
         delay = at - since()
         if delay > 0:
             await asyncio.sleep(delay)
-        tasks.append(asyncio.create_task(traders[index % len(traders)].send(at, since)))
-    return list(await asyncio.gather(*tasks))
+        task = asyncio.create_task(traders[index % len(traders)].send(at, since))
+        pending.add(task)
+        task.add_done_callback(finished)
+    while pending:
+        await asyncio.wait(set(pending))
+    if errors:
+        raise errors[0]
+    return [Sent(*fields) for fields in sorted(answered)]
 
 
 def run_share(
