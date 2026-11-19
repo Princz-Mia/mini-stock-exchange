@@ -1,6 +1,7 @@
 import asyncio
 import json
 import math
+import os
 import threading
 import time
 import uuid
@@ -255,9 +256,33 @@ def test_a_process_that_fails_ends_the_rate_without_waiting_out_the_others(serve
     began = time.monotonic()
 
     with pytest.raises(RuntimeError, match="HTTPStatusError"):
-        stress.fire_in_processes(served, signed_in, rate, 0.25)
+        stress.fire_in_processes(served, signed_in, rate, 0.25, ready_timeout=30.0)
 
-    assert time.monotonic() - began < 60
+    # Released at once, not after the 30 s the others would wait for it.
+    assert time.monotonic() - began < 25
+    assert sum(Served.answered.values()) == 0
+
+
+def ends_without_reporting(*args: object) -> None:
+    """A generator process that dies at once, as a killed one would: the first ends, the rest run
+    as usual."""
+    offset = args[4]
+    if offset == 0:
+        os._exit(3)
+    stress.run_share(*args)  # type: ignore[arg-type]
+
+
+def test_a_process_that_ends_without_reporting_releases_the_others(served: str) -> None:
+    rate = 801.0
+    signed_in = sessions(served, stress.traders(rate))
+    began = time.monotonic()
+
+    with pytest.raises(RuntimeError, match="exit code 3 without reporting"):
+        stress.fire_in_processes(
+            served, signed_in, rate, 0.25, ready_timeout=30.0, target=ends_without_reporting
+        )
+
+    assert time.monotonic() - began < 25
     assert sum(Served.answered.values()) == 0
 
 

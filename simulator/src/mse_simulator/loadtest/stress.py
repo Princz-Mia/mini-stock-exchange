@@ -244,6 +244,7 @@ def run_share(
     every: int,
     ready: threading.Barrier,
     out: multiprocessing.Queue[tuple[int, str, object]],
+    ready_timeout: float = READY_TIMEOUT,
 ) -> None:
     """One generator process's share of a rate: cancels its logins' open orders, waits for the
     other processes, then fires its share of the schedule. Puts its commands on out as tuples of
@@ -262,7 +263,7 @@ def run_share(
 
         try:
             await asyncio.gather(*(tidy(trader) for trader in traders))
-            await asyncio.to_thread(ready.wait, READY_TIMEOUT)
+            await asyncio.to_thread(ready.wait, ready_timeout)
             return await fire(traders, rate, seconds, offset=offset, every=every)
         finally:
             await asyncio.gather(*(trader.client.aclose() for trader in traders))
@@ -277,12 +278,18 @@ def run_share(
 
 
 def fire_in_processes(
-    base_url: str, sessions: list[Session], rate: float, seconds: float
+    base_url: str,
+    sessions: list[Session],
+    rate: float,
+    seconds: float,
+    ready_timeout: float = READY_TIMEOUT,
+    target: Callable[..., None] = run_share,
 ) -> list[Sent]:
     """Fires a rate from processes(rate) processes, each with its own signed-in logins and every
     processes(rate)-th command of the one schedule, started together; returns the commands of
     all of them, in planned order. Times count from each process's start, which a barrier
-    aligns to within milliseconds."""
+    aligns to within milliseconds. A process that ends without reporting releases the others,
+    and the rate fails with its exit code."""
     every = processes(rate)
     needed = traders(rate)
     if len(sessions) < needed:
@@ -293,23 +300,55 @@ def fire_in_processes(
     out = context.Queue()
     workers = [
         context.Process(
-            target=run_share,
-            args=(base_url, sessions[k * per : (k + 1) * per], rate, seconds, k, every, ready, out),
+            target=target,
+            args=(
+                base_url,
+                sessions[k * per : (k + 1) * per],
+                rate,
+                seconds,
+                k,
+                every,
+                ready,
+                out,
+                ready_timeout,
+            ),
             daemon=True,
         )
         for k in range(every)
     ]
-    for worker in workers:
-        worker.start()
     sent: list[Sent] = []
     errors: list[str] = []
+    reported: set[int] = set()
+    # Ended without reporting at the last look: a process puts its answer before it ends, so one
+    # still unreported a second later never will.
+    ended: set[int] = set()
+    deadline = time.monotonic() + ready_timeout + seconds + 120
     try:
-        for _ in workers:
+        for worker in workers:
+            worker.start()
+        while len(reported) < every:
             try:
-                _, outcome, value = out.get(timeout=READY_TIMEOUT + seconds + 120)
+                offset, outcome, value = out.get(timeout=1.0)
             except queue.Empty:
-                errors.append("a generator process gave no answer")
-                break
+                now_ended = {
+                    k for k, w in enumerate(workers) if k not in reported and w.exitcode is not None
+                }
+                lost = now_ended & ended
+                ended = now_ended - lost
+                if lost:
+                    ready.abort()
+                    errors += [
+                        f"generator process {k} ended with exit code {workers[k].exitcode} "
+                        "without reporting"
+                        for k in sorted(lost)
+                    ]
+                    reported |= lost
+                elif time.monotonic() > deadline:
+                    ready.abort()
+                    errors.append("a generator process gave no answer")
+                    break
+                continue
+            reported.add(offset)
             if outcome == "ok":
                 sent.extend(Sent(*fields) for fields in value)
             else:
