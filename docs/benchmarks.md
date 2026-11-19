@@ -264,3 +264,16 @@ The same stress run after the writer changes recorded under "Writer replay" abov
 - At 300 a second the writer is saturated either way.
 - With the settings, 76% fewer full-page images were written to the WAL (3,116 against 12,728) and 10% less WAL in all (5.6 KB a command against 6.2 KB), which is where the tail at 250 a second went.
 - Below 200 a second there is no measurable difference.
+
+### Open-loop stress with publication and the feeds judged, 2026-11-18
+
+The stress run now also requires the publication backlog and every Market Data feed's lag not to grow over the measured window, and every feed to stay live. It ran on `main` with the PostgreSQL settings and Market Data's batched polls, but without the writer's write sets and cancel from the book, and with the load test's raised admission limit (500,000 events or 1 GiB, as the report read back from Execution). **Highest rate that met every budget: 250 commands a second.**
+
+| Rate | p50 | p95 | p99 | Backlog peak | Feed lag peak | Met |
+| --- | --- | --- | --- | --- | --- | --- |
+| 100/s | 12.2 ms | 24.7 ms | 28.2 ms | 0 | 5 | yes |
+| 200/s | 11.9 ms | 18.7 ms | 25.1 ms | 0 | 9 | yes |
+| 250/s | 46.2 ms | 147.4 ms | 408.0 ms | 0 | 9 | yes |
+| 300/s | 6.5 s | 22.5 s | 30.2 s | 0 | 8 | no: p95, p99, generator |
+
+- Publication and the feeds kept up at every rate, 300 a second included: the relay never had a backlog worth sampling, and Market Data was never more than nine records behind. The writer is still the limit.

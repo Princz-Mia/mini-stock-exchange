@@ -15,8 +15,10 @@ import java.util.Map;
 import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.LongConsumer;
 
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AdminClientConfig;
@@ -27,6 +29,7 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
@@ -393,6 +396,34 @@ class MarketFeedConsumerIT {
 				String.class, instrument)).isEqualTo("10000000000000000000");
 	}
 
+	/**
+	 * A delay is reported for each record committed while the feed is live, once: not for the history read while
+	 * catching up, not for an attempt at once that was rolled back, and not for the record the feed paused at.
+	 */
+	@Test
+	void delaysAreReportedOnceForRecordsCommittedWhileLive() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		publishTrade(Trades.trade(instrument, 1));
+		publishTrade(Trades.trade(instrument, 2));
+		List<Long> delays = new CopyOnWriteArrayList<>();
+		List<Integer> attempts = new CopyOnWriteArrayList<>();
+		MarketFeedConsumer feed = feed(Map.of(), recording(tradeProjection.handler((changed) -> {
+		}), attempts), delays::add);
+
+		feed.start();
+
+		waitUntil(() -> feed.state() == State.LIVE);
+		assertThat(delays).as("history read while catching up").isEmpty();
+		// Sent together, so the live feed polls them at once: the attempt fails at the contradiction and rolls back,
+		// and one by one keeps trades 3 and 4 and pauses at it.
+		publishTogether(List.of(Trades.trade(instrument, 3), Trades.trade(instrument, 4), Trades.trade(instrument, 1),
+				Trades.trade(instrument, 5)));
+		waitUntil(() -> feed.state() == State.PAUSED);
+		assertThat(attempts).as("the live trades tried at once first").contains(4);
+		assertThat(delays).as("trades 3 and 4, each once").hasSize(2).allSatisfy((millis) -> assertThat(millis)
+			.isBetween(0L, 30_000L));
+	}
+
 	/** A candle the database refuses is unusable too: the feed pauses at it instead of retrying it forever. */
 	@Test
 	void aCandleTheDatabaseRefusesPausesTheFeed() throws Exception {
@@ -476,10 +507,17 @@ class MarketFeedConsumerIT {
 	}
 
 	private MarketFeedConsumer feed(Map<String, Object> overrides, MarketFeedConsumer.Handler handler) {
+		return feed(overrides, handler, (millis) -> {
+		});
+	}
+
+	private MarketFeedConsumer feed(Map<String, Object> overrides, MarketFeedConsumer.Handler handler,
+			LongConsumer delays) {
 		Map<String, Object> config = consumerConfig(overrides);
 		MarketFeedConsumer feed = new MarketFeedConsumer(
 				() -> new KafkaConsumer<>(config, new StringDeserializer(), new ByteArrayDeserializer()),
-				new TransactionTemplate(transactionManager), handler, checkpoints, settings(), Clock.systemUTC());
+				new TransactionTemplate(transactionManager), handler, checkpoints, settings(), Clock.systemUTC(),
+				delays);
 		feeds.add(feed);
 		return feed;
 	}
@@ -538,6 +576,23 @@ class MarketFeedConsumerIT {
 
 	private void publish(MarketSnapshot snapshot) throws Exception {
 		send(snapshot.getSimulationId() + "|" + snapshot.getInstrumentId(), WireEvents.encode(snapshot));
+	}
+
+	/** One producer batch, so the records reach the feed in one poll. */
+	private void publishTogether(List<TradeExecuted> trades) throws Exception {
+		try (KafkaProducer<String, byte[]> producer = new KafkaProducer<>(
+				Map.of(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers(), ProducerConfig.ACKS_CONFIG, "all",
+						ProducerConfig.LINGER_MS_CONFIG, 200),
+				new StringSerializer(), new ByteArraySerializer())) {
+			List<Future<RecordMetadata>> sent = new ArrayList<>();
+			for (TradeExecuted trade : trades) {
+				sent.add(producer.send(new ProducerRecord<>(topic, trade.getSimulationId() + "|" + trade.getInstrumentId(),
+						WireEvents.encode(trade))));
+			}
+			for (Future<RecordMetadata> each : sent) {
+				each.get();
+			}
+		}
 	}
 
 	private int send(String key, byte[] value) throws Exception {

@@ -1,7 +1,11 @@
+import asyncio
+import contextlib
+
 import httpx
 import pytest
 
 from mse_simulator.loadtest import __main__ as loadtest
+from mse_simulator.loadtest import stats
 from mse_simulator.loadtest.__main__ import SYMBOLS, parse, set_up
 
 
@@ -182,6 +186,54 @@ def test_a_503_is_unavailable_unless_it_is_a_busy_refusal() -> None:
 def test_the_report_says_when_execution_was_not_restarted() -> None:
     assert loadtest.restart_line(6.4) == "- Restarting Execution, its reconciliation included: 6 s."
     assert "not done" in loadtest.restart_line(float("nan"))
+
+
+def test_the_admission_limits_are_read_as_execution_reports_them() -> None:
+    scrape = stats.parse_prometheus(
+        'mse_outbox_admission_limit{limit="events"} 500000.0\n'
+        'mse_outbox_admission_limit{limit="bytes"} 1.073741824E9\n'
+        "mse_outbox_pending 12.0\n"
+    )
+
+    limits = loadtest.admission_limits(scrape)
+
+    assert limits == (500_000, 1_073_741_824)
+    assert loadtest.admission_line(limits) == (
+        "- Publication backlog limit, beyond which new orders are refused: 500,000 events or "
+        "1,024 MiB."
+    )
+    events_only = stats.parse_prometheus('mse_outbox_admission_limit{limit="events"} 3\n')
+    assert loadtest.admission_limits(events_only) is None
+    assert loadtest.admission_line(None) == "- Publication backlog limit: not read."
+
+
+def test_downstream_samples_are_timed_from_the_start_and_a_failed_one_is_skipped() -> None:
+    sampled = loadtest.diagnostics.Sampled()
+    calls = []
+
+    def sample():
+        calls.append(len(calls))
+        if len(calls) == 2:
+            raise RuntimeError("docker exec failed")
+        return (
+            stats.parse_prometheus(f'mse_feed_lag{{topic="mse.market.v1"}} {len(calls)}\n'),
+            stats.parse_prometheus(f"mse_outbox_pending {10 * len(calls)}\n"),
+        )
+
+    async def run() -> None:
+        task = asyncio.create_task(loadtest.sample_downstream(sample, sampled, every=0.05))
+        await asyncio.sleep(0.18)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+
+    assert len(calls) >= 3
+    assert [value for _, value in sampled.backlog][:2] == [10, 30], "the second sample failed"
+    times = [at for at, _ in sampled.feed_lag["mse.market.v1"]]
+    assert times[0] == pytest.approx(0.0, abs=0.05)
+    assert times[1] == pytest.approx(0.10, abs=0.05)
 
 
 def test_each_report_names_its_own_generator() -> None:

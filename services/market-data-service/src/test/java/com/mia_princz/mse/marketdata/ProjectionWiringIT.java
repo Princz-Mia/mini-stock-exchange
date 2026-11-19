@@ -3,9 +3,11 @@ package com.mia_princz.mse.marketdata;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import io.micrometer.core.instrument.MeterRegistry;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -47,8 +49,17 @@ class ProjectionWiringIT {
 	@Qualifier("candleFeed")
 	MarketFeedConsumer candleFeed;
 
+	@Autowired
+	MeterRegistry meters;
+
 	@Test
 	void eachTopicReachesItsProjection() throws Exception {
+		long started = System.nanoTime();
+		while (!(marketFeed.state() == MarketFeedConsumer.State.LIVE && tradeFeed.state() == MarketFeedConsumer.State.LIVE
+				&& candleFeed.state() == MarketFeedConsumer.State.LIVE)
+				&& System.nanoTime() - started < Duration.ofSeconds(30).toNanos()) {
+			Thread.sleep(50);
+		}
 		UUID instrument = UUID.randomUUID();
 		MarketSnapshot snapshot = Snapshots.snapshot(instrument, 3, 2);
 		TradeExecuted trade = Trades.trade(instrument, 3);
@@ -74,6 +85,11 @@ class ProjectionWiringIT {
 		assertThat(marketFeed.health().getDetails()).doesNotContainKey("pausedAt");
 		assertThat(tradeFeed.health().getDetails()).doesNotContainKey("pausedAt");
 		assertThat(candleFeed.health().getDetails()).doesNotContainKey("pausedAt");
+		for (String topic : List.of("mse.market.v1", "mse.trades.v1", "mse.candles.v1")) {
+			assertThat(meters.get("mse.feed.delay").tag("topic", topic).timer().count())
+				.as("the delay of the live record on %s", topic)
+				.isEqualTo(1);
+		}
 	}
 
 	private long count(String table, UUID instrument) {
