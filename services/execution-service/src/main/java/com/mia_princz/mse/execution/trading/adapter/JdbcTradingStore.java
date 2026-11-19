@@ -6,7 +6,7 @@ import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collection;
+import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
@@ -31,9 +31,9 @@ import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
 import com.mia_princz.mse.execution.trading.application.TapeTrade;
 import com.mia_princz.mse.execution.trading.application.TradingStore;
+import com.mia_princz.mse.execution.trading.application.WriteSet;
 import com.mia_princz.mse.execution.trading.domain.BookOrder;
 import com.mia_princz.mse.execution.trading.domain.DepthLevel;
-import com.mia_princz.mse.execution.trading.domain.Fill;
 import com.mia_princz.mse.execution.trading.domain.OrderRequest;
 import com.mia_princz.mse.execution.trading.domain.OrderType;
 import com.mia_princz.mse.execution.trading.domain.Posting;
@@ -532,21 +532,8 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void recordMakerFill(UUID makerOrderId, long quantity) {
-		expectOne(jdbc.sql("""
-				UPDATE orders SET filled_quantity = filled_quantity + :quantity,
-				    working_quantity = working_quantity - :quantity,
-				    state = CASE WHEN working_quantity = :quantity THEN 'FILLED' ELSE 'PARTIALLY_FILLED' END,
-				    version = version + 1, updated_at = now()
-				WHERE id = :id AND state IN ('OPEN', 'PARTIALLY_FILLED') AND working_quantity >= :quantity""")
-			.param("quantity", quantity)
-			.param("id", makerOrderId)
-			.update(), "fill maker " + makerOrderId);
-	}
-
-	@Override
-	public Optional<ExistingOrder> lockOrder(UUID orderId) {
-		return jdbc.sql("SELECT id, account_id, instrument_id, state, working_quantity FROM orders WHERE id = ? FOR UPDATE")
+	public Optional<ExistingOrder> findOrder(UUID orderId) {
+		return jdbc.sql("SELECT id, account_id, instrument_id, state, working_quantity FROM orders WHERE id = ?")
 			.param(orderId)
 			.query((row, index) -> new ExistingOrder(row.getObject("id", UUID.class),
 					row.getObject("account_id", UUID.class), row.getObject("instrument_id", UUID.class),
@@ -555,32 +542,17 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void cancelOrder(UUID orderId, long quantity, String reason) {
-		expectOne(jdbc.sql("""
+	public boolean cancelOrder(UUID orderId, UUID accountId, long quantity, String reason) {
+		return jdbc.sql("""
 				UPDATE orders SET canceled_quantity = canceled_quantity + :quantity, working_quantity = 0,
 				    state = 'CANCELED', reason = :reason, version = version + 1, updated_at = now()
-				WHERE id = :id AND working_quantity = :quantity AND state IN ('OPEN', 'PARTIALLY_FILLED')""")
+				WHERE id = :id AND account_id = :account AND working_quantity = :quantity
+				    AND state IN ('OPEN', 'PARTIALLY_FILLED')""")
 			.param("quantity", quantity)
 			.param("reason", reason)
 			.param("id", orderId)
-			.update(), "cancel order " + orderId);
-	}
-
-	@Override
-	public Trade insertTrade(UUID simulationId, UUID instrumentId, OrderRequest taker, Fill fill, long tradeSequence,
-			Instant executedAt, long commandSequence) {
-		boolean takerBuys = taker.side() == Side.BUY;
-		UUID id = UUID.randomUUID();
-		expectOne(jdbc.sql("""
-				INSERT INTO trades (id, simulation_id, instrument_id, trade_sequence, maker_order_id, taker_order_id,
-				    buyer_account_id, seller_account_id, price_cents, quantity, executed_at, command_sequence)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""")
-			.params(id, simulationId, instrumentId, tradeSequence, fill.makerOrderId(), taker.orderId(),
-					takerBuys ? taker.accountId() : fill.makerAccountId(),
-					takerBuys ? fill.makerAccountId() : taker.accountId(), fill.price().cents(), fill.quantity(),
-					Timestamp.from(executedAt), commandSequence)
-			.update(), "insert trade");
-		return new Trade(id, tradeSequence);
+			.param("account", accountId)
+			.update() == 1;
 	}
 
 	@Override
@@ -590,62 +562,6 @@ public final class JdbcTradingStore implements TradingStore {
 			.update();
 		if (changed != 1) {
 			throw new OutOfStepException("Instrument " + instrumentId + " was not at trade sequence " + from);
-		}
-	}
-
-	@Override
-	public void insertBatch(UUID simulationId, SettlementPlan.Cause cause, UUID tradeId, long commandSequence,
-			List<Posting> postings) {
-		UUID batch = UUID.randomUUID();
-		expectOne(jdbc
-			.sql("INSERT INTO journal_batch (id, simulation_id, cause, command_sequence, trade_id) VALUES (?, ?, ?, ?, ?)")
-			.params(batch, simulationId, cause.name(), commandSequence, tradeId)
-			.update(), "insert journal batch");
-		for (Posting posting : postings) {
-			expectOne(jdbc.sql(
-					"INSERT INTO ledger_entry (batch_id, account_id, instrument_id, bucket, delta) VALUES (?, ?, ?, ?, ?)")
-				.params(batch, posting.accountId(), posting.instrumentId(), posting.bucket().name(), posting.delta())
-				.update(), "insert ledger entry");
-		}
-	}
-
-	@Override
-	public void applyBalance(SettlementPlan.BalanceKey key, SettlementPlan.BalanceChange change) {
-		int updated;
-		if (key.instrumentId() == null) {
-			updated = jdbc.sql("""
-					UPDATE cash_balance SET total_cents = total_cents + ?, reserved_cents = reserved_cents + ?
-					WHERE account_id = ?""")
-				.params(change.totalDelta(), change.reservedDelta(), key.accountId())
-				.update();
-			if (updated == 0) {
-				expectOne(jdbc.sql("""
-						INSERT INTO cash_balance (account_id, account_kind, total_cents, reserved_cents)
-						SELECT id, kind, ?, ? FROM account WHERE id = ?""")
-					.params(change.totalDelta(), change.reservedDelta(), key.accountId())
-					.update(), "insert cash balance");
-			}
-			return;
-		}
-		updated = jdbc.sql("""
-				UPDATE position SET total_quantity = total_quantity + ?, reserved_quantity = reserved_quantity + ?
-				WHERE account_id = ? AND instrument_id = ?""")
-			.params(change.totalDelta(), change.reservedDelta(), key.accountId(), key.instrumentId())
-			.update();
-		if (updated == 0) {
-			expectOne(jdbc.sql("""
-					INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
-					SELECT id, kind, ?, ?, ? FROM account WHERE id = ?""")
-				.params(key.instrumentId(), change.totalDelta(), change.reservedDelta(), key.accountId())
-				.update(), "insert position");
-		}
-	}
-
-	@Override
-	public void touchAccounts(Collection<UUID> accountIds) {
-		for (UUID account : accountIds) {
-			expectOne(jdbc.sql("UPDATE account SET version = version + 1 WHERE id = ?").param(account).update(),
-					"bump account version");
 		}
 	}
 
@@ -700,36 +616,6 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void insertTradeEvent(UUID simulationId, UUID instrumentId, String symbol, Trade trade, Fill fill,
-			Instant executedAt, long commandSequence) {
-		TradeExecuted event = TradeExecuted.newBuilder()
-			.setEventId(UUID.randomUUID())
-			.setSimulationId(simulationId)
-			.setInstrumentId(instrumentId)
-			.setSymbol(symbol)
-			.setTradeId(trade.id())
-			.setTradeSequence(trade.tradeSequence())
-			.setCommandSequence(commandSequence)
-			.setExecutedAt(executedAt)
-			.setPriceCents(fill.price().cents())
-			.setQuantity(fill.quantity())
-			.build();
-		byte[] payload;
-		try {
-			payload = WireEvents.encode(event);
-		}
-		catch (IOException ex) {
-			throw new UncheckedIOException(ex);
-		}
-		expectOne(jdbc.sql("""
-				INSERT INTO outbox (event_id, topic, event_key, schema_fingerprint, payload, command_sequence)
-				VALUES (?, ?, ?, ?, ?, ?)""")
-			.params(event.getEventId(), TRADES_TOPIC, simulationId + "|" + instrumentId, TRADE_FINGERPRINT, payload,
-					commandSequence)
-			.update(), "insert trade event");
-	}
-
-	@Override
 	public List<TapeTrade> recentTrades(UUID instrumentId, int limit) {
 		return jdbc.sql("""
 				SELECT t.id, t.trade_sequence, t.price_cents, t.quantity, t.executed_at, o.side
@@ -744,16 +630,252 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void insertMarketSnapshot(MarketView view) {
-		insertSnapshot(view, false);
+	public void insertRemovedSnapshot(MarketView view) {
+		insertOutbox(List.of(snapshotRow(view, true)), view.commandSequence());
 	}
 
 	@Override
-	public void insertRemovedSnapshot(MarketView view) {
-		insertSnapshot(view, true);
+	public void flush(UUID simulationId, long commandSequence, WriteSet writes) {
+		fillMakers(writes.makerFills());
+		insertTrades(simulationId, commandSequence, writes.trades());
+		// After the trades: a trade's batch refers to it.
+		insertBatches(simulationId, commandSequence, writes.batches());
+		applyBalances(writes.balances());
+		touchAccounts(writes.accounts());
+		List<OutboxRow> rows = new ArrayList<>(writes.events().size());
+		for (WriteSet.Event event : writes.events()) {
+			rows.add(switch (event) {
+				case WriteSet.TradeEvent trade -> tradeRow(simulationId, commandSequence, trade);
+				case WriteSet.Snapshot snapshot -> snapshotRow(snapshot.view(), false);
+			});
+		}
+		insertOutbox(rows, commandSequence);
 	}
 
-	private void insertSnapshot(MarketView view, boolean removed) {
+	/** {@code count} copies of a VALUES row, for one statement that writes or matches every row of a kind. */
+	private static String rows(int count, String row) {
+		return String.join(", ", java.util.Collections.nCopies(count, row));
+	}
+
+	private static void expectRows(int rows, int expected, String what) {
+		if (rows != expected) {
+			throw new IllegalStateException(what + " affected " + rows + " rows, expected " + expected);
+		}
+	}
+
+	private void fillMakers(List<WriteSet.MakerFill> fills) {
+		if (fills.isEmpty()) {
+			return;
+		}
+		List<Object> params = new ArrayList<>(fills.size() * 2);
+		for (WriteSet.MakerFill fill : fills) {
+			params.add(fill.orderId());
+			params.add(fill.quantity());
+		}
+		// The guard is the old one per order: still resting, with at least the quantity filled. An order the book
+		// matched that the database no longer has resting means the book is out of step, so the writer halts.
+		int filled = jdbc.sql("""
+				UPDATE orders o SET filled_quantity = o.filled_quantity + f.quantity,
+				    working_quantity = o.working_quantity - f.quantity,
+				    state = CASE WHEN o.working_quantity = f.quantity THEN 'FILLED' ELSE 'PARTIALLY_FILLED' END,
+				    version = o.version + 1, updated_at = now()
+				FROM (VALUES %s) AS f(id, quantity)
+				WHERE o.id = f.id AND o.state IN ('OPEN', 'PARTIALLY_FILLED') AND o.working_quantity >= f.quantity"""
+			.formatted(rows(fills.size(), "(?::uuid, ?::bigint)")))
+			.params(params)
+			.update();
+		if (filled != fills.size()) {
+			throw new OutOfStepException("Filled " + filled + " of " + fills.size() + " resting orders the book matched");
+		}
+	}
+
+	private void insertTrades(UUID simulationId, long commandSequence, List<WriteSet.NewTrade> trades) {
+		if (trades.isEmpty()) {
+			return;
+		}
+		List<Object> params = new ArrayList<>(trades.size() * 12);
+		for (WriteSet.NewTrade trade : trades) {
+			params.addAll(Arrays.asList(trade.id(), simulationId, trade.instrumentId(), trade.tradeSequence(),
+					trade.makerOrderId(), trade.takerOrderId(), trade.buyerAccountId(), trade.sellerAccountId(),
+					trade.priceCents(), trade.quantity(), Timestamp.from(trade.executedAt()), commandSequence));
+		}
+		expectRows(jdbc.sql("""
+				INSERT INTO trades (id, simulation_id, instrument_id, trade_sequence, maker_order_id, taker_order_id,
+				    buyer_account_id, seller_account_id, price_cents, quantity, executed_at, command_sequence)
+				VALUES %s""".formatted(rows(trades.size(), "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")))
+			.params(params)
+			.update(), trades.size(), "insert trades");
+	}
+
+	/**
+	 * Batches and their postings in one statement. The postings' foreign key to their batch is checked at the end of
+	 * the statement, when both inserts have run; whether each batch balances is checked at commit, as before.
+	 */
+	private void insertBatches(UUID simulationId, long commandSequence, List<WriteSet.Batch> batches) {
+		if (batches.isEmpty()) {
+			return;
+		}
+		List<Object> params = new ArrayList<>();
+		int postings = 0;
+		for (WriteSet.Batch batch : batches) {
+			params.addAll(Arrays.asList(batch.id(), simulationId, batch.cause().name(), commandSequence, batch.tradeId()));
+		}
+		for (WriteSet.Batch batch : batches) {
+			for (Posting posting : batch.postings()) {
+				params.addAll(Arrays.asList(batch.id(), posting.accountId(), posting.instrumentId(),
+						posting.bucket().name(), posting.delta()));
+				postings++;
+			}
+		}
+		int expectedPostings = postings;
+		long[] written = jdbc.sql("""
+				WITH batch AS (
+				    INSERT INTO journal_batch (id, simulation_id, cause, command_sequence, trade_id) VALUES %s RETURNING 1),
+				entry AS (
+				    INSERT INTO ledger_entry (batch_id, account_id, instrument_id, bucket, delta) VALUES %s RETURNING 1)
+				SELECT (SELECT count(*) FROM batch), (SELECT count(*) FROM entry)"""
+			.formatted(rows(batches.size(), "(?, ?, ?, ?, ?)"), rows(expectedPostings, "(?, ?, ?, ?, ?)")))
+			.params(params)
+			.query((row, index) -> new long[] { row.getLong(1), row.getLong(2) })
+			.single();
+		expectRows((int) written[0], batches.size(), "insert journal batches");
+		expectRows((int) written[1], expectedPostings, "insert ledger entries");
+	}
+
+	/**
+	 * Every cash and position change in one statement, returning the rows it found. A balance with no row yet gets one,
+	 * as the first change to it.
+	 */
+	private void applyBalances(Map<SettlementPlan.BalanceKey, SettlementPlan.BalanceChange> changes) {
+		if (changes.isEmpty()) {
+			return;
+		}
+		List<Object> cashParams = new ArrayList<>();
+		List<Object> positionParams = new ArrayList<>();
+		int cash = 0;
+		int positions = 0;
+		for (Map.Entry<SettlementPlan.BalanceKey, SettlementPlan.BalanceChange> change : changes.entrySet()) {
+			SettlementPlan.BalanceKey key = change.getKey();
+			if (key.instrumentId() == null) {
+				cashParams.addAll(Arrays.asList(key.accountId(), change.getValue().totalDelta(),
+						change.getValue().reservedDelta()));
+				cash++;
+			}
+			else {
+				positionParams.addAll(Arrays.asList(key.accountId(), key.instrumentId(), change.getValue().totalDelta(),
+						change.getValue().reservedDelta()));
+				positions++;
+			}
+		}
+		List<String> parts = new ArrayList<>();
+		List<String> selects = new ArrayList<>();
+		if (cash > 0) {
+			parts.add("""
+					cash AS (
+					    UPDATE cash_balance b SET total_cents = b.total_cents + u.total,
+					        reserved_cents = b.reserved_cents + u.reserved
+					    FROM (VALUES %s) AS u(account_id, total, reserved)
+					    WHERE b.account_id = u.account_id
+					    RETURNING b.account_id, NULL::uuid AS instrument_id)""".formatted(rows(cash, "(?::uuid, ?::bigint, ?::bigint)")));
+			selects.add("SELECT account_id, instrument_id FROM cash");
+		}
+		if (positions > 0) {
+			parts.add("""
+					held AS (
+					    UPDATE position b SET total_quantity = b.total_quantity + u.total,
+					        reserved_quantity = b.reserved_quantity + u.reserved
+					    FROM (VALUES %s) AS u(account_id, instrument_id, total, reserved)
+					    WHERE b.account_id = u.account_id AND b.instrument_id = u.instrument_id
+					    RETURNING b.account_id, b.instrument_id)"""
+				.formatted(rows(positions, "(?::uuid, ?::uuid, ?::bigint, ?::bigint)")));
+			selects.add("SELECT account_id, instrument_id FROM held");
+		}
+		List<Object> params = new ArrayList<>(cashParams);
+		params.addAll(positionParams);
+		java.util.Set<SettlementPlan.BalanceKey> found = new java.util.HashSet<>(jdbc
+			.sql("WITH " + String.join(", ", parts) + " " + String.join(" UNION ALL ", selects))
+			.params(params)
+			.query((row, index) -> new SettlementPlan.BalanceKey(row.getObject("account_id", UUID.class),
+					row.getObject("instrument_id", UUID.class)))
+			.list());
+		for (Map.Entry<SettlementPlan.BalanceKey, SettlementPlan.BalanceChange> change : changes.entrySet()) {
+			if (!found.contains(change.getKey())) {
+				insertBalance(change.getKey(), change.getValue());
+			}
+		}
+	}
+
+	private void insertBalance(SettlementPlan.BalanceKey key, SettlementPlan.BalanceChange change) {
+		if (key.instrumentId() == null) {
+			expectOne(jdbc.sql("""
+					INSERT INTO cash_balance (account_id, account_kind, total_cents, reserved_cents)
+					SELECT id, kind, ?, ? FROM account WHERE id = ?""")
+				.params(change.totalDelta(), change.reservedDelta(), key.accountId())
+				.update(), "insert cash balance");
+			return;
+		}
+		expectOne(jdbc.sql("""
+				INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
+				SELECT id, kind, ?, ?, ? FROM account WHERE id = ?""")
+			.params(key.instrumentId(), change.totalDelta(), change.reservedDelta(), key.accountId())
+			.update(), "insert position");
+	}
+
+	private void touchAccounts(java.util.Set<UUID> accounts) {
+		if (accounts.isEmpty()) {
+			return;
+		}
+		expectRows(jdbc.sql("UPDATE account SET version = version + 1 WHERE id IN (%s)"
+			.formatted(rows(accounts.size(), "?")))
+			.params(new ArrayList<>(accounts))
+			.update(), accounts.size(), "bump account versions");
+	}
+
+	/** One outbox row, encoded. */
+	private record OutboxRow(UUID eventId, String topic, String key, long fingerprint, byte[] payload) {
+	}
+
+	/** Outbox rows in one statement; their ids rise in the order given, the order the relay publishes them in. */
+	private void insertOutbox(List<OutboxRow> rows, long commandSequence) {
+		if (rows.isEmpty()) {
+			return;
+		}
+		List<Object> params = new ArrayList<>(rows.size() * 6);
+		for (OutboxRow row : rows) {
+			params.addAll(Arrays.asList(row.eventId(), row.topic(), row.key(), row.fingerprint(), row.payload(),
+					commandSequence));
+		}
+		expectRows(jdbc.sql("""
+				INSERT INTO outbox (event_id, topic, event_key, schema_fingerprint, payload, command_sequence)
+				VALUES %s""".formatted(rows(rows.size(), "(?, ?, ?, ?, ?, ?)")))
+			.params(params)
+			.update(), rows.size(), "insert outbox events");
+	}
+
+	private OutboxRow tradeRow(UUID simulationId, long commandSequence, WriteSet.TradeEvent event) {
+		WriteSet.NewTrade trade = event.trade();
+		TradeExecuted executed = TradeExecuted.newBuilder()
+			.setEventId(UUID.randomUUID())
+			.setSimulationId(simulationId)
+			.setInstrumentId(trade.instrumentId())
+			.setSymbol(event.symbol())
+			.setTradeId(trade.id())
+			.setTradeSequence(trade.tradeSequence())
+			.setCommandSequence(commandSequence)
+			.setExecutedAt(trade.executedAt())
+			.setPriceCents(trade.priceCents())
+			.setQuantity(trade.quantity())
+			.build();
+		try {
+			return new OutboxRow(executed.getEventId(), TRADES_TOPIC, simulationId + "|" + trade.instrumentId(),
+					TRADE_FINGERPRINT, WireEvents.encode(executed));
+		}
+		catch (IOException ex) {
+			throw new UncheckedIOException(ex);
+		}
+	}
+
+	private OutboxRow snapshotRow(MarketView view, boolean removed) {
 		Instrument instrument = view.instrument();
 		MarketSnapshot.Builder snapshot = MarketSnapshot.newBuilder()
 			.setSymbol(instrument.symbol())
@@ -790,12 +912,8 @@ public final class JdbcTradingStore implements TradingStore {
 			throw new IllegalStateException("Market snapshot for " + event.getSymbol() + " is " + payload.length
 					+ " bytes, over its " + SNAPSHOT_BUDGET_BYTES + "-byte budget");
 		}
-		expectOne(jdbc.sql("""
-				INSERT INTO outbox (event_id, topic, event_key, schema_fingerprint, payload, command_sequence)
-				VALUES (?, ?, ?, ?, ?, ?)""")
-			.params(event.getEventId(), MARKET_TOPIC, view.simulationId() + "|" + instrument.id(),
-					SNAPSHOT_FINGERPRINT, payload, view.commandSequence())
-			.update(), "insert market snapshot");
+		return new OutboxRow(event.getEventId(), MARKET_TOPIC, view.simulationId() + "|" + instrument.id(),
+				SNAPSHOT_FINGERPRINT, payload);
 	}
 
 	private static List<BookLevel> levels(List<DepthLevel> depth) {
