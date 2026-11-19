@@ -1076,14 +1076,9 @@ def run(options: Options) -> int:
         )
         checks, restarted = correctness(stack, instruments)
         split = diagnostics.writer_split(before.metrics, after.metrics)
-        committed = sum(
-            stats.total(after.metrics, "mse_writer_commit_seconds_count", command=command)
-            - stats.total(before.metrics, "mse_writer_commit_seconds_count", command=command)
-            for command in ("place", "cancel")
-        )
         where = diagnostics.report(
             split,
-            diagnostics.database_window(database_before, database_after, committed),
+            diagnostics.database_window(database_before, database_after, split.commands),
             diagnostics.reads_per_second(before.metrics, after.metrics, after.at - before.at),
             sampled,
             payloads,

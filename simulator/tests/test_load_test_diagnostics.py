@@ -113,6 +113,46 @@ def test_the_writer_split_is_the_window_and_the_ceiling_follows() -> None:
     assert split.ceiling == pytest.approx(1000 / 4.6)
 
 
+def test_a_run_of_several_commands_counts_its_time_and_its_commands() -> None:
+    # One transaction is timed once, tagged "run" when it held several commands; the run counter
+    # says how many commands the runs held, runs of one included.
+    def scrape(
+        place: tuple[int, float], run: dict[str, tuple[int, float]], runs: int, held: int
+    ) -> dict:
+        lines = [
+            f'mse_writer_queue_wait_seconds_count{{command="place"}} {held}',
+            f'mse_writer_queue_wait_seconds_sum{{command="place"}} {held * 0.001}',
+            f"mse_writer_run_size_commands_count {runs}",
+            f"mse_writer_run_size_commands_sum {held}",
+        ]
+        for phase in ("begin", "work", "commit", "apply"):
+            lines.append(f'mse_writer_{phase}_seconds_count{{command="place"}} {place[0]}')
+            lines.append(f'mse_writer_{phase}_seconds_sum{{command="place"}} {place[1] / 4}')
+        for phase, (count, seconds) in run.items():
+            lines.append(f'mse_writer_{phase}_seconds_count{{command="run"}} {count}')
+            lines.append(f'mse_writer_{phase}_seconds_sum{{command="run"}} {seconds}')
+        return stats.parse_prometheus("\n".join(lines))
+
+    before = scrape((0, 0.0), {p: (0, 0.0) for p in ("begin", "work", "commit", "apply")}, 0, 0)
+    # 100 orders alone (0.5 s in all), and 50 runs holding 400 orders (0.5 s in all).
+    after = scrape(
+        (100, 0.5),
+        {"begin": (50, 0.005), "work": (50, 0.2), "commit": (50, 0.25), "apply": (50, 0.045)},
+        150,
+        500,
+    )
+
+    split = diagnostics.writer_split(before, after)
+
+    assert split.commands == 500
+    assert split.service_ms == pytest.approx(2.0)
+    assert split.ceiling == pytest.approx(500)
+    assert split.mean_run == pytest.approx(500 / 150)
+    assert split.means["run"]["commit"] == pytest.approx(5.0)
+    assert split.means["run"]["queue_wait"] is None
+    assert split.means["place"]["queue_wait"] == pytest.approx(1.0)
+
+
 def test_no_commands_in_the_window_has_no_ceiling() -> None:
     same = writer(ZERO, ZERO)
 
@@ -211,3 +251,5 @@ def test_the_report_names_what_it_measured() -> None:
     assert "postgres: 80%, 80%" in text
     assert "`SELECT a`" in text
     assert "one writer at that time sustains about n/a" in text
+    assert "| run | n/a | n/a | n/a | n/a | n/a |" in text
+    assert "at a mean run of n/a" in text
