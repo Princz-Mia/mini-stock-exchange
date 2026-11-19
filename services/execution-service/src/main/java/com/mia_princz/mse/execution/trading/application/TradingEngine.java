@@ -69,6 +69,9 @@ public final class TradingEngine {
 
 	private final Map<UUID, OrderBook> books = new HashMap<>();
 
+	/** The current command's writes, flushed just before its answer is stored; a new set for each transaction. */
+	private WriteSet writes = new WriteSet();
+
 	/** Each account's resting orders across all the books, kept by the books themselves. */
 	private final RestingOrders resting;
 
@@ -383,7 +386,12 @@ public final class TradingEngine {
 		long[] marks = new long[2];
 		T result = transactions.inTransaction(() -> {
 			marks[0] = nanoTime.getAsLong();
+			writes = new WriteSet();
 			T value = work.get();
+			if (!writes.isEmpty()) {
+				// Rows collected after the answer was stored, or by a path that stored none, would be lost silently.
+				throw new IllegalStateException("A command's writes were not flushed before its commit");
+			}
 			marks[1] = nanoTime.getAsLong();
 			return value;
 		});
@@ -927,10 +935,10 @@ public final class TradingEngine {
 		store.cancelOrder(command.orderId(), order.working(), "CANCELED_BY_OWNER");
 		SettlementPlan release = Settlement.cancel(order.instrumentId(), resting);
 		for (SettlementPlan.Batch batch : release.batches()) {
-			store.insertBatch(simulationId, batch.cause(), null, sequence, batch.postings());
+			writes.batch(batch.cause(), null, batch.postings());
 		}
-		release.balanceChanges().forEach(store::applyBalance);
-		store.touchAccounts(List.of(command.accountId()));
+		release.balanceChanges().forEach(writes::balance);
+		writes.touch(List.of(command.accountId()));
 		snapshot(market, order.instrumentId(), books.get(order.instrumentId()), BookDelta.cancel(resting), sequence);
 		return new CancelOutcome(remember(key, 200,
 				new CancelResult(command.orderId(), CancelResult.Status.CANCELED, order.working(), sequence)),
@@ -1000,7 +1008,7 @@ public final class TradingEngine {
 		Tape tape = tapes.get(instrument.id());
 		TradingStore.Instrument after = newTrades.isEmpty() ? instrument
 				: instrument.withLastTradeSequence(newTrades.getLast().tradeSequence());
-		store.insertMarketSnapshot(new TradingStore.MarketView(simulationId, after, market,
+		writes.snapshot(new TradingStore.MarketView(simulationId, after, market,
 				book.depthAfter(delta, Side.BUY, SNAPSHOT_LEVELS), book.depthAfter(delta, Side.SELL, SNAPSHOT_LEVELS),
 				tape == null ? List.copyOf(newTrades) : tape.with(newTrades), sequence, clock.instant()));
 	}
@@ -1018,7 +1026,7 @@ public final class TradingEngine {
 	private List<TapeTrade> write(PlaceOrder command, MatchPlan plan, long sequence) {
 		// PostgreSQL keeps microseconds, so the tape in memory holds exactly what the database does.
 		Instant executedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
-		Map<Integer, TradingStore.Trade> trades = new HashMap<>();
+		Map<Integer, WriteSet.NewTrade> trades = new HashMap<>();
 		List<TapeTrade> tape = new ArrayList<>(plan.fills().size());
 		Set<UUID> touched = new LinkedHashSet<>();
 		touched.add(command.accountId());
@@ -1029,11 +1037,16 @@ public final class TradingEngine {
 			store.advanceTradeSequence(command.instrumentId(), before, before + plan.fills().size());
 		}
 		long tradeSequence = before;
+		boolean takerBuys = command.side() == Side.BUY;
 		for (int i = 0; i < plan.fills().size(); i++) {
 			Fill fill = plan.fills().get(i);
-			store.recordMakerFill(fill.makerOrderId(), fill.quantity());
-			TradingStore.Trade trade = store.insertTrade(simulationId, command.instrumentId(), plan.taker(), fill,
-					++tradeSequence, executedAt, sequence);
+			writes.fillMaker(fill.makerOrderId(), fill.quantity());
+			WriteSet.NewTrade trade = new WriteSet.NewTrade(UUID.randomUUID(), command.instrumentId(), ++tradeSequence,
+					fill.makerOrderId(), plan.taker().orderId(),
+					takerBuys ? plan.taker().accountId() : fill.makerAccountId(),
+					takerBuys ? fill.makerAccountId() : plan.taker().accountId(), fill.price().cents(), fill.quantity(),
+					executedAt);
+			writes.trade(trade);
 			trades.put(i, trade);
 			tape.add(new TapeTrade(trade.id(), trade.tradeSequence(), fill.price().cents(), fill.quantity(),
 					command.side(), executedAt));
@@ -1041,15 +1054,14 @@ public final class TradingEngine {
 		}
 		SettlementPlan settlement = Settlement.of(command.instrumentId(), plan);
 		for (SettlementPlan.Batch batch : settlement.batches()) {
-			TradingStore.Trade trade = trades.get(batch.fillIndex());
-			store.insertBatch(simulationId, batch.cause(), trade == null ? null : trade.id(), sequence, batch.postings());
+			WriteSet.NewTrade trade = trades.get(batch.fillIndex());
+			writes.batch(batch.cause(), trade == null ? null : trade.id(), batch.postings());
 		}
-		settlement.balanceChanges().forEach(store::applyBalance);
-		store.touchAccounts(touched);
+		settlement.balanceChanges().forEach(writes::balance);
+		writes.touch(touched);
+		String symbol = known(command.instrumentId()).symbol();
 		for (int i = 0; i < plan.fills().size(); i++) {
-			store.insertTradeEvent(simulationId, command.instrumentId(), known(command.instrumentId()).symbol(),
-					trades.get(i),
-					plan.fills().get(i), executedAt, sequence);
+			writes.tradeEvent(trades.get(i), symbol);
 		}
 		return tape;
 	}
@@ -1101,6 +1113,8 @@ public final class TradingEngine {
 			case TokenRevocation revocation -> revocation.commandSequence();
 			default -> throw new IllegalArgumentException("Not a command result: " + result);
 		};
+		store.flush(simulationId, sequence, writes);
+		writes = new WriteSet();
 		store.insertResult(simulationId, key, httpStatus, result, sequence);
 		return result;
 	}
