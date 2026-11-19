@@ -2,6 +2,7 @@ package com.mia_princz.mse.marketdata;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Statement;
@@ -11,7 +12,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
 
@@ -203,6 +206,97 @@ class MarketFeedConsumerIT {
 		assertThat(feed.health().getStatus().getCode()).isEqualTo("OUT_OF_SERVICE");
 	}
 
+	/**
+	 * One poll of rising snapshots with a repeat and an older one at the end, applied at once: the newest stays, the
+	 * poll moves the checkpoint, and the feed counts the three snapshots that one by one would have applied.
+	 */
+	@Test
+	void anOlderSnapshotAfterANewerInOnePollChangesNothing() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		MarketSnapshot second = Snapshots.snapshot(instrument, 2, 2);
+		publish(Snapshots.snapshot(instrument, 1, 1));
+		publish(second);
+		publish(second);
+		publish(Snapshots.snapshot(instrument, 4, 1));
+		publish(Snapshots.snapshot(instrument, 3, 1));
+		List<Integer> attempts = new CopyOnWriteArrayList<>();
+		MarketFeedConsumer feed = feed(Map.of(), recording(projection.handler((changed) -> {
+		}), attempts));
+
+		feed.start();
+
+		waitUntil(() -> feed.state() == State.LIVE);
+		assertThat(attempts).as("the five snapshots applied at once").contains(5);
+		assertThat(sequence(instrument)).isEqualTo(4);
+		assertThat(feed.appliedEvents()).as("snapshots 1, 2 and 4 each changed the market").isEqualTo(3);
+		assertThat(checkpoints.load(topic).values().stream().mapToLong(Long::longValue).sum()).isEqualTo(5);
+	}
+
+	/**
+	 * A snapshot the tables refuse inside a poll, though a newer one follows: the attempt at once fails, and one by
+	 * one keeps the snapshot before it and pauses at it.
+	 */
+	@Test
+	void aSnapshotTheTablesRefuseInsideABatchPausesTheFeed() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		publish(Snapshots.snapshot(instrument, 1, 1));
+		MarketSnapshot refused = Snapshots.snapshot(instrument, 2, 1);
+		refused.getRules().setTickCents(0L);
+		int partition = send(refused.getSimulationId() + "|" + instrument, WireEvents.encode(refused));
+		publish(Snapshots.snapshot(instrument, 3, 1));
+		List<Integer> attempts = new CopyOnWriteArrayList<>();
+		MarketFeedConsumer feed = feed(Map.of(), recording(projection.handler((changed) -> {
+		}), attempts));
+
+		feed.start();
+
+		waitUntil(() -> feed.state() == State.PAUSED);
+		assertThat(attempts).as("the three snapshots tried at once first").contains(3);
+		assertThat(sequence(instrument)).isEqualTo(1);
+		assertThat(feed.health().getDetails()).containsEntry("pausedAt", topic + "/" + partition + "@1");
+		assertThat(checkpoints.load(topic).get(partition)).isEqualTo(1);
+	}
+
+	/**
+	 * A removal's place in the order matters, so a poll holding one is applied one by one: an instrument added,
+	 * removed and added again in one poll is there, and one added and then removed is not.
+	 */
+	@Test
+	void aPollWithARemovalIsAppliedInOrder() throws Exception {
+		UUID readded = UUID.randomUUID();
+		UUID removed = UUID.randomUUID();
+		publish(Snapshots.snapshot(readded, 1, 1));
+		publish(Snapshots.removed(readded, 2));
+		publish(Snapshots.snapshot(readded, 3, 1));
+		publish(Snapshots.snapshot(removed, 1, 1));
+		publish(Snapshots.removed(removed, 2));
+		MarketFeedConsumer feed = feed(Map.of());
+
+		feed.start();
+
+		waitUntil(() -> feed.state() == State.LIVE);
+		assertThat(sequence(readded)).isEqualTo(3);
+		assertThat(sequenceOrZero(removed)).as("removed").isZero();
+	}
+
+	/** A record that cannot be decoded inside a poll: the records before it are kept, and the feed pauses at it. */
+	@Test
+	void aBadRecordInsideABatchKeepsTheRecordsBeforeIt() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		String key = Snapshots.SIMULATION + "|" + instrument;
+		publish(Snapshots.snapshot(instrument, 1, 1));
+		publish(Snapshots.snapshot(instrument, 2, 1));
+		int partition = send(key, new byte[] { 9, 9 });
+		publish(Snapshots.snapshot(instrument, 3, 1));
+		MarketFeedConsumer feed = feed(Map.of());
+
+		feed.start();
+
+		waitUntil(() -> feed.state() == State.PAUSED);
+		assertThat(sequence(instrument)).isEqualTo(2);
+		assertThat(checkpoints.load(topic).get(partition)).as("at the bad record, not past it").isEqualTo(2);
+	}
+
 	/** The same trade redelivered, and again under a new event id: one tape row. */
 	@Test
 	void tradesAreProjectedOncePerTradeId() throws Exception {
@@ -242,6 +336,61 @@ class MarketFeedConsumerIT {
 				contradiction.getEventId()))
 			.as("not marked as seen, so it is read again after a fix instead of skipped")
 			.isZero();
+	}
+
+	/**
+	 * A contradiction found after a poll's writes, applied at once: the whole attempt is rolled back, so the poll goes
+	 * one by one from a clean state, keeps the trades before the contradiction, and pauses at it.
+	 */
+	@Test
+	void aContradictionInsideABatchUndoesTheBatchsWrites() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		publishTrade(Trades.trade(instrument, 1));
+		publishTrade(Trades.trade(instrument, 2));
+		TradeExecuted contradiction = Trades.trade(instrument, 1);
+		int partition = send(contradiction.getSimulationId() + "|" + contradiction.getInstrumentId(),
+				WireEvents.encode(contradiction));
+		TradeExecuted after = Trades.trade(instrument, 3);
+		publishTrade(after);
+		List<Integer> attempts = new CopyOnWriteArrayList<>();
+		MarketFeedConsumer feed = feed(Map.of(), recording(tradeProjection.handler((changed) -> {
+		}), attempts));
+
+		feed.start();
+
+		waitUntil(() -> feed.state() == State.PAUSED);
+		assertThat(attempts).as("the four trades tried at once first").contains(4);
+		assertThat(jdbc.queryForList("SELECT trade_sequence FROM public_trade WHERE instrument_id = ? ORDER BY 1",
+				Long.class, instrument)).containsExactly(1L, 2L);
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM processed_event WHERE event_id IN (?, ?)", Long.class,
+				contradiction.getEventId(), after.getEventId())).as("nothing from the attempt kept").isZero();
+		assertThat(checkpoints.load(topic).get(partition)).as("at the contradiction").isEqualTo(2);
+	}
+
+	/**
+	 * Two trades whose notionals each fit in a long but whose sum does not: the attempt at once, which adds them up in
+	 * Java, fails, and one by one, which adds them in the database's NUMERIC, applies both. The feed goes live instead of
+	 * retrying the poll.
+	 */
+	@Test
+	void aSumOnlyTheBatchAddsUpFallsBackInsteadOfRetrying() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		for (int sequence = 1; sequence <= 2; sequence++) {
+			publishTrade(TradeExecuted.newBuilder(Trades.trade(instrument, sequence))
+				.setPriceCents(1_000_000_000L)
+				.setQuantity(5_000_000_000L)
+				.build());
+		}
+		List<Integer> attempts = new CopyOnWriteArrayList<>();
+		MarketFeedConsumer feed = feed(Map.of(), recording(tradeProjection.handler((changed) -> {
+		}), attempts));
+
+		feed.start();
+
+		waitUntil(() -> feed.state() == State.LIVE);
+		assertThat(attempts).as("both trades tried at once first").contains(2);
+		assertThat(jdbc.queryForObject("SELECT notional_cents::text FROM instrument_session WHERE instrument_id = ?",
+				String.class, instrument)).isEqualTo("10000000000000000000");
 	}
 
 	/** A candle the database refuses is unusable too: the feed pauses at it instead of retrying it forever. */
@@ -335,12 +484,34 @@ class MarketFeedConsumerIT {
 		return feed;
 	}
 
+	/** The service's handler, with the size of each poll it was asked to apply at once added to {@code attempts}. */
+	private static MarketFeedConsumer.BatchHandler recording(MarketFeedConsumer.BatchHandler service,
+			List<Integer> attempts) {
+		return new MarketFeedConsumer.BatchHandler() {
+
+			@Override
+			public boolean apply(byte[] payload) throws IOException {
+				return service.apply(payload);
+			}
+
+			@Override
+			public OptionalInt applyAll(List<byte[]> payloads) throws IOException {
+				attempts.add(payloads.size());
+				return service.applyAll(payloads);
+			}
+
+		};
+	}
+
+	/** The handlers the service uses: a poll of more than one record is applied at once, falling back one by one. */
 	private MarketFeedConsumer.Handler snapshotHandler() {
-		return (payload) -> projection.apply(WireEvents.decodeSnapshot(payload));
+		return projection.handler((instrument) -> {
+		});
 	}
 
 	private MarketFeedConsumer.Handler tradeHandler() {
-		return (payload) -> tradeProjection.apply(WireEvents.decodeTrade(payload));
+		return tradeProjection.handler((instrument) -> {
+		});
 	}
 
 	private void publishTrade(TradeExecuted trade) throws Exception {

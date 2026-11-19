@@ -11,6 +11,17 @@ The order book alone, with no database (JMH, `MatcherBenchmark`). Each invocatio
 | 200 resting orders | 427 ± 13 ns |
 | 5,000 resting orders | 596 ± 22 ns |
 
+## Market Data catch-up
+
+How fast Market Data works through a backlog (`FeedCatchUpBench`): 6,000 market snapshots and 6,000 trades for five instruments, published to a three-partition topic in Testcontainers, then one feed timed from its start until it is live. The same seeded events are applied four times, alternately one record at a time and a whole poll at once, in one run on 2026-11-18:
+
+| Events a second | One record at a time | A poll at once |
+| --- | --- | --- |
+| Snapshots | 449 and 460 | 5,865 and 15,443 |
+| Trades | 410 and 411 | 16,645 and 40,994 |
+
+One record at a time, each record is its own savepoint and its own statements in the poll's transaction. A poll at once is a few multi-row statements. Only the newest snapshot per instrument is written, since a snapshot replaces the ones before it; the others are still offered to the tables' checks in one more statement per table, so a snapshot the tables would refuse stops the poll exactly as it would one at a time. Trades are inserted together and each session's figures are summed once. The bench reaches PostgreSQL from the Windows host through Docker, where each round trip costs more than inside Compose. The first figure in each cell includes the JVM warming up.
+
 ## Writer replay
 
 The same seeded 12,000 commands (2,000 warm-up, 10,000 measured), one at a time, through the real engine and PostgreSQL in Testcontainers (`EngineReplayBench`). Every run below produced the same digest of answers, so they did identical work.
