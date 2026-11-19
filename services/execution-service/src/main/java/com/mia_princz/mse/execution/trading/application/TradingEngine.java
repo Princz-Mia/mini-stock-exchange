@@ -910,7 +910,16 @@ public final class TradingEngine {
 			return new CancelOutcome(replay(key, opening.prior().get()), null);
 		}
 		long sequence = opening.sequence();
-		TradingStore.ExistingOrder order = store.lockOrder(command.orderId())
+		// The books hold exactly the committed resting orders, so one resting there is resting in the database: it is
+		// cancelled with one guarded update, without reading the row first.
+		for (Map.Entry<UUID, OrderBook> entry : books.entrySet()) {
+			Optional<BookOrder> found = entry.getValue().find(command.orderId());
+			if (found.isPresent() && found.get().accountId().equals(command.accountId())) {
+				return cancelResting(key, command, market, entry.getKey(), found.get(), sequence);
+			}
+		}
+		// Not resting, or someone else's: the row is read, without a lock, only to answer.
+		TradingStore.ExistingOrder order = store.findOrder(command.orderId())
 			.filter((existing) -> existing.accountId().equals(command.accountId()))
 			.orElse(null);
 		if (order == null) {
@@ -920,29 +929,30 @@ public final class TradingEngine {
 		CancelResult.Status status = switch (order.state()) {
 			case "CANCELED" -> CancelResult.Status.ALREADY_CANCELED;
 			case "FILLED", "REJECTED" -> CancelResult.Status.NOT_CANCELABLE;
-			default -> CancelResult.Status.CANCELED;
+			// Resting in the database but not in the book: the book is out of step, so the writer halts.
+			default -> throw new BookOutOfStepException(command.orderId());
 		};
-		if (status != CancelResult.Status.CANCELED) {
-			int httpStatus = status == CancelResult.Status.NOT_CANCELABLE ? 409 : 200;
-			return new CancelOutcome(remember(key, httpStatus, new CancelResult(command.orderId(), status, 0, sequence)),
-					order.instrumentId());
-		}
+		int httpStatus = status == CancelResult.Status.NOT_CANCELABLE ? 409 : 200;
+		return new CancelOutcome(remember(key, httpStatus, new CancelResult(command.orderId(), status, 0, sequence)),
+				order.instrumentId());
+	}
 
-		BookOrder resting = books.get(order.instrumentId())
-			.find(command.orderId())
-			.filter((found) -> found.remainingQuantity() == order.working())
-			.orElseThrow(() -> new BookOutOfStepException(command.orderId()));
-		store.cancelOrder(command.orderId(), order.working(), "CANCELED_BY_OWNER");
-		SettlementPlan release = Settlement.cancel(order.instrumentId(), resting);
+	/** Cancels an order the book holds for the caller; a row that is not resting as the book says halts the writer. */
+	private CancelOutcome cancelResting(CommandKey key, CancelOrder command, Market market, UUID instrumentId,
+			BookOrder resting, long sequence) {
+		if (!store.cancelOrder(command.orderId(), command.accountId(), resting.remainingQuantity(),
+				"CANCELED_BY_OWNER")) {
+			throw new BookOutOfStepException(command.orderId());
+		}
+		SettlementPlan release = Settlement.cancel(instrumentId, resting);
 		for (SettlementPlan.Batch batch : release.batches()) {
 			writes.batch(batch.cause(), null, batch.postings());
 		}
 		release.balanceChanges().forEach(writes::balance);
 		writes.touch(List.of(command.accountId()));
-		snapshot(market, order.instrumentId(), books.get(order.instrumentId()), BookDelta.cancel(resting), sequence);
-		return new CancelOutcome(remember(key, 200,
-				new CancelResult(command.orderId(), CancelResult.Status.CANCELED, order.working(), sequence)),
-				order.instrumentId());
+		snapshot(market, instrumentId, books.get(instrumentId), BookDelta.cancel(resting), sequence);
+		return new CancelOutcome(remember(key, 200, new CancelResult(command.orderId(), CancelResult.Status.CANCELED,
+				resting.remainingQuantity(), sequence)), instrumentId);
 	}
 
 	private Outcome placeInTransaction(CommandKey key, PlaceOrder command, OrderBook book) {

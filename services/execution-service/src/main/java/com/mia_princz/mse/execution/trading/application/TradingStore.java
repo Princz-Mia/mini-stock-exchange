@@ -72,7 +72,7 @@ public interface TradingStore {
 	record Opening<T>(Market market, long sequence, Optional<StoredResult<T>> prior) {
 	}
 
-	/** An order row as cancelling needs it, locked for the rest of the transaction. */
+	/** An order row as a cancel reads it to answer for an order that is not resting in the writer's books. */
 	record ExistingOrder(UUID id, UUID accountId, UUID instrumentId, String state, long working) {
 	}
 
@@ -203,9 +203,14 @@ public interface TradingStore {
 
 	void insertOrder(NewOrder order);
 
-	Optional<ExistingOrder> lockOrder(UUID orderId);
+	/** Reads the order without a lock: only the writer changes orders. */
+	Optional<ExistingOrder> findOrder(UUID orderId);
 
-	void cancelOrder(UUID orderId, long quantity, String reason);
+	/**
+	 * Cancels the account's order if it is still resting with exactly {@code quantity} working; false if no such row,
+	 * which means the writer's book is out of step with the database.
+	 */
+	boolean cancelOrder(UUID orderId, UUID accountId, long quantity, String reason);
 
 	/**
 	 * Moves the instrument's last trade sequence from {@code from} to {@code to}, once per command that traded in it.

@@ -83,6 +83,8 @@ The tail moved this time: the commands with trades, which make it, lost a statem
 
 The largest step so far, and the tail most of all: commands with fills now cost the same statements as any other. From the first row of this section the bench has gone from 105 to 182 commands a second.
 
+**A cancel of an order resting in the book, without reading it first, 2026-11-17.** One statement fewer for each successful cancel. On this bench, no measurable change (182 commands a second before and after, same digest): many of its cancels target orders already filled, which are answered as before, and the read saved is cheap here.
+
 ## Steady load
 
 **Scenario:** five instruments and 10,000 bots (2,000 market makers, 2,000 momentum, 6,000 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. Until 2026-11-15 the scenario was 1,000 bots; its last result is kept below. Neither is a limit: the exchange limits neither the bot population nor the bots in one run, and `--bots` sets the number.
