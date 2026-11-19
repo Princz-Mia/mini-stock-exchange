@@ -115,6 +115,9 @@ services:
       MSE_EXPORT_TOKEN: ${MSE_EXPORT_TOKEN:-}
       # Optional too; without it the simulator's control routes refuse every request.
       MSE_SIMULATOR_TOKEN: ${MSE_SIMULATOR_TOKEN:-}
+      # Trading commands queued together commit as one transaction of at most this many; each keeps its own
+      # answer and sequence. Tests keep 1 unless they set it.
+      MSE_TRADING_MAX_BATCH: 32
     volumes:
       # Plaintext bot tokens, written once at provisioning; the simulator mounts it read-only.
       - bot-tokens:/run/mse/bot-tokens
@@ -153,7 +156,7 @@ services:
       retries: 6
       start_period: 10s
     mem_limit: 256m
-    cpus: 0.5
+    cpus: 2.0
 
   flink-jobmanager:
     profiles: [full]

@@ -54,7 +54,7 @@ Kafka sits after the commit, so trading keeps working if Kafka or Flink is down.
 flowchart TD
   W["web adapters<br/>controllers, rate limits, problems"] --> ENG
   ENG["TradingEngine<br/>on the CommandWriter thread"] --> BOOK["order books and tapes<br/>in memory"]
-  ENG --> ST["TradingStore<br/>JDBC, one transaction per command"]
+  ENG --> ST["TradingStore<br/>JDBC, one transaction per run"]
   ENG -->|"after commit"| AS["AccountStream<br/>private SSE"]
   ST --> DB[("execution_db")]
   REL["OutboxRelay<br/>own thread"] --> DB
@@ -71,7 +71,7 @@ flowchart TD
 
 Architecture tests keep the domain free of Spring, SQL and Kafka, and keep the application layer reaching the database only through its ports.
 
-**The single writer** ([why](#decisions)): every order, cancel and operator command runs on one thread, in admission order, each as one database transaction. HTTP threads only validate, rate-limit and queue, and a full queue answers `503` at once.
+**The single writer** ([why](#decisions)): every order, cancel and operator command runs on one thread, in admission order. Orders and cancels waiting in the queue together run as one database transaction, a run of up to 32 in Compose, so they share one commit; an operator command runs alone. HTTP threads only validate, rate-limit and queue, and a full queue answers `503` at once.
 
 ## Placing an order
 
@@ -89,7 +89,7 @@ sequenceDiagram
   H->>W: admit (or 503 at once if full)
   W->>DB: lock market row, check writer epoch
   W->>DB: stored answer for this key? Then return it
-  W->>B: plan against the book, without changing it
+  W->>B: plan against the book and the run's earlier commands, without changing it
   W->>DB: order, trades, ledger, balances, outbox, answer
   W->>DB: COMMIT
   W->>B: apply the plan, update the tape
@@ -103,6 +103,7 @@ sequenceDiagram
 - **On a rollback** the plan is discarded and nothing changes.
 - **If the commit's outcome is unknown,** or the book can't apply a committed plan, the writer halts instead of guessing, and a restart rebuilds.
 - **A cancel** follows the same path: lock, check the owner, release the reservation, commit, then remove the order from the book.
+- **In a run,** the lock and the commit happen once. When the run commits, every command keeps its own answer, sequence and rows, exactly as if it had run alone. A failure that doesn't halt rolls the run back and runs its commands again one at a time. If the run halts the writer, the commands already answered keep their answers and the rest fail, whether or not they committed; after a restart, each key says what happened. The limit is the `mse.trading.max-batch` setting, 32 in `compose.yaml`; at 1, every command runs alone.
 
 **Answers and retries.** If the answer takes longer than five seconds, the client gets `504 COMMAND_OUTCOME_UNKNOWN`. It looks the key up: `404` means nothing committed, and the same key may be sent again.
 
