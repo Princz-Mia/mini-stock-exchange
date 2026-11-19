@@ -927,7 +927,7 @@ def run_stress(options: Options) -> int:
             (username, password, instruments[index % len(instruments)])
             for index, (username, password) in enumerate(credentials)
         ]
-        results, skipped, broke = asyncio.run(stress_rates(options, logins))
+        results, skipped, broke = stress_rates(options, logins)
         env = read_environment(stack)
         logger.info("checking accounting and the public side")
         checks, restarted = checked(stack, instruments)
@@ -935,7 +935,8 @@ def run_stress(options: Options) -> int:
             f"# Stress: {datetime.now(UTC):%Y-%m-%d %H:%M} UTC",
             "",
             f"- {len(SYMBOLS)} instruments, no bots; each trader login sends at most "
-            f"{stress.PER_TRADER} commands a second, from this machine through port {WEB_PORT}.",
+            f"{stress.PER_TRADER} commands a second, from this machine through port {WEB_PORT}, "
+            f"from one process per {stress.PER_PROCESS} commands a second.",
             f"- Each rate: {options.stress_warmup} s of warm-up (the first "
             f"{max(options.stress_warmup, FIRST_WARMUP)} s), then {options.stress_duration} s "
             "measured; latency counts from each command's planned time.",
@@ -961,64 +962,62 @@ def run_stress(options: Options) -> int:
             stack.compose("down", "-v", "--remove-orphans", check=False)
 
 
-async def stress_rates(
+async def signed_in(base_url: str, logins: list[tuple[str, str, str]]) -> list[stress.Session]:
+    """Every login signed in, eight at a time: the exchange refuses a burst of sign-ins from one
+    address while their passwords are checked."""
+    gate = asyncio.Semaphore(8)
+
+    async def one(username: str, password: str, instrument: str) -> stress.Session:
+        async with gate:
+            trader = await stress.sign_in(base_url, username, password, instrument)
+            try:
+                return stress.session(trader)
+            finally:
+                await trader.client.aclose()
+
+    return list(await asyncio.gather(*(one(*login) for login in logins)))
+
+
+def stress_rates(
     options: Options, logins: list[tuple[str, str, str]]
 ) -> tuple[list[stress.Result], list[float], str | None]:
-    """Signs every login in, then fires each rate in turn, each starting with no open orders. A
-    rate that cannot be measured ends the run; the rates before it are still returned."""
+    """Signs every login in, once, then fires each rate in turn from its generator processes,
+    each rate starting with no open orders. A rate that cannot be measured ends the run; the rates
+    before it are still returned."""
     assert options.stress is not None
     base_url = f"http://{HOST}:{WEB_PORT}"
-    gate = asyncio.Semaphore(8)
-    traders: list[stress.Trader] = []
-
-    async def sign_in(username: str, password: str, instrument: str) -> None:
-        async with gate:
-            traders.append(await stress.sign_in(base_url, username, password, instrument))
-
-    async def tidy(trader: stress.Trader) -> None:
-        async with gate:
-            await trader.tidy()
-
+    sessions = asyncio.run(signed_in(base_url, logins))
     results: list[stress.Result] = []
     skipped: list[float] = []
     broke = None
-    try:
-        await asyncio.gather(*(sign_in(*login) for login in logins))
-        for index, rate in enumerate(options.stress):
-            logger.info("rate %d: %.0f commands/s", index + 1, rate)
-            warmup = (
-                max(options.stress_warmup, FIRST_WARMUP) if index == 0 else options.stress_warmup
+    for index, rate in enumerate(options.stress):
+        logger.info(
+            "rate %d: %.0f commands/s from %d processes", index + 1, rate, stress.processes(rate)
+        )
+        warmup = max(options.stress_warmup, FIRST_WARMUP) if index == 0 else options.stress_warmup
+        try:
+            sent = stress.fire_in_processes(
+                base_url, sessions, rate, warmup + options.stress_duration
             )
-            try:
-                await asyncio.gather(*(tidy(trader) for trader in traders))
-                sent = await stress.fire(
-                    traders[: stress.traders(rate)],
-                    rate,
-                    warmup + options.stress_duration,
-                )
-            except Exception as error:  # noqa: BLE001 - the rates before it are still reported
-                logger.exception(
-                    "rate %d at %.0f commands/s could not be measured", index + 1, rate
-                )
-                broke = f"{rate:,.0f}/s ({type(error).__name__}: {error})"
-                skipped = options.stress[index + 1 :]
-                break
-            result = stress.measured(rate, warmup, options.stress_duration, sent)
-            results.append(result)
-            logger.info(
-                "rate %d: answered %.1f/s, p99 %s, %s",
-                index + 1,
-                result.answered_rate,
-                result.latency(0.99),
-                "met every budget" if result.passed else "missed: " + ", ".join(result.missed()),
-            )
-            if not result.passed:
-                skipped = options.stress[index + 1 :]
-                break
-            # Let the writer's queue empty before the next rate.
-            await asyncio.sleep(5)
-    finally:
-        await asyncio.gather(*(trader.client.aclose() for trader in traders))
+        except Exception as error:  # noqa: BLE001 - the rates before it are still reported
+            logger.exception("rate %d at %.0f commands/s could not be measured", index + 1, rate)
+            broke = f"{rate:,.0f}/s ({type(error).__name__}: {error})"
+            skipped = options.stress[index + 1 :]
+            break
+        result = stress.measured(rate, warmup, options.stress_duration, sent)
+        results.append(result)
+        logger.info(
+            "rate %d: answered %.1f/s, p99 %s, %s",
+            index + 1,
+            result.answered_rate,
+            result.latency(0.99),
+            "met every budget" if result.passed else "missed: " + ", ".join(result.missed()),
+        )
+        if not result.passed:
+            skipped = options.stress[index + 1 :]
+            break
+        # Let the writer's queue empty before the next rate.
+        time.sleep(5)
     return results, skipped, broke
 
 

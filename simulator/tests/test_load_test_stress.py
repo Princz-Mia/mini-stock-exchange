@@ -1,6 +1,10 @@
 import asyncio
 import json
+import math
+import threading
 import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
@@ -24,8 +28,35 @@ def test_each_trader_login_stays_under_a_persons_limit() -> None:
     assert stress.traders(1.0) == 1
     assert stress.traders(8.0) == 1
     assert stress.traders(9.0) == 2
-    assert stress.traders(1000.0) == 125
+    assert stress.traders(400.0) == 50
+    # Three processes of 333.3 a second, 42 logins each.
+    assert stress.traders(1000.0) == 126
     assert stress.traders(2000.0) == 250
+    for rate in (1.0, 7.5, 399.0, 401.0, 799.0, 1000.0, 1234.5, 2000.0):
+        every = stress.processes(rate)
+        logins = stress.traders(rate)
+        assert logins % every == 0, "each process has as many logins as the others"
+        assert rate / logins <= stress.PER_TRADER
+
+
+def test_each_process_carries_at_most_its_share() -> None:
+    assert stress.processes(1.0) == 1
+    assert stress.processes(400.0) == 1
+    assert stress.processes(401.0) == 2
+    assert stress.processes(1000.0) == 3
+    assert stress.processes(2000.0) == 5
+
+
+def test_the_processes_shares_make_up_the_one_plan() -> None:
+    whole = stress.schedule(1000.0, 1.0)
+
+    shares = [stress.schedule(1000.0, 1.0, offset, 3) for offset in range(3)]
+
+    assert sorted(at for share in shares for at in share) == whole
+    assert shares[1][:2] == [pytest.approx(0.001), pytest.approx(0.004)]
+    for offset, every in ((-1, 3), (3, 3), (1, 1)):
+        with pytest.raises(ValueError):
+            stress.schedule(1000.0, 1.0, offset, every)
 
 
 OPEN_ORDER_LIMIT = 20
@@ -100,6 +131,140 @@ def traders(exchange: Exchange, count: int) -> list[stress.Trader]:
         )
         for index in range(count)
     ]
+
+
+def test_one_process_fires_only_its_share() -> None:
+    exchange = Exchange()
+
+    sent = asyncio.run(stress.fire(traders(exchange, 2), 100.0, 1.0, offset=1, every=3))
+
+    assert [each.intended for each in sent] == stress.schedule(100.0, 1.0, 1, 3)
+    assert all(each.status in (200, 201) for each in sent)
+
+
+class Served(BaseHTTPRequestHandler):
+    """A fake exchange over real HTTP, for generator processes: signs in a login whose password
+    is "pw", places any order and cancels it. Counts what it answered, by username."""
+
+    signed_in: dict[str, str] = {}
+    answered: dict[str, int] = {}
+    lock = threading.Lock()
+
+    def log_message(self, *args: object) -> None:
+        pass
+
+    def answer(self, status: int, body: dict) -> None:
+        data = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def session(self) -> str:
+        cookie = self.headers.get("Cookie", "")
+        return cookie.removeprefix("session=")
+
+    def do_GET(self) -> None:
+        if self.path == "/api/v1/auth/csrf":
+            self.answer(200, {"headerName": "X-CSRF", "token": "token"})
+        elif self.session() not in self.signed_in:
+            self.answer(401, {})
+        else:
+            self.answer(200, {"orders": []})
+
+    def do_POST(self) -> None:
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if self.path == "/api/v1/auth/login":
+            login = json.loads(body)
+            if login["password"] != "pw":
+                self.answer(401, {})
+                return
+            session = uuid.uuid4().hex
+            with self.lock:
+                self.signed_in[session] = login["username"]
+            data = b"{}"
+            self.send_response(200)
+            self.send_header("Set-Cookie", f"session={session}; Path=/")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        with self.lock:
+            username = self.signed_in.get(self.session())
+            if username is None or self.headers.get("X-CSRF") != "token":
+                self.answer(401, {})
+                return
+            self.answered[username] = self.answered.get(username, 0) + 1
+        if self.path == "/api/v1/orders":
+            self.answer(201, {"orderId": uuid.uuid4().hex})
+        else:
+            self.answer(200, {})
+
+
+@pytest.fixture
+def served() -> str:
+    Served.signed_in = {}
+    Served.answered = {}
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Served)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+    server.server_close()
+
+
+def sessions(base_url: str, count: int) -> list[stress.Session]:
+    async def signed_in() -> list[stress.Session]:
+        traders = [
+            await stress.sign_in(base_url, f"stress-{index}", "pw", "instrument")
+            for index in range(count)
+        ]
+        try:
+            return [stress.session(trader) for trader in traders]
+        finally:
+            for trader in traders:
+                await trader.client.aclose()
+
+    return asyncio.run(signed_in())
+
+
+def test_processes_send_the_whole_plan_once_as_their_own_logins(served: str) -> None:
+    rate = 801.0
+    signed_in = sessions(served, stress.traders(rate))
+
+    sent = stress.fire_in_processes(served, signed_in, rate, 0.25)
+
+    assert stress.processes(rate) == 3
+    assert [each.intended for each in sent] == stress.schedule(rate, 0.25)
+    assert all(each.status in (200, 201) for each in sent)
+    # Every login sent commands, as itself, signed in once before the processes started.
+    assert len(Served.signed_in) == len(signed_in)
+    assert sorted(Served.answered) == sorted(Served.signed_in.values())
+    assert sum(Served.answered.values()) == len(sent)
+    # Each login belongs to one process, so none sends more than its process's share of it.
+    every = stress.processes(rate)
+    share = math.ceil(len(sent) / every) / (len(signed_in) / every)
+    assert max(Served.answered.values()) <= math.ceil(share)
+
+
+def test_a_process_that_fails_ends_the_rate_without_waiting_out_the_others(served: str) -> None:
+    rate = 801.0
+    signed_in = sessions(served, stress.traders(rate))
+    signed_in[-1] = ({"session": "unknown"}, *signed_in[-1][1:])
+    began = time.monotonic()
+
+    with pytest.raises(RuntimeError, match="HTTPStatusError"):
+        stress.fire_in_processes(served, signed_in, rate, 0.25)
+
+    assert time.monotonic() - began < 60
+    assert sum(Served.answered.values()) == 0
+
+
+def test_too_few_logins_for_a_rate_are_refused() -> None:
+    session = ({"session": "s"}, {"X-CSRF": "token"}, "instrument")
+    with pytest.raises(ValueError, match="126 logins"):
+        stress.fire_in_processes("http://unused", [session] * 125, 1000.0, 1.0)
 
 
 def test_traders_take_turns_and_each_cancels_the_order_it_placed() -> None:
@@ -280,8 +445,8 @@ def test_the_report_names_the_highest_rate_and_each_rate() -> None:
     text = "\n".join(stress.report([good, bad], [750.0, 1000.0]))
 
     assert "**Highest rate that met every budget: 250 commands a second.**" in text
-    assert "| 250/s | 32 | 1,000 | 1,000.0/s | 0 | 0 | 10.0 ms |" in text
-    assert "| 500/s | 63 | 1,000 | 998.0/s | 2 | 0 |" in text
+    assert "| 250/s | 1 | 32 | 1,000 | 1,000.0/s | 0 | 0 | 10.0 ms |" in text
+    assert "| 500/s | 2 | 64 | 1,000 | 998.0/s | 2 | 0 |" in text
     assert "no: refusals and failures below 0.1%" in text
     assert "Not run, after a rate missed a budget: 750/s, 1,000/s." in text
     assert "Could not be measured" not in text
