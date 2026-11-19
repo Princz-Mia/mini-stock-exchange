@@ -49,9 +49,6 @@ public interface TradingStore {
 
 	}
 
-	record Available(long cashCents, long shares) {
-	}
-
 	/** A new order row. Rejected orders have no accepted sequence. */
 	record NewOrder(UUID id, UUID simulationId, OrderRequest request, UUID instrumentId,
 			PlacementResult.OrderState state, String reason, long filled, long working, long canceled,
@@ -196,34 +193,28 @@ public interface TradingStore {
 	Instrument insertInstrument(UUID simulationId, UUID instrumentId, String symbol, String displayName,
 			long referencePriceCents);
 
-	Available available(UUID accountId, UUID instrumentId);
+	/**
+	 * What is available of each balance (cash with no instrument, shares of one): its total less what is reserved.
+	 * A balance with no row has nothing available and is left out.
+	 */
+	Map<com.mia_princz.mse.execution.trading.domain.SettlementPlan.BalanceKey, Long> available(
+			java.util.Collection<com.mia_princz.mse.execution.trading.domain.SettlementPlan.BalanceKey> balances);
 
 	/** Each account with open or partially filled orders, and how many, to check the writer's own count. */
 	Map<UUID, Integer> restingOrdersByAccount(UUID simulationId);
-
-	void insertOrder(NewOrder order);
 
 	/** Reads the order without a lock: only the writer changes orders. */
 	Optional<ExistingOrder> findOrder(UUID orderId);
 
 	/**
-	 * Cancels the account's order if it is still resting with exactly {@code quantity} working; false if no such row,
-	 * which means the writer's book is out of step with the database.
+	 * Writes a transaction's collected rows, one statement per kind (more only if a kind has more rows than one
+	 * statement takes), in the order the rows depend on each other: trade counters, new orders, maker fills, cancels,
+	 * trades, journal batches with their postings, balances, account versions, outbox events in the order they were
+	 * added, and stored answers. Each statement checks it changed exactly the rows it was given; a trade counter, a
+	 * maker or a cancelled order that is not as the writer believed throws {@link OutOfStepException}. A missing cash
+	 * or position row is inserted, as the first change to it, one statement each.
 	 */
-	boolean cancelOrder(UUID orderId, UUID accountId, long quantity, String reason);
-
-	/**
-	 * Moves the instrument's last trade sequence from {@code from} to {@code to}, once per command that traded in it.
-	 * Throws {@link OutOfStepException} if the row was not at {@code from}.
-	 */
-	void advanceTradeSequence(UUID instrumentId, long from, long to);
-
-	/**
-	 * Writes a command's collected rows, one statement per kind: maker fills, trades, journal batches with their
-	 * postings, balances, account versions, then outbox events in the order they were added. Each statement checks it
-	 * changed exactly the rows it was given. A missing cash or position row is inserted, as the first change to it.
-	 */
-	void flush(UUID simulationId, long commandSequence, WriteSet writes);
+	void flush(UUID simulationId, WriteSet writes);
 
 	/**
 	 * Opens a trading command in one statement, in the order every command needs: locks the market row if
@@ -257,9 +248,6 @@ public interface TradingStore {
 	 * answers from the first. Empty when another writer has claimed the market since.
 	 */
 	Optional<RunOpening> openRun(UUID simulationId, long writerEpoch, List<RunKey> keys);
-
-	/** {@code status} is the HTTP status the stored result is replayed with. */
-	void insertResult(UUID simulationId, CommandKey key, int status, Object result, long commandSequence);
 
 	/**
 	 * The public state of one instrument once the current command commits: the instrument as it will be (its last

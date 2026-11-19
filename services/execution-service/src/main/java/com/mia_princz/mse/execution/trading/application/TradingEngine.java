@@ -87,7 +87,7 @@ public final class TradingEngine {
 
 	private final Map<UUID, OrderBook> books = new HashMap<>();
 
-	/** The current command's writes, flushed just before its answer is stored; a new set for each transaction. */
+	/** The current transaction's writes, its stored answers included, sent once just before its commit. */
 	private WriteSet writes = new WriteSet();
 
 	/** Each account's resting orders across all the books, kept by the books themselves. */
@@ -323,13 +323,52 @@ public final class TradingEngine {
 	private record Answered(CommandKey key, Object result) {
 	}
 
+	/** An order the run has written or changed, as the run leaves it: its owner and its state. */
+	private record RunOrder(UUID accountId, String state) {
+	}
+
 	/**
 	 * What a run's commands have changed so far, held apart from the books, tapes and counts until the run commits, so
-	 * each command sees the run's earlier ones. Dropped with the run if it rolls back.
+	 * each command sees the run's earlier ones. Its rows are written only at the run's end, so it also holds what a
+	 * later command would otherwise read back: the orders the run changed, and the balances it read. Dropped with the
+	 * run if it rolls back.
 	 */
 	private final class RunState {
 
 		private final Map<UUID, BookOverlay> overlays = new HashMap<>();
+
+		/** Orders the run has written or changed. */
+		private final Map<UUID, RunOrder> orders = new HashMap<>();
+
+		/** Every balance the run's orders check, read on the first check; null until then. */
+		private Map<SettlementPlan.BalanceKey, Long> balances;
+
+		private final List<SettlementPlan.BalanceKey> checked = new ArrayList<>();
+
+		/** The balances of the run's orders that entered its transaction: their cash, and their shares. */
+		RunState(List<Trading> run, List<Integer> entering) {
+			for (int i : entering) {
+				if (run.get(i) instanceof QueuedPlace place) {
+					checked.add(new SettlementPlan.BalanceKey(place.command().accountId(), null));
+					checked.add(new SettlementPlan.BalanceKey(place.command().accountId(), place.command().instrumentId()));
+				}
+			}
+		}
+
+		/**
+		 * What is available of a balance (cash when {@code instrumentId} is null) once the run so far is applied: as read
+		 * from the database, in one statement for the whole run on the first check, with the run's changes added.
+		 */
+		long available(UUID accountId, UUID instrumentId) {
+			SettlementPlan.BalanceKey key = new SettlementPlan.BalanceKey(accountId, instrumentId);
+			if (balances == null) {
+				balances = new HashMap<>(store.available(checked));
+			}
+			if (!checked.contains(key)) {
+				throw new IllegalStateException("The run did not read balance " + key);
+			}
+			return balances.getOrDefault(key, 0L) + writes.availableChange(key);
+		}
 
 		/** Each instrument's newest trade sequence once the run so far commits. */
 		private final Map<UUID, Long> tradeSequences = new HashMap<>();
@@ -662,7 +701,7 @@ public final class TradingEngine {
 			CommandWriter.RunOutcome[] outcomes, Ran[] ran) {
 		TradingStore.RunOpening opening = store.openRun(simulationId, writerEpoch, keys)
 			.orElseThrow(() -> new HaltInRun(entering.getFirst(), new StaleWriterException()));
-		RunState state = new RunState();
+		RunState state = new RunState(run, entering);
 		Map<KeyId, Answered> answered = new HashMap<>();
 		long next = opening.firstSequence();
 		for (int j = 0; j < entering.size(); j++) {
@@ -697,6 +736,20 @@ public final class TradingEngine {
 		if (next != opening.lastSequence() + 1) {
 			throw new IllegalStateException("The run used command sequences up to " + (next - 1)
 					+ " but its opening took them up to " + opening.lastSequence());
+		}
+		// Every row the run collected, once. A row not as the writer believed (a counter, a maker, a cancelled order)
+		// halts the writer, but which command's row it was is not known here. A run of one blames its command; a longer
+		// run rolls back and runs again one by one, so the command whose row it is halts the writer, and the ones before
+		// it commit, as they would one by one.
+		try {
+			store.flush(simulationId, writes);
+			writes = new WriteSet();
+		}
+		catch (TradingStore.OutOfStepException ex) {
+			if (entering.size() == 1) {
+				throw new HaltInRun(entering.getFirst(), ex);
+			}
+			throw ex;
 		}
 	}
 
@@ -762,7 +815,10 @@ public final class TradingEngine {
 		return result;
 	}
 
-	/** A transaction, with when it was asked for, opened, done with its statements and committed, in {@code marks}. */
+	/**
+	 * A transaction, with when it was asked for, opened, done with its statements and committed, in {@code marks}. The
+	 * rows its commands collected are written once, at the end of the work.
+	 */
 	private <T> T inTransaction(long[] marks, Supplier<T> work) {
 		marks[0] = nanoTime.getAsLong();
 		T result = transactions.inTransaction(() -> {
@@ -770,8 +826,8 @@ public final class TradingEngine {
 			writes = new WriteSet();
 			T value = work.get();
 			if (!writes.isEmpty()) {
-				// Rows collected after the answer was stored, or by a path that stored none, would be lost silently.
-				throw new IllegalStateException("A command's writes were not flushed before its commit");
+				store.flush(simulationId, writes);
+				writes = new WriteSet();
 			}
 			marks[2] = nanoTime.getAsLong();
 			return value;
@@ -1299,15 +1355,19 @@ public final class TradingEngine {
 				return cancelResting(run, market, key, command, entry.getKey(), found.get(), sequence);
 			}
 		}
-		// Not resting, or someone else's: the row is read, without a lock, only to answer.
-		TradingStore.ExistingOrder order = store.findOrder(command.orderId())
-			.filter((existing) -> existing.accountId().equals(command.accountId()))
-			.orElse(null);
-		if (order == null) {
+		// Not resting, or someone else's. An order the run has already written or changed answers from the run, since its
+		// rows are written only at the end; any other is read, without a lock, only to answer.
+		RunOrder known = run.orders.get(command.orderId());
+		String state = known != null ? (known.accountId().equals(command.accountId()) ? known.state() : null)
+				: store.findOrder(command.orderId())
+					.filter((existing) -> existing.accountId().equals(command.accountId()))
+					.map(TradingStore.ExistingOrder::state)
+					.orElse(null);
+		if (state == null) {
 			return Ran.answered(remember(key, 404,
 					new CancelResult(command.orderId(), CancelResult.Status.NOT_FOUND, 0, sequence)), Set.of(), sequence);
 		}
-		CancelResult.Status status = switch (order.state()) {
+		CancelResult.Status status = switch (state) {
 			case "CANCELED" -> CancelResult.Status.ALREADY_CANCELED;
 			case "FILLED", "REJECTED" -> CancelResult.Status.NOT_CANCELABLE;
 			// Resting in the database but not in the book: the book is out of step, so the writer halts.
@@ -1318,16 +1378,17 @@ public final class TradingEngine {
 				Set.of(), sequence);
 	}
 
-	/** Cancels an order the book holds for the caller; a row that is not resting as the book says halts the writer. */
+	/**
+	 * Cancels an order the book holds for the caller, with an update guarded by what the book says; when the run's
+	 * writes are sent, a row that is not resting as the book says halts the writer.
+	 */
 	private Ran cancelResting(RunState run, Market market, CommandKey key, CancelOrder command, UUID instrumentId,
 			BookOrder resting, long sequence) {
-		if (!store.cancelOrder(command.orderId(), command.accountId(), resting.remainingQuantity(),
-				"CANCELED_BY_OWNER")) {
-			throw new BookOutOfStepException(command.orderId());
-		}
+		writes.cancel(command.orderId(), command.accountId(), resting.remainingQuantity(), "CANCELED_BY_OWNER");
+		run.orders.put(command.orderId(), new RunOrder(command.accountId(), "CANCELED"));
 		SettlementPlan release = Settlement.cancel(instrumentId, resting);
 		for (SettlementPlan.Batch batch : release.batches()) {
-			writes.batch(batch.cause(), null, batch.postings());
+			writes.batch(batch.cause(), null, sequence, batch.postings());
 		}
 		release.balanceChanges().forEach(writes::balance);
 		writes.touch(List.of(command.accountId()));
@@ -1340,21 +1401,20 @@ public final class TradingEngine {
 	}
 
 	/**
-	 * An order inside its run's transaction. Balances are read from the database, which holds the run's earlier
-	 * writes; the order is matched against its book with the run's earlier commands over it, and its plan joins them
-	 * once its rows are written.
+	 * An order inside its run's transaction. Its balances are what the run read from the database, with the run's
+	 * earlier changes to them added; the order is matched against its book with the run's earlier commands over it,
+	 * and its plan joins them once its rows are collected.
 	 */
 	private Ran placeInRun(RunState run, Market market, CommandKey key, PlaceOrder command, long sequence) {
 		if (!"OPEN".equals(market.state())) {
-			return reject(key, command, RejectionCode.MARKET_NOT_OPEN, sequence);
+			return reject(run, key, command, RejectionCode.MARKET_NOT_OPEN, sequence);
 		}
-		TradingStore.Available available = store.available(command.accountId(), command.instrumentId());
 		long hold = Settlement.holdAmount(command.side(), command.bound(), command.quantity().shares());
-		if (command.side() == Side.BUY && available.cashCents() < hold) {
-			return reject(key, command, RejectionCode.INSUFFICIENT_CASH, sequence);
+		if (command.side() == Side.BUY && run.available(command.accountId(), null) < hold) {
+			return reject(run, key, command, RejectionCode.INSUFFICIENT_CASH, sequence);
 		}
-		if (command.side() == Side.SELL && available.shares() < hold) {
-			return reject(key, command, RejectionCode.INSUFFICIENT_SHARES, sequence);
+		if (command.side() == Side.SELL && run.available(command.accountId(), command.instrumentId()) < hold) {
+			return reject(run, key, command, RejectionCode.INSUFFICIENT_SHARES, sequence);
 		}
 
 		OrderRequest request = new OrderRequest(command.orderId(), command.accountId(), command.side(), command.type(),
@@ -1362,16 +1422,17 @@ public final class TradingEngine {
 		BookOverlay overlay = run.overlay(command.instrumentId());
 		MatchPlan plan = overlay.plan(request);
 		if (plan.outcome() == MatchPlan.Outcome.EXECUTION_LIMIT_EXCEEDED) {
-			return reject(key, command, RejectionCode.EXECUTION_LIMIT_EXCEEDED, sequence);
+			return reject(run, key, command, RejectionCode.EXECUTION_LIMIT_EXCEEDED, sequence);
 		}
 		if (plan.rests() && (run.resting(command.accountId()) >= market.maxOpenOrdersPerAccount()
 				|| run.restingTotal() >= market.maxOpenOrdersTotal())) {
-			return reject(key, command, RejectionCode.ORDER_LIMIT_EXCEEDED, sequence);
+			return reject(run, key, command, RejectionCode.ORDER_LIMIT_EXCEEDED, sequence);
 		}
 
 		PlacementResult result = accepted(command, plan, sequence);
-		store.insertOrder(new NewOrder(command.orderId(), simulationId, request, command.instrumentId(), result.state(),
+		writes.order(new NewOrder(command.orderId(), simulationId, request, command.instrumentId(), result.state(),
 				result.reason(), result.filled(), result.working(), result.canceled(), sequence));
+		run.orders.put(command.orderId(), new RunOrder(command.accountId(), result.state().name()));
 		List<TapeTrade> trades = write(run, command, plan, sequence);
 		if (!plan.fills().isEmpty() || plan.rests()) {
 			snapshot(run, market, command.instrumentId(), overlay, BookDelta.of(plan), sequence, trades);
@@ -1433,22 +1494,24 @@ public final class TradingEngine {
 		Set<UUID> touched = new LinkedHashSet<>();
 		touched.add(command.accountId());
 		// Trades are numbered from the writer's own counter, which moves only after the commit, with the run's earlier
-		// trades after it. The row is moved once per command, first, so a counter that disagrees halts the writer before
-		// any trade is written under a number already taken.
+		// trades after it. The row is moved once per run, first among its writes, so a counter that disagrees halts the
+		// writer before any trade is written under a number already taken.
 		long before = run.lastTradeSequence(command.instrumentId());
 		if (!plan.fills().isEmpty()) {
-			store.advanceTradeSequence(command.instrumentId(), before, before + plan.fills().size());
+			writes.tradeSequence(command.instrumentId(), before, before + plan.fills().size());
 		}
 		long tradeSequence = before;
 		boolean takerBuys = command.side() == Side.BUY;
 		for (int i = 0; i < plan.fills().size(); i++) {
 			Fill fill = plan.fills().get(i);
 			writes.fillMaker(fill.makerOrderId(), fill.quantity());
+			run.orders.put(fill.makerOrderId(),
+					new RunOrder(fill.makerAccountId(), fill.makerRemainingAfter() == 0 ? "FILLED" : "PARTIALLY_FILLED"));
 			WriteSet.NewTrade trade = new WriteSet.NewTrade(UUID.randomUUID(), command.instrumentId(), ++tradeSequence,
 					fill.makerOrderId(), plan.taker().orderId(),
 					takerBuys ? plan.taker().accountId() : fill.makerAccountId(),
 					takerBuys ? fill.makerAccountId() : plan.taker().accountId(), fill.price().cents(), fill.quantity(),
-					executedAt);
+					executedAt, sequence);
 			writes.trade(trade);
 			trades.put(i, trade);
 			tape.add(new TapeTrade(trade.id(), trade.tradeSequence(), fill.price().cents(), fill.quantity(),
@@ -1458,7 +1521,7 @@ public final class TradingEngine {
 		SettlementPlan settlement = Settlement.of(command.instrumentId(), plan);
 		for (SettlementPlan.Batch batch : settlement.batches()) {
 			WriteSet.NewTrade trade = trades.get(batch.fillIndex());
-			writes.batch(batch.cause(), trade == null ? null : trade.id(), batch.postings());
+			writes.batch(batch.cause(), trade == null ? null : trade.id(), sequence, batch.postings());
 		}
 		settlement.balanceChanges().forEach(writes::balance);
 		writes.touch(touched);
@@ -1492,16 +1555,20 @@ public final class TradingEngine {
 	}
 
 	/** A rejection holds nothing, but the order's own account is told of it, as of any order it placed. */
-	private Ran reject(CommandKey key, PlaceOrder command, RejectionCode code, long sequence) {
+	private Ran reject(RunState run, CommandKey key, PlaceOrder command, RejectionCode code, long sequence) {
 		OrderRequest request = new OrderRequest(command.orderId(), command.accountId(), command.side(), command.type(),
 				command.bound(), command.quantity(), sequence);
-		store.insertOrder(new NewOrder(command.orderId(), simulationId, request, command.instrumentId(),
+		writes.order(new NewOrder(command.orderId(), simulationId, request, command.instrumentId(),
 				OrderState.REJECTED, code.name(), 0, 0, 0, null));
+		run.orders.put(command.orderId(), new RunOrder(command.accountId(), OrderState.REJECTED.name()));
 		return Ran.answered(remember(key, 422, new PlacementResult(command.orderId(), OrderState.REJECTED, code.name(),
 				code, 0, 0, 0, sequence)), Set.of(command.accountId()), sequence);
 	}
 
-	/** Stores the first committed result in the same transaction, so a retry with the same key gets it back. */
+	/**
+	 * Stores the first committed result in the same transaction, so a retry with the same key gets it back. It is
+	 * written with the transaction's other rows, just before the commit.
+	 */
 	private <T> T remember(CommandKey key, int httpStatus, T result) {
 		long sequence = switch (result) {
 			case PlacementResult placement -> placement.commandSequence();
@@ -1517,9 +1584,7 @@ public final class TradingEngine {
 			case TokenRevocation revocation -> revocation.commandSequence();
 			default -> throw new IllegalArgumentException("Not a command result: " + result);
 		};
-		store.flush(simulationId, sequence, writes);
-		writes = new WriteSet();
-		store.insertResult(simulationId, key, httpStatus, result, sequence);
+		writes.result(key, httpStatus, result, sequence);
 		return result;
 	}
 
