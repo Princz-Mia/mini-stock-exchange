@@ -19,12 +19,16 @@ import java.util.concurrent.CompletableFuture;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterHaltException;
 import com.mia_princz.mse.execution.trading.application.PlacementResult.OrderState;
 import com.mia_princz.mse.execution.trading.application.TradingStore.Market;
 import com.mia_princz.mse.execution.trading.application.TradingStore.NewOrder;
 import com.mia_princz.mse.execution.trading.application.TransactionRunner.CommitOutcomeUnknownException;
 import com.mia_princz.mse.execution.trading.domain.BookDelta;
+import com.mia_princz.mse.execution.trading.domain.BookOverlay;
 import com.mia_princz.mse.execution.trading.domain.BookOrder;
 import com.mia_princz.mse.execution.trading.domain.DepthLevel;
 import com.mia_princz.mse.execution.trading.domain.DisplayName;
@@ -39,9 +43,14 @@ import com.mia_princz.mse.execution.trading.domain.SettlementPlan;
 import com.mia_princz.mse.execution.trading.domain.Side;
 
 /**
- * Processes trading commands on the single writer. Each command is one database transaction covering the risk check,
- * matching, the order and trade rows, the ledger, the balances and the outbox. The in-memory book changes only after
- * that transaction has committed; if anything leaves the two possibly out of step, the writer halts.
+ * Processes commands on the single writer. Orders and cancels queued together run as one run, up to the writer's run
+ * limit, in one database transaction: one lock, one epoch check and one lookup of every key, then each command in
+ * admission order with its own sequence, risk check, matching, rows, ledger, balances and outbox events, and one
+ * commit. Each command is planned against the books as the run's earlier commands leave them, held in an overlay;
+ * the books, the tapes and every count the writer keeps change only after the commit, in sequence order, and then
+ * each command gets its answer. A run that fails without halting rolls back and its commands run again one by one,
+ * so each gets the answer it would get alone. Any other command is a transaction of its own. If anything leaves the
+ * books and the database possibly out of step, the writer halts.
  */
 public final class TradingEngine {
 
@@ -50,6 +59,15 @@ public final class TradingEngine {
 
 	/** Levels per side in a public market snapshot. */
 	static final int SNAPSHOT_LEVELS = 20;
+
+	private static final Logger LOG = LoggerFactory.getLogger(TradingEngine.class);
+
+	private static final long FALLBACK_LOG_INTERVAL_NANOS = 10_000_000_000L;
+
+	/** When a fallback was last logged, on the writer's clock; zero before the first. */
+	private long lastFallbackLogged;
+
+	private int fallbacksUnlogged;
 
 	private final TradingStore store;
 
@@ -272,91 +290,130 @@ public final class TradingEngine {
 		return submit(() -> books.get(instrumentId).depth(side, Integer.MAX_VALUE));
 	}
 
-	/** {@code trades} are the command's new trades, oldest first, for the tape once it commits. */
-	/** {@code fresh} is false for a repeated key's stored answer, which changed nothing. */
-	private record Outcome(PlacementResult result, MatchPlan plan, List<TapeTrade> trades, boolean fresh) {
+	/**
+	 * One command of a run, done inside its transaction: its answer, and what it changes once the run commits. A plan
+	 * or a cancelled order for its instrument's book (neither for a replay, a rejection or a cancel that found nothing
+	 * resting), its trades for the tape, and the accounts it changed (none for a replay).
+	 */
+	private record Ran(Object result, UUID instrumentId, MatchPlan plan, UUID canceledOrderId, List<TapeTrade> trades,
+			Set<UUID> changed, long sequence) {
 
-		Outcome(PlacementResult result, MatchPlan plan) {
-			this(result, plan, List.of(), true);
+		/** A stored answer given again, which changes nothing. */
+		static Ran replayed(Object result) {
+			return new Ran(result, null, null, null, List.of(), Set.of(), 0);
 		}
 
-		Outcome(PlacementResult result, MatchPlan plan, List<TapeTrade> trades) {
-			this(result, plan, trades, true);
+		/** An answer that changes no book, for the given accounts. */
+		static Ran answered(Object result, Set<UUID> changed, long sequence) {
+			return new Ran(result, null, null, null, List.of(), changed, sequence);
 		}
 
 	}
 
-	private PlacementResult process(CommandKey key, PlaceOrder command) {
-		OrderBook book = books.get(command.instrumentId());
-		if (book == null) {
-			throw new UnknownInstrumentException(command.instrumentId());
+	/** A command key without its request: two commands with the same one share a stored answer. */
+	private record KeyId(UUID principalId, UUID idempotencyKey) {
+
+		static KeyId of(CommandKey key) {
+			return new KeyId(key.principalId(), key.idempotencyKey());
 		}
-		Outcome outcome;
-		try {
-			outcome = timed("place", () -> placeInTransaction(key, command, book));
-		}
-		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
-			throw new WriterHaltException("Trading state may differ from the database", ex);
-		}
-		if (outcome.plan() != null) {
-			long applying = nanoTime.getAsLong();
-			try {
-				book.apply(outcome.plan());
-				tapes.get(command.instrumentId()).add(outcome.trades());
-				if (!outcome.trades().isEmpty()) {
-					long last = outcome.trades().getLast().tradeSequence();
-					catalogue.computeIfPresent(command.instrumentId(), (id, known) -> known.withLastTradeSequence(last));
-				}
-			}
-			catch (RuntimeException | Error ex) {
-				// Committed but not applied: the book no longer matches the database, whatever was thrown.
-				throw new WriterHaltException("The book could not apply a committed plan", ex);
-			}
-			timings.record(WriterTimings.Phase.APPLY, "place", nanoTime.getAsLong() - applying);
-		}
-		if (outcome.fresh()) {
-			// The order's own account, a rejection included, and every resting order's account it traded against.
-			Set<UUID> changed = new HashSet<>();
-			changed.add(command.accountId());
-			if (outcome.plan() != null) {
-				outcome.plan().fills().forEach((fill) -> changed.add(fill.makerAccountId()));
-			}
-			accountChanges.changed(changed, outcome.result().commandSequence());
-		}
-		return outcome.result();
+
 	}
 
-	private record CancelOutcome(CancelResult result, UUID instrumentId) {
+	/** The answer an earlier command of the run stored for its key, for a later command with the same key. */
+	private record Answered(CommandKey key, Object result) {
 	}
 
-	private CancelResult processCancel(CommandKey key, CancelOrder command) {
-		CancelOutcome outcome;
-		try {
-			outcome = timed("cancel", () -> cancelInTransaction(key, command));
+	/**
+	 * What a run's commands have changed so far, held apart from the books, tapes and counts until the run commits, so
+	 * each command sees the run's earlier ones. Dropped with the run if it rolls back.
+	 */
+	private final class RunState {
+
+		private final Map<UUID, BookOverlay> overlays = new HashMap<>();
+
+		/** Each instrument's newest trade sequence once the run so far commits. */
+		private final Map<UUID, Long> tradeSequences = new HashMap<>();
+
+		/** Each instrument's trades in the run so far, oldest first. */
+		private final Map<UUID, List<TapeTrade>> trades = new HashMap<>();
+
+		BookOverlay overlay(UUID instrumentId) {
+			return overlays.computeIfAbsent(instrumentId, (id) -> books.get(id).overlay());
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException | BookOutOfStepException
-				| TradingStore.OutOfStepException ex) {
-			throw new WriterHaltException("Trading state may differ from the database", ex);
+
+		/** The order as it rests once the run so far is applied. */
+		Optional<BookOrder> find(UUID instrumentId, OrderBook book, UUID orderId) {
+			BookOverlay overlay = overlays.get(instrumentId);
+			return overlay == null ? book.find(orderId) : overlay.find(orderId);
 		}
-		long applying = nanoTime.getAsLong();
-		boolean removed = true;
-		if (outcome.instrumentId() != null && outcome.result().status() == CancelResult.Status.CANCELED) {
-			try {
-				removed = books.get(outcome.instrumentId()).cancel(command.orderId()).isPresent();
+
+		/** The account's resting orders once the run so far is applied. */
+		int resting(UUID accountId) {
+			int count = resting.of(accountId);
+			for (BookOverlay overlay : overlays.values()) {
+				count += overlay.restingChange(accountId);
 			}
-			catch (RuntimeException | Error ex) {
-				throw new WriterHaltException("The book could not apply a committed cancel", ex);
+			return count;
+		}
+
+		/** The market's resting orders once the run so far is applied. */
+		int restingTotal() {
+			int count = restingOrders();
+			for (BookOverlay overlay : overlays.values()) {
+				count += overlay.sizeChange();
+			}
+			return count;
+		}
+
+		long lastTradeSequence(UUID instrumentId) {
+			Long last = tradeSequences.get(instrumentId);
+			return last != null ? last : known(instrumentId).lastTradeSequence();
+		}
+
+		/** The instrument's tape once the run so far and then {@code newTrades}, oldest first, commit. */
+		List<TapeTrade> tape(UUID instrumentId, List<TapeTrade> newTrades) {
+			List<TapeTrade> earlier = trades.getOrDefault(instrumentId, List.of());
+			List<TapeTrade> all = newTrades;
+			if (!earlier.isEmpty()) {
+				all = new ArrayList<>(earlier);
+				all.addAll(newTrades);
+			}
+			Tape tape = tapes.get(instrumentId);
+			return tape == null ? List.copyOf(all) : tape.with(all);
+		}
+
+		void traded(UUID instrumentId, List<TapeTrade> newTrades) {
+			if (!newTrades.isEmpty()) {
+				tradeSequences.put(instrumentId, newTrades.getLast().tradeSequence());
+				trades.computeIfAbsent(instrumentId, (id) -> new ArrayList<>()).addAll(newTrades);
 			}
 		}
-		if (!removed) {
-			throw new WriterHaltException("A committed cancel found no order in the book",
-					new BookOutOfStepException(command.orderId()));
+
+	}
+
+	/** The run's transaction failed without halting and rolled back: nothing of it was written. */
+	private static final class NotApplied extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+
+		NotApplied(Throwable cause) {
+			super(cause);
 		}
-		timings.record(WriterTimings.Phase.APPLY, "cancel", nanoTime.getAsLong() - applying);
-		if (outcome.instrumentId() != null && outcome.result().status() == CancelResult.Status.CANCELED) {
-			accountChanges.changed(Set.of(command.accountId()), outcome.result().commandSequence());
+
+	}
+
+	/** A halt found inside a run's transaction, with the index of the command that caused it. */
+	private static final class HaltInRun extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+
+		private final int index;
+
+		HaltInRun(int index, RuntimeException cause) {
+			super(cause);
+			this.index = index;
 		}
-		return outcome.result();
+
 	}
 
 	/** {@code instrument} is the row as written when {@code fresh}, otherwise null. */
@@ -383,14 +440,42 @@ public final class TradingEngine {
 	}
 
 	/**
-	 * Runs a run of trading commands the writer took together, in order, and gives each its outcome. For now each
-	 * command runs in its own transaction, exactly as it would alone, so a run of any length gives the same results
-	 * as its commands one after another, a halt included: the commands before the one that halts keep their results,
-	 * that one fails with the halt, and the ones after it fail as never run, as queued commands do when the writer
-	 * halts. At the default run limit of one, every run is a single command. A writer closing past its grace period
-	 * interrupts its thread, and the commands of the run not yet started then fail as never run.
+	 * Runs a run of trading commands the writer took together, in one transaction, and gives each its outcome, in
+	 * order; at the default run limit of one, every run is a single command, as it always was.
+	 * <ul>
+	 * <li>A run that fails without halting (a constraint, say, or a commit the database refused) rolled back whole, so
+	 * its commands run again one by one and each gets the outcome it would get alone: a command that fails then fails
+	 * alone, and one that halts the writer fails with the halt while the ones after it fail as never run. The fallback
+	 * is logged and counted, since a run that keeps failing costs more than its commands alone.</li>
+	 * <li>A run that halts the writer before or at its commit fails every command that entered its transaction: the
+	 * one that caused the halt with it, the others as stopped.</li>
+	 * <li>A run that halts the writer while being applied, after its commit, keeps the answers of the commands applied
+	 * before; the rest fail, to be looked up by their keys.</li>
+	 * <li>An order for an unknown instrument fails as it would alone, whatever happens to the rest.</li>
+	 * <li>A writer closing past its grace period interrupts its thread, and commands not yet started then fail as never
+	 * run.</li>
+	 * </ul>
 	 */
 	List<CommandWriter.RunOutcome> processBatch(List<Trading> run) {
+		long starting = nanoTime.getAsLong();
+		for (Trading command : run) {
+			timings.record(WriterTimings.Phase.QUEUE_WAIT, kind(command), starting - command.admitted());
+		}
+		if (Thread.currentThread().isInterrupted()) {
+			List<CommandWriter.RunOutcome> stopped = new ArrayList<>(run.size());
+			run.forEach((command) -> stopped.add(stopped("Writer closed before this command ran")));
+			return stopped;
+		}
+		try {
+			return runTogether(run);
+		}
+		catch (NotApplied ex) {
+			if (run.size() == 1) {
+				// As the writer treats a failing command on its own: it fails, and the others go on.
+				return List.of(CommandWriter.RunOutcome.failed(ex.getCause()));
+			}
+			fellBack(run.size(), ex.getCause());
+		}
 		List<CommandWriter.RunOutcome> outcomes = new ArrayList<>(run.size());
 		String stopped = null;
 		for (Trading command : run) {
@@ -398,27 +483,248 @@ public final class TradingEngine {
 				stopped = "Writer closed before this command ran";
 			}
 			if (stopped != null) {
-				outcomes.add(CommandWriter.RunOutcome.failed(new CommandWriter.WriterStoppedException(stopped)));
+				outcomes.add(stopped(stopped));
 				continue;
 			}
-			String kind = command instanceof QueuedPlace ? "place" : "cancel";
-			timings.record(WriterTimings.Phase.QUEUE_WAIT, kind, nanoTime.getAsLong() - command.admitted());
+			CommandWriter.RunOutcome outcome;
 			try {
-				outcomes.add(CommandWriter.RunOutcome.done(switch (command) {
-					case QueuedPlace place -> process(place.key(), place.command());
-					case QueuedCancel cancel -> processCancel(cancel.key(), cancel.command());
-				}));
+				outcome = runTogether(List.of(command)).getFirst();
 			}
-			catch (WriterHaltException ex) {
-				outcomes.add(CommandWriter.RunOutcome.halted(ex));
+			catch (NotApplied ex) {
+				outcome = CommandWriter.RunOutcome.failed(ex.getCause());
+			}
+			outcomes.add(outcome);
+			if (outcome instanceof CommandWriter.RunOutcome.Halted) {
 				stopped = "Writer halted before this command ran";
-			}
-			catch (Throwable ex) {
-				// As the writer treats a failing command on its own: it fails, and the others go on.
-				outcomes.add(CommandWriter.RunOutcome.failed(ex));
 			}
 		}
 		return outcomes;
+	}
+
+	/**
+	 * Records a run that fell back to one command at a time. Logged at most once every ten seconds, with how many fell
+	 * back since: a run-path mistake would make every run fail, and one line per run would bury it.
+	 */
+	private void fellBack(int commands, Throwable cause) {
+		timings.runFellBack(commands);
+		long now = nanoTime.getAsLong();
+		fallbacksUnlogged++;
+		if (lastFallbackLogged == 0 || now - lastFallbackLogged >= FALLBACK_LOG_INTERVAL_NANOS) {
+			LOG.warn("A run of {} commands failed and ran again one by one ({} runs fell back since the last report)",
+					commands, fallbacksUnlogged, cause);
+			lastFallbackLogged = now == 0 ? 1 : now;
+			fallbacksUnlogged = 0;
+		}
+	}
+
+	private static String kind(Trading command) {
+		return command instanceof QueuedPlace ? "place" : "cancel";
+	}
+
+	private static CommandWriter.RunOutcome stopped(String message) {
+		return CommandWriter.RunOutcome.failed(new CommandWriter.WriterStoppedException(message));
+	}
+
+	/**
+	 * Runs commands in one transaction and gives each its outcome, in order; throws {@link NotApplied} if the
+	 * transaction failed without halting, so that nothing of it was written. An order for an instrument the market does
+	 * not have fails first, outside the transaction, as it would alone. Once the transaction has committed, each
+	 * command is applied to the books, the tapes and the counts in sequence order, its accounts are told, and only then
+	 * is it answered.
+	 */
+	private List<CommandWriter.RunOutcome> runTogether(List<Trading> run) {
+		CommandWriter.RunOutcome[] outcomes = new CommandWriter.RunOutcome[run.size()];
+		List<Integer> entering = new ArrayList<>(run.size());
+		List<TradingStore.RunKey> keys = new ArrayList<>(run.size());
+		for (int i = 0; i < run.size(); i++) {
+			Trading command = run.get(i);
+			if (command instanceof QueuedPlace place && !books.containsKey(place.command().instrumentId())) {
+				outcomes[i] = CommandWriter.RunOutcome.failed(new UnknownInstrumentException(place.command().instrumentId()));
+				continue;
+			}
+			entering.add(i);
+			keys.add(new TradingStore.RunKey(command.key(),
+					command instanceof QueuedPlace ? PlacementResult.class : CancelResult.class));
+		}
+		if (entering.isEmpty()) {
+			return List.of(outcomes);
+		}
+		Ran[] ran = new Ran[run.size()];
+		// Timed as its command when only one entered the transaction, as a run otherwise.
+		String kind = entering.size() == 1 ? kind(run.get(entering.getFirst())) : "run";
+		long[] marks = new long[4];
+		try {
+			inTransaction(marks, () -> {
+				runInTransaction(run, entering, keys, outcomes, ran);
+				return null;
+			});
+		}
+		catch (HaltInRun ex) {
+			// Rolled back, so none of the run was written.
+			return haltedBeforeCommit(run, entering, outcomes, ex.index, (RuntimeException) ex.getCause(),
+					"Writer halted before this command's run committed");
+		}
+		catch (CommitOutcomeUnknownException ex) {
+			return haltedBeforeCommit(run, entering, outcomes, entering.getFirst(), ex,
+					"Writer halted while this command's run committed; look it up by its key");
+		}
+		catch (RuntimeException | Error ex) {
+			throw new NotApplied(ex);
+		}
+		// Committed: from here on, anything thrown leaves the books behind the database.
+		int at = 0;
+		try {
+			recordTransaction(kind, marks);
+			long applying = 0;
+			boolean applied = false;
+			for (; at < entering.size(); at++) {
+				int i = entering.get(at);
+				if (ran[i] == null) {
+					// A conflict, answered already: it changed nothing.
+					continue;
+				}
+				long start = nanoTime.getAsLong();
+				apply(ran[i]);
+				applying += nanoTime.getAsLong() - start;
+				applied |= ran[i].plan() != null || ran[i].canceledOrderId() != null;
+				if (!ran[i].changed().isEmpty()) {
+					accountChanges.changed(ran[i].changed(), ran[i].sequence());
+				}
+				outcomes[i] = CommandWriter.RunOutcome.done(ran[i].result());
+			}
+			if (applied) {
+				timings.record(WriterTimings.Phase.APPLY, kind, applying);
+			}
+		}
+		catch (RuntimeException | Error ex) {
+			if (at == entering.size()) {
+				// Every command is applied and answered; only its timing failed.
+				return List.of(outcomes);
+			}
+			return haltedAfterCommit(run, entering, outcomes, ran, at, ex);
+		}
+		return List.of(outcomes);
+	}
+
+	/**
+	 * A committed run that failed while being applied: the commands applied before keep their answers, the one being
+	 * applied halts the writer, and those after it committed without reaching the books, so each fails as stopped and
+	 * is looked up by its key after the restart. They are logged here; the caller logs the halt itself.
+	 */
+	private static List<CommandWriter.RunOutcome> haltedAfterCommit(List<Trading> run, List<Integer> entering,
+			CommandWriter.RunOutcome[] outcomes, Ran[] ran, int at, Throwable failure) {
+		WriterHaltException halt = failure instanceof WriterHaltException known ? known
+				: new WriterHaltException("A committed command could not be applied", failure);
+		outcomes[entering.get(at)] = CommandWriter.RunOutcome.halted(halt);
+		List<CommandKey> unapplied = new ArrayList<>();
+		for (int later : entering.subList(at + 1, entering.size())) {
+			if (ran[later] != null) {
+				outcomes[later] = stopped("Writer halted after this command committed; look it up by its key");
+				unapplied.add(run.get(later).key());
+			}
+		}
+		if (!unapplied.isEmpty()) {
+			LOG.error("The writer halted applying a committed run; these commands committed but reach the books only "
+					+ "after a restart: {}", unapplied);
+		}
+		return List.of(outcomes);
+	}
+
+	/**
+	 * A run whose transaction halted the writer: the command that caused it fails with the halt, and every other
+	 * command that entered the transaction fails as stopped, since none of them was applied. The caller logs the halt
+	 * with the key of the command that caused it; the others are logged here, since a lost commit may have committed
+	 * them.
+	 */
+	private static List<CommandWriter.RunOutcome> haltedBeforeCommit(List<Trading> run, List<Integer> entering,
+			CommandWriter.RunOutcome[] outcomes, int cause, RuntimeException failure, String others) {
+		WriterHaltException halt = new WriterHaltException("Trading state may differ from the database", failure);
+		List<CommandKey> stoppedKeys = new ArrayList<>();
+		for (int i : entering) {
+			outcomes[i] = i == cause ? CommandWriter.RunOutcome.halted(halt) : stopped(others);
+			if (i != cause) {
+				stoppedKeys.add(run.get(i).key());
+			}
+		}
+		if (!stoppedKeys.isEmpty()) {
+			LOG.error("The writer halted with a run of {} commands ({}); besides the one logged with the cause, these are "
+					+ "answered as stopped: {}", entering.size(), others, stoppedKeys);
+		}
+		return List.of(outcomes);
+	}
+
+	/**
+	 * Opens the run with one statement, then runs each command that entered it in order. A key answered before, in an
+	 * earlier transaction or earlier in this run, gets that answer again for the same request and is a conflict for
+	 * another; neither takes a sequence. Every other command takes the next of the sequences the opening took.
+	 */
+	private void runInTransaction(List<Trading> run, List<Integer> entering, List<TradingStore.RunKey> keys,
+			CommandWriter.RunOutcome[] outcomes, Ran[] ran) {
+		TradingStore.RunOpening opening = store.openRun(simulationId, writerEpoch, keys)
+			.orElseThrow(() -> new HaltInRun(entering.getFirst(), new StaleWriterException()));
+		RunState state = new RunState();
+		Map<KeyId, Answered> answered = new HashMap<>();
+		long next = opening.firstSequence();
+		for (int j = 0; j < entering.size(); j++) {
+			int i = entering.get(j);
+			Trading command = run.get(i);
+			CommandKey key = command.key();
+			Optional<TradingStore.StoredResult<?>> prior = opening.priors().get(j);
+			Answered earlier = prior.isPresent() ? null : answered.get(KeyId.of(key));
+			if (prior.isPresent() || earlier != null) {
+				boolean same = prior.isPresent() ? key.sameRequest(prior.get().route(), prior.get().requestHash())
+						: key.sameRequest(earlier.key().route(), earlier.key().requestHash());
+				if (same) {
+					ran[i] = Ran.replayed(prior.isPresent() ? prior.get().result() : earlier.result());
+				}
+				else {
+					outcomes[i] = CommandWriter.RunOutcome.failed(new IdempotencyConflictException(key));
+				}
+				continue;
+			}
+			long sequence = next++;
+			try {
+				ran[i] = switch (command) {
+					case QueuedPlace place -> placeInRun(state, opening.market(), key, place.command(), sequence);
+					case QueuedCancel cancel -> cancelInRun(state, opening.market(), key, cancel.command(), sequence);
+				};
+			}
+			catch (TradingStore.OutOfStepException | BookOutOfStepException ex) {
+				throw new HaltInRun(i, ex);
+			}
+			answered.put(KeyId.of(key), new Answered(key, ran[i].result()));
+		}
+		if (next != opening.lastSequence() + 1) {
+			throw new IllegalStateException("The run used command sequences up to " + (next - 1)
+					+ " but its opening took them up to " + opening.lastSequence());
+		}
+	}
+
+	/** Applies a committed command to its book, tape and instrument; anything that fails leaves them out of step. */
+	private void apply(Ran ran) {
+		boolean removed = true;
+		try {
+			if (ran.plan() != null) {
+				books.get(ran.instrumentId()).apply(ran.plan());
+				tapes.get(ran.instrumentId()).add(ran.trades());
+				if (!ran.trades().isEmpty()) {
+					long last = ran.trades().getLast().tradeSequence();
+					catalogue.computeIfPresent(ran.instrumentId(), (id, known) -> known.withLastTradeSequence(last));
+				}
+			}
+			if (ran.canceledOrderId() != null) {
+				removed = books.get(ran.instrumentId()).cancel(ran.canceledOrderId()).isPresent();
+			}
+		}
+		catch (RuntimeException | Error ex) {
+			// Committed but not applied: the book no longer matches the database, whatever was thrown.
+			throw new WriterHaltException(ran.plan() != null ? "The book could not apply a committed plan"
+					: "The book could not apply a committed cancel", ex);
+		}
+		if (!removed) {
+			throw new WriterHaltException("A committed cancel found no order in the book",
+					new BookOutOfStepException(ran.canceledOrderId()));
+		}
 	}
 
 	/** Refused, not queued, until startup has finished, so the caller can retry the same key. */
@@ -450,24 +756,34 @@ public final class TradingEngine {
 	 * recorded once it has committed. A transaction that fails records none of them.
 	 */
 	private <T> T timed(String kind, Supplier<T> work) {
-		long opening = nanoTime.getAsLong();
-		long[] marks = new long[2];
+		long[] marks = new long[4];
+		T result = inTransaction(marks, work);
+		recordTransaction(kind, marks);
+		return result;
+	}
+
+	/** A transaction, with when it was asked for, opened, done with its statements and committed, in {@code marks}. */
+	private <T> T inTransaction(long[] marks, Supplier<T> work) {
+		marks[0] = nanoTime.getAsLong();
 		T result = transactions.inTransaction(() -> {
-			marks[0] = nanoTime.getAsLong();
+			marks[1] = nanoTime.getAsLong();
 			writes = new WriteSet();
 			T value = work.get();
 			if (!writes.isEmpty()) {
 				// Rows collected after the answer was stored, or by a path that stored none, would be lost silently.
 				throw new IllegalStateException("A command's writes were not flushed before its commit");
 			}
-			marks[1] = nanoTime.getAsLong();
+			marks[2] = nanoTime.getAsLong();
 			return value;
 		});
-		long committed = nanoTime.getAsLong();
-		timings.record(WriterTimings.Phase.BEGIN, kind, marks[0] - opening);
-		timings.record(WriterTimings.Phase.WORK, kind, marks[1] - marks[0]);
-		timings.record(WriterTimings.Phase.COMMIT, kind, committed - marks[1]);
+		marks[3] = nanoTime.getAsLong();
 		return result;
+	}
+
+	private void recordTransaction(String kind, long[] marks) {
+		timings.record(WriterTimings.Phase.BEGIN, kind, marks[1] - marks[0]);
+		timings.record(WriterTimings.Phase.WORK, kind, marks[2] - marks[1]);
+		timings.record(WriterTimings.Phase.COMMIT, kind, marks[3] - marks[2]);
 	}
 
 	/**
@@ -971,19 +1287,16 @@ public final class TradingEngine {
 		return remember(key, 200, new MarketTransition(MarketTransition.Status.APPLIED, action.to(), sequence));
 	}
 
-	private CancelOutcome cancelInTransaction(CommandKey key, CancelOrder command) {
-		TradingStore.Opening<CancelResult> opening = open(key, CancelResult.class);
-		Market market = opening.market();
-		if (opening.prior().isPresent()) {
-			return new CancelOutcome(replay(key, opening.prior().get()), null);
-		}
-		long sequence = opening.sequence();
-		// The books hold exactly the committed resting orders, so one resting there is resting in the database: it is
-		// cancelled with one guarded update, without reading the row first.
+	/**
+	 * A cancel inside its run's transaction. The books, with the run's earlier commands over them, hold exactly the
+	 * resting orders as the transaction has them, so one resting there is resting in the database: it is cancelled
+	 * with one guarded update, without reading the row first.
+	 */
+	private Ran cancelInRun(RunState run, Market market, CommandKey key, CancelOrder command, long sequence) {
 		for (Map.Entry<UUID, OrderBook> entry : books.entrySet()) {
-			Optional<BookOrder> found = entry.getValue().find(command.orderId());
+			Optional<BookOrder> found = run.find(entry.getKey(), entry.getValue(), command.orderId());
 			if (found.isPresent() && found.get().accountId().equals(command.accountId())) {
-				return cancelResting(key, command, market, entry.getKey(), found.get(), sequence);
+				return cancelResting(run, market, key, command, entry.getKey(), found.get(), sequence);
 			}
 		}
 		// Not resting, or someone else's: the row is read, without a lock, only to answer.
@@ -991,8 +1304,8 @@ public final class TradingEngine {
 			.filter((existing) -> existing.accountId().equals(command.accountId()))
 			.orElse(null);
 		if (order == null) {
-			return new CancelOutcome(remember(key, 404,
-					new CancelResult(command.orderId(), CancelResult.Status.NOT_FOUND, 0, sequence)), null);
+			return Ran.answered(remember(key, 404,
+					new CancelResult(command.orderId(), CancelResult.Status.NOT_FOUND, 0, sequence)), Set.of(), sequence);
 		}
 		CancelResult.Status status = switch (order.state()) {
 			case "CANCELED" -> CancelResult.Status.ALREADY_CANCELED;
@@ -1001,12 +1314,12 @@ public final class TradingEngine {
 			default -> throw new BookOutOfStepException(command.orderId());
 		};
 		int httpStatus = status == CancelResult.Status.NOT_CANCELABLE ? 409 : 200;
-		return new CancelOutcome(remember(key, httpStatus, new CancelResult(command.orderId(), status, 0, sequence)),
-				order.instrumentId());
+		return Ran.answered(remember(key, httpStatus, new CancelResult(command.orderId(), status, 0, sequence)),
+				Set.of(), sequence);
 	}
 
 	/** Cancels an order the book holds for the caller; a row that is not resting as the book says halts the writer. */
-	private CancelOutcome cancelResting(CommandKey key, CancelOrder command, Market market, UUID instrumentId,
+	private Ran cancelResting(RunState run, Market market, CommandKey key, CancelOrder command, UUID instrumentId,
 			BookOrder resting, long sequence) {
 		if (!store.cancelOrder(command.orderId(), command.accountId(), resting.remainingQuantity(),
 				"CANCELED_BY_OWNER")) {
@@ -1018,18 +1331,20 @@ public final class TradingEngine {
 		}
 		release.balanceChanges().forEach(writes::balance);
 		writes.touch(List.of(command.accountId()));
-		snapshot(market, instrumentId, books.get(instrumentId), BookDelta.cancel(resting), sequence);
-		return new CancelOutcome(remember(key, 200, new CancelResult(command.orderId(), CancelResult.Status.CANCELED,
-				resting.remainingQuantity(), sequence)), instrumentId);
+		BookOverlay overlay = run.overlay(instrumentId);
+		snapshot(run, market, instrumentId, overlay, BookDelta.cancel(resting), sequence, List.of());
+		CancelResult result = remember(key, 200, new CancelResult(command.orderId(), CancelResult.Status.CANCELED,
+				resting.remainingQuantity(), sequence));
+		overlay.cancel(command.orderId());
+		return new Ran(result, instrumentId, null, command.orderId(), List.of(), Set.of(command.accountId()), sequence);
 	}
 
-	private Outcome placeInTransaction(CommandKey key, PlaceOrder command, OrderBook book) {
-		TradingStore.Opening<PlacementResult> opening = open(key, PlacementResult.class);
-		Market market = opening.market();
-		if (opening.prior().isPresent()) {
-			return new Outcome(replay(key, opening.prior().get()), null, List.of(), false);
-		}
-		long sequence = opening.sequence();
+	/**
+	 * An order inside its run's transaction. Balances are read from the database, which holds the run's earlier
+	 * writes; the order is matched against its book with the run's earlier commands over it, and its plan joins them
+	 * once its rows are written.
+	 */
+	private Ran placeInRun(RunState run, Market market, CommandKey key, PlaceOrder command, long sequence) {
 		if (!"OPEN".equals(market.state())) {
 			return reject(key, command, RejectionCode.MARKET_NOT_OPEN, sequence);
 		}
@@ -1044,43 +1359,52 @@ public final class TradingEngine {
 
 		OrderRequest request = new OrderRequest(command.orderId(), command.accountId(), command.side(), command.type(),
 				command.bound(), command.quantity(), sequence);
-		MatchPlan plan = book.plan(request);
+		BookOverlay overlay = run.overlay(command.instrumentId());
+		MatchPlan plan = overlay.plan(request);
 		if (plan.outcome() == MatchPlan.Outcome.EXECUTION_LIMIT_EXCEEDED) {
 			return reject(key, command, RejectionCode.EXECUTION_LIMIT_EXCEEDED, sequence);
 		}
-		if (plan.rests() && (resting.of(command.accountId()) >= market.maxOpenOrdersPerAccount()
-				|| restingOrders() >= market.maxOpenOrdersTotal())) {
+		if (plan.rests() && (run.resting(command.accountId()) >= market.maxOpenOrdersPerAccount()
+				|| run.restingTotal() >= market.maxOpenOrdersTotal())) {
 			return reject(key, command, RejectionCode.ORDER_LIMIT_EXCEEDED, sequence);
 		}
 
 		PlacementResult result = accepted(command, plan, sequence);
 		store.insertOrder(new NewOrder(command.orderId(), simulationId, request, command.instrumentId(), result.state(),
 				result.reason(), result.filled(), result.working(), result.canceled(), sequence));
-		List<TapeTrade> trades = write(command, plan, sequence);
+		List<TapeTrade> trades = write(run, command, plan, sequence);
 		if (!plan.fills().isEmpty() || plan.rests()) {
-			snapshot(market, command.instrumentId(), book, BookDelta.of(plan), sequence, trades);
+			snapshot(run, market, command.instrumentId(), overlay, BookDelta.of(plan), sequence, trades);
 		}
-		return new Outcome(remember(key, 201, result), plan, trades);
+		remember(key, 201, result);
+		overlay.record(plan);
+		run.traded(command.instrumentId(), trades);
+		// The order's own account and every resting order's account it traded against.
+		Set<UUID> changed = new HashSet<>();
+		changed.add(command.accountId());
+		plan.fills().forEach((fill) -> changed.add(fill.makerAccountId()));
+		return new Ran(result, command.instrumentId(), plan, null, trades, changed, sequence);
 	}
 
 	/**
-	 * The instrument's public state once this command commits, written in the same transaction. The depth comes from
-	 * the book and the command's own changes; the book itself changes only after the commit.
+	 * The instrument's public state once this command commits, written in the same transaction: depth from the book
+	 * with the run's earlier commands and this one's changes over it, and the tape from memory with the run's trades
+	 * and this command's first. Re-reading the tape from the database for every command was the largest part of the
+	 * writer's time. The books and tapes themselves change only after the commit.
 	 */
-	private void snapshot(Market market, UUID instrumentId, OrderBook book, BookDelta delta, long sequence) {
-		snapshot(market, instrumentId, book, delta, sequence, List.of());
+	private void snapshot(RunState run, Market market, UUID instrumentId, BookOverlay overlay, BookDelta delta,
+			long sequence, List<TapeTrade> newTrades) {
+		long last = newTrades.isEmpty() ? run.lastTradeSequence(instrumentId) : newTrades.getLast().tradeSequence();
+		writes.snapshot(new TradingStore.MarketView(simulationId, known(instrumentId).withLastTradeSequence(last),
+				market, overlay.depthAfter(delta, Side.BUY, SNAPSHOT_LEVELS),
+				overlay.depthAfter(delta, Side.SELL, SNAPSHOT_LEVELS), run.tape(instrumentId, newTrades), sequence,
+				clock.instant()));
 	}
 
 	/**
-	 * The tape comes from memory, with the command's own trades first: re-reading it from the database for every
-	 * command was the largest part of the writer's time. An instrument added by this command has no tape yet.
+	 * The public state of an instrument a command other than an order or cancel changed. An instrument added by this
+	 * command has no tape yet.
 	 */
-	private void snapshot(Market market, UUID instrumentId, OrderBook book, BookDelta delta, long sequence,
-			List<TapeTrade> newTrades) {
-		snapshot(market, known(instrumentId), book, delta, sequence, newTrades);
-	}
-
-	/** {@code instrument} as it is before this command; its last trade sequence moves to the command's newest. */
 	private void snapshot(Market market, TradingStore.Instrument instrument, OrderBook book, BookDelta delta,
 			long sequence, List<TapeTrade> newTrades) {
 		Tape tape = tapes.get(instrument.id());
@@ -1101,16 +1425,17 @@ public final class TradingEngine {
 	}
 
 	/** Writes the order's trades and settlement; returns its trades for the tape, oldest first. */
-	private List<TapeTrade> write(PlaceOrder command, MatchPlan plan, long sequence) {
+	private List<TapeTrade> write(RunState run, PlaceOrder command, MatchPlan plan, long sequence) {
 		// PostgreSQL keeps microseconds, so the tape in memory holds exactly what the database does.
 		Instant executedAt = clock.instant().truncatedTo(ChronoUnit.MICROS);
 		Map<Integer, WriteSet.NewTrade> trades = new HashMap<>();
 		List<TapeTrade> tape = new ArrayList<>(plan.fills().size());
 		Set<UUID> touched = new LinkedHashSet<>();
 		touched.add(command.accountId());
-		// Trades are numbered from the writer's own counter, which moves only after the commit. The row is moved once,
-		// first, so a counter that disagrees halts the writer before any trade is written under a number already taken.
-		long before = known(command.instrumentId()).lastTradeSequence();
+		// Trades are numbered from the writer's own counter, which moves only after the commit, with the run's earlier
+		// trades after it. The row is moved once per command, first, so a counter that disagrees halts the writer before
+		// any trade is written under a number already taken.
+		long before = run.lastTradeSequence(command.instrumentId());
 		if (!plan.fills().isEmpty()) {
 			store.advanceTradeSequence(command.instrumentId(), before, before + plan.fills().size());
 		}
@@ -1166,13 +1491,14 @@ public final class TradingEngine {
 		return new PlacementResult(command.orderId(), state, reason, null, filled, working, canceled, sequence);
 	}
 
-	private Outcome reject(CommandKey key, PlaceOrder command, RejectionCode code, long sequence) {
+	/** A rejection holds nothing, but the order's own account is told of it, as of any order it placed. */
+	private Ran reject(CommandKey key, PlaceOrder command, RejectionCode code, long sequence) {
 		OrderRequest request = new OrderRequest(command.orderId(), command.accountId(), command.side(), command.type(),
 				command.bound(), command.quantity(), sequence);
 		store.insertOrder(new NewOrder(command.orderId(), simulationId, request, command.instrumentId(),
 				OrderState.REJECTED, code.name(), 0, 0, 0, null));
-		return new Outcome(remember(key, 422, new PlacementResult(command.orderId(), OrderState.REJECTED, code.name(),
-				code, 0, 0, 0, sequence)), null);
+		return Ran.answered(remember(key, 422, new PlacementResult(command.orderId(), OrderState.REJECTED, code.name(),
+				code, 0, 0, 0, sequence)), Set.of(command.accountId()), sequence);
 	}
 
 	/** Stores the first committed result in the same transaction, so a retry with the same key gets it back. */

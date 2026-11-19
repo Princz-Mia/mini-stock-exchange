@@ -233,6 +233,31 @@ public interface TradingStore {
 	 */
 	<T> Optional<Opening<T>> open(UUID simulationId, long writerEpoch, CommandKey key, Class<T> type);
 
+	/** A trading command's key in a run, with the type its stored answer is read as. */
+	record RunKey(CommandKey key, Class<?> type) {
+	}
+
+	/**
+	 * A run's start: the locked market, the sequences taken for it, from {@code firstSequence} to
+	 * {@code lastSequence} (none when {@code firstSequence} is past {@code lastSequence}), and for each key, in the
+	 * order given, its stored answer if it has one.
+	 */
+	record RunOpening(Market market, long firstSequence, long lastSequence, List<Optional<StoredResult<?>>> priors) {
+
+		public RunOpening {
+			priors = List.copyOf(priors);
+		}
+
+	}
+
+	/**
+	 * Opens a run of trading commands in one statement, as {@link #open} opens one: locks the market row if
+	 * {@code writerEpoch} still owns it, looks up the stored answer of every key, and takes one command sequence for
+	 * each distinct key that has none. A key given twice is looked up once and takes one sequence: its second command
+	 * answers from the first. Empty when another writer has claimed the market since.
+	 */
+	Optional<RunOpening> openRun(UUID simulationId, long writerEpoch, List<RunKey> keys);
+
 	/** {@code status} is the HTTP status the stored result is replayed with. */
 	void insertResult(UUID simulationId, CommandKey key, int status, Object result, long commandSequence);
 
