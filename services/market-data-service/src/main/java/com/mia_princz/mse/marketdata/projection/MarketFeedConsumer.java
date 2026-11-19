@@ -4,8 +4,11 @@ import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
@@ -78,6 +81,19 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 		 * when the database refuses it; the feed pauses in each case
 		 */
 		boolean apply(byte[] payload) throws IOException;
+
+	}
+
+	/** A handler that can also apply a whole poll at once, in a few statements instead of a few per record. */
+	public interface BatchHandler extends Handler {
+
+		/**
+		 * Applies every payload together, with the projection ending exactly as applying them one by one in order would
+		 * leave it, and returns how many changed it. Empty when this batch must be applied one by one, as when order
+		 * within it matters. Throws as {@link Handler#apply} does; the consumer then applies the poll one by one, which
+		 * finds the record to pause at.
+		 */
+		OptionalInt applyAll(List<byte[]> payloads) throws IOException;
 
 	}
 
@@ -213,11 +229,59 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 	}
 
 	/**
+	 * Applies a poll: all at once when the handler can and the poll holds more than one record, otherwise, or when
+	 * that fails, one by one. False if a record could not be used.
+	 */
+	private boolean applyBatch(ConsumerRecords<String, byte[]> records) {
+		if (handler instanceof BatchHandler batch && records.count() > 1 && applyAtOnce(batch, records)) {
+			return true;
+		}
+		return applyOneByOne(records);
+	}
+
+	/**
+	 * The whole poll and one checkpoint per partition in one transaction, without savepoints. Anything that goes wrong
+	 * rolls it all back and returns false, and the poll is then applied one by one, which keeps the records before a
+	 * bad one and pauses at it. Any runtime exception falls back, not only the ones a bad record raises: one by one is
+	 * the reference, and an error it does not share, such as a sum that only the batch adds up in Java, must not
+	 * keep the feed retrying the same poll.
+	 */
+	private boolean applyAtOnce(BatchHandler batch, ConsumerRecords<String, byte[]> records) {
+		List<byte[]> payloads = new ArrayList<>(records.count());
+		Map<Integer, Long> next = new HashMap<>();
+		for (ConsumerRecord<String, byte[]> record : records) {
+			payloads.add(record.value());
+			next.merge(record.partition(), record.offset() + 1, Math::max);
+		}
+		Integer changed = transactions.execute((status) -> {
+			try {
+				OptionalInt result = batch.applyAll(payloads);
+				if (result.isEmpty()) {
+					status.setRollbackOnly();
+					return null;
+				}
+				next.forEach((partition, offset) -> checkpoints.save(settings.topic(), partition, offset));
+				return result.getAsInt();
+			}
+			catch (IOException | RuntimeException ex) {
+				status.setRollbackOnly();
+				log.debug("Feed {} applies a poll one by one: {}", settings.topic(), ex.getMessage());
+				return null;
+			}
+		});
+		if (changed == null) {
+			return false;
+		}
+		applied.addAndGet(changed);
+		return true;
+	}
+
+	/**
 	 * Applies records in order and saves their checkpoints in one transaction; false if one could not be used. That
 	 * record's own writes, such as its processed-event mark, are rolled back to a savepoint while the records before
 	 * it commit, so once the cause is fixed it is read again instead of being skipped as already seen.
 	 */
-	private boolean applyBatch(ConsumerRecords<String, byte[]> records) {
+	private boolean applyOneByOne(ConsumerRecords<String, byte[]> records) {
 		Boolean complete = transactions.execute((status) -> {
 			for (ConsumerRecord<String, byte[]> record : records) {
 				boolean changed;

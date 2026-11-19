@@ -1,9 +1,20 @@
 # Only for the load test: statement and I/O statistics, so a command's time can be split into the database's work,
 # the network and the WAL flush. Durability is unchanged: fsync and synchronous_commit keep their defaults (on).
+# An override's command replaces compose.yaml's whole list, so its durable settings are repeated here first.
 services:
   postgres:
     command:
       - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - wal_buffers=32MB
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - wal_compression=lz4
       - -c
       - shared_preload_libraries=pg_stat_statements
       - -c

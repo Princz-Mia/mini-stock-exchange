@@ -1,7 +1,6 @@
 package com.mia_princz.mse.execution.trading.application;
 
 import java.time.Instant;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -9,10 +8,7 @@ import java.util.UUID;
 
 import com.mia_princz.mse.execution.trading.domain.BookOrder;
 import com.mia_princz.mse.execution.trading.domain.DepthLevel;
-import com.mia_princz.mse.execution.trading.domain.Fill;
 import com.mia_princz.mse.execution.trading.domain.OrderRequest;
-import com.mia_princz.mse.execution.trading.domain.Posting;
-import com.mia_princz.mse.execution.trading.domain.SettlementPlan;
 
 /** What the engine needs from the database. Every method runs inside the caller's transaction. */
 public interface TradingStore {
@@ -62,9 +58,6 @@ public interface TradingStore {
 			Long acceptedSequence) {
 	}
 
-	record Trade(UUID id, long tradeSequence) {
-	}
-
 	/**
 	 * The first committed result of a command, stored with the request it answered. The result is read only when the
 	 * key's route and hash match, and is null otherwise: another route's answer is a conflict, whatever its shape.
@@ -79,7 +72,7 @@ public interface TradingStore {
 	record Opening<T>(Market market, long sequence, Optional<StoredResult<T>> prior) {
 	}
 
-	/** An order row as cancelling needs it, locked for the rest of the transaction. */
+	/** An order row as a cancel reads it to answer for an order that is not resting in the writer's books. */
 	record ExistingOrder(UUID id, UUID accountId, UUID instrumentId, String state, long working) {
 	}
 
@@ -210,15 +203,14 @@ public interface TradingStore {
 
 	void insertOrder(NewOrder order);
 
-	void recordMakerFill(UUID makerOrderId, long quantity);
+	/** Reads the order without a lock: only the writer changes orders. */
+	Optional<ExistingOrder> findOrder(UUID orderId);
 
-	Optional<ExistingOrder> lockOrder(UUID orderId);
-
-	void cancelOrder(UUID orderId, long quantity, String reason);
-
-	/** {@code tradeSequence} is the writer's, the next after the instrument's last; see advanceTradeSequence. */
-	Trade insertTrade(UUID simulationId, UUID instrumentId, OrderRequest taker, Fill fill, long tradeSequence,
-			Instant executedAt, long commandSequence);
+	/**
+	 * Cancels the account's order if it is still resting with exactly {@code quantity} working; false if no such row,
+	 * which means the writer's book is out of step with the database.
+	 */
+	boolean cancelOrder(UUID orderId, UUID accountId, long quantity, String reason);
 
 	/**
 	 * Moves the instrument's last trade sequence from {@code from} to {@code to}, once per command that traded in it.
@@ -226,12 +218,12 @@ public interface TradingStore {
 	 */
 	void advanceTradeSequence(UUID instrumentId, long from, long to);
 
-	void insertBatch(UUID simulationId, SettlementPlan.Cause cause, UUID tradeId, long commandSequence,
-			List<Posting> postings);
-
-	void applyBalance(SettlementPlan.BalanceKey key, SettlementPlan.BalanceChange change);
-
-	void touchAccounts(Collection<UUID> accountIds);
+	/**
+	 * Writes a command's collected rows, one statement per kind: maker fills, trades, journal batches with their
+	 * postings, balances, account versions, then outbox events in the order they were added. Each statement checks it
+	 * changed exactly the rows it was given. A missing cash or position row is inserted, as the first change to it.
+	 */
+	void flush(UUID simulationId, long commandSequence, WriteSet writes);
 
 	/**
 	 * Opens a trading command in one statement, in the order every command needs: locks the market row if
@@ -244,9 +236,6 @@ public interface TradingStore {
 	/** {@code status} is the HTTP status the stored result is replayed with. */
 	void insertResult(UUID simulationId, CommandKey key, int status, Object result, long commandSequence);
 
-	void insertTradeEvent(UUID simulationId, UUID instrumentId, String symbol, Trade trade, Fill fill,
-			Instant executedAt, long commandSequence);
-
 	/**
 	 * The public state of one instrument once the current command commits: the instrument as it will be (its last
 	 * trade sequence included), depth from the book plus the command's changes, and the tape newest first with the
@@ -258,9 +247,6 @@ public interface TradingStore {
 
 	/** An instrument's newest trades, newest first, to rebuild its tape at startup. */
 	List<TapeTrade> recentTrades(UUID instrumentId, int limit);
-
-	/** Writes the instrument's {@code MarketSnapshot} to the outbox, in the command's transaction. */
-	void insertMarketSnapshot(MarketView view);
 
 	/** Writes the instrument's last {@code MarketSnapshot}, which says it was removed, to the outbox. */
 	void insertRemovedSnapshot(MarketView view);
