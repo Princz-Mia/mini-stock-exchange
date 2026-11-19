@@ -21,6 +21,23 @@ services:
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     ports:
       - 127.0.0.1:${POSTGRES_HOST_PORT:-15432}:5432
+    # Durable throughout: fsync, synchronous_commit and full_page_writes keep their defaults (on). These give the
+    # trading writer room: a larger cache and WAL buffer, checkpoints far apart, and full-page images in the WAL
+    # compressed. infra/load-test/compose.diagnostics.yaml repeats this list, since an override replaces it.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - wal_buffers=32MB
+      - -c
+      - max_wal_size=4GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - wal_compression=lz4
+    # Dynamic shared memory (parallel queries) lives in /dev/shm, which Docker otherwise limits to 64 MB.
+    shm_size: 256m
     healthcheck:
       # TCP on purpose: the temporary init server listens only on the Unix socket.
       test: [CMD-SHELL, pg_isready -h 127.0.0.1 -U postgres -d postgres]
