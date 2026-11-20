@@ -383,3 +383,24 @@ Up to 1,200 a second, every planned command was answered: none refused, none fai
 At 100 a second, commands rarely wait for each other: the mean run was 1.00. The bots themselves cannot offer much more: the simulator reached its 1-CPU limit near 175 a second on 2026-11-17.
 
 **Environment:** as for the 2026-11-08 run, except the proxy's CPU limit (2). Commit `d92d659` for the ten-minute windows and the JFR recordings; the one-minute ramp and the bot run used the same exchange code, before the generator's last two fixes.
+
+### Sessions committed without waiting for the flush, 2026-11-20
+
+The session store now has its own small connection pool, whose commits don't wait for the WAL flush (`docs/architecture.md`). Orders, trades, balances and everything else stay durable. The same ten-minute stress run as above: ten minutes at 400 a second, then ten at 1,000, each after a 2-minute warm-up, in Compose with runs of up to 32.
+
+**Ten minutes at 1,000 commands a second now meets every budget**, where all five earlier runs failed (p99 1.05 to 26 s).
+
+| Rate | Answered | Refused or failed | p50 | p95 | p99 | Generator lag p99 | Met |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 400/s | 400.0/s | 0 | 9.9 ms | 15.3 ms | 21.6 ms | 5.2 ms | yes |
+| 1,000/s | 1,000.0/s | 0 | 22.9 ms | 47.5 ms | 112.7 ms | 11.0 ms | yes |
+
+- **It held while the disk was slow.** At minute 16, PostgreSQL's WAL sync went from 1.7 to 4.0 ms, as in the earlier runs, so the whole 1,000-a-second window ran in that state. The writer's commit was 5.0 to 5.7 ms per transaction, at runs of 9 to 10 commands.
+- **The pools at 1,000 a second:**
+  - the application's pool took about 2,130 borrows a second, the password check and the account lookup, with no waits;
+  - the session store's pool took about 3,000 a second, with 0.4 to 0.8 ms of mean wait and at most 12 threads waiting. Its 4 connections are enough for the budgets but close to full.
+- **Fewer WAL flushes:** at 400 a second, about 365 a second against 530 before, since only the writer and the outbox relay wait for them.
+- **CPU at 1,000 a second:** Execution 146% of one CPU on average (204% at peak), PostgreSQL 148% (192%).
+- **Accounting:** the restart's reconciliation (11 s), the public trades and the candles all checked out.
+
+**Environment:** as for the group-commit run above. The exchange code matched `main` after the session store and runs in Compose were both merged.
