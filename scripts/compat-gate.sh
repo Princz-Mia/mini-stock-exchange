@@ -229,6 +229,9 @@ login_flow() {
   local base="http://localhost:$web_port/api/v1" jar="$run_dir/cookies.txt" token body added
   # Traders are added by the operator during setup, as on the setup screen; the dev trader first, to sign in as.
   api_login "$run_dir/operator-login.txt" operator "$operator_password" || return 1
+  # The operator also trades: one session holds both roles.
+  assert_match 'operator roles' '"roles":\["OPERATOR","TRADER"\]' \
+    "$(curl -s -b "$run_dir/operator-login.txt" "$api/me")" || return 1
   added=$(api_command "$run_dir/operator-login.txt" /admin/traders \
     "{\"username\":\"trader\",\"password\":\"$trader_password\"}")
   assert_equal 'add the dev trader' 201 "$(status_of "$added")" || return 1

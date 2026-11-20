@@ -28,7 +28,9 @@ export function AppShell() {
     );
   }
   if (session.data === null) {
-    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
+    // Back to this page after signing in, unless the user signed out here: the next one to sign in in this tab
+    // starts on their own start page, not the last user's.
+    return <Navigate to="/login" replace state={logout.isIdle ? { from: location.pathname } : undefined} />;
   }
 
   return <SignedIn identity={session.data} logout={() => logout.mutate()} loggingOut={logout.isPending} />;

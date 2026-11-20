@@ -151,7 +151,14 @@ class ApiContractIT {
 		check(trader.get("/api/v1/commands/" + cancelKey), "GET", command, 200);
 		check(trader.get("/api/v1/commands/" + UUID.randomUUID()), "GET", command, 404);
 
-		check(operator.get("/api/v1/orders/" + restingId), "GET", read, 403);
+		// A login that only operates is refused by the role rule; the operator also trades, so it is refused for
+		// having no account yet, with a problem.
+		TestUsers.insert(jdbc, UUID.randomUUID(), "watcher", TestBrowser.passwordHash(PASSWORD), "OPERATOR");
+		TestBrowser watcher = TestBrowser.loggedIn(port, "watcher", PASSWORD);
+		check(watcher.get("/api/v1/orders/" + restingId), "GET", read, 403);
+		check(watcher.get("/api/v1/portfolio"), "GET", "/api/v1/portfolio", 403);
+		check(watcher.post(place, limit(instrument, "BUY", 1, "90.00"), "Idempotency-Key",
+				UUID.randomUUID().toString()), "POST", place, 403);
 		check(operator.get("/api/v1/portfolio"), "GET", "/api/v1/portfolio", 403);
 		check(operator.post(place, limit(instrument, "BUY", 1, "90.00"), "Idempotency-Key",
 				UUID.randomUUID().toString()), "POST", place, 403);

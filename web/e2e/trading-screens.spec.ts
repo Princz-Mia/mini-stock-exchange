@@ -677,6 +677,19 @@ for (const size of SIZES) {
       await expect(page.getByRole('heading', { level: 1, name: 'NOVA' })).toBeVisible();
       await expect(mode.getByRole('link', { name: 'Trading' })).toHaveAttribute('aria-current', 'true');
       await capture(page, size, 'operator-trading-no-account');
+      if (size.name === 'desktop') {
+        // Between the sizes above, where the top bar with the switch is widest: it wraps rather than scroll sideways.
+        for (const link of ['Trading', 'Operating']) {
+          await mode.getByRole('link', { name: link }).click();
+          await expect(mode.getByRole('link', { name: link })).toHaveAttribute('aria-current', 'true');
+          for (const width of [1100, 1024, 900, 768, 641]) {
+            await page.setViewportSize({ width, height: 800 });
+            const scrolled = await page.evaluate(() => document.documentElement.scrollWidth);
+            expect(scrolled, `${link} at ${width}px scrolls sideways`).toBeLessThanOrEqual(width);
+          }
+          await page.setViewportSize({ width: size.width, height: size.height });
+        }
+      }
       await page.context().close();
 
       // Trading falling behind: a halted writer, a full queue, refusals and a backlog, each said in words.

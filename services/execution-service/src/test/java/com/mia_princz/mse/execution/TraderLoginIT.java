@@ -86,8 +86,9 @@ class TraderLoginIT {
 		assertThat(JSON.readTree(omarSession.get("/api/v1/me").body()).get("roles").toString()).contains("TRADER");
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM account WHERE display_name = 'omar'", Long.class))
 			.isZero();
-		// The list shows every login that trades, the configured ones included (the operator also trades); the unfunded
-		// ones are those setup can fund.
+		// The list shows every login that trades, the configured ones included (the operator also trades), and no login
+		// that only operates; the unfunded ones are those setup can fund.
+		TestUsers.insert(jdbc, UUID.randomUUID(), "watcher", TestBrowser.passwordHash(PASSWORD), "OPERATOR");
 		HttpResponse<String> everyone = operator.get(TRADERS);
 		CONTRACT.assertResponse("GET", TRADERS, 200, everyone.headers().firstValue("Content-Type").orElse(null),
 				everyone.body());

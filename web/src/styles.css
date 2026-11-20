@@ -208,8 +208,9 @@ input[aria-invalid='true'] {
 /* Shell */
 .topbar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-4);
+  gap: var(--space-2) var(--space-4);
   padding: var(--space-2) var(--space-6);
   background: var(--surface);
   border-bottom: 1px solid var(--line);
@@ -246,6 +247,10 @@ input[aria-invalid='true'] {
   color: var(--text);
   background: var(--surface-sunken);
   box-shadow: inset 0 -2px 0 var(--selected-mark);
+}
+
+.topbar > button {
+  white-space: nowrap;
 }
 
 /* Trading or Operating, for a user holding both roles: two pills, the current one raised. */

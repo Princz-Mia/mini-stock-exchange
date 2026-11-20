@@ -111,8 +111,10 @@ class AccountSetupIT {
 			.isZero();
 
 		// Only logins that trade get accounts; that is checked before the writer, so nothing is committed or audited. The
-		// operator also trades, so it may fund its own (UserRolesIT).
+		// operator also trades, so it may fund its own (UserRolesIT); a login that only operates may not be funded.
 		assertThat(code(provision(operator, UUID.randomUUID(), "nobody", "1.00"), 422)).isEqualTo("UNKNOWN_TRADER");
+		TestUsers.insert(jdbc, UUID.randomUUID(), "watcher", TestBrowser.passwordHash(PASSWORD), "OPERATOR");
+		assertThat(code(provision(operator, UUID.randomUUID(), "watcher", "1.00"), 422)).isEqualTo("UNKNOWN_TRADER");
 
 		// Invalid endowments are refused before the writer, with every problem listed.
 		assertThat(fields(provision(operator, UUID.randomUUID(), "other", "-1.00", holding(nova, 1),

@@ -172,6 +172,71 @@ describe('one user with both roles', () => {
     expect(window.location.pathname).toBe('/operator');
   });
 
+  it("points the tour at the panel in the ticket's place, not at a missing ticket", async () => {
+    both();
+    openAt('/terminal');
+    await screen.findByRole('heading', { name: 'No trading account' });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Help' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Take the tour' }));
+    const tour = await screen.findByRole('dialog', { name: TOURS.TRADER.welcome.title });
+    fireEvent.click(within(tour).getByRole('button', { name: 'Start the tour' }));
+    while (within(tour).queryByRole('heading', { name: /^Order ticket/ }) === null) {
+      fireEvent.click(within(tour).getByRole('button', { name: 'Next' }));
+    }
+
+    expect(within(tour).getByText(/^Buy or sell/)).not.toHaveTextContent('once there is an instrument');
+  });
+
+  it('returns to the page it came from after signing in again', async () => {
+    let session = false;
+    both(
+      fakeServer()
+        .on('GET /api/v1/me', () => (session ? { status: 200, json: { username: 'operator', roles: BOTH } } : { status: 401 }))
+        .on('GET /api/v1/auth/csrf', { status: 200, json: { headerName: 'X-CSRF-TOKEN', token: 't' } })
+        .on('POST /api/v1/auth/login', () => {
+          session = true;
+          return { status: 200, json: { username: 'operator', roles: BOTH } };
+        }),
+    );
+    openAt('/terminal');
+
+    fireEvent.change(await screen.findByLabelText('Username'), { target: { value: 'operator' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(await screen.findByRole('heading', { name: 'No trading account' })).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/terminal');
+    expect(current()).toHaveTextContent('Trading');
+  });
+
+  it('starts on the operator screen after someone else signed out on a trading page', async () => {
+    let user: { username: string; roles: string[] } | null = { username: 'trader', roles: ['TRADER'] };
+    both(
+      fakeServer()
+        .on('GET /api/v1/me', () => (user ? { status: 200, json: user } : { status: 401 }))
+        .on('GET /api/v1/auth/csrf', { status: 200, json: { headerName: 'X-CSRF-TOKEN', token: 't' } })
+        .on('POST /api/v1/auth/logout', () => {
+          user = null;
+          return { status: 204 };
+        })
+        .on('POST /api/v1/auth/login', () => {
+          user = { username: 'operator', roles: BOTH };
+          return { status: 200, json: user };
+        }),
+    );
+    openAt('/terminal');
+    await screen.findByRole('heading', { name: 'NOVA', level: 1 });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
+    fireEvent.change(await screen.findByLabelText('Username'), { target: { value: 'operator' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
+
+    expect(await screen.findByRole('heading', { name: 'Market' })).toBeInTheDocument();
+    expect(window.location.pathname).toBe('/operator');
+  });
+
   it('has no account page: the address goes to the operator screen', async () => {
     both();
     openAt('/account');

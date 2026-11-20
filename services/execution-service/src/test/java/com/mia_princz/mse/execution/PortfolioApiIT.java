@@ -527,8 +527,9 @@ class PortfolioApiIT {
 		assertThat(trader.get("/api/v1/portfolio/trades?cursor=%25").statusCode()).isEqualTo(400);
 		assertThat(trader.get("/api/v1/orders?order=sideways").statusCode()).isEqualTo(400);
 		assertThat(trader.get("/api/v1/portfolio/trades?order=OLDEST").statusCode()).isEqualTo(400);
-		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
-		assertThat(operator.get("/api/v1/portfolio").statusCode()).isEqualTo(403);
+		// A login that only operates has no portfolio.
+		TestUsers.insert(jdbc, UUID.randomUUID(), "watcher", TestBrowser.passwordHash(PASSWORD), "OPERATOR");
+		assertThat(TestBrowser.loggedIn(port, "watcher", PASSWORD).get("/api/v1/portfolio").statusCode()).isEqualTo(403);
 		assertThat(new TestBrowser(port).get("/api/v1/orders").statusCode()).isEqualTo(401);
 	}
 
