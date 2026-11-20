@@ -48,6 +48,30 @@ public final class BookDelta {
 		return delta;
 	}
 
+	/** This delta followed by {@code next}: both changes at each price, added together. Neither changes. */
+	public BookDelta plus(BookDelta next) {
+		if (next.isEmpty()) {
+			return this;
+		}
+		if (isEmpty()) {
+			return next;
+		}
+		BookDelta sum = new BookDelta();
+		sum.accumulate(this);
+		sum.accumulate(next);
+		return sum;
+	}
+
+	/**
+	 * Adds {@code next}'s changes to this delta, in place. Only for a delta its owner keeps to itself, such as an
+	 * overlay's running total; every delta handed out stays unchanged.
+	 */
+	void accumulate(BookDelta next) {
+		for (Side side : Side.values()) {
+			next.changes(side).forEach((price, change) -> add(side, price, change.quantity(), change.orders()));
+		}
+	}
+
 	public boolean isEmpty() {
 		return bids.isEmpty() && asks.isEmpty();
 	}
