@@ -109,6 +109,7 @@ class OrderApiIT {
 	void commandsAreTimedAndTheQueueMeasured() throws Exception {
 		long places = committed("place");
 		long cancels = committed("cancel");
+		long runs = meters.get("mse.writer.run.size").summary().count();
 		String orderId = orderId(place(trader, UUID.randomUUID(), limit("BUY", 1, "90.00")));
 		assertThat(cancel(trader, UUID.randomUUID(), orderId).statusCode()).isEqualTo(200);
 
@@ -122,6 +123,9 @@ class OrderApiIT {
 		// Prometheus export is off in tests; the gate reads the real scrape and its bucket edges.
 		assertThat(meters.get("mse.writer.queue.depth").gauge().value()).isZero();
 		assertThat(meters.get("mse.writer.queue.capacity").gauge().value()).isEqualTo(256);
+		// One run each, of one command: the default limit.
+		assertThat(meters.get("mse.writer.run.size").summary().count()).isEqualTo(runs + 2);
+		assertThat(meters.get("mse.writer.run.size").summary().max()).isEqualTo(1);
 	}
 
 	/**

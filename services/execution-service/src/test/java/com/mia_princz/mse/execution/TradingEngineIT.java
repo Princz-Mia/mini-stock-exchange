@@ -489,6 +489,101 @@ class TradingEngineIT {
 		writer.close(Duration.ofSeconds(5));
 	}
 
+	/**
+	 * Trading commands queued together reach the engine as one run, and each gets the result it would get alone, in
+	 * admission order: an order rests, another fills against it, a cancel takes what is left, and a fourth rests. A
+	 * command of the run that fails fails alone.
+	 */
+	@Test
+	void tradingCommandsQueuedTogetherRunAsOneRunWithTheirOwnResults() throws Exception {
+		writer.close(Duration.ofSeconds(5));
+		List<Integer> runs = new java.util.concurrent.CopyOnWriteArrayList<>();
+		writer = new CommandWriter("test-writer", 1_000, 8, runs::add);
+		resting = new FailingRestingOrders();
+		engine = new TradingEngine(store, new SpringTransactionRunner(transactionManager), writer, Clock.systemUTC(),
+				(account) -> {
+					throw new UnsupportedOperationException("no bots in these tests");
+				}, AccountChanges.NONE, timings, System::nanoTime, resting);
+		engine.start();
+		UUID buyer = funded();
+		UUID seller = funded();
+		long before = commandSequence();
+		java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+		writer.submit(() -> release.await(5, java.util.concurrent.TimeUnit.SECONDS));
+		PlaceOrder bid = order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 5);
+		CompletableFuture<PlacementResult> rests = engine.place(key(), bid);
+		CompletableFuture<PlacementResult> fills = engine.place(key(), order(seller, Side.SELL, OrderType.LIMIT, "100.00", 3));
+		CompletableFuture<CancelResult> cancels = engine.cancel(key(), new CancelOrder(bid.orderId(), buyer));
+		CompletableFuture<PlacementResult> unknown = engine.place(key(), new PlaceOrder(UUID.randomUUID(), seller,
+				UUID.randomUUID(), Side.SELL, OrderType.LIMIT, Price.parse("100.00"), new Quantity(1)));
+		CompletableFuture<PlacementResult> later = engine.place(key(), order(seller, Side.SELL, OrderType.LIMIT, "101.00", 1));
+
+		release.countDown();
+
+		assertThat(rests.get().state()).isEqualTo(PlacementResult.OrderState.OPEN);
+		assertThat(fills.get().state()).isEqualTo(PlacementResult.OrderState.FILLED);
+		assertThat(cancels.get().status()).isEqualTo(CancelResult.Status.CANCELED);
+		assertThatThrownBy(unknown::get).hasCauseInstanceOf(TradingEngine.UnknownInstrumentException.class);
+		assertThat(later.get().state()).isEqualTo(PlacementResult.OrderState.OPEN);
+		assertThat(List.of(rests.get().commandSequence(), fills.get().commandSequence(),
+				cancels.get().commandSequence(), later.get().commandSequence()))
+			.as("in admission order")
+			.containsExactly(before + 1, before + 2, before + 3, before + 4);
+		assertThat(runs).as("the five queued together, one run").containsExactly(5);
+		assertThat(engine.depth(instrument, Side.BUY).get()).isEmpty();
+		assertThat(engine.depth(instrument, Side.SELL).get()).singleElement()
+			.satisfies((level) -> assertThat(level.quantity()).isEqualTo(1));
+		assertLedgerMatchesBalances();
+	}
+
+	/**
+	 * A command that halts the writer in the middle of a run: the command before it keeps its committed result, it
+	 * fails with the halt, and the one after it fails as never run, as it would have queued behind it one by one.
+	 */
+	@Test
+	void aHaltInARunKeepsTheResultsBeforeItAndFailsTheCommandsAfterItAsNeverRun() throws Exception {
+		writer.close(Duration.ofSeconds(5));
+		List<Integer> runs = new java.util.concurrent.CopyOnWriteArrayList<>();
+		writer = new CommandWriter("test-writer", 1_000, 8, runs::add);
+		resting = new FailingRestingOrders();
+		engine = new TradingEngine(store, new SpringTransactionRunner(transactionManager), writer, Clock.systemUTC(),
+				(account) -> {
+					throw new UnsupportedOperationException("no bots in these tests");
+				}, AccountChanges.NONE, timings, System::nanoTime, resting);
+		engine.start();
+		UUID buyer = funded();
+		long before = commandSequence();
+		java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+		writer.submit(() -> release.await(5, java.util.concurrent.TimeUnit.SECONDS));
+		// Nothing to buy, so the remainder is cancelled and nothing rests; the next one rests, and the books fail as
+		// they take it, after its commit.
+		CompletableFuture<PlacementResult> unfilled = engine.place(key(),
+				order(buyer, Side.BUY, OrderType.MARKET_PROTECTED, "101.00", 1));
+		PlaceOrder halting = order(buyer, Side.BUY, OrderType.LIMIT, "99.00", 1);
+		CompletableFuture<PlacementResult> halts = engine.place(key(), halting);
+		PlaceOrder never = order(buyer, Side.BUY, OrderType.LIMIT, "98.00", 1);
+		CompletableFuture<PlacementResult> neverRan = engine.place(key(), never);
+		failBookAt.set("added");
+
+		try {
+			release.countDown();
+
+			assertThat(unfilled.get().state()).isEqualTo(OrderState.CANCELED);
+			assertThat(unfilled.get().commandSequence()).isEqualTo(before + 1);
+			assertThatThrownBy(halts::get).hasCauseInstanceOf(CommandWriter.WriterHaltException.class);
+			assertThatThrownBy(neverRan::get).hasCauseInstanceOf(CommandWriter.WriterStoppedException.class)
+				.hasMessageContaining("halted before this command ran");
+			assertThat(runs).containsExactly(3);
+			assertThat(orderState(halting.orderId())).as("committed before the books failed").isEqualTo("OPEN");
+			assertThat(jdbc.queryForObject("SELECT count(*) FROM orders WHERE id = ?", Long.class, never.orderId()))
+				.as("never ran")
+				.isZero();
+		}
+		finally {
+			failBookAt.set(null);
+		}
+	}
+
 	/** Golden fixture, end to end: three sellers rest 3@100.00, 4@100.00, 5@101.00; a buyer takes 10@101.00. */
 	@Test
 	void goldenFixtureCommitsOrdersTradesLedgerBalancesAndEvents() throws Exception {

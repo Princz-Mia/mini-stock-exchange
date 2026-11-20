@@ -81,6 +81,27 @@ public final class TradingEngine {
 	/** Each instrument's newest trades for its snapshots, kept like the books: changed only after a commit. */
 	private final Map<UUID, Tape> tapes = new HashMap<>();
 
+	/**
+	 * Runs runs of trading commands for the writer. One object for the engine's life: the writer joins queued commands
+	 * into a run only when they go to the same processor.
+	 */
+	private final CommandWriter.RunProcessor<Trading> runs = this::processBatch;
+
+	/** A trading command waiting in the writer's queue, with when it was admitted. */
+	sealed interface Trading {
+
+		CommandKey key();
+
+		long admitted();
+
+	}
+
+	record QueuedPlace(CommandKey key, PlaceOrder command, long admitted) implements Trading {
+	}
+
+	record QueuedCancel(CommandKey key, CancelOrder command, long admitted) implements Trading {
+	}
+
 	private UUID simulationId;
 
 	private long writerEpoch;
@@ -176,12 +197,12 @@ public final class TradingEngine {
 
 	/** Places an order. A repeat of the same key and request returns the first committed result unchanged. */
 	public CompletableFuture<PlacementResult> place(CommandKey key, PlaceOrder command) {
-		return submit("place", () -> process(key, command));
+		return submitTrading(new QueuedPlace(key, command, nanoTime.getAsLong()));
 	}
 
 	/** Cancels a resting order; allowed while the market is open or halted. */
 	public CompletableFuture<CancelResult> cancel(CommandKey key, CancelOrder command) {
-		return submit("cancel", () -> processCancel(key, command));
+		return submitTrading(new QueuedCancel(key, command, nanoTime.getAsLong()));
 	}
 
 	/**
@@ -359,6 +380,53 @@ public final class TradingEngine {
 			tapes.putIfAbsent(command.instrumentId(), new Tape(TAPE_TRADES, List.of()));
 		}
 		return added.result();
+	}
+
+	/**
+	 * Runs a run of trading commands the writer took together, in order, and gives each its outcome. For now each
+	 * command runs in its own transaction, exactly as it would alone, so a run of any length gives the same results
+	 * as its commands one after another, a halt included: the commands before the one that halts keep their results,
+	 * that one fails with the halt, and the ones after it fail as never run, as queued commands do when the writer
+	 * halts. At the default run limit of one, every run is a single command. A writer closing past its grace period
+	 * interrupts its thread, and the commands of the run not yet started then fail as never run.
+	 */
+	List<CommandWriter.RunOutcome> processBatch(List<Trading> run) {
+		List<CommandWriter.RunOutcome> outcomes = new ArrayList<>(run.size());
+		String stopped = null;
+		for (Trading command : run) {
+			if (stopped == null && Thread.currentThread().isInterrupted()) {
+				stopped = "Writer closed before this command ran";
+			}
+			if (stopped != null) {
+				outcomes.add(CommandWriter.RunOutcome.failed(new CommandWriter.WriterStoppedException(stopped)));
+				continue;
+			}
+			String kind = command instanceof QueuedPlace ? "place" : "cancel";
+			timings.record(WriterTimings.Phase.QUEUE_WAIT, kind, nanoTime.getAsLong() - command.admitted());
+			try {
+				outcomes.add(CommandWriter.RunOutcome.done(switch (command) {
+					case QueuedPlace place -> process(place.key(), place.command());
+					case QueuedCancel cancel -> processCancel(cancel.key(), cancel.command());
+				}));
+			}
+			catch (WriterHaltException ex) {
+				outcomes.add(CommandWriter.RunOutcome.halted(ex));
+				stopped = "Writer halted before this command ran";
+			}
+			catch (Throwable ex) {
+				// As the writer treats a failing command on its own: it fails, and the others go on.
+				outcomes.add(CommandWriter.RunOutcome.failed(ex));
+			}
+		}
+		return outcomes;
+	}
+
+	/** Refused, not queued, until startup has finished, so the caller can retry the same key. */
+	private <T> CompletableFuture<T> submitTrading(Trading command) {
+		if (!started) {
+			throw new CommandWriter.WriterStoppedException("Trading has not started");
+		}
+		return writer.submitInRun(runs, command);
 	}
 
 	/** Refused, not queued, until startup has finished, so the caller can retry the same key. */
