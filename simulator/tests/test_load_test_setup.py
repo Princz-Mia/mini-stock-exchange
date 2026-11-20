@@ -1,7 +1,12 @@
+import asyncio
+import contextlib
+import time
+
 import httpx
 import pytest
 
 from mse_simulator.loadtest import __main__ as loadtest
+from mse_simulator.loadtest import stats
 from mse_simulator.loadtest.__main__ import SYMBOLS, parse, set_up
 
 
@@ -182,6 +187,118 @@ def test_a_503_is_unavailable_unless_it_is_a_busy_refusal() -> None:
 def test_the_report_says_when_execution_was_not_restarted() -> None:
     assert loadtest.restart_line(6.4) == "- Restarting Execution, its reconciliation included: 6 s."
     assert "not done" in loadtest.restart_line(float("nan"))
+
+
+def test_the_admission_limits_are_read_as_execution_reports_them() -> None:
+    scrape = stats.parse_prometheus(
+        'mse_outbox_admission_limit{limit="events"} 500000.0\n'
+        'mse_outbox_admission_limit{limit="bytes"} 1.073741824E9\n'
+        "mse_outbox_pending 12.0\n"
+    )
+
+    limits = loadtest.admission_limits(scrape)
+
+    assert limits == (500_000, 1_073_741_824)
+    assert loadtest.admission_line(limits) == (
+        "- Publication backlog limit, beyond which new orders are refused: 500,000 events or "
+        "1,024 MiB."
+    )
+    events_only = stats.parse_prometheus('mse_outbox_admission_limit{limit="events"} 3\n')
+    assert loadtest.admission_limits(events_only) is None
+    assert loadtest.admission_line(None) == "- Publication backlog limit: not read."
+
+
+def test_downstream_samples_are_timed_from_the_start_and_a_failed_one_is_skipped() -> None:
+    sampled = loadtest.diagnostics.Sampled()
+    calls = []
+
+    def sample():
+        calls.append(len(calls))
+        if len(calls) == 2:
+            raise RuntimeError("docker exec failed")
+        return (
+            stats.parse_prometheus(f'mse_feed_lag{{topic="mse.market.v1"}} {len(calls)}\n'),
+            stats.parse_prometheus(f"mse_outbox_pending {10 * len(calls)}\n"),
+        )
+
+    async def run() -> None:
+        task = asyncio.create_task(loadtest.sample_downstream(sample, sampled, every=0.05))
+        await asyncio.sleep(0.18)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+
+    assert len(calls) >= 3
+    assert [value for _, value in sampled.backlog][:2] == [10, 30], "the second sample failed"
+    times = [at for at, _ in sampled.feed_lag["mse.market.v1"]]
+    assert times[0] == pytest.approx(0.0, abs=0.05)
+    assert times[1] == pytest.approx(0.10, abs=0.05)
+
+
+def test_a_run_rate_is_written_as_the_api_takes_it_or_refused_before_starting(
+    tmp_path, monkeypatch
+) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}")
+    monkeypatch.chdir(tmp_path)
+    assert loadtest.run_rate("225") == "225.00"
+    assert loadtest.run_rate("12.5") == "12.50"
+    assert loadtest.run_rate("100.00") == "100.00"
+    assert parse(["--rate", "225"]).rate == "225.00"
+    for text in ("abc", "0.001", "0", "-5", "2000.01", "nan", "inf", "1.234"):
+        with pytest.raises(ValueError):
+            loadtest.run_rate(text)
+    with pytest.raises(SystemExit):
+        parse(["--rate", "2500"])
+
+
+def test_processor_readings_and_cpu_throttling_are_taken_while_a_rate_runs() -> None:
+    sampled = loadtest.diagnostics.Sampled()
+    readings = iter(["mse-load-postgres-1|40.00%\n", "mse-load-postgres-1|60.00%\n"])
+    counters = iter([{"postgres": (100, 0, 0)}, {"postgres": (200, 20, 500_000)}])
+
+    read_at: list[float] = []
+
+    def count():
+        read_at.append(time.monotonic())  # the clock asyncio's loop keeps
+        return next(counters)
+
+    async def run() -> tuple[dict, float]:
+        began = asyncio.get_running_loop().time()
+        task = asyncio.create_task(
+            loadtest.sample_cpu(lambda: next(readings, ""), sampled, every=0.05)
+        )
+        held = await loadtest.throttled_between(count, 0.1, 0.2)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        return held, began
+
+    held, began = asyncio.run(run())
+
+    assert [value for _, value in sampled.cpu_at["postgres"]][:2] == [40.0, 60.0]
+    times = [at for at, _ in sampled.cpu_at["postgres"]][:2]
+    assert times[0] == pytest.approx(0.0, abs=0.05) and times[1] == pytest.approx(0.05, abs=0.05)
+    assert read_at[0] - began >= 0.09, "the first counters wait for the window's start"
+    assert read_at[1] - read_at[0] == pytest.approx(0.1, abs=0.05)
+    assert held["postgres"][0] == pytest.approx(0.2), "20 of 100 periods"
+    assert held["postgres"][1] == pytest.approx(5_000, rel=0.5), "500 ms in about 0.1 s"
+
+
+def test_cpu_counters_skip_a_service_that_cannot_be_read() -> None:
+    class FakeStack:
+        def exec(self, service, *command):
+            if service == "kafka":
+                raise RuntimeError("no such container")
+            if service == "web":
+                return "usage_usec 5\n"
+            return "nr_periods 10\nnr_throttled 1\nthrottled_usec 300\n"
+
+    counters = loadtest.cpu_stats(FakeStack())
+
+    assert set(counters) == {"execution-service", "postgres", "market-data-service"}
+    assert counters["postgres"] == (10, 1, 300)
 
 
 def test_each_report_names_its_own_generator() -> None:

@@ -257,7 +257,8 @@ describe('the operator screen', () => {
     expect(price).toHaveValue(' 1205.5x ');
     expect(price).toHaveAttribute('aria-invalid', 'true');
     expect(price).toHaveAccessibleDescription('Reference price must be a price in cents');
-    expect(price).toHaveFocus();
+    // Focus moves to the refused field in an effect after the message renders, so wait for it.
+    await waitFor(() => expect(price).toHaveFocus());
     expect(name).not.toHaveAttribute('aria-invalid');
     expect(server.requests.at(-1)?.body).toEqual({ referencePrice: '1205.5x', displayName: 'Nova  Dyn' });
 

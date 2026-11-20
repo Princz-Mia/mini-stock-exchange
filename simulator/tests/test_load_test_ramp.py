@@ -26,6 +26,20 @@ def scrape(
 
 ACTIVITY_BEFORE = {"placed": 1000, "canceled": 500, "rejected": 10, "errors": 0}
 QUIET_QUEUE = [(float(at), 1.0) for at in range(0, 121, 5)]
+QUIET_BACKLOG = [(float(at), 20.0) for at in range(0, 121, 5)]
+# The trades feed peaks at 9 once; the market feed stays at 4.
+QUIET_LAG = {
+    "mse.trades.v1": [(float(at), 9.0 if at == 60 else 3.0) for at in range(0, 121, 5)],
+    "mse.market.v1": [(float(at), 4.0) for at in range(0, 121, 5)],
+}
+
+
+def rising(start: float, end: float, seconds: int = 120) -> list[tuple[float, float]]:
+    """A series that sits at start for the first third and at end for the last."""
+    return [
+        (float(at), start if at < seconds / 3 else end if at >= 2 * seconds / 3 else start)
+        for at in range(0, seconds + 1, 5)
+    ]
 
 
 def measured(
@@ -38,9 +52,14 @@ def measured(
     refused: int = 0,
     seconds: float = 120.0,
     unavailable: int = 0,
+    backlog: list | None = None,
+    lag: dict | None = None,
+    live: dict | None = None,
 ) -> ramp.Step:
     sampled = diagnostics.Sampled()
-    sampled.feed_lag = {"mse.trades.v1": [3.0, 9.0], "mse.market.v1": [4.0]}
+    sampled.feed_lag = QUIET_LAG if lag is None else lag
+    sampled.backlog = QUIET_BACKLOG if backlog is None else backlog
+    sampled.feed_live = live or {}
     sampled.cpu = {"simulator": [30.0, 50.0], "execution-service": [80.0, 120.0]}
     return ramp.step(
         target,
@@ -70,6 +89,7 @@ def test_a_step_is_measured_over_its_window() -> None:
     assert step.unexpected == 0
     assert step.refused == 0
     assert step.lag_peak == 9.0
+    assert step.backlog_peak == 20.0
     assert step.cpu["execution-service"] == (100.0, 120.0)
     # 40% of a CPU over the bots' 500 commands a second (the probe is not the simulator's).
     assert step.simulator_ms == pytest.approx(0.8)
@@ -88,6 +108,13 @@ def test_a_step_is_measured_over_its_window() -> None:
         ({"probe": [("place", 0.01, 504)] * 120}, "refusals and failures below 0.1%"),
         ({"refused": 61}, "refusals and failures below 0.1%"),
         ({"after_committed": {"0.05": 100 + 50_000}}, "admitted at least 90% of the rate"),
+        ({"backlog": rising(20.0, 5_000.0)}, "publication and the feeds kept up"),
+        (
+            {"lag": QUIET_LAG | {"mse.market.v1": rising(4.0, 5_000.0)}},
+            "publication and the feeds kept up",
+        ),
+        ({"backlog": []}, "publication and the feeds kept up"),
+        ({"lag": {}}, "publication and the feeds kept up"),
     ],
 )
 def test_each_budget_can_fail_a_step_alone(change, missed) -> None:
@@ -178,6 +205,51 @@ def test_the_report_names_the_highest_rate_and_each_step() -> None:
     assert "Not run, after a step missed a budget: 300/s, 500/s." in text
     assert "Could not be measured" not in text
     assert "| 150/s | 100 / 120 | n/a | 40 / 50 | n/a | n/a | 0.8 ms |" in text
+
+
+def test_downstream_growth_is_allowed_two_seconds_of_the_rate_and_at_least_200() -> None:
+    # At 500 a second the allowance is 1,000 records between the first and last thirds.
+    assert measured(backlog=rising(20.0, 1_020.0)).passed
+    assert not measured(backlog=rising(20.0, 1_021.0)).passed
+    lag = QUIET_LAG | {"mse.trades.v1": rising(3.0, 1_004.0)}
+    assert not measured(lag=lag).passed, "any topic's lag counts"
+    # At 50 a second, two seconds would be 100 records; the floor of 200 applies.
+    low = {"0.05": 100 + 5_712, "0.15": 300}
+    activity = {"placed": 5_000, "canceled": 2_500, "rejected": 10, "errors": 0}
+    assert measured(50.0, low, activity, backlog=rising(20.0, 220.0)).passed
+    assert not measured(50.0, low, activity, backlog=rising(20.0, 221.0)).passed
+
+
+def test_a_momentary_downstream_peak_is_not_growth() -> None:
+    spike = [(float(at), 50_000.0 if at == 60 else 20.0) for at in range(0, 121, 5)]
+
+    step = measured(backlog=spike)
+
+    assert step.passed
+    assert step.backlog_peak == 50_000.0
+
+
+def test_the_report_says_what_fell_behind() -> None:
+    behind = measured(200.0, lag=QUIET_LAG | {"mse.market.v1": rising(4.0, 900.0)})
+
+    text = "\n".join(ramp.report([measured(150.0), behind], []))
+
+    assert "| 20 | 9 | yes |" in text, "backlog peak and feed lag peak"
+    assert "Publication or a feed fell behind: 200/s: grew: mse.market.v1 4 to 900." in text
+    assert "not sampled" not in text
+
+
+def test_a_feed_that_stopped_fails_the_step_though_its_lag_stayed_flat() -> None:
+    stopped = {"mse.trades.v1": [(float(at), 1.0 if at < 70 else 0.0) for at in range(0, 121, 5)]}
+
+    step = measured(live=stopped)
+
+    assert step.missed() == ["publication and the feeds kept up"]
+    text = "\n".join(ramp.report([step], []))
+    assert "Publication or a feed fell behind: 500/s: not live: mse.trades.v1." in text
+    unsampled = "\n".join(ramp.report([measured(backlog=[])], []))
+    assert "fell behind" not in unsampled
+    assert "Publication and the feeds were not sampled enough to judge: 500/s" in unsampled
 
 
 def test_the_report_names_a_step_that_could_not_be_measured() -> None:

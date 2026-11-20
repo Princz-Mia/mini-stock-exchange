@@ -4,10 +4,12 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import io.micrometer.core.instrument.FunctionCounter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
@@ -73,11 +75,18 @@ class ProjectionConfiguration {
 		return (topic, handler) -> {
 			Map<String, Object> feedConfig = new HashMap<>(config);
 			feedConfig.put(ConsumerConfig.CLIENT_ID_CONFIG, "market-data-" + topic);
+			Timer delay = Timer.builder("mse.feed.delay")
+				.description("From a record's send to Kafka until its projection committed, while the feed is live")
+				.tag("topic", topic)
+				.publishPercentileHistogram()
+				// Micrometer's buckets stop at 30 s by default; a feed falling behind is exactly when delays pass that.
+				.maximumExpectedValue(Duration.ofMinutes(10))
+				.register(meters);
 			MarketFeedConsumer feed = new MarketFeedConsumer(
 					() -> new KafkaConsumer<>(feedConfig, new StringDeserializer(), new ByteArrayDeserializer()),
 					new TransactionTemplate(transactionManager), handler, checkpoints,
 					new MarketFeedConsumer.Settings(topic, pollTimeout, lagCheckInterval, staleAfter, retryBackoff),
-					clock);
+					clock, (millis) -> delay.record(millis, TimeUnit.MILLISECONDS));
 			Gauge.builder("mse.feed.lag", feed, MarketFeedConsumer::lag)
 				.description("Records on Kafka not yet projected; -1 before the first measurement")
 				.tag("topic", topic)
