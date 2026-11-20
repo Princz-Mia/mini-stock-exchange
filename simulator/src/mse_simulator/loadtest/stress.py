@@ -2,14 +2,19 @@
 answers, and each command's latency counted from when it was meant to go. A closed loop, like the
 bots, waits for each answer before its next step, so when the exchange slows down it also sends
 less and its latency hides the wait; an open loop does not. Trader sends the commands and fire
-keeps the schedule; the verdicts are pure functions over what was sent and answered."""
+keeps the schedule; fire_in_processes splits a rate's schedule across processes, since one Python
+process keeps a schedule only up to about 800 commands a second; the verdicts are pure functions
+over what was sent and answered."""
 
 import asyncio
 import math
+import multiprocessing
+import queue
+import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import astuple, dataclass, field
 
 import httpx
 
@@ -34,21 +39,36 @@ ANSWERED_SHARE = 0.9
 # The generator itself may start a command this late at the 99th percentile; later, and a missed
 # budget may be the generator's, not the exchange's.
 GENERATOR_LAG_BUDGET = 0.050
+# Commands a second one generator process carries. One process starts falling behind its schedule
+# somewhere between 800 and 1,000 a second on a desktop; half of that leaves it room.
+PER_PROCESS = 400
+# How long the processes of one rate wait for each other to be ready before the rate is given up.
+READY_TIMEOUT = 300.0
 # The containers a stress run passes through: the commands come from this machine through the
 # proxy (web), not from the simulator.
 SERVICES = ("execution-service", "postgres", "kafka", "market-data-service", "web")
 
 
+def processes(rate: float) -> int:
+    """How many generator processes share the rate, each carrying at most PER_PROCESS."""
+    return max(1, math.ceil(rate / PER_PROCESS))
+
+
 def traders(rate: float) -> int:
-    """How many trader logins carry the rate, each under its own limit."""
-    return max(1, math.ceil(rate / PER_TRADER))
+    """How many trader logins carry the rate: each process's share of it split across its own
+    logins, each login under its own limit."""
+    every = processes(rate)
+    return every * max(1, math.ceil(rate / every / PER_TRADER))
 
 
-def schedule(rate: float, seconds: float) -> list[float]:
-    """When each command is meant to go, in seconds from the start: evenly, at the rate."""
+def schedule(rate: float, seconds: float, offset: int = 0, every: int = 1) -> list[float]:
+    """When each command is meant to go, in seconds from the start: evenly, at the rate. With
+    several processes, one process's share: the commands at offset, offset + every, and so on."""
     if rate <= 0 or seconds <= 0:
         raise ValueError("a positive rate and duration")
-    return [index / rate for index in range(round(rate * seconds))]
+    if not 0 <= offset < every:
+        raise ValueError("an offset from 0 to every - 1")
+    return [index / rate for index in range(offset, round(rate * seconds), every)]
 
 
 @dataclass(frozen=True)
@@ -152,16 +172,34 @@ class Trader:
         self.resting.clear()
 
 
+# A signed-in login, as a generator process takes it: its cookies, its CSRF header and its
+# instrument.
+Session = tuple[dict[str, str], dict[str, str], str]
+
+
+def connections(
+    base_url: str, timeout: float = 15.0, cookies: dict[str, str] | None = None
+) -> httpx.AsyncClient:
+    """A login's own connections, so its cookie stays its own."""
+    return httpx.AsyncClient(
+        base_url=base_url,
+        timeout=timeout,
+        cookies=cookies,
+        limits=httpx.Limits(max_connections=IN_FLIGHT, max_keepalive_connections=IN_FLIGHT),
+    )
+
+
+def session(trader: Trader) -> Session:
+    """What another process needs to send as this signed-in trader."""
+    return dict(trader.client.cookies), dict(trader.csrf), trader.instrument
+
+
 async def sign_in(
     base_url: str, username: str, password: str, instrument: str, timeout: float = 15.0
 ) -> Trader:
     """A trader's own session, with its own connections, so its cookie and CSRF token stay its
     own."""
-    client = httpx.AsyncClient(
-        base_url=base_url,
-        timeout=timeout,
-        limits=httpx.Limits(max_connections=IN_FLIGHT, max_keepalive_connections=IN_FLIGHT),
-    )
+    client = connections(base_url, timeout)
     csrf = (await client.get("/api/v1/auth/csrf")).json()
     login = await client.post(
         "/api/v1/auth/login",
@@ -179,22 +217,188 @@ async def fire(
     rate: float,
     seconds: float,
     clock: Callable[[], float] = time.perf_counter,
+    offset: int = 0,
+    every: int = 1,
 ) -> list[Sent]:
-    """Sends each command at its planned time, round-robin across the traders, without waiting for
-    earlier answers; returns when every command has been answered or has failed."""
-    plan = schedule(rate, seconds)
+    """Sends each command of the schedule (or of one process's share of it) at its planned time,
+    round-robin across the traders, without waiting for earlier answers; returns when every
+    command has been answered or has failed, in planned order.
+
+    A finished command is kept only as a tuple of numbers, which Python's collector stops
+    tracking, and its task is let go: kept whole, ten minutes of commands made each full
+    collection walk hundreds of thousands of objects, pausing the schedule for half a second."""
+    plan = schedule(rate, seconds, offset, every)
     start = clock()
 
     def since() -> float:
         return clock() - start
 
-    tasks = []
+    answered: list[tuple[float, float, float, int]] = []
+    errors: list[BaseException] = []
+    pending: set[asyncio.Task[Sent]] = set()
+
+    def finished(task: asyncio.Task[Sent]) -> None:
+        pending.discard(task)
+        if task.cancelled():
+            errors.append(asyncio.CancelledError())
+        elif (error := task.exception()) is not None:
+            errors.append(error)
+        else:
+            sent = task.result()
+            answered.append((sent.intended, sent.started, sent.answered, sent.status))
+
     for index, at in enumerate(plan):
         delay = at - since()
         if delay > 0:
             await asyncio.sleep(delay)
-        tasks.append(asyncio.create_task(traders[index % len(traders)].send(at, since)))
-    return list(await asyncio.gather(*tasks))
+        task = asyncio.create_task(traders[index % len(traders)].send(at, since))
+        pending.add(task)
+        task.add_done_callback(finished)
+    while pending:
+        await asyncio.wait(set(pending))
+    if errors:
+        raise errors[0]
+    return [Sent(*fields) for fields in sorted(answered)]
+
+
+def run_share(
+    base_url: str,
+    sessions: list[Session],
+    rate: float,
+    seconds: float,
+    offset: int,
+    every: int,
+    ready: threading.Barrier,
+    out: multiprocessing.Queue[tuple[int, str, object]],
+    ready_timeout: float = READY_TIMEOUT,
+) -> None:
+    """One generator process's share of a rate: cancels its logins' open orders, waits for the
+    other processes, then fires its share of the schedule. Puts its commands on out as tuples of
+    Sent's fields, or the error that stopped it."""
+
+    async def share() -> list[Sent]:
+        gate = asyncio.Semaphore(8)
+        traders = [
+            Trader(connections(base_url, cookies=cookies), csrf, instrument)
+            for cookies, csrf, instrument in sessions
+        ]
+
+        async def tidy(trader: Trader) -> None:
+            async with gate:
+                await trader.tidy()
+
+        try:
+            await asyncio.gather(*(tidy(trader) for trader in traders))
+            await asyncio.to_thread(ready.wait, ready_timeout)
+            return await fire(traders, rate, seconds, offset=offset, every=every)
+        finally:
+            await asyncio.gather(*(trader.client.aclose() for trader in traders))
+
+    try:
+        sent = asyncio.run(share())
+    except BaseException as error:  # noqa: BLE001 - the coordinator reports it
+        ready.abort()
+        out.put((offset, "error", f"{type(error).__name__}: {error}"))
+        return
+    out.put((offset, "ok", [astuple(each) for each in sent]))
+
+
+def fire_in_processes(
+    base_url: str,
+    sessions: list[Session],
+    rate: float,
+    seconds: float,
+    ready_timeout: float = READY_TIMEOUT,
+    target: Callable[..., None] = run_share,
+    started: Callable[[], None] | None = None,
+) -> list[Sent]:
+    """Fires a rate from processes(rate) processes, each with its own signed-in logins and every
+    processes(rate)-th command of the one schedule, started together; returns the commands of
+    all of them, in planned order. Times count from each process's start, which a barrier
+    aligns to within milliseconds; started, if given, is called on a thread of its own as the
+    barrier releases them, so what it starts shares their clock. A process that ends without
+    reporting releases the others, and the rate fails with its exit code."""
+    every = processes(rate)
+    needed = traders(rate)
+    if len(sessions) < needed:
+        raise ValueError(f"{needed} logins carry {rate:,.0f}/s; {len(sessions)} given")
+    per = needed // every
+    context = multiprocessing.get_context("spawn")
+    ready = context.Barrier(every + (0 if started is None else 1))
+    out = context.Queue()
+    workers = [
+        context.Process(
+            target=target,
+            args=(
+                base_url,
+                sessions[k * per : (k + 1) * per],
+                rate,
+                seconds,
+                k,
+                every,
+                ready,
+                out,
+                ready_timeout,
+            ),
+            daemon=True,
+        )
+        for k in range(every)
+    ]
+    sent: list[Sent] = []
+    errors: list[str] = []
+    reported: set[int] = set()
+    # Ended without reporting at the last look: a process puts its answer before it ends, so one
+    # still unreported a second later never will.
+    ended: set[int] = set()
+    deadline = time.monotonic() + ready_timeout + seconds + 120
+    if started is not None:
+
+        def on_release() -> None:
+            try:
+                ready.wait(ready_timeout)
+            except threading.BrokenBarrierError:
+                return
+            started()
+
+        threading.Thread(target=on_release, name="generator-start", daemon=True).start()
+    try:
+        for worker in workers:
+            worker.start()
+        while len(reported) < every:
+            try:
+                offset, outcome, value = out.get(timeout=1.0)
+            except queue.Empty:
+                now_ended = {
+                    k for k, w in enumerate(workers) if k not in reported and w.exitcode is not None
+                }
+                lost = now_ended & ended
+                ended = now_ended - lost
+                if lost:
+                    ready.abort()
+                    errors += [
+                        f"generator process {k} ended with exit code {workers[k].exitcode} "
+                        "without reporting"
+                        for k in sorted(lost)
+                    ]
+                    reported |= lost
+                elif time.monotonic() > deadline:
+                    ready.abort()
+                    errors.append("a generator process gave no answer")
+                    break
+                continue
+            reported.add(offset)
+            if outcome == "ok":
+                sent.extend(Sent(*fields) for fields in value)
+            else:
+                errors.append(str(value))
+    finally:
+        for worker in workers:
+            worker.join(timeout=30)
+            if worker.is_alive():
+                worker.terminate()
+    if errors:
+        raise RuntimeError("; ".join(errors))
+    return sorted(sent, key=lambda each: each.intended)
 
 
 @dataclass(frozen=True)
@@ -363,8 +567,9 @@ def containers_lines(results: list[Result]) -> list[str]:
 
     lines = [
         "",
-        "The writer over each measured window, mean per command (place and cancel weighted); the "
-        "service time is begin to apply, and what one writer sustains at it:",
+        "The writer over each measured window, per committed command (a run's transaction shared "
+        "among its commands); the service time is begin to apply, and what one writer sustains at "
+        "it:",
         "",
         "| Rate | Queue | Begin | Work | Commit | Apply | Service | One writer sustains |",
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
@@ -398,19 +603,9 @@ def containers_lines(results: list[Result]) -> list[str]:
 
 
 def weighted(split: diagnostics.WriterSplit, phase: str) -> float | None:
-    """A phase's mean over place and cancel together, as the service time weighs them."""
-    means = [split.means.get(command, {}).get(phase) for command in ("place", "cancel")]
-    counts = split.commands
-    total = sum(counts.get(command, 0.0) for command in ("place", "cancel"))
-    if not total:
-        return None
-    return (
-        sum(
-            (mean or 0.0) * counts.get(command, 0.0)
-            for mean, command in zip(means, ("place", "cancel"), strict=True)
-        )
-        / total
-    )
+    """A phase's milliseconds per committed command, a run's transaction shared among the commands
+    it held, as the service time counts them; queue_wait is each command's own mean."""
+    return split.per_command.get(phase)
 
 
 def downstream_lines(flows: list[tuple[float, diagnostics.Downstream | None]]) -> list[str]:
@@ -450,9 +645,9 @@ def report(results: list[Result], skipped: list[float], broke: str | None = None
         + ("none" if best is None else f"{best.rate:,.0f} commands a second")
         + ".**",
         "",
-        "| Rate | Traders | Planned | Answered | Refused or timed out | Failed | p50 | p95 | p99 | "
-        "Generator lag p99 | Backlog peak | Feed lag peak | Met |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Rate | Processes | Traders | Planned | Answered | Refused or timed out | Failed | p50 | "
+        "p95 | p99 | Generator lag p99 | Backlog peak | Feed lag peak | Met |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for each in results:
         met = "yes" if each.passed else "no: " + ", ".join(each.missed())
@@ -460,7 +655,8 @@ def report(results: list[Result], skipped: list[float], broke: str | None = None
         backlog = "n/a" if flow is None else f"{flow.peak(diagnostics.BACKLOG):,.0f}"
         lag = "n/a" if flow is None else f"{flow.lag_peak:,.0f}"
         lines.append(
-            f"| {label(each.rate)} | {traders(each.rate)} | {each.planned:,} | "
+            f"| {label(each.rate)} | {processes(each.rate)} | {traders(each.rate)} | "
+            f"{each.planned:,} | "
             f"{each.answered_rate:,.1f}/s | {each.overloaded:,} | {each.failed:,} | "
             f"{ms(each.latency(0.5))} | {ms(each.latency(0.95))} | {ms(each.latency(0.99))} | "
             f"{ms(each.generator_lag)} | {backlog} | {lag} | {met} |"

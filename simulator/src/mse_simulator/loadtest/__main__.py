@@ -973,7 +973,8 @@ def run_stress(options: Options) -> int:
             f"# Stress: {datetime.now(UTC):%Y-%m-%d %H:%M} UTC",
             "",
             f"- {len(SYMBOLS)} instruments, no bots; each trader login sends at most "
-            f"{stress.PER_TRADER} commands a second, from this machine through port {WEB_PORT}.",
+            f"{stress.PER_TRADER} commands a second, from this machine through port {WEB_PORT}, "
+            f"from one process per {stress.PER_PROCESS} commands a second.",
             f"- Each rate: {options.stress_warmup} s of warm-up (the first "
             f"{max(options.stress_warmup, FIRST_WARMUP)} s), then {options.stress_duration} s "
             "measured; latency counts from each command's planned time.",
@@ -1070,6 +1071,22 @@ async def throttled_between(
     return diagnostics.throttling(first, last, last_at - first_at)
 
 
+async def signed_in(base_url: str, logins: list[tuple[str, str, str]]) -> list[stress.Session]:
+    """Every login signed in, eight at a time: the exchange refuses a burst of sign-ins from one
+    address while their passwords are checked."""
+    gate = asyncio.Semaphore(8)
+
+    async def one(username: str, password: str, instrument: str) -> stress.Session:
+        async with gate:
+            trader = await stress.sign_in(base_url, username, password, instrument)
+            try:
+                return stress.session(trader)
+            finally:
+                await trader.client.aclose()
+
+    return list(await asyncio.gather(*(one(*login) for login in logins)))
+
+
 async def stress_rates(
     options: Options,
     logins: list[tuple[str, str, str]],
@@ -1077,87 +1094,87 @@ async def stress_rates(
     cpu: Callable[[], str] | None = None,
     counters: Callable[[], dict[str, tuple[float, float, float]]] | None = None,
 ) -> tuple[list[stress.Result], list[float], str | None]:
-    """Signs every login in, then fires each rate in turn, each starting with no open orders, while
-    the publication backlog, the feeds' lag, Execution's timers and each container's processor are
-    sampled, and its CPU throttling read at the measured window's ends. A rate that cannot be
-    measured ends the run; the rates before it are still returned."""
+    """Signs every login in, once, then fires each rate in turn from its generator processes, each
+    rate starting with no open orders, while the publication backlog, the feeds' lag, Execution's
+    timers and each container's processor are sampled, and its CPU throttling read at the
+    measured window's ends. The samplers start as the processes do, so their times share the
+    schedule's clock. A rate that cannot be measured ends the run; the rates before it are still
+    returned."""
     assert options.stress is not None
     base_url = f"http://{HOST}:{WEB_PORT}"
-    gate = asyncio.Semaphore(8)
-    traders: list[stress.Trader] = []
-
-    async def sign_in(username: str, password: str, instrument: str) -> None:
-        async with gate:
-            traders.append(await stress.sign_in(base_url, username, password, instrument))
-
-    async def tidy(trader: stress.Trader) -> None:
-        async with gate:
-            await trader.tidy()
-
+    sessions = await signed_in(base_url, logins)
+    loop = asyncio.get_running_loop()
     results: list[stress.Result] = []
     skipped: list[float] = []
     broke = None
-    try:
-        await asyncio.gather(*(sign_in(*login) for login in logins))
-        for index, rate in enumerate(options.stress):
-            logger.info("rate %d: %.0f commands/s", index + 1, rate)
-            warmup = (
-                max(options.stress_warmup, FIRST_WARMUP) if index == 0 else options.stress_warmup
-            )
-            sampled = diagnostics.Sampled()
-            throttled: dict[str, tuple[float, float]] = {}
-            try:
-                await asyncio.gather(*(tidy(trader) for trader in traders))
-                samplers = [asyncio.create_task(sample_downstream(sample, sampled))]
-                if cpu is not None:
-                    samplers.append(asyncio.create_task(sample_cpu(cpu, sampled)))
-                held = None
-                if counters is not None:
-                    held = asyncio.create_task(
+    for index, rate in enumerate(options.stress):
+        logger.info(
+            "rate %d: %.0f commands/s from %d processes", index + 1, rate, stress.processes(rate)
+        )
+        warmup = max(options.stress_warmup, FIRST_WARMUP) if index == 0 else options.stress_warmup
+        sampled = diagnostics.Sampled()
+        throttled: dict[str, tuple[float, float]] = {}
+        samplers: list[asyncio.Task[None]] = []
+        held: list[asyncio.Task[dict[str, tuple[float, float]]]] = []
+
+        def begin(
+            sampled: diagnostics.Sampled = sampled,
+            warmup: float = warmup,
+            samplers: list[asyncio.Task[None]] = samplers,
+            held: list[asyncio.Task[dict[str, tuple[float, float]]]] = held,
+        ) -> None:
+            samplers.append(asyncio.create_task(sample_downstream(sample, sampled)))
+            if cpu is not None:
+                samplers.append(asyncio.create_task(sample_cpu(cpu, sampled)))
+            if counters is not None:
+                held.append(
+                    asyncio.create_task(
                         throttled_between(counters, warmup, warmup + options.stress_duration)
                     )
-                try:
-                    sent = await stress.fire(
-                        traders[: stress.traders(rate)],
-                        rate,
-                        warmup + options.stress_duration,
-                    )
-                finally:
-                    for task in samplers:
-                        task.cancel()
-                    for task in samplers:
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await task
-                if held is not None:
-                    try:
-                        throttled = await held
-                    except Exception:  # noqa: BLE001 - the rate is still reported without it
-                        logger.warning("the CPU throttling could not be read", exc_info=True)
-            except Exception as error:  # noqa: BLE001 - the rates before it are still reported
-                logger.exception(
-                    "rate %d at %.0f commands/s could not be measured", index + 1, rate
                 )
-                broke = f"{rate:,.0f}/s ({type(error).__name__}: {error})"
-                skipped = options.stress[index + 1 :]
-                break
-            result = stress.measured(
-                rate, warmup, options.stress_duration, sent, sampled, throttled
-            )
-            results.append(result)
-            logger.info(
-                "rate %d: answered %.1f/s, p99 %s, %s",
-                index + 1,
-                result.answered_rate,
-                result.latency(0.99),
-                "met every budget" if result.passed else "missed: " + ", ".join(result.missed()),
-            )
-            if not result.passed:
-                skipped = options.stress[index + 1 :]
-                break
-            # Let the writer's queue empty before the next rate.
-            await asyncio.sleep(5)
-    finally:
-        await asyncio.gather(*(trader.client.aclose() for trader in traders))
+
+        try:
+            try:
+                sent = await asyncio.to_thread(
+                    stress.fire_in_processes,
+                    base_url,
+                    sessions,
+                    rate,
+                    warmup + options.stress_duration,
+                    started=lambda begin=begin: loop.call_soon_threadsafe(begin),
+                )
+            finally:
+                for task in samplers:
+                    task.cancel()
+                for task in samplers:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+        except Exception as error:  # noqa: BLE001 - the rates before it are still reported
+            for task in held:
+                task.cancel()
+            logger.exception("rate %d at %.0f commands/s could not be measured", index + 1, rate)
+            broke = f"{rate:,.0f}/s ({type(error).__name__}: {error})"
+            skipped = options.stress[index + 1 :]
+            break
+        for task in held:
+            try:
+                throttled = await task
+            except Exception:  # noqa: BLE001 - the rate is still reported without it
+                logger.warning("the CPU throttling could not be read", exc_info=True)
+        result = stress.measured(rate, warmup, options.stress_duration, sent, sampled, throttled)
+        results.append(result)
+        logger.info(
+            "rate %d: answered %.1f/s, p99 %s, %s",
+            index + 1,
+            result.answered_rate,
+            result.latency(0.99),
+            "met every budget" if result.passed else "missed: " + ", ".join(result.missed()),
+        )
+        if not result.passed:
+            skipped = options.stress[index + 1 :]
+            break
+        # Let the writer's queue empty before the next rate.
+        await asyncio.sleep(5)
     return results, skipped, broke
 
 
@@ -1215,14 +1232,9 @@ def run(options: Options) -> int:
         )
         checks, restarted = correctness(stack, instruments)
         split = diagnostics.writer_split(before.metrics, after.metrics)
-        committed = sum(
-            stats.total(after.metrics, "mse_writer_commit_seconds_count", command=command)
-            - stats.total(before.metrics, "mse_writer_commit_seconds_count", command=command)
-            for command in ("place", "cancel")
-        )
         where = diagnostics.report(
             split,
-            diagnostics.database_window(database_before, database_after, committed),
+            diagnostics.database_window(database_before, database_after, split.commands),
             diagnostics.reads_per_second(before.metrics, after.metrics, after.at - before.at),
             sampled,
             payloads,

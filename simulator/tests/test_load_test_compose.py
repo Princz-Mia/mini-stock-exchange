@@ -38,3 +38,16 @@ def test_no_setting_turns_durability_off() -> None:
         settings = postgres_settings(path)
         for name in ("fsync", "synchronous_commit", "full_page_writes"):
             assert name not in settings, f"{path} must leave {name} at its default (on)"
+
+
+def test_everyones_stack_runs_trading_commands_in_runs_of_up_to_32() -> None:
+    # The service's own default is one command per transaction; Compose, and so the load test,
+    # sets the limit for everyone, and the load test's overlay must not change it.
+    lines = (ROOT / "compose.yaml").read_text(encoding="utf-8").splitlines()
+    start = lines.index("  execution-service:")
+    end = next(
+        i for i in range(start + 1, len(lines)) if lines[i].startswith("  ") and lines[i][2] != " "
+    )
+    assert "      MSE_TRADING_MAX_BATCH: 32" in lines[start:end]
+    overlay = (ROOT / "infra/load-test/compose.diagnostics.yaml").read_text(encoding="utf-8")
+    assert "MSE_TRADING_MAX_BATCH" not in overlay

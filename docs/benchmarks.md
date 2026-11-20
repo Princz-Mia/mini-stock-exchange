@@ -301,3 +301,85 @@ The stress run now also reports, per rate, the writer's phases from Execution's 
 - The writer binds: about 1.45 ms of statements and 2.2 to 2.4 ms of commit per command, most of the commit being the WAL flush.
 - CPU does not: Execution and PostgreSQL were never held back at their limits and used at most 60% and 105% of one CPU of the two each may use.
 - Over 10 minutes the commit rose to 2.8 ms and the queue grew without end at 250 a second, so the sustainable rate on this host is nearer 235.
+
+### Group commit on, 2026-11-19
+
+Execution now commits the orders and cancels waiting in its queue together, as one transaction of up to 32 (`MSE_TRADING_MAX_BATCH` in `compose.yaml`). Each keeps its own answer, sequence and rows. The same open-loop stress run as above, with durable commits, in the same environment except for these changes:
+
+- **The proxy keeps its connections to the services open.** It used to open one per request. Each closed connection then waits a minute in TIME_WAIT, so the proxy ran out of its 28,232 local ports near 470 requests a second: at 500 a second, 2,034 commands in a minute were answered 502.
+- **The proxy's CPU limit is 2 instead of 0.5.** At 0.5 it saturated near 300 commands a second, before the writer.
+- **The stress generator runs one process per 400 commands a second.** One Python process falls behind its schedule somewhere between 800 and 1,000 a second. Past that, its own lag failed the rate, not the exchange.
+
+**Highest rate that met every budget: 1,200 commands a second**, against 250 on 2026-11-18.
+
+| Rate | Generator processes | p50 | p95 | p99 | Generator lag p99 | Met |
+| --- | --- | --- | --- | --- | --- | --- |
+| 400/s | 1 | 13.5 ms | 19.0 ms | 26.4 ms | 5.9 ms | yes |
+| 600/s | 2 | 15.3 ms | 24.1 ms | 33.8 ms | 9.9 ms | yes |
+| 800/s | 2 | 17.0 ms | 28.0 ms | 47.8 ms | 10.1 ms | yes |
+| 1,000/s | 3 | 19.3 ms | 32.2 ms | 53.5 ms | 11.2 ms | yes |
+| 1,200/s | 3 | 25.0 ms | 70.1 ms | 109.4 ms | 11.6 ms | yes |
+| 1,500/s | 4 | 8.4 s | 31.8 s | 43.1 s | 870 ms | no: 1,019 refused by the account limit, latency |
+
+Up to 1,200 a second, every planned command was answered: none refused, none failed. The accounting checks passed afterwards, and restarting Execution with its reconciliation took 7 s.
+
+**How the writer behaves.** Means over each measured minute, from Execution's timers and `docker stats`; CPU is in percent of one CPU, and each limit is 2 CPUs:
+
+| Rate | Mean run | Statements per run | Commit per run | Writer time per command | Execution CPU | PostgreSQL CPU | Proxy CPU |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 400/s | 1.7 | 1.75 ms | 2.35 ms | 2.40 ms | 60% | 79% | 9% |
+| 600/s | 2.7 | 1.85 ms | 2.47 ms | 1.61 ms | 87% | 112% | 13% |
+| 800/s | 4.0 | 2.08 ms | 2.74 ms | 1.20 ms | 114% | 116% | 17% |
+| 1,000/s | 5.5 | 2.33 ms | 2.90 ms | 0.95 ms | 149% | 146% | 25% |
+| 1,200/s | 8.4 | 3.23 ms | 3.12 ms | 0.75 ms | 186% | 168% | 28% |
+| 1,500/s | 19.4 | 10.62 ms | 5.08 ms | 0.81 ms | 203% | 180% | 34% |
+
+- **The writer is busy almost all the time at every rate,** 92 to 98%. It is always in a transaction, and its runs grow with the load.
+- **A transaction costs 4 to 6 ms up to runs of about 8.** So the writer's time per command falls as runs grow: from 2.4 ms at 400 a second to 0.75 ms at 1,200. At one command per transaction, the writer topped out near 250 a second.
+- **At 1,500 a second, Execution is at its 2-CPU limit, and PostgreSQL is close to its own.** The writer still empties its queue (14 ms of queue wait on average), but the HTTP threads share those CPUs. Requests wait before they reach the queue and then arrive in bursts, which the per-account rate limit refuses. More throughput needs higher CPU limits for Execution and PostgreSQL, not a writer change.
+- **A cold start at a high rate is slow for about a minute.** A stack started straight at 700 a second took 35 to 90 ms per transaction while the JVM compiled. Then the commands that piled up in the generator drained slowly: each trader login sends 7.9 a second against its account's limit of 10, so it can catch up by only 2 a second. The runs above start at 400 a second.
+
+**Ten minutes at a rate.** Each rate below was measured for 10 minutes after a 2-minute warm-up, following 10 minutes at 400 a second so that it started warm. **Highest rate that met every budget for ten minutes: 800 commands a second.**
+
+| Rate | Runs | Answered | Refused or timed out | p50 | p95 | p99 | Generator lag p99 | Met |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 400/s | 7 | 400.0/s | 0 | 13.4 to 23.7 ms | 18.0 to 36.5 ms | 22.1 to 61.0 ms | 5.3 to 8.6 ms | yes, every run |
+| 800/s | 1 | 800.0/s | 0 | 54.4 ms | 103.8 ms | 164.9 ms | 12.6 ms | yes |
+| 1,000/s | 5 | 997.2 to 1,000.0/s | 0 to 1,667 | 135 to 687 ms | 706 ms to 12.1 s | 1.05 to 26.0 s | 10.3 to 560 ms | no: p95 and p99 |
+| 1,200/s | 1 | 1,166.9/s | 19,888 | 54 s | 415 s | 523 s | 3.0 s | no |
+
+- **Execution's database pool limits ten minutes at 1,000 a second.** The third window, on 2026-11-20, sampled Execution's connection pools every 5 seconds. The shared pool has 10 connections, and one of them always holds the writer's ownership lock. It stayed full the whole time: up to 190 requests waited for a connection, about 33 ms per borrow at first and 12 ms by the end. Each trading request borrows a connection four times: to load its session, to check its password version, to look up its account, and to save its session. Saving the session is an `UPDATE` whose commit waits for the WAL flush, so most likely it holds its connection longest; the pool's metrics can't split the time by statement. The writer has a separate pool and kept up: its admission-to-commit p99 stayed between 45 and 90 ms each minute.
+- **The missed percentiles come from backlogs that clear slowly.** With the pool full, Execution handles only slightly more than 1,000 a second, so after a short stall the requests queue for Tomcat's 200 request threads. That happened about 10 s into the rate, leaving about 3.5 s of backlog that took 5 minutes to clear. It happened again when a checkpoint finished, adding about 1.4 s. Once the backlog had cleared, p95 and p99 were about 165 and 200 ms.
+- **Durable commits become twice as slow, and the slowdown is in the disk below PostgreSQL.** Every failed ten-minute window ran with the writer's commit at about 6.5 ms per transaction at 1,000 a second, against 2.9 ms when commits are fast. Where the samples caught the change, it took about 10 seconds, and commits stayed slow until the load stopped. A fourth run, on 2026-11-20, timed PostgreSQL's WAL syncs. A separate container timed synced 8 kB writes on the same Docker disk. Both slowed at the same moment: WAL syncs went from 1.75 to about 3.9 ms, and the probe's writes from 2.0 to about 4.3 ms. Windows' own disk write time rose about fourfold with them. Within 5 seconds of the load stopping, the probe was back at its idle 0.7 ms. PostgreSQL flushes its WAL back to back in both states, about 520 times a second when fast and 250 when slow, so the time per flush sets how many commits it can make durable.
+- **What starts the slowdown is not known.** In three runs it came 10.6 to 14.5 minutes into the load, with no common amount of WAL or commands written before it. A fifth run made 4 GB of WAL files before the load, so PostgreSQL reused them and created none during the run, and it still slowed. In one run the slowdown began as the first checkpoint started writing. In the other two, nothing in PostgreSQL's counters or the VM's memory changed first: no checkpoint, no full-page images, a steady WAL rate. A 10-second pause between rates didn't end it. The one-minute ramp above ran while commits were fast. Windows' disk counters leave out flushes, so they can't tell whether the extra time is spent in Docker Desktop's virtual disk or in the SSD itself.
+- **At 1,200 a second the generator broke down as well.** Once answers slowed, its three processes reached their CPU limit and fell behind (lag 3 s, 13,298 requests timed out). That window measures the generator as much as the exchange.
+- Every run's accounting checks passed, even the failed ones. Restarting Execution with its reconciliation took 7 to 17 s.
+
+**Where Execution's CPU goes (JFR).** Execution was recorded for 50 s inside measured windows, with JFR's profiling settings. Its CPU, in percent of one CPU, and the share of its CPU samples by thread:
+
+| | Run limit 1, 200/s | Run limit 32, 200/s | Run limit 32, 1,000/s |
+| --- | --- | --- | --- |
+| Execution CPU | 43% | 39% | 164% |
+| HTTP request threads | 63% | 69% | 86% |
+| The writer | 32% | 19% | 10% |
+| Kafka producer | 4% | 7% | 3% |
+| GC pauses, worst | 10 ms | 8 ms | 67 ms |
+
+- **At 200 a second, runs cut the writer's share of the CPU from 32% to 19%,** and Execution's CPU from 43% to 39%.
+- **At 1,000 a second, the HTTP request threads take 86% of Execution's CPU, and the writer only 10%.** What binds Execution at 1,500 a second is the work per request, not the writer.
+- **Where the request threads' samples land:** Micrometer's per-request metrics about 20%, Tomcat 18%, Spring's web and other layers 24%, Spring Security 9%, the JDBC driver 5%, Jackson 3%, sessions read and deserialized about 7%, and our own code 1%.
+- JFR's profiling settings cost enough CPU to fail the 1,000-a-second window they were recorded in (p95 547 ms), so these recordings are kept apart from the results above.
+
+**The steady-load scenario still meets every budget.** The 10,000-bot run at 100 a second from "Steady load", with runs on:
+
+| | 2026-11-15 | 2026-11-19, runs on |
+| --- | --- | --- |
+| Committed | 96.7 a second | 94.8 a second |
+| Estimated p50 / p95 / p99 | 5.1 / 12.5 / 55.6 ms | 4.1 / 7.3 / 9.8 ms |
+| Client p50 / p95 / p99, through the proxy | 10.9 / 18.5 / 31.0 ms | 9.7 / 13.7 / 15.5 ms |
+| Within 150 ms | 100.000% | 100.000% |
+| Unexpected failures | 0 | 0 |
+
+At 100 a second, commands rarely wait for each other: the mean run was 1.00. The bots themselves cannot offer much more: the simulator reached its 1-CPU limit near 175 a second on 2026-11-17.
+
+**Environment:** as for the 2026-11-08 run, except the proxy's CPU limit (2). Commit `d92d659` for the ten-minute windows and the JFR recordings; the one-minute ramp and the bot run used the same exchange code, before the generator's last two fixes.

@@ -178,47 +178,77 @@ def database_window(
     )
 
 
+# The writer times a transaction once, tagged by its command's kind when it held one order or
+# cancel, or "run" when it held several; queue time is each command's own, tagged by its kind.
+TRANSACTIONS = ("place", "cancel", "run")
+RUN_SIZE = "mse_writer_run_size_commands"
+
+
 @dataclass(frozen=True)
 class WriterSplit:
-    """Mean milliseconds per phase, by command, over the window, and the rate one writer could
-    sustain at the measured service time."""
+    """Mean milliseconds per phase over the window, by transaction (a run's row has no queue time,
+    which is each command's); the writer's time per committed command, begin to apply, over every
+    transaction; the mean run; and the rate one writer could sustain at that time per command."""
 
-    means: dict[str, dict[str, float]]
+    means: dict[str, dict[str, float | None]]
     service_ms: float | None
     ceiling: float | None
-    # Committed commands over the window, by command.
-    commands: dict[str, float] = field(default_factory=dict)
+    commands: float
+    mean_run: float | None
+    # Milliseconds per committed command, by phase: a phase's time over every transaction divided
+    # by the commands they held, and queue_wait as each command's own mean.
+    per_command: dict[str, float | None] = field(default_factory=dict)
+
+
+def _moved(before: Samples, after: Samples, name: str, **labels: str) -> float:
+    return stats.total(after, name, **labels) - stats.total(before, name, **labels)
+
+
+def committed_commands(before: Samples, after: Samples) -> float:
+    """Orders and cancels the writer ran in the window: the commands its runs held, a run of one
+    included. A writer that does not count runs ran each in its own transaction, so its place and
+    cancel commits are the count."""
+    held = _moved(before, after, f"{RUN_SIZE}_sum")
+    if held > 0:
+        return held
+    return sum(
+        _moved(before, after, "mse_writer_commit_seconds_count", command=command)
+        for command in ("place", "cancel")
+    )
 
 
 def writer_split(before: Samples, after: Samples) -> WriterSplit:
-    means: dict[str, dict[str, float]] = {}
-    counts: dict[str, float] = {}
-    weighted = 0.0
-    commands = 0.0
-    for command in ("place", "cancel"):
+    means: dict[str, dict[str, float | None]] = {}
+    totals = {phase: 0.0 for phase in PHASES}
+    queued = 0.0
+    busy = 0.0
+    for command in TRANSACTIONS:
         means[command] = {}
-        service = 0.0
         for phase in PHASES:
             name = f"mse_writer_{phase}_seconds"
-            count = stats.total(after, f"{name}_count", command=command) - stats.total(
-                before, f"{name}_count", command=command
-            )
-            seconds = stats.total(after, f"{name}_sum", command=command) - stats.total(
-                before, f"{name}_sum", command=command
-            )
-            mean = seconds / count * 1000 if count > 0 else 0.0
-            means[command][phase] = mean
+            count = _moved(before, after, f"{name}_count", command=command)
+            seconds = _moved(before, after, f"{name}_sum", command=command)
+            means[command][phase] = seconds / count * 1000 if count > 0 else None
             if phase != "queue_wait":
-                service += mean
-        done = stats.total(after, "mse_writer_commit_seconds_count", command=command) - stats.total(
-            before, "mse_writer_commit_seconds_count", command=command
+                busy += seconds
+            else:
+                queued += count
+            totals[phase] += seconds
+    commands = committed_commands(before, after)
+    runs = _moved(before, after, f"{RUN_SIZE}_count")
+    service_ms = busy * 1000 / commands if commands > 0 else None
+    per_command: dict[str, float | None] = {
+        phase: (
+            (seconds * 1000 / queued if queued > 0 else None)
+            if phase == "queue_wait"
+            else (seconds * 1000 / commands if commands > 0 else None)
         )
-        weighted += service * done
-        commands += done
-        counts[command] = done
-    service_ms = weighted / commands if commands > 0 else None
+        for phase, seconds in totals.items()
+    }
     ceiling = 1000 / service_ms if service_ms else None
-    return WriterSplit(means, service_ms, ceiling, counts)
+    return WriterSplit(
+        means, service_ms, ceiling, commands, commands / runs if runs > 0 else None, per_command
+    )
 
 
 def reads_per_second(before: Samples, after: Samples, seconds: float) -> dict[str, float]:
@@ -438,19 +468,23 @@ def report(
 
     lines = ["## Where the time goes", ""]
     lines += [
-        "Means over the window, from the writer's timers (committed transactions only):",
+        "Means over the window, from the writer's timers (committed transactions only). A place or "
+        "cancel row is a transaction that held that one command; a run is one that held several. "
+        "Queue time is each command's own:",
         "",
         "| | Queue | Begin | Work | Commit | Apply |",
         "| --- | --- | --- | --- | --- | --- |",
     ]
-    for command in ("place", "cancel"):
+    for command in TRANSACTIONS:
         m = split.means[command]
         lines.append(f"| {command} | " + " | ".join(ms(m[phase]) for phase in PHASES) + " |")
     ceiling = "n/a" if split.ceiling is None else f"{split.ceiling:.0f} commands a second"
+    run = "n/a" if split.mean_run is None else f"{split.mean_run:.2f} commands"
     lines += [
         "",
-        f"- Service time (begin to apply, weighted by commands): {ms(split.service_ms)}; one "
-        f"writer at that time sustains about {ceiling}.",
+        f"- Service time per command (begin to apply, every transaction's time over the "
+        f"{split.commands:,.0f} commands they held): {ms(split.service_ms)}, at a mean run of "
+        f"{run}; one writer at that time sustains about {ceiling}, and more as runs grow.",
         f"- Statements Execution sent, reads included, per committed command: "
         f"{window.statements_per_command:.1f}, taking the database "
         f"{ms(window.server_ms_per_command)}. The writer's own counts are pinned in its tests.",
