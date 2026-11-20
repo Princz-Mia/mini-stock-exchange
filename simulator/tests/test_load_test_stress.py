@@ -323,6 +323,95 @@ def test_samples_after_the_plan_ends_are_left_out() -> None:
     assert measured.downstream.verdicts[diagnostics.BACKLOG].last_minute == 4_000.0
 
 
+def cost(second: int, command: str) -> float:
+    """Seconds each phase takes for one command started in that second: slow before the window
+    (30 s to 90 s), slower after it, and inside it rising by a microsecond a second, so only the
+    window's own two scrapes give the expected means. A cancel costs a third of a place."""
+    if second < 30:
+        base = 0.010
+    elif second < 90:
+        base = 0.003 + (second - 30) * 0.000001
+    else:
+        base = 0.5
+    return base if command == "place" else base / 3
+
+
+def writer_scrape(at: int) -> dict:
+    """Execution's writer timers after at seconds of 30 places and 10 cancels a second, each phase
+    but queue_wait taking cost(); queue_wait takes twice that."""
+    counts = {"place": 0, "cancel": 0}
+    sums = {"place": 0.0, "cancel": 0.0}
+    for second in range(at):
+        for command, per_second in (("place", 30), ("cancel", 10)):
+            counts[command] += per_second
+            sums[command] += per_second * cost(second, command)
+    lines = []
+    for command in ("place", "cancel"):
+        for phase in diagnostics.PHASES:
+            total = sums[command] * (2 if phase == "queue_wait" else 1)
+            lines.append(
+                f'mse_writer_{phase}_seconds_count{{command="{command}"}} {counts[command]}'
+            )
+            lines.append(f'mse_writer_{phase}_seconds_sum{{command="{command}"}} {total}')
+    return stats.parse_prometheus("\n".join(lines))
+
+
+def test_the_writer_and_the_containers_are_taken_over_the_measured_window() -> None:
+    sampled = diagnostics.Sampled()
+    sampled.execution = [(float(at), writer_scrape(at)) for at in range(0, 121, 5)]
+    sampled.cpu_at = {
+        "postgres": [(20.0, 190.0), (30.0, 100.0), (60.0, 120.0), (90.0, 80.0), (100.0, 5.0)],
+        "web": [(50.0, 30.0)],
+    }
+    sent = [stress.Sent(at / 10, at / 10 + 0.001, at / 10 + 0.01, 201) for at in range(900)]
+
+    measured = stress.measured(500.0, 30.0, 60.0, sent, sampled, {"postgres": (0.25, 40.0)})
+
+    split = measured.writer
+    assert split is not None
+    assert split.commands == {"place": 1_800, "cancel": 600}, "the window's own commands"
+    # Inside the window a place's phase averages 3.0295 ms (3 ms plus 29.5 us of rise); a cancel's
+    # a third of it. Weighted 3:1, a phase is 2.5246 ms; queue_wait twice that.
+    place = 3.0295
+    phase = (place * 3 + place / 3) / 4
+    assert stress.weighted(split, "work") == pytest.approx(phase)
+    assert stress.weighted(split, "queue_wait") == pytest.approx(2 * phase)
+    assert split.service_ms == pytest.approx(4 * phase), "begin, work, commit and apply"
+    assert measured.cpu == {"postgres": (100.0, 120.0), "web": (30.0, 30.0)}, (
+        "readings at 30 s and 90 s belong to the window"
+    )
+    assert measured.throttled == {"postgres": (0.25, 40.0)}
+
+    text = "\n".join(stress.report([measured], []))
+    assert "| 500/s | 5.05 ms | 2.52 ms | 2.52 ms | 2.52 ms | 2.52 ms | 10.10 ms | 99/s |" in text
+    assert "| 500/s | n/a | 100 / 120, held 25% | n/a | n/a | 30 / 30 |" in text
+
+
+def test_fractional_rates_keep_their_decimals_in_every_table() -> None:
+    assert stress.label(250.0) == "250/s"
+    assert stress.label(12.25) == "12.25/s"
+    assert stress.label(12.5) == "12.5/s"
+    assert stress.label(1500.0) == "1,500/s"
+    text = "\n".join(
+        stress.report([result(*GOOD), stress.Result(12.25, 1.0, result(*GOOD).sent)], [12.5])
+    )
+    assert "| 12.25/s | n/a | n/a |" in text
+    assert "Not run, after a rate missed a budget: 12.5/s." in text
+
+
+def test_without_two_scrapes_in_the_window_the_writer_is_not_reported() -> None:
+    sampled = diagnostics.Sampled()
+    sampled.execution = [(31.0, writer_scrape(31)), (95.0, writer_scrape(95))]
+    sent = [stress.Sent(at / 10, at / 10 + 0.001, at / 10 + 0.01, 201) for at in range(900)]
+
+    measured = stress.measured(500.0, 30.0, 60.0, sent, sampled)
+
+    assert measured.writer is None and measured.cpu == {} and measured.throttled == {}
+    assert "| 500/s | n/a | n/a | n/a | n/a | n/a | n/a | n/a |" in "\n".join(
+        stress.report([measured], [])
+    )
+
+
 def test_answers_below_the_planned_share_fail_a_rate() -> None:
     measured = result(*([(0.010, 201)] * 800 + [(0.010, 503)] * 200))
 

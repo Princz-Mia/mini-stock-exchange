@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import time
 
 import httpx
 import pytest
@@ -234,6 +235,70 @@ def test_downstream_samples_are_timed_from_the_start_and_a_failed_one_is_skipped
     times = [at for at, _ in sampled.feed_lag["mse.market.v1"]]
     assert times[0] == pytest.approx(0.0, abs=0.05)
     assert times[1] == pytest.approx(0.10, abs=0.05)
+
+
+def test_a_run_rate_is_written_as_the_api_takes_it_or_refused_before_starting(
+    tmp_path, monkeypatch
+) -> None:
+    (tmp_path / "compose.yaml").write_text("services: {}")
+    monkeypatch.chdir(tmp_path)
+    assert loadtest.run_rate("225") == "225.00"
+    assert loadtest.run_rate("12.5") == "12.50"
+    assert loadtest.run_rate("100.00") == "100.00"
+    assert parse(["--rate", "225"]).rate == "225.00"
+    for text in ("abc", "0.001", "0", "-5", "2000.01", "nan", "inf", "1.234"):
+        with pytest.raises(ValueError):
+            loadtest.run_rate(text)
+    with pytest.raises(SystemExit):
+        parse(["--rate", "2500"])
+
+
+def test_processor_readings_and_cpu_throttling_are_taken_while_a_rate_runs() -> None:
+    sampled = loadtest.diagnostics.Sampled()
+    readings = iter(["mse-load-postgres-1|40.00%\n", "mse-load-postgres-1|60.00%\n"])
+    counters = iter([{"postgres": (100, 0, 0)}, {"postgres": (200, 20, 500_000)}])
+
+    read_at: list[float] = []
+
+    def count():
+        read_at.append(time.monotonic())  # the clock asyncio's loop keeps
+        return next(counters)
+
+    async def run() -> tuple[dict, float]:
+        began = asyncio.get_running_loop().time()
+        task = asyncio.create_task(
+            loadtest.sample_cpu(lambda: next(readings, ""), sampled, every=0.05)
+        )
+        held = await loadtest.throttled_between(count, 0.1, 0.2)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        return held, began
+
+    held, began = asyncio.run(run())
+
+    assert [value for _, value in sampled.cpu_at["postgres"]][:2] == [40.0, 60.0]
+    times = [at for at, _ in sampled.cpu_at["postgres"]][:2]
+    assert times[0] == pytest.approx(0.0, abs=0.05) and times[1] == pytest.approx(0.05, abs=0.05)
+    assert read_at[0] - began >= 0.09, "the first counters wait for the window's start"
+    assert read_at[1] - read_at[0] == pytest.approx(0.1, abs=0.05)
+    assert held["postgres"][0] == pytest.approx(0.2), "20 of 100 periods"
+    assert held["postgres"][1] == pytest.approx(5_000, rel=0.5), "500 ms in about 0.1 s"
+
+
+def test_cpu_counters_skip_a_service_that_cannot_be_read() -> None:
+    class FakeStack:
+        def exec(self, service, *command):
+            if service == "kafka":
+                raise RuntimeError("no such container")
+            if service == "web":
+                return "usage_usec 5\n"
+            return "nr_periods 10\nnr_throttled 1\nthrottled_usec 300\n"
+
+    counters = loadtest.cpu_stats(FakeStack())
+
+    assert set(counters) == {"execution-service", "postgres", "market-data-service"}
+    assert counters["postgres"] == (10, 1, 300)
 
 
 def test_each_report_names_its_own_generator() -> None:
