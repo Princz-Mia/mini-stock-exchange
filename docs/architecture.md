@@ -170,7 +170,7 @@ erDiagram
 - **Bot runs:** each strategy in a run is assigned to the oldest bots tagged with it, and a foreign key from `bot_assignment` to the bot's tag refuses any other assignment. Neither the population nor a run has a size limit, so the simulator reads a run's bots in pages, once, since they never change.
 - **Resting orders** are limited per account (20 by default) and across the market (200,000), so a market of 10,000 bots fits; the market-wide count comes from the in-memory books, not a query per order.
 - **Answers and events:** `command_result` stores each idempotency key's answer, and `outbox` holds every event ever published.
-- **Sessions** are `spring_session` rows.
+- **Sessions** are `spring_session` rows, written through their own small connection pool whose commits don't wait for the WAL flush. Each signed-in request saves its last access, so this keeps a commit per request off the trading writer's path. If PostgreSQL itself crashes, session changes from its last fraction of a second may be lost: a trader signs in again, or a sign-out in that instant is undone. Everything else stays durable.
 
 **In `market_data_db`:**
 - `instrument_projection`, `market_snapshot` (depth and quotes), `public_trade` and `candle_1m`;
@@ -219,7 +219,7 @@ The main decisions, each with its consequences and the condition for revisiting 
 - **Events leave through an outbox,** at least once and in order, with idempotent consumers.
 - **Analytics as a separate Flink job** that reads Kafka only, never a database, so its failure can't touch trading.
 - **Whole cents in a `long`** for every amount, with overflow checked.
-- **Server-side sessions for people and hashed bearer tokens for bots.** The private stream carries only account versions and is tied to the session.
+- **Server-side sessions for people and hashed bearer tokens for bots.** The private stream carries only account versions and is tied to the session. Session writes commit asynchronously; revisit if a lost sign-out ever matters more than a commit per request.
 
 ## Requirements and where they are met
 
