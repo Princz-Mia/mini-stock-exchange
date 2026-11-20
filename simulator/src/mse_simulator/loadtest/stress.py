@@ -14,11 +14,11 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import astuple, dataclass
+from dataclasses import astuple, dataclass, field
 
 import httpx
 
-from mse_simulator.loadtest import stats
+from mse_simulator.loadtest import diagnostics, stats
 
 # A person's account may send 10 trading commands a second; each trader login stays well under it.
 PER_TRADER = 8
@@ -44,6 +44,9 @@ GENERATOR_LAG_BUDGET = 0.050
 PER_PROCESS = 400
 # How long the processes of one rate wait for each other to be ready before the rate is given up.
 READY_TIMEOUT = 300.0
+# The containers a stress run passes through: the commands come from this machine through the
+# proxy (web), not from the simulator.
+SERVICES = ("execution-service", "postgres", "kafka", "market-data-service", "web")
 
 
 def processes(rate: float) -> int:
@@ -307,19 +310,21 @@ def fire_in_processes(
     seconds: float,
     ready_timeout: float = READY_TIMEOUT,
     target: Callable[..., None] = run_share,
+    started: Callable[[], None] | None = None,
 ) -> list[Sent]:
     """Fires a rate from processes(rate) processes, each with its own signed-in logins and every
     processes(rate)-th command of the one schedule, started together; returns the commands of
     all of them, in planned order. Times count from each process's start, which a barrier
-    aligns to within milliseconds. A process that ends without reporting releases the others,
-    and the rate fails with its exit code."""
+    aligns to within milliseconds; started, if given, is called on a thread of its own as the
+    barrier releases them, so what it starts shares their clock. A process that ends without
+    reporting releases the others, and the rate fails with its exit code."""
     every = processes(rate)
     needed = traders(rate)
     if len(sessions) < needed:
         raise ValueError(f"{needed} logins carry {rate:,.0f}/s; {len(sessions)} given")
     per = needed // every
     context = multiprocessing.get_context("spawn")
-    ready = context.Barrier(every)
+    ready = context.Barrier(every + (0 if started is None else 1))
     out = context.Queue()
     workers = [
         context.Process(
@@ -346,6 +351,16 @@ def fire_in_processes(
     # still unreported a second later never will.
     ended: set[int] = set()
     deadline = time.monotonic() + ready_timeout + seconds + 120
+    if started is not None:
+
+        def on_release() -> None:
+            try:
+                ready.wait(ready_timeout)
+            except threading.BrokenBarrierError:
+                return
+            started()
+
+        threading.Thread(target=on_release, name="generator-start", daemon=True).start()
     try:
         for worker in workers:
             worker.start()
@@ -393,6 +408,14 @@ class Result:
     rate: float
     seconds: float
     sent: list[Sent]
+    # The publication backlog and the feeds' lag over the same window; None if not sampled.
+    downstream: diagnostics.Downstream | None = None
+    # The writer's phases over the window, from Execution's scrapes nearest its ends.
+    writer: diagnostics.WriterSplit | None = None
+    # Mean and peak processor per service over the window, in percent of one CPU.
+    cpu: dict[str, tuple[float, float]] = field(default_factory=dict)
+    # Per service: the share of periods held back at the CPU limit, and milliseconds a second.
+    throttled: dict[str, tuple[float, float]] = field(default_factory=dict)
 
     @property
     def planned(self) -> int:
@@ -444,6 +467,8 @@ class Result:
             f"at least {ANSWERED_SHARE:.0%} answered": self.planned > 0
             and len(self.ok) >= ANSWERED_SHARE * self.planned,
             "the generator kept up": lag is not None and lag <= GENERATOR_LAG_BUDGET,
+            "publication and the feeds kept up": self.downstream is not None
+            and self.downstream.kept_up,
         }
 
     @property
@@ -454,8 +479,40 @@ class Result:
         return [name for name, met in self.verdicts().items() if not met]
 
 
-def measured(rate: float, warmup: float, seconds: float, sent: list[Sent]) -> Result:
-    """The commands planned after the warm-up, with their times from the warm-up's end."""
+def measured(
+    rate: float,
+    warmup: float,
+    seconds: float,
+    sent: list[Sent],
+    sampled: diagnostics.Sampled | None = None,
+    throttled: dict[str, tuple[float, float]] | None = None,
+) -> Result:
+    """The commands planned after the warm-up, with their times from the warm-up's end; and the
+    backlog, lag and feed state sampled while the measured commands were planned, judged between
+    the window's first and last thirds. Samples after the plan's end, while the last answers come
+    in and nothing new is sent, are left out: the relay and the feeds catch up then."""
+    downstream = None
+    if sampled is not None:
+
+        def inside(series: list[tuple[float, float]]) -> list[tuple[float, float]]:
+            return [
+                (at - warmup, value) for at, value in series if warmup <= at <= warmup + seconds
+            ]
+
+        window = diagnostics.Sampled(
+            feed_lag={topic: inside(series) for topic, series in sampled.feed_lag.items()},
+            feed_live={topic: inside(series) for topic, series in sampled.feed_live.items()},
+            backlog=inside(sampled.backlog),
+        )
+        downstream = diagnostics.downstream(window, rate, seconds / 3)
+    writer = None
+    cpu: dict[str, tuple[float, float]] = {}
+    if sampled is not None:
+        writer = writer_over(sampled.execution, warmup, warmup + seconds)
+        for service, readings in sorted(sampled.cpu_at.items()):
+            values = [value for at, value in readings if warmup <= at <= warmup + seconds]
+            if values:
+                cpu[service] = (sum(values) / len(values), max(values))
     return Result(
         rate,
         seconds,
@@ -469,7 +526,22 @@ def measured(rate: float, warmup: float, seconds: float, sent: list[Sent]) -> Re
             for each in sent
             if each.intended >= warmup
         ],
+        downstream,
+        writer,
+        cpu,
+        throttled or {},
     )
+
+
+def writer_over(
+    scrapes: list[tuple[float, diagnostics.Samples]], start: float, end: float
+) -> diagnostics.WriterSplit | None:
+    """The writer's phases between the first scrape at or after start and the last at or before
+    end; None without two such scrapes."""
+    inside = [(at, samples) for at, samples in scrapes if start <= at <= end]
+    if len(inside) < 2:
+        return None
+    return diagnostics.writer_split(inside[0][1], inside[-1][1])
 
 
 def highest_passing(results: list[Result]) -> Result | None:
@@ -480,6 +552,83 @@ def highest_passing(results: list[Result]) -> Result | None:
             break
         best = each
     return best
+
+
+def label(rate: float) -> str:
+    """A rate as the tables name it, with the decimals it was given: 250/s, 12.25/s."""
+    return f"{rate:,.2f}".rstrip("0").rstrip(".") + "/s"
+
+
+def containers_lines(results: list[Result]) -> list[str]:
+    """The writer's phases and each container's processor per rate, for finding what binds."""
+
+    def ms(value: float | None) -> str:
+        return "n/a" if value is None else f"{value:.2f} ms"
+
+    lines = [
+        "",
+        "The writer over each measured window, per committed command (a run's transaction shared "
+        "among its commands); the service time is begin to apply, and what one writer sustains at "
+        "it:",
+        "",
+        "| Rate | Queue | Begin | Work | Commit | Apply | Service | One writer sustains |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for each in results:
+        split = each.writer
+        if split is None:
+            lines.append(f"| {label(each.rate)} | " + " | ".join(["n/a"] * 7) + " |")
+            continue
+        phases = " | ".join(ms(weighted(split, phase)) for phase in diagnostics.PHASES)
+        ceiling = "n/a" if split.ceiling is None else f"{split.ceiling:,.0f}/s"
+        lines.append(f"| {label(each.rate)} | {phases} | {ms(split.service_ms)} | {ceiling} |")
+    lines += [
+        "",
+        "Processor per rate, mean / peak in percent of one CPU, sampled about every 10 s; then the "
+        "share of scheduling periods each was held back at its CPU limit:",
+        "",
+        "| Rate | " + " | ".join(SERVICES) + " |",
+        "| --- | " + " | ".join("---" for _ in SERVICES) + " |",
+    ]
+    for each in results:
+        cells = []
+        for service in SERVICES:
+            cpu = each.cpu.get(service)
+            held = each.throttled.get(service)
+            cell = "n/a" if cpu is None else f"{cpu[0]:.0f} / {cpu[1]:.0f}"
+            cell += "" if held is None else f", held {held[0]:.0%}"
+            cells.append(cell)
+        lines.append(f"| {label(each.rate)} | " + " | ".join(cells) + " |")
+    return lines
+
+
+def weighted(split: diagnostics.WriterSplit, phase: str) -> float | None:
+    """A phase's milliseconds per committed command, a run's transaction shared among the commands
+    it held, as the service time counts them; queue_wait is each command's own mean."""
+    return split.per_command.get(phase)
+
+
+def downstream_lines(flows: list[tuple[float, diagnostics.Downstream | None]]) -> list[str]:
+    """What fell behind at each rate, and apart from it the rates not sampled enough to tell."""
+    behind = [
+        f"{label(rate)}: {flow.describe()}" for rate, flow in flows if flow and flow.fell_behind()
+    ]
+    unsampled = [
+        label(rate) + (f" ({flow.describe()})" if flow else "")
+        for rate, flow in flows
+        if flow is None or (not flow.measured and not flow.fell_behind())
+    ]
+    lines = []
+    if behind:
+        lines += ["", "Publication or a feed fell behind: " + "; ".join(behind) + "."]
+    if unsampled:
+        lines += [
+            "",
+            "Publication and the feeds were not sampled enough to judge: "
+            + "; ".join(unsampled)
+            + ".",
+        ]
+    return lines
 
 
 def report(results: list[Result], skipped: list[float], broke: str | None = None) -> list[str]:
@@ -497,33 +646,38 @@ def report(results: list[Result], skipped: list[float], broke: str | None = None
         + ".**",
         "",
         "| Rate | Processes | Traders | Planned | Answered | Refused or timed out | Failed | p50 | "
-        "p95 | p99 | Generator lag p99 | Met |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "p95 | p99 | Generator lag p99 | Backlog peak | Feed lag peak | Met |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for each in results:
         met = "yes" if each.passed else "no: " + ", ".join(each.missed())
+        flow = each.downstream
+        backlog = "n/a" if flow is None else f"{flow.peak(diagnostics.BACKLOG):,.0f}"
+        lag = "n/a" if flow is None else f"{flow.lag_peak:,.0f}"
         lines.append(
-            f"| {each.rate:,.0f}/s | {processes(each.rate)} | {traders(each.rate)} | "
+            f"| {label(each.rate)} | {processes(each.rate)} | {traders(each.rate)} | "
             f"{each.planned:,} | "
             f"{each.answered_rate:,.1f}/s | {each.overloaded:,} | {each.failed:,} | "
             f"{ms(each.latency(0.5))} | {ms(each.latency(0.95))} | {ms(each.latency(0.99))} | "
-            f"{ms(each.generator_lag)} | {met} |"
+            f"{ms(each.generator_lag)} | {backlog} | {lag} | {met} |"
         )
+    lines += downstream_lines([(each.rate, each.downstream) for each in results])
     unanswered = [
-        f"{each.rate:,.0f}/s: "
+        f"{label(each.rate)}: "
         + ", ".join(f"{status or 'none'} x {count:,}" for status, count in each.by_status().items())
         for each in results
         if each.by_status()
     ]
     if unanswered:
         lines += ["", "Answers other than 2xx, by status: " + "; ".join(unanswered) + "."]
+    lines += containers_lines(results)
     if broke:
         lines += ["", f"Could not be measured, which ended the run: {broke}."]
     if skipped:
         lines += [
             "",
             "Not run, after a rate missed a budget: "
-            + ", ".join(f"{rate:,.0f}/s" for rate in skipped)
+            + ", ".join(label(rate) for rate in skipped)
             + ".",
         ]
     lines.append("")

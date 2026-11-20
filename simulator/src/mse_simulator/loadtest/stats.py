@@ -130,11 +130,13 @@ class QueueVerdict:
 def queue_growth(
     samples: list[tuple[float, float]], allowance: float = 5.0, span: float = 60.0
 ) -> QueueVerdict:
-    """Whether the writer queue grew over the window, from (seconds into the window, depth) samples.
+    """Whether a queue grew over the window, from (seconds into the window, depth) samples: the
+    writer's queue, or downstream the publication backlog and a feed's lag.
 
     Sustained growth means the average depth over the last span (a minute unless given) is above
-    the first span's by more than a few commands. A momentary peak is not growth; it is reported
-    beside the verdict. The span must be under half the window, or the two ends overlap.
+    the first span's by more than the allowance (a few commands unless given). A momentary peak is
+    not growth; it is reported beside the verdict. The span must be under half the window, or the
+    two ends overlap.
     """
     if not samples:
         raise ValueError("no queue samples")

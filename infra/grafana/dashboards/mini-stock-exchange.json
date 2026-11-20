@@ -794,6 +794,153 @@
       ]
     },
     {
+      "type": "timeseries",
+      "title": "Market Data feed delay",
+      "description": "From a record's send to Kafka until its projection committed, per topic, while the feed is live. Estimated from the histogram.",
+      "id": 22,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 56
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le, topic) (rate(mse_feed_delay_seconds_bucket{job=\"market-data-service\"}[1m])))",
+          "legendFormat": "p50 {{topic}}"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, topic) (rate(mse_feed_delay_seconds_bucket{job=\"market-data-service\"}[1m])))",
+          "legendFormat": "p99 {{topic}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Relay batch time",
+      "description": "A batch published in full, from reading it to marking it published. Estimated from the histogram.",
+      "id": 23,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 56
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(mse_outbox_batch_seconds_bucket{job=\"execution-service\"}[1m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(mse_outbox_batch_seconds_bucket{job=\"execution-service\"}[1m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Relay rounds per batch",
+      "description": "Waits for Kafka acknowledgements a batch needed: the most events any one instrument had in it. Many rounds mean one busy instrument holds the batch up.",
+      "id": 24,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 64
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "rate(mse_outbox_batch_rounds_sum{job=\"execution-service\"}[1m]) / rate(mse_outbox_batch_rounds_count{job=\"execution-service\"}[1m])",
+          "legendFormat": "mean"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(mse_outbox_batch_rounds_bucket{job=\"execution-service\"}[1m])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "JVM",
       "id": 19,
@@ -802,7 +949,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 56
+        "y": 72
       },
       "panels": []
     },
@@ -819,7 +966,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 57
+        "y": 73
       },
       "fieldConfig": {
         "defaults": {
@@ -859,7 +1006,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 57
+        "y": 73
       },
       "fieldConfig": {
         "defaults": {

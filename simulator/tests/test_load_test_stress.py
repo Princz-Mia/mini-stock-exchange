@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpx
 import pytest
 
-from mse_simulator.loadtest import stress
+from mse_simulator.loadtest import diagnostics, stats, stress
 
 
 def test_commands_are_planned_evenly_at_the_rate() -> None:
@@ -178,6 +178,8 @@ class Served(BaseHTTPRequestHandler):
 
     signed_in: dict[str, str] = {}
     answered: dict[str, int] = {}
+    # When each trading command arrived, on this process's monotonic clock.
+    arrived: list[float] = []
     lock = threading.Lock()
 
     def log_message(self, *args: object) -> None:
@@ -226,6 +228,7 @@ class Served(BaseHTTPRequestHandler):
                 self.answer(401, {})
                 return
             self.answered[username] = self.answered.get(username, 0) + 1
+            self.arrived.append(time.monotonic())
         if self.path == "/api/v1/orders":
             self.answer(201, {"orderId": uuid.uuid4().hex})
         else:
@@ -236,6 +239,7 @@ class Served(BaseHTTPRequestHandler):
 def served() -> str:
     Served.signed_in = {}
     Served.answered = {}
+    Served.arrived = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), Served)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -276,6 +280,45 @@ def test_processes_send_the_whole_plan_once_as_their_own_logins(served: str) -> 
     every = stress.processes(rate)
     share = math.ceil(len(sent) / every) / (len(signed_in) / every)
     assert max(Served.answered.values()) <= math.ceil(share)
+
+
+def test_started_is_called_once_as_the_processes_are_released(served: str) -> None:
+    rate = 801.0
+    signed_in = sessions(served, stress.traders(rate))
+    calls: list[float] = []
+
+    sent = stress.fire_in_processes(
+        served, signed_in, rate, 1.0, started=lambda: calls.append(time.monotonic())
+    )
+    returned = time.monotonic()
+
+    assert len(calls) == 1
+    # Called as the schedule begins: just before the first command arrives, not while the
+    # processes were still starting, and with the second of commands still ahead of it.
+    first = min(Served.arrived)
+    assert calls[0] <= first < calls[0] + 0.3
+    assert returned - calls[0] >= 0.9
+    assert [each.intended for each in sent] == stress.schedule(rate, 1.0)
+
+
+def test_started_is_not_called_when_a_process_fails_before_the_start(served: str) -> None:
+    rate = 801.0
+    signed_in = sessions(served, stress.traders(rate))
+    signed_in[-1] = ({"session": "unknown"}, *signed_in[-1][1:])
+    calls: list[float] = []
+
+    with pytest.raises(RuntimeError, match="HTTPStatusError"):
+        stress.fire_in_processes(
+            served,
+            signed_in,
+            rate,
+            0.25,
+            ready_timeout=30.0,
+            started=lambda: calls.append(time.monotonic()),
+        )
+
+    time.sleep(0.5)
+    assert calls == []
 
 
 def test_a_process_that_fails_ends_the_rate_without_waiting_out_the_others(served: str) -> None:
@@ -427,13 +470,26 @@ def test_a_command_with_no_answer_is_recorded_as_failed() -> None:
     assert [each.status for each in sent] == [0] * 5
 
 
-def result(*answers: tuple[float, int], lag: float = 0.001) -> stress.Result:
+QUIET = diagnostics.Downstream(
+    1_000.0,
+    {
+        diagnostics.BACKLOG: stats.QueueVerdict(10.0, 12.0, 40.0, False),
+        "mse.market.v1": stats.QueueVerdict(3.0, 4.0, 9.0, False),
+    },
+)
+
+
+def result(
+    *answers: tuple[float, int],
+    lag: float = 0.001,
+    downstream: diagnostics.Downstream | None = QUIET,
+) -> stress.Result:
     """One command per answer, a millisecond apart, each answered after its latency."""
     sent = [
         stress.Sent(index / 1000, index / 1000 + lag, index / 1000 + latency, status)
         for index, (latency, status) in enumerate(answers)
     ]
-    return stress.Result(500.0, 1.0, sent)
+    return stress.Result(500.0, 1.0, sent, downstream)
 
 
 GOOD = [(0.010, 201)] * 1000
@@ -466,6 +522,158 @@ def test_each_budget_can_fail_a_rate_alone(answers, lag, missed) -> None:
     assert measured.missed() == [missed]
 
 
+@pytest.mark.parametrize(
+    "downstream",
+    [
+        None,
+        diagnostics.Downstream(1_000.0, {}),
+        diagnostics.Downstream(
+            1_000.0, {diagnostics.BACKLOG: stats.QueueVerdict(10.0, 12.0, 40.0, False)}
+        ),
+        diagnostics.Downstream(
+            1_000.0,
+            {
+                diagnostics.BACKLOG: stats.QueueVerdict(10.0, 12.0, 40.0, False),
+                "mse.trades.v1": stats.QueueVerdict(3.0, 4_000.0, 4_100.0, True),
+            },
+        ),
+    ],
+    ids=["not sampled", "nothing sampled", "no feed sampled", "a feed grew"],
+)
+def test_publication_and_the_feeds_must_be_seen_keeping_up(downstream) -> None:
+    measured = result(*GOOD, downstream=downstream)
+
+    assert measured.missed() == ["publication and the feeds kept up"]
+
+
+def test_the_backlog_and_lag_after_the_warm_up_are_judged_over_thirds() -> None:
+    sampled = diagnostics.Sampled()
+    # A backlog built up during the warm-up and drained steadily after it is not growth; a feed
+    # that falls behind across the measured window is.
+    sampled.backlog = [(float(at), 9_000.0 if at < 30 else 20.0) for at in range(0, 91, 5)]
+    sampled.feed_lag = {
+        "mse.market.v1": [
+            (float(at), 5.0 if at < 50 else 3_000.0 if at >= 70 else 5.0) for at in range(0, 91, 5)
+        ]
+    }
+    sent = [stress.Sent(at / 10, at / 10 + 0.001, at / 10 + 0.01, 201) for at in range(900)]
+
+    measured = stress.measured(500.0, 30.0, 60.0, sent, sampled)
+
+    assert measured.downstream is not None
+    assert measured.downstream.allowance == 1_000.0
+    assert measured.downstream.peak(diagnostics.BACKLOG) == 20.0, "the warm-up is left out"
+    assert measured.downstream.grew() == ["mse.market.v1"]
+    assert measured.missed() == ["publication and the feeds kept up"]
+
+
+def test_samples_after_the_plan_ends_are_left_out() -> None:
+    # The backlog grows through the measured minute, then drains while the last answers come in:
+    # judged on the plan's window it grew; with the drain counted it would look flat.
+    sampled = diagnostics.Sampled()
+    sampled.backlog = [
+        (float(at), 20.0 if at < 60 else 4_000.0 if at < 95 else 0.0) for at in range(30, 121, 5)
+    ]
+    sampled.feed_lag = {"mse.market.v1": [(float(at), 3.0) for at in range(30, 121, 5)]}
+    sent = [stress.Sent(at / 10, at / 10 + 0.001, at / 10 + 0.01, 201) for at in range(900)]
+
+    measured = stress.measured(500.0, 30.0, 60.0, sent, sampled)
+
+    assert measured.downstream is not None
+    assert measured.downstream.grew() == [diagnostics.BACKLOG]
+    assert max(at for at, _ in sampled.backlog) == 120.0
+    assert measured.downstream.verdicts[diagnostics.BACKLOG].last_minute == 4_000.0
+
+
+def cost(second: int, command: str) -> float:
+    """Seconds each phase takes for one command started in that second: slow before the window
+    (30 s to 90 s), slower after it, and inside it rising by a microsecond a second, so only the
+    window's own two scrapes give the expected means. A cancel costs a third of a place."""
+    if second < 30:
+        base = 0.010
+    elif second < 90:
+        base = 0.003 + (second - 30) * 0.000001
+    else:
+        base = 0.5
+    return base if command == "place" else base / 3
+
+
+def writer_scrape(at: int) -> dict:
+    """Execution's writer timers after at seconds of 30 places and 10 cancels a second, each phase
+    but queue_wait taking cost(); queue_wait takes twice that."""
+    counts = {"place": 0, "cancel": 0}
+    sums = {"place": 0.0, "cancel": 0.0}
+    for second in range(at):
+        for command, per_second in (("place", 30), ("cancel", 10)):
+            counts[command] += per_second
+            sums[command] += per_second * cost(second, command)
+    lines = []
+    for command in ("place", "cancel"):
+        for phase in diagnostics.PHASES:
+            total = sums[command] * (2 if phase == "queue_wait" else 1)
+            lines.append(
+                f'mse_writer_{phase}_seconds_count{{command="{command}"}} {counts[command]}'
+            )
+            lines.append(f'mse_writer_{phase}_seconds_sum{{command="{command}"}} {total}')
+    return stats.parse_prometheus("\n".join(lines))
+
+
+def test_the_writer_and_the_containers_are_taken_over_the_measured_window() -> None:
+    sampled = diagnostics.Sampled()
+    sampled.execution = [(float(at), writer_scrape(at)) for at in range(0, 121, 5)]
+    sampled.cpu_at = {
+        "postgres": [(20.0, 190.0), (30.0, 100.0), (60.0, 120.0), (90.0, 80.0), (100.0, 5.0)],
+        "web": [(50.0, 30.0)],
+    }
+    sent = [stress.Sent(at / 10, at / 10 + 0.001, at / 10 + 0.01, 201) for at in range(900)]
+
+    measured = stress.measured(500.0, 30.0, 60.0, sent, sampled, {"postgres": (0.25, 40.0)})
+
+    split = measured.writer
+    assert split is not None
+    assert split.commands == 2_400, "the window's own commands"
+    # Inside the window a place's phase averages 3.0295 ms (3 ms plus 29.5 us of rise); a cancel's
+    # a third of it. Weighted 3:1, a phase is 2.5246 ms; queue_wait twice that.
+    place = 3.0295
+    phase = (place * 3 + place / 3) / 4
+    assert stress.weighted(split, "work") == pytest.approx(phase)
+    assert stress.weighted(split, "queue_wait") == pytest.approx(2 * phase)
+    assert split.service_ms == pytest.approx(4 * phase), "begin, work, commit and apply"
+    assert measured.cpu == {"postgres": (100.0, 120.0), "web": (30.0, 30.0)}, (
+        "readings at 30 s and 90 s belong to the window"
+    )
+    assert measured.throttled == {"postgres": (0.25, 40.0)}
+
+    text = "\n".join(stress.report([measured], []))
+    assert "| 500/s | 5.05 ms | 2.52 ms | 2.52 ms | 2.52 ms | 2.52 ms | 10.10 ms | 99/s |" in text
+    assert "| 500/s | n/a | 100 / 120, held 25% | n/a | n/a | 30 / 30 |" in text
+
+
+def test_fractional_rates_keep_their_decimals_in_every_table() -> None:
+    assert stress.label(250.0) == "250/s"
+    assert stress.label(12.25) == "12.25/s"
+    assert stress.label(12.5) == "12.5/s"
+    assert stress.label(1500.0) == "1,500/s"
+    text = "\n".join(
+        stress.report([result(*GOOD), stress.Result(12.25, 1.0, result(*GOOD).sent)], [12.5])
+    )
+    assert "| 12.25/s | n/a | n/a |" in text
+    assert "Not run, after a rate missed a budget: 12.5/s." in text
+
+
+def test_without_two_scrapes_in_the_window_the_writer_is_not_reported() -> None:
+    sampled = diagnostics.Sampled()
+    sampled.execution = [(31.0, writer_scrape(31)), (95.0, writer_scrape(95))]
+    sent = [stress.Sent(at / 10, at / 10 + 0.001, at / 10 + 0.01, 201) for at in range(900)]
+
+    measured = stress.measured(500.0, 30.0, 60.0, sent, sampled)
+
+    assert measured.writer is None and measured.cpu == {} and measured.throttled == {}
+    assert "| 500/s | n/a | n/a | n/a | n/a | n/a | n/a | n/a |" in "\n".join(
+        stress.report([measured], [])
+    )
+
+
 def test_answers_below_the_planned_share_fail_a_rate() -> None:
     measured = result(*([(0.010, 201)] * 800 + [(0.010, 503)] * 200))
 
@@ -493,8 +701,10 @@ def test_the_highest_passing_rate_is_the_last_before_the_first_failure() -> None
 
 
 def test_the_report_names_the_highest_rate_and_each_rate() -> None:
-    good = stress.Result(250.0, 1.0, result(*GOOD).sent)
-    bad = stress.Result(500.0, 1.0, result(*([(0.010, 201)] * 998 + [(0.010, 429)] * 2)).sent)
+    good = stress.Result(250.0, 1.0, result(*GOOD).sent, QUIET)
+    bad = stress.Result(
+        500.0, 1.0, result(*([(0.010, 201)] * 998 + [(0.010, 429)] * 2)).sent, QUIET
+    )
 
     text = "\n".join(stress.report([good, bad], [750.0, 1000.0]))
 
@@ -505,6 +715,27 @@ def test_the_report_names_the_highest_rate_and_each_rate() -> None:
     assert "Not run, after a rate missed a budget: 750/s, 1,000/s." in text
     assert "Could not be measured" not in text
     assert "Answers other than 2xx, by status: 500/s: 429 x 2." in text
+    assert "| 1.0 ms | 40 | 9 | yes |" in text, "generator lag, backlog peak, feed lag peak"
+    assert "fell behind" not in text
+    behind = diagnostics.Downstream(
+        1_000.0,
+        {
+            diagnostics.BACKLOG: stats.QueueVerdict(10.0, 6_000.0, 6_500.0, True),
+            "mse.market.v1": stats.QueueVerdict(3.0, 4.0, 9.0, False),
+        },
+    )
+    fell = "\n".join(stress.report([stress.Result(750.0, 1.0, good.sent, behind)], []))
+    assert (
+        "Publication or a feed fell behind: 750/s: grew: publication backlog 10 to 6,000." in fell
+    )
+    assert "not sampled" not in fell
+    unsampled = "\n".join(stress.report([stress.Result(750.0, 1.0, good.sent)], []))
+    assert "| n/a | n/a | no: publication and the feeds kept up |" in unsampled
+    assert "fell behind" not in unsampled
+    assert "Publication and the feeds were not sampled enough to judge: 750/s." in unsampled
+    thin = diagnostics.Downstream(1_000.0, QUIET.verdicts, unsampled=("mse.trades.v1",))
+    text = "\n".join(stress.report([stress.Result(750.0, 1.0, good.sent, thin)], []))
+    assert "not sampled enough to judge: 750/s (not sampled enough: mse.trades.v1)." in text
     mixed = result(*([(0.010, 201)] * 990 + [(0.010, 422)] * 7 + [(0.010, 0)] * 3))
     assert mixed.by_status() == {0: 3, 422: 7}
     assert "500/s: none x 3, 422 x 7." in "\n".join(stress.report([mixed], []))
