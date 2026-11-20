@@ -366,10 +366,52 @@ class TradingEngineIT {
 		}
 	}
 
+	/**
+	 * A run's statements do not grow with its commands: eight queued together (six orders that fill against one
+	 * resting order, one that rests, and a cancel of what is left) send each kind of row once, as one order with a
+	 * fill does, plus the cancel's row.
+	 */
+	@Test
+	void aRunSendsEachKindOfRowOnce() throws Exception {
+		UUID seller = funded();
+		UUID buyer = funded();
+		Statements statements = new Statements(dataSource);
+		countingEngine(statements, 8);
+		try {
+			PlacementResult resting = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 10);
+			Map<String, String> counts = new java.util.LinkedHashMap<>();
+			List<CompletableFuture<?>> answers = new ArrayList<>();
+			java.util.concurrent.CountDownLatch release = hold();
+			statements.count(counts, "a run of eight", () -> {
+				for (int i = 0; i < 6; i++) {
+					answers.add(engine.place(key(), order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 1)));
+				}
+				answers.add(engine.place(key(), order(seller, Side.SELL, OrderType.LIMIT, "101.00", 1)));
+				answers.add(engine.cancel(key(), new CancelOrder(resting.orderId(), seller)));
+				release.countDown();
+				for (CompletableFuture<?> answer : answers) {
+					answer.get();
+				}
+				return null;
+			});
+			assertThat(((CancelResult) answers.getLast().get()).canceledQuantity()).isEqualTo(4);
+			// The opening, the balances read once, the trade counter, then one statement each for orders, fills,
+			// cancels, trades, journal, balances, account versions, outbox and answers.
+			assertThat(counts).containsExactly(Map.entry("a run of eight", "12 statements, 1 commit"));
+		}
+		finally {
+			restartEngine();
+		}
+	}
+
 	/** Replaces the engine with one whose connections count what they send. */
 	private void countingEngine(Statements statements) throws InterruptedException {
+		countingEngine(statements, 1);
+	}
+
+	private void countingEngine(Statements statements, int maxRun) throws InterruptedException {
 		writer.close(Duration.ofSeconds(5));
-		writer = new CommandWriter("counted-writer", 1_000);
+		writer = new CommandWriter("counted-writer", 1_000, maxRun);
 		DataSource counted = statements.dataSource();
 		engine = new TradingEngine(new JdbcTradingStore(JdbcClient.create(counted), JsonMapper.builder().build()),
 				new SpringTransactionRunner(new org.springframework.jdbc.support.JdbcTransactionManager(counted)), writer,
@@ -814,15 +856,20 @@ class TradingEngineIT {
 	 * with runs of one and once with runs of up to 32. The stream crosses, rests, sweeps several makers, meets its own
 	 * account's orders, sends protected market orders, orders it cannot pay for, orders for an unknown instrument,
 	 * cancels of orders placed just before (often in the same run), of filled, cancelled, unknown and others' orders,
-	 * and keys repeated for the same request and for another. The answers, sequences, order rows, trades, ledger,
-	 * balances, account versions, the accounts told of each change, outbox events and books are the same, ids aside,
-	 * and the database reconciles.
+	 * and keys repeated for the same request and for another. One account has so little that whether it can pay
+	 * depends on what the run's earlier orders reserved, and one starts with cash and no position rows at all. Runs of
+	 * 32 go twice: through the store as it is, each kind of row in one statement, and through one that sends one row
+	 * per statement (a journal batch with its postings), so every kind of row a run writes twice or more is split. The
+	 * answers, sequences, order rows, trades, ledger, balances, account versions, the accounts told of each change,
+	 * outbox events and books are the same, ids aside, and the database reconciles.
 	 */
 	@Test
 	void runsOfUpToThirtyTwoLeaveExactlyWhatRunsOfOneLeave() throws Exception {
 		org.junit.jupiter.api.Assumptions.assumeTrue(maxRun() == 1, "the test runs both run limits itself");
-		Map<String, Object> alone = streamRun(1, 1);
-		Map<String, Object> together = streamRun(32, 2);
+		Map<String, Object> alone = streamRun(1, 1, store);
+		Map<String, Object> together = streamRun(32, 2, store);
+		Map<String, Object> split = streamRun(32, 3,
+				new JdbcTradingStore(JdbcClient.create(dataSource), JsonMapper.builder().build(), 1));
 
 		assertThat(alone.get("largest run")).isEqualTo(1);
 		assertThat((int) together.get("largest run")).as("the largest run").isGreaterThan(8);
@@ -840,14 +887,17 @@ class TradingEngineIT {
 				Map.entry("failed UnknownInstrumentException", 20), Map.entry("repeated", 300),
 				Map.entry("CANCELED traded IOC_REMAINDER_CANCELED", 20), Map.entry("CANCELED SELF_TRADE_PREVENTED", 20),
 				Map.entry("REJECTED INSUFFICIENT_CASH", 10), Map.entry("takers of several makers", 80),
-				Map.entry("REJECTED ORDER_LIMIT_EXCEEDED", 20))
+				Map.entry("REJECTED ORDER_LIMIT_EXCEEDED", 20), Map.entry("REJECTED INSUFFICIENT_SHARES", 50))
 			.entrySet()) {
 			assertThat(coverage.getOrDefault(least.getKey(), 0)).as(least.getKey() + " in " + coverage)
 				.isGreaterThanOrEqualTo(least.getValue());
 		}
+		assertThat(split.get("committed whole")).as("split runs of several committed as one")
+			.isEqualTo(split.get("runs of several"));
 		for (String part : List.of("coverage", "answers", "orders", "trades", "ledger", "balances", "versions", "told",
 				"events", "books")) {
 			assertThat(firstDifference(alone.get(part), together.get(part))).as(part).isNull();
+			assertThat(firstDifference(alone.get(part), split.get(part))).as(part + ", rows split").isNull();
 		}
 		assertThat(store.reconciliationProblems(simulation)).isEmpty();
 		assertLedgerMatchesBalances();
@@ -872,7 +922,7 @@ class TradingEngineIT {
 	}
 
 	/** The stream run on new instruments and accounts with this run limit; what it left, ids replaced by names. */
-	private Map<String, Object> streamRun(int maxRun, long salt) throws Exception {
+	private Map<String, Object> streamRun(int maxRun, long salt, TradingStore runStore) throws Exception {
 		Map<UUID, String> names = new HashMap<>();
 		List<UUID> instruments = new ArrayList<>();
 		Map<String, String> symbols = new HashMap<>();
@@ -887,7 +937,11 @@ class TradingEngineIT {
 		}
 		List<UUID> accounts = new ArrayList<>();
 		for (int i = 0; i < 12; i++) {
-			UUID account = new TransactionTemplate(transactionManager).execute((status) -> fundIn(instruments));
+			// The last two: one that can afford little, and one with cash and no position rows.
+			long cash = i == 10 ? 30_000 : STARTING_CASH;
+			long shares = i == 10 ? 5 : i == 11 ? 0 : STARTING_SHARES;
+			UUID account = new TransactionTemplate(transactionManager)
+				.execute((status) -> fundIn(instruments, cash, shares));
 			accounts.add(account);
 			names.put(account, "a" + i);
 		}
@@ -898,7 +952,7 @@ class TradingEngineIT {
 		List<Map.Entry<Long, Set<UUID>>> told = java.util.Collections.synchronizedList(new ArrayList<>());
 		// One instant for both runs, so trades and snapshots carry the same times.
 		Clock clock = Clock.fixed(java.time.Instant.parse("2026-11-19T09:30:00.123456Z"), java.time.ZoneOffset.UTC);
-		engine = new TradingEngine(store, new SpringTransactionRunner(transactionManager), writer, clock, (account) -> {
+		engine = new TradingEngine(runStore, new SpringTransactionRunner(transactionManager), writer, clock, (account) -> {
 			throw new UnsupportedOperationException("no bots in these tests");
 		}, (ids, sequence) -> told.add(Map.entry(sequence, Set.copyOf(ids))), timings, System::nanoTime, resting);
 		engine.start();
@@ -1120,8 +1174,11 @@ class TradingEngineIT {
 		}
 	}
 
-	/** A trader funded with cash and shares of each instrument, by one balanced genesis batch. */
-	private UUID fundIn(List<UUID> instruments) {
+	/**
+	 * A trader funded with this cash and these shares of each instrument, by one balanced genesis batch; with no shares,
+	 * the account has no position rows at all.
+	 */
+	private UUID fundIn(List<UUID> instruments, long cash, long shares) {
 		UUID account = UUID.randomUUID();
 		jdbc.update("INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'BOT', 'Bot')", account,
 				simulation);
@@ -1129,16 +1186,16 @@ class TradingEngineIT {
 		jdbc.update("INSERT INTO journal_batch (id, simulation_id, cause, command_sequence) VALUES (?, ?, 'GENESIS', 1)",
 				batch, simulation);
 		String post = "INSERT INTO ledger_entry (batch_id, account_id, instrument_id, bucket, delta) VALUES (?, ?, ?, 'AVAILABLE', ?)";
-		jdbc.update(post, batch, issuance, null, -STARTING_CASH);
-		jdbc.update(post, batch, account, null, STARTING_CASH);
+		jdbc.update(post, batch, issuance, null, -cash);
+		jdbc.update(post, batch, account, null, cash);
 		jdbc.update("INSERT INTO cash_balance (account_id, account_kind, total_cents, reserved_cents) VALUES (?, 'BOT', ?, 0)",
-				account, STARTING_CASH);
-		for (UUID held : instruments) {
-			jdbc.update(post, batch, issuance, held, -STARTING_SHARES);
-			jdbc.update(post, batch, account, held, STARTING_SHARES);
+				account, cash);
+		for (UUID held : shares == 0 ? List.<UUID>of() : instruments) {
+			jdbc.update(post, batch, issuance, held, -shares);
+			jdbc.update(post, batch, account, held, shares);
 			jdbc.update("""
 					INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
-					VALUES (?, 'BOT', ?, ?, 0)""", account, held, STARTING_SHARES);
+					VALUES (?, 'BOT', ?, ?, 0)""", account, held, shares);
 		}
 		return account;
 	}
@@ -1177,14 +1234,16 @@ class TradingEngineIT {
 
 	/**
 	 * A run that fails without halting runs again one by one, and a command that halts the writer then stops the ones
-	 * after it, as one by one: the first commits, the refused one fails alone, the one whose book is out of step halts
-	 * the writer, and the last fails as never run.
+	 * after it, as one by one: the first commits, the refused one fails alone, the cancel of an order the database
+	 * holds differently from the book halts the writer, and the last fails as never run. The run's rows are sent
+	 * together at its end, the refused order before the cancel, so only one by one does the cancel's row show.
 	 */
 	@Test
 	void aHaltWhileARunRunsAgainOneByOneStopsTheCommandsAfterIt() throws Exception {
 		runningEngine(8);
 		UUID seller = funded();
-		UUID hidden = restingOnlyInTheDatabase(seller);
+		PlacementResult held = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
+		asOwner("UPDATE orders SET working_quantity = 3, canceled_quantity = 2 WHERE id = ?", held.orderId());
 		ddl("""
 				CREATE FUNCTION test_refused_now() RETURNS trigger LANGUAGE plpgsql AS $$
 				BEGIN
@@ -1199,7 +1258,7 @@ class TradingEngineIT {
 					order(seller, Side.SELL, OrderType.LIMIT, "100.00", 1));
 			CompletableFuture<PlacementResult> refused = engine.place(key(),
 					order(seller, Side.SELL, OrderType.LIMIT, "100.00", 6_667));
-			CompletableFuture<CancelResult> halting = engine.cancel(key(), new CancelOrder(hidden, seller));
+			CompletableFuture<CancelResult> halting = engine.cancel(key(), new CancelOrder(held.orderId(), seller));
 			PlaceOrder last = order(seller, Side.SELL, OrderType.LIMIT, "101.00", 1);
 			CompletableFuture<PlacementResult> never = engine.place(key(), last);
 
@@ -1219,7 +1278,7 @@ class TradingEngineIT {
 		}
 		finally {
 			ddl("DROP TRIGGER test_refused_now ON orders; DROP FUNCTION test_refused_now();");
-			cancelInTheDatabase(hidden);
+			asOwner("UPDATE orders SET working_quantity = 5, canceled_quantity = 0 WHERE id = ?", held.orderId());
 		}
 		restartEngine();
 	}
@@ -1293,6 +1352,47 @@ class TradingEngineIT {
 		}
 		assertThat(engine.depth(instrument, Side.SELL).get()).extracting(DepthLevel::quantity)
 			.containsExactly(1L, 1L, 1L);
+	}
+
+	/**
+	 * A row out of step is found only when a run's rows are sent, where nothing says whose row it is: the run rolls back
+	 * and runs again one by one, so the order that fills against a maker the database no longer has resting halts the
+	 * writer, the one before it commits, and the one after it fails as never run, exactly as one by one.
+	 */
+	@Test
+	void aRowOutOfStepFoundWhenARunsRowsAreSentBlamesItsOwnCommand() throws Exception {
+		runningEngine(8);
+		UUID seller = funded();
+		UUID buyer = funded();
+		PlacementResult maker = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
+		long before = commandSequence();
+		asOwner("UPDATE orders SET state = 'FILLED', working_quantity = 0, filled_quantity = 5 WHERE id = ?",
+				maker.orderId());
+		try {
+			java.util.concurrent.CountDownLatch release = hold();
+			CompletableFuture<PlacementResult> first = engine.place(key(),
+					order(buyer, Side.BUY, OrderType.LIMIT, "90.00", 1));
+			CompletableFuture<PlacementResult> filling = engine.place(key(),
+					order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 2));
+			CompletableFuture<PlacementResult> last = engine.place(key(),
+					order(buyer, Side.BUY, OrderType.LIMIT, "91.00", 1));
+
+			release.countDown();
+
+			assertThat(first.get().commandSequence()).isEqualTo(before + 1);
+			assertThatThrownBy(filling::get).hasCauseInstanceOf(WriterHaltException.class)
+				.rootCause()
+				.hasMessageContaining("Filled 0 of 1 resting orders the book matched");
+			assertThatThrownBy(last::get).hasCauseInstanceOf(WriterStoppedException.class)
+				.hasMessageContaining("halted before this command ran");
+			assertThat(phases("run")).containsExactly("FALLBACK");
+			assertThat(commandSequence()).isEqualTo(before + 1);
+		}
+		finally {
+			asOwner("UPDATE orders SET state = 'OPEN', working_quantity = 5, filled_quantity = 0 WHERE id = ?",
+					maker.orderId());
+		}
+		restartEngine();
 	}
 
 	/** An order the database has resting that no book holds, as a book out of step would leave it. */
@@ -1503,8 +1603,9 @@ class TradingEngineIT {
 		Map<String, Object> before = snapshot();
 		List<DepthLevel> bookBefore = engine.depth(instrument, Side.SELL).get();
 
-		// The answer is the last write: everything else, the write set included, has been sent.
-		failAt.set("insertResult");
+		// The flush is the last write: every row of the transaction, its answer included, goes in it. It fails once they
+		// are all written, so the rollback has them to undo.
+		failAt.set("flush written");
 		CompletableFuture<PlacementResult> failed = engine.place(key(), order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 3));
 
 		assertThatThrownBy(failed::get).isInstanceOf(ExecutionException.class)
@@ -1713,7 +1814,7 @@ class TradingEngineIT {
 		PlacementResult sell = place(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
 		Map<String, Object> before = snapshot();
 
-		failAt.set("insertResult");
+		failAt.set("flush written");
 		CompletableFuture<CancelResult> failed = engine.cancel(key(), new CancelOrder(sell.orderId(), seller));
 
 		assertThatThrownBy(failed::get).isInstanceOf(ExecutionException.class)
@@ -1951,12 +2052,17 @@ class TradingEngineIT {
 					if (method.getName().equals(failAt.get())) {
 						throw new IllegalStateException("injected failure before commit");
 					}
+					Object answer;
 					try {
-						return method.invoke(store, args);
+						answer = method.invoke(store, args);
 					}
 					catch (InvocationTargetException ex) {
 						throw ex.getCause();
 					}
+					if ((method.getName() + " written").equals(failAt.get())) {
+						throw new IllegalStateException("injected failure before commit, its rows written");
+					}
+					return answer;
 				});
 	}
 
@@ -2200,8 +2306,8 @@ class TradingEngineIT {
 				accounts.add(funded());
 			}
 			Map<UUID, List<UUID>> mine = new HashMap<>();
-			// Before the write set, in it, and after it: insertResult is the last write of every command.
-			String[] failures = { "insertOrder", "advanceTradeSequence", "flush", "insertResult", "insertResult" };
+			// Reading the balances, or writing the rows: the flush is the last write of every command.
+			String[] failures = { "available", "flush", "flush" };
 			int injected = 0;
 			int refused = 0;
 			int filled = 0;
@@ -2415,7 +2521,7 @@ class TradingEngineIT {
 		UUID neverAdded = UUID.randomUUID();
 		jdbc.update("UPDATE simulation SET state = 'SETUP', opened_at = NULL");
 		try {
-			for (String last : List.of("insertResult", "insertAudit")) {
+			for (String last : List.of("flush", "insertAudit")) {
 				failAt.set(last);
 				try {
 					assertThatThrownBy(() -> engine
@@ -2721,15 +2827,15 @@ class TradingEngineIT {
 	}
 
 	/**
-	 * The store, but each command's write set is sent one row at a time, with the statements the writer used before it
-	 * collected them, as the reference the batched statements must match. Outbox events go one per statement.
+	 * The store, but a transaction's write set is sent one row at a time, with the statements the writer used before it
+	 * collected them, as the reference the statements per kind of row must match. Outbox events go one per statement.
 	 */
 	private TradingStore rowByRow(TradingStore real) {
 		JdbcClient client = JdbcClient.create(dataSource);
 		return (TradingStore) Proxy.newProxyInstance(TradingStore.class.getClassLoader(),
 				new Class<?>[] { TradingStore.class }, (proxy, method, args) -> {
 					if (method.getName().equals("flush")) {
-						flushRowByRow(client, real, (UUID) args[0], (long) args[1], (WriteSet) args[2]);
+						flushRowByRow(client, real, (UUID) args[0], (WriteSet) args[1]);
 						return null;
 					}
 					try {
@@ -2741,17 +2847,46 @@ class TradingEngineIT {
 				});
 	}
 
-	private static void flushRowByRow(JdbcClient jdbc, TradingStore real, UUID simulationId, long commandSequence,
-			WriteSet writes) {
+	private static void flushRowByRow(JdbcClient jdbc, TradingStore real, UUID simulationId, WriteSet writes) {
+		for (WriteSet.TradeSequence move : writes.tradeSequences()) {
+			one(jdbc.sql("UPDATE instrument SET last_trade_sequence = ? WHERE id = ? AND last_trade_sequence = ?")
+				.params(move.to(), move.instrumentId(), move.from())
+				.update());
+		}
+		for (TradingStore.NewOrder order : writes.orders()) {
+			com.mia_princz.mse.execution.trading.domain.OrderRequest request = order.request();
+			one(jdbc.sql("""
+					INSERT INTO orders (id, simulation_id, account_id, instrument_id, side, type, time_in_force, bound_cents,
+					    requested_quantity, filled_quantity, working_quantity, canceled_quantity, state, reason, accepted_sequence)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""")
+				.params(order.id(), order.simulationId(), request.accountId(), order.instrumentId(), request.side().name(),
+						request.type().name(), request.type() == OrderType.LIMIT ? "GTC" : "IOC", request.bound().cents(),
+						request.quantity().shares(), order.filled(), order.working(), order.canceled(),
+						order.state().name(), order.reason(), order.acceptedSequence())
+				.update());
+		}
 		for (WriteSet.MakerFill fill : writes.makerFills()) {
 			one(jdbc.sql("""
 					UPDATE orders SET filled_quantity = filled_quantity + :quantity,
 					    working_quantity = working_quantity - :quantity,
 					    state = CASE WHEN working_quantity = :quantity THEN 'FILLED' ELSE 'PARTIALLY_FILLED' END,
-					    version = version + 1, updated_at = now()
+					    version = version + :fills, updated_at = now()
 					WHERE id = :id AND state IN ('OPEN', 'PARTIALLY_FILLED') AND working_quantity >= :quantity""")
 				.param("quantity", fill.quantity())
+				.param("fills", fill.fills())
 				.param("id", fill.orderId())
+				.update());
+		}
+		for (WriteSet.Cancel cancel : writes.cancels()) {
+			one(jdbc.sql("""
+					UPDATE orders SET canceled_quantity = canceled_quantity + :quantity, working_quantity = 0,
+					    state = 'CANCELED', reason = :reason, version = version + 1, updated_at = now()
+					WHERE id = :id AND account_id = :account AND working_quantity = :quantity
+					    AND state IN ('OPEN', 'PARTIALLY_FILLED')""")
+				.param("quantity", cancel.quantity())
+				.param("reason", cancel.reason())
+				.param("id", cancel.orderId())
+				.param("account", cancel.accountId())
 				.update());
 		}
 		for (WriteSet.NewTrade trade : writes.trades()) {
@@ -2761,13 +2896,13 @@ class TradingEngineIT {
 					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""")
 				.params(trade.id(), simulationId, trade.instrumentId(), trade.tradeSequence(), trade.makerOrderId(),
 						trade.takerOrderId(), trade.buyerAccountId(), trade.sellerAccountId(), trade.priceCents(),
-						trade.quantity(), java.sql.Timestamp.from(trade.executedAt()), commandSequence)
+						trade.quantity(), java.sql.Timestamp.from(trade.executedAt()), trade.commandSequence())
 				.update());
 		}
 		for (WriteSet.Batch batch : writes.batches()) {
 			one(jdbc.sql(
 					"INSERT INTO journal_batch (id, simulation_id, cause, command_sequence, trade_id) VALUES (?, ?, ?, ?, ?)")
-				.params(batch.id(), simulationId, batch.cause().name(), commandSequence, batch.tradeId())
+				.params(batch.id(), simulationId, batch.cause().name(), batch.commandSequence(), batch.tradeId())
 				.update());
 			for (com.mia_princz.mse.execution.trading.domain.Posting posting : batch.postings()) {
 				one(jdbc.sql(
@@ -2803,16 +2938,26 @@ class TradingEngineIT {
 					.update());
 			}
 		});
-		for (UUID account : writes.accounts()) {
-			one(jdbc.sql("UPDATE account SET version = version + 1 WHERE id = ?").param(account).update());
-		}
+		writes.accounts().forEach((account, commands) -> one(
+				jdbc.sql("UPDATE account SET version = version + ? WHERE id = ?").params(commands, account).update()));
 		for (WriteSet.Event event : writes.events()) {
 			WriteSet single = new WriteSet();
 			switch (event) {
 				case WriteSet.TradeEvent trade -> single.tradeEvent(trade.trade(), trade.symbol());
 				case WriteSet.Snapshot snapshot -> single.snapshot(snapshot.view());
 			}
-			real.flush(simulationId, commandSequence, single);
+			real.flush(simulationId, single);
+		}
+		JsonMapper json = JsonMapper.builder().build();
+		for (WriteSet.Result result : writes.results()) {
+			CommandKey key = result.key();
+			one(jdbc.sql("""
+					INSERT INTO command_result (simulation_id, principal_id, idempotency_key, route, request_hash,
+					    response_status, response_body, command_sequence)
+					VALUES (?, ?, ?, ?, ?, ?, ?::jsonb, ?)""")
+				.params(simulationId, key.principalId(), key.idempotencyKey(), key.route(), key.requestHash(),
+						result.httpStatus(), json.writeValueAsString(result.result()), result.commandSequence())
+				.update());
 		}
 	}
 
@@ -2919,8 +3064,9 @@ class TradingEngineIT {
 		CommandKey key = key(buyer, UUID.randomUUID(), "buy 2 at 100.00");
 		PlaceOrder order = order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 2);
 
-		failAt.set("flush");
-		assertThatThrownBy(() -> engine.place(key, order).get()).hasRootCauseMessage("injected failure before commit");
+		failAt.set("flush written");
+		assertThatThrownBy(() -> engine.place(key, order).get())
+			.hasRootCauseMessage("injected failure before commit, its rows written");
 		failAt.set(null);
 
 		assertThat(engine.place(key, order).get().state()).isEqualTo(OrderState.FILLED);
