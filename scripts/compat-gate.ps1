@@ -276,7 +276,7 @@ function Assert-Reconciled {
 }
 
 # Recovery steps: every projection table Market Data derives (service_identity is configuration, not derived).
-$projections = 'instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, instrument_session, session_minute, candle_1m'
+$projections = 'instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, instrument_session, session_minute, spread_minute, candle_1m'
 $tradeTotals = "SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quantity) || ' ' || max(trade_sequence)"
 # The session figures Market Data keeps with the tape, worked out from the tape itself: count, shares, notional,
 # high, low and the last price by sequence. Equal after every rebuild: the counts double if instrument_session is
@@ -478,6 +478,7 @@ try {
         Assert-Match '/api/v1/instruments (Market Data, public)' '"instruments":\[' ((& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/instruments") | Out-String)
         Assert-Equal '/api/v1/instruments/x/orders (Market Data, denied)' '403' (Get-Http '/api/v1/instruments/x/orders')
         Assert-Match '/api/v1/market-events, no market yet (Market Data)' '"code":"INSTRUMENT_NOT_FOUND"' ((& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/market-events?instrumentId=00000000-0000-0000-0000-000000000001") | Out-String)
+        Assert-Match '/api/v1/instruments/{id}/market-quality, no market yet (Market Data, public)' '"code":"INSTRUMENT_NOT_FOUND"' ((& curl.exe -s -m 10 "http://localhost:$webPort/api/v1/instruments/00000000-0000-0000-0000-000000000001/market-quality?fromSequence=1&toSequence=1") | Out-String)
         Assert-Equal '/api/v1/internal/x (blocked at proxy)' '404' (Get-Http '/api/v1/internal/x')
         Assert-Match '/internal/exports/trades serves the SPA, not the export' '^<!doctype html>' ((& curl.exe -s "http://localhost:$webPort/internal/exports/trades?instrumentId=00000000-0000-0000-0000-000000000001") | Out-String)
         Assert-Match '/internal/simulator/assignment serves the SPA, not the assignment' '^<!doctype html>' ((& curl.exe -s "http://localhost:$webPort/internal/simulator/assignment") | Out-String)
@@ -636,6 +637,18 @@ try {
         Assert-Equal 'the worker confirmed it, after placing orders' 't' $confirmed.Output
         $open = Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' "SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id WHERE a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')"
         Assert-Equal 'bot orders left open' '0' $open.Output
+        # The run's window, measured from the public market data: the market maker quoted both sides of NOVA in it.
+        $window = (Get-ExecutionValue "SELECT start_sequence || '&toSequence=' || end_sequence FROM bot_run WHERE id = '$($started.runId)'")
+        $quality = "http://localhost:$webPort/api/v1/instruments/$(Get-Nova)/market-quality?fromSequence=$window"
+        $measured = ''
+        foreach ($attempt in 1..15) {
+            $measured = (& curl.exe -s -m 10 $quality | Out-String)
+            if ($measured -match '"twoSidedMinutes":[1-9]') { break }
+            Start-Sleep -Seconds 2
+        }
+        "market quality $window => $measured" | Add-Content -Encoding utf8 $script:currentLog
+        Assert-Match "the run's window has two-sided minutes" '"twoSidedMinutes":[1-9]' $measured
+        Assert-Match "the run's window has an average spread" '"averageSpread":"[0-9]+\.[0-9]{4}"' $measured
         # The bots' commands were timed: Prometheus has a bucket edge at each latency budget, and the queue's size.
         $scrape = (Invoke-InContainer 'execution-service' @('curl', '-fsS', 'http://localhost:8080/actuator/prometheus')) -split "`n" |
             Where-Object { $_ -match '^mse_(commands_seconds_bucket\{command="place",outcome="committed",le="0\.(15|5)"\}|writer_queue_capacity) ' }
@@ -872,6 +885,11 @@ try {
         Invoke-Checked 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts\restore.ps1', $backup, '-Project', 'mse-gate', '-EnvFile', $envFile, '-Yes')
         Assert-Equal 'Execution back at the backup' $atBackup (Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$nova'")
         Assert-CaughtUp
+        # The book's minutes come back from the republished snapshots, and none from after the backup is left: the
+        # newest minute ends at the market's sequence, which a minute kept from the extra trade would pass.
+        $minutes = "SELECT (SELECT max(last_sequence) FROM spread_minute WHERE instrument_id = '$nova') = (SELECT source_command_sequence FROM market_snapshot WHERE instrument_id = '$nova')"
+        [void](Wait-Until 15 { (Get-MarketDataValue $minutes) -eq 't' })
+        Assert-Equal "NOVA's minutes end at its market" 't' (Get-MarketDataValue $minutes)
     }
 }
 catch {

@@ -218,6 +218,8 @@ proxy_routes() {
     assert_match '/api/v1/instruments (Market Data, public)' '"instruments":\[' "$(curl -s -m 10 "http://localhost:$web_port/api/v1/instruments")" &&
     assert_equal '/api/v1/instruments/x/orders (Market Data, denied)' 403 "$(http_status /api/v1/instruments/x/orders)" &&
     assert_match '/api/v1/market-events, no market yet (Market Data)' '"code":"INSTRUMENT_NOT_FOUND"' "$(curl -s -m 10 "http://localhost:$web_port/api/v1/market-events?instrumentId=00000000-0000-0000-0000-000000000001")" &&
+    assert_match '/api/v1/instruments/{id}/market-quality, no market yet (Market Data, public)' '"code":"INSTRUMENT_NOT_FOUND"' \
+      "$(curl -s -m 10 "http://localhost:$web_port/api/v1/instruments/00000000-0000-0000-0000-000000000001/market-quality?fromSequence=1&toSequence=1")" &&
     assert_equal '/api/v1/internal/x (blocked at proxy)' 404 "$(http_status /api/v1/internal/x)" &&
     assert_match '/internal/exports/trades serves the SPA, not the export' '^<!doctype html>' \
       "$(curl -s "http://localhost:$web_port/internal/exports/trades?instrumentId=00000000-0000-0000-0000-000000000001")" &&
@@ -412,6 +414,18 @@ bot_trading() {
     assert_equal 'the worker confirmed it, after placing orders' 't' \
       "$(psql_as execution_owner execution_db "SELECT stopped_at IS NOT NULL AND placed > 0 FROM bot_run WHERE id = '$run'" | tr -d '\r')" &&
     assert_equal 'bot orders left open' 0 "$(psql_as execution_owner execution_db "$open" | tr -d '\r')" || return 1
+  # The run's window, measured from the public market data: the market maker quoted both sides of NOVA in it.
+  local window quality measured
+  window=$(execution_sql "SELECT start_sequence || '&toSequence=' || end_sequence FROM bot_run WHERE id = '$run'")
+  quality="http://localhost:$web_port/api/v1/instruments/$(nova)/market-quality?fromSequence=$window"
+  for i in $(seq 1 15); do
+    measured=$(curl -s -m 10 "$quality")
+    printf '%s' "$measured" | grep -Eq '"twoSidedMinutes":[1-9]' && break
+    sleep 2
+  done
+  note "market quality $window => $measured"
+  assert_match "the run's window has two-sided minutes" '"twoSidedMinutes":[1-9]' "$measured" &&
+    assert_match "the run's window has an average spread" '"averageSpread":"[0-9]+\.[0-9]{4}"' "$measured" || return 1
   # The bots' commands were timed: Prometheus has a bucket edge at each latency budget, and the queue's size.
   local scrape
   scrape=$(compose exec -T execution-service curl -fsS http://localhost:8080/actuator/prometheus 2>&1 |
@@ -534,7 +548,7 @@ dashboard() {
 }
 
 # Recovery steps: every projection table Market Data derives (service_identity is configuration, not derived).
-projections="instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, instrument_session, session_minute, candle_1m"
+projections="instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, instrument_session, session_minute, spread_minute, candle_1m"
 feeds_live() { # all three Market Data feeds caught up and in contact with Kafka
   [ "$(compose exec -T market-data-service curl -fsS http://localhost:8080/actuator/prometheus 2>/dev/null |
     grep -c '^mse_feed_live{.*} 1')" = 3 ]
@@ -731,7 +745,14 @@ restore_rehearsal() {
     { fail 'the restore failed'; return 1; }
   assert_equal 'Execution back at the backup' "$at_backup" \
     "$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")" &&
-    caught_up
+    caught_up || return 1
+  # The book's minutes come back from the republished snapshots, and none from after the backup is left: the newest
+  # minute ends at the market's sequence, which a minute kept from the extra trade would pass.
+  local minutes="SELECT (SELECT max(last_sequence) FROM spread_minute WHERE instrument_id = '$(nova)')
+    = (SELECT source_command_sequence FROM market_snapshot WHERE instrument_id = '$(nova)')"
+  minutes_match() { [ "$(market_data_sql "$minutes")" = t ]; }
+  retry 15 minutes_match
+  assert_equal "NOVA's minutes end at its market" t "$(market_data_sql "$minutes")"
 }
 
 account_stream() {

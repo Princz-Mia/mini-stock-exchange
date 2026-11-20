@@ -1198,6 +1198,40 @@ paths:
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
 
+  /api/v1/instruments/{instrumentId}/market-quality:
+    get:
+      tags: [market-data]
+      operationId: getMarketQuality
+      summary: The instrument's book minute by minute over a window of command sequences, with its spread and volatility.
+      description: |
+        Public facts only, so a bot run's window can be measured from its start and end sequences. The minutes are
+        those whose snapshots meet fromSequence..toSequence (both inclusive), from the first to the last, at most
+        1,440; a minute at either edge may also hold snapshots outside the window. A minute's book is its last
+        snapshot's, and a minute without one holds the minute before (changed false). The average spread is the mean
+        of the minutes' best ask minus best bid, over minutes with both sides. Volatility is the sample standard
+        deviation of the one-minute returns of the last price (price / previous price - 1, a held price counting as
+        0), not annualised. Both are null with nothing to measure. The history comes from the market snapshots: a
+        rebuild from Kafka keeps only what the compacted topic still holds, a restore all of it.
+      parameters:
+        - $ref: '#/components/parameters/InstrumentId'
+        - name: fromSequence
+          in: query
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: toSequence
+          in: query
+          required: true
+          description: Inclusive; not below fromSequence.
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        '200':
+          description: The minutes and their figures.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MarketQuality' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
   /internal/reconciliation/candles:
     get:
       tags: [market-data]
@@ -2481,6 +2515,50 @@ components:
           maxItems: 1440
           items: { $ref: '#/components/schemas/Candle' }
         freshness: { $ref: '#/components/schemas/CandleFreshness' }
+    QualityMinute:
+      type: object
+      additionalProperties: false
+      description: A minute's book, its last snapshot's; changed is false when it holds the minute before.
+      required: [minute, bestBid, bestAsk, spread, lastPrice, changed]
+      properties:
+        minute: { $ref: '#/components/schemas/Timestamp' }
+        bestBid:
+          description: Null while no one bids.
+          oneOf: [{ $ref: '#/components/schemas/Price' }, { type: 'null' }]
+        bestAsk:
+          description: Null while no one asks.
+          oneOf: [{ $ref: '#/components/schemas/Price' }, { type: 'null' }]
+        spread:
+          description: Best ask minus best bid; null unless both sides are there.
+          oneOf: [{ $ref: '#/components/schemas/Price' }, { type: 'null' }]
+        lastPrice:
+          description: Null before the first trade.
+          oneOf: [{ $ref: '#/components/schemas/Price' }, { type: 'null' }]
+        changed: { type: boolean }
+    MarketQuality:
+      type: object
+      additionalProperties: false
+      required: [instrumentId, fromSequence, toSequence, minutes, averageSpread, twoSidedMinutes, volatility, returns,
+        feed]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        fromSequence: { $ref: '#/components/schemas/Sequence' }
+        toSequence: { $ref: '#/components/schemas/Sequence' }
+        minutes:
+          type: array
+          maxItems: 1440
+          items: { $ref: '#/components/schemas/QualityMinute' }
+        averageSpread:
+          description: A price with four places, rounded half-even; null without a minute with both sides.
+          type: [string, 'null']
+          pattern: '^(0|[1-9][0-9]{0,18})\.[0-9]{4}$'
+        twoSidedMinutes: { type: integer, minimum: 0, description: The minutes the average spread is taken over. }
+        volatility:
+          description: A fraction with six places, rounded half-even; null with fewer than two returns.
+          type: [string, 'null']
+          pattern: '^(0|[1-9][0-9]*)\.[0-9]{6}$'
+        returns: { type: integer, minimum: 0, description: The one-minute returns the volatility is taken over. }
+        feed: { $ref: '#/components/schemas/Feed' }
     ExportedTrade:
       type: object
       additionalProperties: false
