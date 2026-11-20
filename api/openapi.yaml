@@ -2201,7 +2201,7 @@ components:
                       cancels: { type: integer, format: int64, minimum: 0 }
                       refusals:
                         type: array
-                        x-may-be-empty: true
+                        description: Empty when none of the strategy's commands were refused.
                         items:
                           type: object
                           additionalProperties: false

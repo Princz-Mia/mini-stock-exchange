@@ -1331,6 +1331,7 @@ export interface components {
                     readonly placements: number;
                     /** Format: int64 */
                     readonly cancels: number;
+                    /** @description Empty when none of the strategy's commands were refused. */
                     readonly refusals: readonly {
                         readonly code: string;
                         /** Format: int64 */
