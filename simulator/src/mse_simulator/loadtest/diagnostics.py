@@ -280,6 +280,7 @@ class Sampled:
     execution: list[tuple[float, Samples]] = field(default_factory=list)
     pending: list[float] = field(default_factory=list)
     writer_pending: list[float] = field(default_factory=list)
+    session_pending: list[float] = field(default_factory=list)
     cpu: dict[str, list[float]] = field(default_factory=dict)
     # (seconds into the window, percent of one CPU), by service, when the reading was timed.
     cpu_at: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
@@ -302,6 +303,9 @@ class Sampled:
         )
         self.writer_pending.append(
             stats.total(execution, "hikaricp_connections_pending", pool="writer")
+        )
+        self.session_pending.append(
+            stats.total(execution, "hikaricp_connections_pending", pool="sessions")
         )
 
     def docker(self, text: str, project: str, at: float | None = None) -> None:
@@ -524,10 +528,11 @@ def report(
     ] or ["- not sampled"]
     peak_pending = max(sampled.pending, default=0.0)
     peak_writer = max(sampled.writer_pending, default=0.0)
+    peak_sessions = max(sampled.session_pending, default=0.0)
     lines += [
         "",
         f"Threads waiting for a connection at peak: {peak_pending:.0f} on Execution's application "
-        f"pool, {peak_writer:.0f} on the writer's.",
+        f"pool, {peak_writer:.0f} on the writer's, {peak_sessions:.0f} on the session store's.",
         "",
     ]
     lines += ["Processor by container, percent of one CPU (mean, peak):", ""]
