@@ -8,6 +8,7 @@ import java.sql.DriverManager;
 import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -176,11 +177,12 @@ class MarketFeedConsumerIT {
 		waitUntil(() -> first.state() == State.LIVE);
 		first.close();
 		Map<String, Object> before = market(instrument);
+		List<Map<String, Object>> minutesBefore = minutes(instrument);
 
 		try (Connection owner = DriverManager.getConnection(TestcontainersConfiguration.jdbcUrl(postgres, "market_data_db"),
 				"market_data_owner", TestcontainersConfiguration.MARKET_DATA_OWNER_PASSWORD);
 				Statement wipe = owner.createStatement()) {
-			wipe.execute("TRUNCATE market_snapshot, instrument_projection, processed_event, projection_checkpoint");
+			wipe.execute("TRUNCATE market_snapshot, instrument_projection, processed_event, projection_checkpoint, spread_minute");
 		}
 		assertThat(sequenceOrZero(instrument)).isZero();
 
@@ -189,6 +191,8 @@ class MarketFeedConsumerIT {
 		waitUntil(() -> rebuilt.state() == State.LIVE);
 
 		assertThat(market(instrument)).isEqualTo(before);
+		// Nothing compacted yet, so every snapshot is read again, and the book's minutes come back as they were.
+		assertThat(minutes(instrument)).isEqualTo(minutesBefore).isNotEmpty();
 	}
 
 	@Test
@@ -258,6 +262,31 @@ class MarketFeedConsumerIT {
 		assertThat(sequence(instrument)).isEqualTo(1);
 		assertThat(feed.health().getDetails()).containsEntry("pausedAt", topic + "/" + partition + "@1");
 		assertThat(checkpoints.load(topic).get(partition)).isEqualTo(1);
+	}
+
+	/**
+	 * A crossed book can't be a minute's sample. Inside a batch it fails the poll, which is then applied one by one and
+	 * stops at it, as for any snapshot the tables refuse: the snapshot before it stays, the one after waits.
+	 */
+	@Test
+	void aCrossedBookInsideABatchPausesTheFeed() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		Instant at = Instant.parse("2026-11-20T10:00:00Z");
+		publish(Snapshots.book(instrument, 1, at, 10_000L, 10_100L, null));
+		MarketSnapshot crossed = Snapshots.book(instrument, 2, at, 10_100L, 10_100L, null);
+		int partition = send(crossed.getSimulationId() + "|" + instrument, WireEvents.encode(crossed));
+		publish(Snapshots.book(instrument, 3, at, 10_000L, 10_100L, null));
+		List<Integer> attempts = new CopyOnWriteArrayList<>();
+		MarketFeedConsumer feed = feed(Map.of(), recording(projection.handler((changed) -> {
+		}), attempts));
+
+		feed.start();
+
+		waitUntil(() -> feed.state() == State.PAUSED);
+		assertThat(attempts).as("the three snapshots tried at once first").contains(3);
+		assertThat(sequence(instrument)).isEqualTo(1);
+		assertThat(minutes(instrument)).extracting((minute) -> minute.get("last_sequence")).containsExactly(1L);
+		assertThat(feed.health().getDetails()).containsEntry("pausedAt", topic + "/" + partition + "@1");
 	}
 
 	/**
@@ -612,6 +641,12 @@ class MarketFeedConsumerIT {
 		return jdbc.queryForObject(
 				"SELECT coalesce(max(source_command_sequence), 0) FROM market_snapshot WHERE instrument_id = ?",
 				Long.class, instrument);
+	}
+
+	private List<Map<String, Object>> minutes(UUID instrument) {
+		return jdbc.queryForList("""
+				SELECT minute_start, first_sequence, last_sequence, best_bid_cents, best_ask_cents, last_price_cents
+				FROM spread_minute WHERE instrument_id = ? ORDER BY minute_start""", instrument);
 	}
 
 	private Map<String, Object> market(UUID instrument) {

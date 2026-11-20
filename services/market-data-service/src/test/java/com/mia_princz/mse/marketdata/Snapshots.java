@@ -48,6 +48,25 @@ final class Snapshots {
 		return removal;
 	}
 
+	/**
+	 * The book at a writer-clock time: a best bid and a best ask, each with a level behind it, null for an empty side,
+	 * and the last trade's price, null before the first. Bids are at least 2, so the level behind stays positive.
+	 */
+	static MarketSnapshot book(UUID instrument, long commandSequence, Instant at, Long bid, Long ask, Long lastPrice) {
+		MarketSnapshot book = untraded(instrument, commandSequence);
+		book.setGeneratedAt(at.truncatedTo(ChronoUnit.MICROS));
+		book.setBids(bid == null ? List.of() : List.of(new BookLevel(bid, 10L, 1), new BookLevel(bid - 1, 5L, 2)));
+		book.setAsks(ask == null ? List.of() : List.of(new BookLevel(ask, 10L, 1), new BookLevel(ask + 1, 5L, 2)));
+		if (lastPrice != null) {
+			PublicTrade trade = new PublicTrade(UUID.randomUUID(), commandSequence, lastPrice, 1L, AggressorSide.BUY,
+					at.truncatedTo(ChronoUnit.MICROS));
+			book.setRecentTrades(List.of(trade));
+			book.setLastTrade(trade);
+			book.setLastTradeSequence(commandSequence);
+		}
+		return book;
+	}
+
 	static MarketSnapshot snapshot(UUID instrument, long commandSequence, int levels) {
 		List<BookLevel> bids = new ArrayList<>();
 		for (int i = 0; i < levels; i++) {

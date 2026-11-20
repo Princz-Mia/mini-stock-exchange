@@ -19,6 +19,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.MissingServletRequestParameterException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -48,6 +49,9 @@ class MarketController {
 	static final int MAX_CANDLE_MINUTES = 1_440;
 
 	static final Duration DEFAULT_CANDLE_RANGE = Duration.ofHours(2);
+
+	/** One entry per minute, so at most a day per request, as with the candles. */
+	static final int MAX_QUALITY_MINUTES = 1_440;
 
 	private final MarketQueries queries;
 
@@ -164,6 +168,56 @@ class MarketController {
 		return new Candles(instrumentId.toString(), servedEpoch, start, end, bars, freshness);
 	}
 
+	/** A minute's book; {@code changed} is false when it holds the minute before, nothing having changed. */
+	record QualityMinute(Instant minute, String bestBid, String bestAsk, String spread, String lastPrice,
+			boolean changed) {
+	}
+
+	/**
+	 * The market over a window of command sequences, as {@link QualityFigures} measures it. {@code averageSpread} is a
+	 * price with four places and {@code volatility} a fraction with six, each rounded half-even, and null when there is
+	 * nothing to measure. {@code feed} is the market feed's: while it is behind, the window's last minutes may be too.
+	 */
+	record MarketQuality(String instrumentId, String fromSequence, String toSequence, List<QualityMinute> minutes,
+			String averageSpread, int twoSidedMinutes, String volatility, int returns, Feed feed) {
+	}
+
+	/**
+	 * The instrument's book minute by minute over {@code fromSequence..toSequence}, both inclusive, with its average
+	 * spread and volatility: public facts only, so a bot run's window can be measured from the run's sequences.
+	 */
+	@GetMapping("/{instrumentId}/market-quality")
+	MarketQuality marketQuality(@PathVariable UUID instrumentId, @RequestParam long fromSequence,
+			@RequestParam long toSequence) {
+		if (fromSequence < 1) {
+			throw ApiException.invalid("fromSequence", "OUT_OF_RANGE", "fromSequence must be at least 1");
+		}
+		if (toSequence < fromSequence) {
+			throw ApiException.invalid("toSequence", "INVALID_RANGE", "toSequence must not be below fromSequence");
+		}
+		if (!queries.isKnown(instrumentId)) {
+			throw notFound();
+		}
+		List<MarketQueries.SpreadMinute> rows = queries.spreadMinutes(instrumentId, fromSequence, toSequence,
+				MAX_QUALITY_MINUTES + 1);
+		if (rows.size() > MAX_QUALITY_MINUTES || (!rows.isEmpty() && Duration
+			.between(rows.getFirst().minute(), rows.getLast().minute())
+			.toMinutes() >= MAX_QUALITY_MINUTES)) {
+			throw ApiException.invalid("toSequence", "RANGE_TOO_LARGE",
+					"the window spans more than " + MAX_QUALITY_MINUTES + " minutes");
+		}
+		QualityFigures.Figures figures = QualityFigures.of(rows);
+		return new MarketQuality(instrumentId.toString(), Long.toString(fromSequence), Long.toString(toSequence),
+				figures.minutes()
+					.stream()
+					.map((minute) -> new QualityMinute(minute.start(), nullablePrice(minute.bidCents()),
+							nullablePrice(minute.askCents()), nullablePrice(minute.spreadCents()),
+							nullablePrice(minute.lastPriceCents()), minute.changed()))
+					.toList(),
+				figures.averageSpread(), figures.twoSidedMinutes(), figures.volatilityRatio(), figures.returns(),
+				feed(marketFeed));
+	}
+
 	@GetMapping
 	Instruments instruments() {
 		List<MarketQueries.Instrument> listed = queries.instruments();
@@ -217,6 +271,16 @@ class MarketController {
 	@ExceptionHandler(MethodArgumentTypeMismatchException.class)
 	ResponseEntity<ProblemDetail> mismatch(MethodArgumentTypeMismatchException ex) {
 		return problem(ApiException.invalid(ex.getName(), "INVALID_VALUE", ex.getName() + " has an invalid value"));
+	}
+
+	/** A required parameter left out: answered here for the same reason. */
+	@ExceptionHandler(MissingServletRequestParameterException.class)
+	ResponseEntity<ProblemDetail> missing(MissingServletRequestParameterException ex) {
+		return problem(ApiException.invalid(ex.getParameterName(), "REQUIRED", ex.getParameterName() + " is required"));
+	}
+
+	private static String nullablePrice(Long cents) {
+		return cents == null ? null : price(cents);
 	}
 
 	private static InstrumentView view(MarketQueries.Instrument instrument, MarketQueries.Session session,
