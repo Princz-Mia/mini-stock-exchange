@@ -1238,7 +1238,9 @@ public final class TradingEngine {
 		if (!"OPEN".equals(market.state()) && !"HALTED".equals(market.state())) {
 			refusal = BotRunResult.Status.NOT_OPEN;
 		}
-		else if (running.isPresent() && (running.get().endsAt() == null || running.get().endsAt().isAfter(now))) {
+		else if (running.isPresent() && (running.get().endsAt() == null || running.get().endsAt().isAfter(now))
+				|| store.botRunStopping(simulationId, now)) {
+			// Also while a worker is still finishing a stopped run: its last commands belong to its window, not this one's.
 			refusal = BotRunResult.Status.RUN_ACTIVE;
 		}
 		else if (shortfall != null) {
@@ -1297,8 +1299,9 @@ public final class TradingEngine {
 		Optional<String> state = store.botRunState(simulationId, command.runId());
 		BotRunResult.Status status = state.isEmpty() ? BotRunResult.Status.NOT_FOUND
 				: "RUNNING".equals(state.get()) ? BotRunResult.Status.STOPPED : BotRunResult.Status.NOT_RUNNING;
-		if (status == BotRunResult.Status.STOPPED) {
-			store.requestBotRunStop(command.runId(), clock.instant(), sequence);
+		if (status == BotRunResult.Status.STOPPED && !store.requestBotRunStop(command.runId(), clock.instant(), sequence)) {
+			// Its worker confirmed it stopped, its time being up, since the state was read.
+			status = BotRunResult.Status.NOT_RUNNING;
 		}
 		store.insertAudit(simulationId, command.actorUserId(), "BOT_RUN_STOP",
 				status == BotRunResult.Status.STOPPED ? "APPLIED" : "NOT_ALLOWED", key.idempotencyKey(), sequence);

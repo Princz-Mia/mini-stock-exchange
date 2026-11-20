@@ -395,19 +395,31 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void requestBotRunStop(UUID runId, Instant at, Long stopSequence) {
-		expectOne(jdbc.sql("""
+	public boolean requestBotRunStop(UUID runId, Instant at, Long stopSequence) {
+		return jdbc.sql("""
 				UPDATE bot_run SET desired_state = 'STOPPED', stop_requested_at = ?, stop_sequence = ?
 				WHERE id = ? AND desired_state = 'RUNNING'""")
 			.params(Timestamp.from(at), stopSequence, runId)
-			.update(), "request bot run stop");
+			.update() == 1;
+	}
+
+	@Override
+	public boolean botRunStopping(UUID simulationId, Instant now) {
+		Timestamp at = Timestamp.from(now);
+		return jdbc.sql("""
+				SELECT EXISTS (SELECT 1 FROM bot_run WHERE simulation_id = ? AND worker_id IS NOT NULL
+				    AND stopped_at IS NULL AND lease_expires_at > ? AND (desired_state = 'STOPPED' OR ends_at <= ?))""")
+			.params(simulationId, at, at)
+			.query(Boolean.class)
+			.single();
 	}
 
 	@Override
 	public void endUnfinishedBotRuns(UUID simulationId, long endSequence) {
 		// The runs first, then their instruments: the order the worker's confirmation takes its locks in.
 		List<UUID> ended = jdbc.sql("""
-				UPDATE bot_run SET end_sequence = ? WHERE simulation_id = ? AND end_sequence IS NULL RETURNING id""")
+				UPDATE bot_run SET end_sequence = ?, ended_by = 'NEXT_START' WHERE simulation_id = ? AND ended_by IS NULL
+				RETURNING id""")
 			.params(endSequence, simulationId)
 			.query(UUID.class)
 			.list();

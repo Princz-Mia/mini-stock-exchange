@@ -185,12 +185,14 @@ class SimulatorControlIT {
 		assertThat(problem(beatResponse(simulator, UUID.randomUUID(), "worker-b", 0, 0, 0, 0, 0, false), 404))
 			.isEqualTo("RUN_NOT_FOUND");
 
-		// Stopped by the operator: the worker still holds it until it confirms, and a stopping run comes before a new
-		// one, so its quotes are cancelled before new trading starts.
+		// Stopped by the operator: the worker still holds it until it confirms, and the next run waits until then, so
+		// the run's last commands and closing cancels stay in its own window.
 		assertThat(operator.post("/api/v1/admin/bot-runs/" + first + "/stop", "", "Idempotency-Key",
 				UUID.randomUUID().toString()).statusCode()).isEqualTo(200);
-		UUID second = start(operator, """
-				{"noise":1,"momentum":1,"commandsPerSecond":"1.00","durationMinutes":1,"instrumentIds":["%s"]}""".formatted(zeta));
+		String secondRun = """
+				{"noise":1,"momentum":1,"commandsPerSecond":"1.00","durationMinutes":1,"instrumentIds":["%s"]}""".formatted(zeta);
+		assertThat(problem(operator.post("/api/v1/admin/bot-runs", secondRun, "Idempotency-Key",
+				UUID.randomUUID().toString()), 409)).isEqualTo("RUN_ACTIVE");
 		JsonNode stopping = assignment(simulator).get("run");
 		assertThat(stopping.get("runId").asString()).isEqualTo(first.toString());
 		assertThat(stopping.get("desiredState").asString()).isEqualTo("STOPPED");
@@ -209,6 +211,7 @@ class SimulatorControlIT {
 			.isEqualTo("RUN_FINISHED");
 
 		// Then the new run; once its time is up the worker confirms, and it is recorded as stopped at its end.
+		UUID second = start(operator, secondRun);
 		assertThat(assignment(simulator).get("run").get("runId").asString()).isEqualTo(second.toString());
 		beat(simulator, second, "worker-b", 1, 0, 0, 0, 0, false, 200);
 		Instant endedAt = rewind(second, Duration.ofMinutes(2));

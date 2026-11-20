@@ -253,31 +253,33 @@ class SimulatorControlController {
 		}
 		Instant leaseExpiresAt = stopping ? now : now.plus(lease);
 		Timestamp at = Timestamp.from(now);
-		// A run that ran out of time is recorded as stopped at its end. A confirmed stop also ends the run's window at
-		// the newest committed command, unless the next run's start ended it first: nothing is in flight, and the
-		// worker hears back only after its commands commit, so every command of the run, its closing cancels included,
-		// is at or before it. Each instrument's newest trade sequence is taken in the same snapshot.
+		// A run that ran out of time is recorded as stopped at its end.
 		jdbc.sql("""
 				UPDATE bot_run SET worker_id = ?, heartbeat_at = ?, lease_expires_at = ?, placed = GREATEST(placed, ?),
 				    canceled = GREATEST(canceled, ?), rejected = GREATEST(rejected, ?), errors = GREATEST(errors, ?),
 				    in_flight = ?, stop_failures = ?,
 				    stopped_at = CASE WHEN ? THEN CAST(? AS timestamptz) END,
 				    desired_state = CASE WHEN ? THEN 'STOPPED' ELSE desired_state END,
-				    stop_requested_at = CASE WHEN ? THEN coalesce(stop_requested_at, ends_at) ELSE stop_requested_at END,
-				    end_sequence = CASE WHEN ? AND end_sequence IS NULL
-				        THEN (SELECT last_command_sequence FROM simulation s WHERE s.id = bot_run.simulation_id)
-				        ELSE end_sequence END
+				    stop_requested_at = CASE WHEN ? THEN coalesce(stop_requested_at, ends_at) ELSE stop_requested_at END
 				WHERE id = ?""")
 			.params(body.workerId(), at, Timestamp.from(leaseExpiresAt), body.placed(), body.canceled(),
 					body.rejected(), body.errors(), body.inFlight(), body.stopFailures(), stopping, at, stopping,
-					stopping, stopping, run.id())
+					stopping, run.id())
 			.update();
 		if (stopping) {
+			// The confirmed stop ends the run's window at the newest committed command, unless the next start ended it
+			// first: nothing is in flight, and the worker hears back only after its commands commit, so every command
+			// of the run, its closing cancels included, is at or before it. One statement, so the command and each
+			// instrument's newest trade sequence come from one snapshot.
 			jdbc.sql("""
+					WITH ended AS (
+					    UPDATE bot_run b SET ended_by = 'WORKER', end_sequence = s.last_command_sequence
+					    FROM simulation s
+					    WHERE b.id = ? AND b.ended_by IS NULL AND s.id = b.simulation_id
+					    RETURNING b.id)
 					UPDATE bot_run_instrument r SET end_trade_sequence = i.last_trade_sequence
-					FROM instrument i
-					WHERE r.run_id = ? AND r.end_trade_sequence IS NULL AND i.simulation_id = r.simulation_id
-					    AND i.id = r.instrument_id""")
+					FROM ended e, instrument i
+					WHERE r.run_id = e.id AND i.simulation_id = r.simulation_id AND i.id = r.instrument_id""")
 				.param(run.id())
 				.update();
 		}

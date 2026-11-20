@@ -162,10 +162,10 @@ class BotRunController {
 
 	/**
 	 * The run's commands in the command sequence: from its start to its end. {@code stopSequence} is the operator's
-	 * stop command, if there was one; {@code endSequence} stays null until the run is finished, and for runs recorded
-	 * before windows were kept.
+	 * stop command, if there was one; {@code endSequence} stays null until the run is finished, and {@code endedBy}
+	 * says how it ended: WORKER, NEXT_START, or NOT_KEPT for a run recorded before windows were kept.
 	 */
-	record Window(String startSequence, String stopSequence, String endSequence) {
+	record Window(String startSequence, String stopSequence, String endSequence, String endedBy) {
 	}
 
 	/**
@@ -194,7 +194,7 @@ class BotRunController {
 		List<Row> rows = jdbc.sql("""
 				SELECT id, desired_state, started_at, ends_at, stop_requested_at, stopped_at, seed, commands_per_second,
 				    max_order_quantity, max_position, worker_id, heartbeat_at, lease_expires_at, placed, canceled,
-				    rejected, errors, in_flight, stop_failures, start_sequence, stop_sequence, end_sequence
+				    rejected, errors, in_flight, stop_failures, start_sequence, stop_sequence, end_sequence, ended_by
 				FROM bot_run%1$s
 				ORDER BY started_at %2$s, id %2$s LIMIT :limit""".formatted(
 				after == null ? "" : " WHERE (started_at, id) " + direction.after() + " (:afterAt, :afterId)",
@@ -211,7 +211,7 @@ class BotRunController {
 					new Activity(row.getLong("placed"), row.getLong("canceled"), row.getLong("rejected"),
 							row.getLong("errors"), row.getInt("in_flight"), row.getInt("stop_failures")),
 					new Window(row.getString("start_sequence"), row.getString("stop_sequence"),
-							row.getString("end_sequence"))))
+							row.getString("end_sequence"), row.getString("ended_by"))))
 			.list();
 		if (rows.isEmpty()) {
 			return new RunList(List.of(), null);
