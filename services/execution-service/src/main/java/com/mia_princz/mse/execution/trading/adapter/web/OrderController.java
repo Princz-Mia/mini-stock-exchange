@@ -165,7 +165,9 @@ class OrderController {
 	/** The first committed result for one of the caller's keys. 404 means unknown, so retrying that key is safe. */
 	@GetMapping("/commands/{key}")
 	ResponseEntity<?> command(@PathVariable UUID key, Authentication authentication) {
+		// Only orders and cancels: a user who also operates shares one key space, and its operator answers stay out.
 		TradingQueries.StoredCommand stored = queries.command(trader(authentication).userId(), key)
+			.filter((found) -> PLACE_ROUTE.equals(found.route()) || CANCEL_ROUTE.equals(found.route()))
 			.orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "COMMAND_NOT_FOUND",
 					"No committed result for this key; retrying it is safe"));
 		return PLACE_ROUTE.equals(stored.route()) ? placement(STORED.readValue(stored.body(), PlacementResult.class))

@@ -101,7 +101,8 @@ export interface paths {
         readonly put?: never;
         /**
          * A signed-in trader changes their own password, confirming the current one.
-         * @description Traders only; the operator's password comes from configuration. The new password follows the same rules as
+         * @description Traders only, and not the operator, which also trades: its password comes from configuration. The new
+         *     password follows the same rules as
          *     one the operator sets: 12 to 64 characters and at most 72 bytes, not only spaces, not the username, and not
          *     the current password. A wrong current password counts against the sign-in limit, and once the limit is
          *     reached the change is refused before any password is checked. Once changed, the trader's other sessions end
@@ -341,8 +342,9 @@ export interface paths {
             readonly cookie?: never;
         };
         /**
-         * Every trader login, oldest first unless order=newest. Operator only.
-         * @description Wherever each login came from: added during setup or seeded from configuration. With funded=false, only the
+         * Every login that trades, oldest first unless order=newest. Operator only.
+         * @description Wherever each login came from: added during setup or seeded from configuration. The operator also trades,
+         *     so it is listed too and setup can fund it. With funded=false, only the
          *     logins still without an account in this market, which setup can fund; with funded=true, only those with one.
          *     A cursor keeps the filter it was issued with.
          */
@@ -1901,7 +1903,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Not a trader, or a missing or invalid CSRF token. No body. */
+            /** @description Not a trader, the operator, or a missing or invalid CSRF token. No body. */
             readonly 403: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -2053,13 +2055,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Not a trader. */
-            readonly 403: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content?: never;
-            };
+            readonly 403: components["responses"]["NotTrader"];
             readonly 404: components["responses"]["Problem"];
         };
     };
@@ -2154,13 +2150,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Not a trader. */
-            readonly 403: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content?: never;
-            };
+            readonly 403: components["responses"]["NotTrader"];
             readonly 404: components["responses"]["Problem"];
             readonly 409: components["responses"]["Problem"];
             readonly 422: components["responses"]["Problem"];
