@@ -100,10 +100,10 @@ class ApiContractIT {
 		check(bars, path(bars, instrument) + "?from=" + Candles.MINUTE + "&to=" + Candles.MINUTE.plusSeconds(86_460), 400);
 		check(bars, path(bars, UUID.randomUUID()), 404);
 
-		// A minute with one side, then one with both and a trade, then a minute held: every nullable field both ways.
+		// A minute with asks only, then one with both and a trade, then a minute held: every nullable field both ways.
 		String quality = "/api/v1/instruments/{instrumentId}/market-quality";
 		UUID measured = UUID.randomUUID();
-		snapshots.apply(Snapshots.book(measured, 1, Candles.MINUTE, 10_000L, null, null));
+		snapshots.apply(Snapshots.book(measured, 1, Candles.MINUTE, null, 10_150L, null));
 		snapshots.apply(Snapshots.book(measured, 2, Candles.MINUTE.plusSeconds(60), 10_000L, 10_150L, 10_050L));
 		snapshots.apply(Snapshots.book(measured, 3, Candles.MINUTE.plusSeconds(180), 10_010L, 10_150L, 10_110L));
 		check(quality, path(quality, measured) + "?fromSequence=1&toSequence=3", 200);

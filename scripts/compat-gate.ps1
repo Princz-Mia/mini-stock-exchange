@@ -624,6 +624,19 @@ try {
         Assert-Match 'health: commands in the last minute' '^[1-9][0-9]*$' "$($health.lastMinute.committed)"
         Assert-Equal 'health: writer available' 'True' "$($health.writer.available)"
         Assert-Equal 'health: outbox admitting' 'True' "$($health.outbox.admitting)"
+        # The run's window so far, measured from the public market data while the market maker quotes both sides of
+        # NOVA. Measured before the stop: the stop cancels its quotes, so the minute that ends the run is one-sided.
+        $window = (Get-ExecutionValue "SELECT b.start_sequence || '&toSequence=' || s.last_command_sequence FROM bot_run b JOIN simulation s ON s.id = b.simulation_id WHERE b.id = '$($started.runId)'")
+        $quality = "http://localhost:$webPort/api/v1/instruments/$(Get-Nova)/market-quality?fromSequence=$window"
+        $measured = ''
+        foreach ($attempt in 1..15) {
+            $measured = (& curl.exe -s -m 10 $quality | Out-String)
+            if ($measured -match '"twoSidedMinutes":[1-9]') { break }
+            Start-Sleep -Seconds 2
+        }
+        "market quality $window => $measured" | Add-Content -Encoding utf8 $script:currentLog
+        Assert-Match "the run's window has two-sided minutes" '"twoSidedMinutes":[1-9]' $measured
+        Assert-Match "the run's window has an average spread" '"averageSpread":"[0-9]+\.[0-9]{4}"' $measured
         $headers = @{ $csrf.headerName = $csrf.token; 'Idempotency-Key' = [guid]::NewGuid().ToString() }
         [void](Invoke-RestMethod "$base/admin/bot-runs/$($started.runId)/stop" -Method Post -WebSession $operator -Headers $headers)
         $status = ''
@@ -637,18 +650,6 @@ try {
         Assert-Equal 'the worker confirmed it, after placing orders' 't' $confirmed.Output
         $open = Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' "SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id WHERE a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')"
         Assert-Equal 'bot orders left open' '0' $open.Output
-        # The run's window, measured from the public market data: the market maker quoted both sides of NOVA in it.
-        $window = (Get-ExecutionValue "SELECT start_sequence || '&toSequence=' || end_sequence FROM bot_run WHERE id = '$($started.runId)'")
-        $quality = "http://localhost:$webPort/api/v1/instruments/$(Get-Nova)/market-quality?fromSequence=$window"
-        $measured = ''
-        foreach ($attempt in 1..15) {
-            $measured = (& curl.exe -s -m 10 $quality | Out-String)
-            if ($measured -match '"twoSidedMinutes":[1-9]') { break }
-            Start-Sleep -Seconds 2
-        }
-        "market quality $window => $measured" | Add-Content -Encoding utf8 $script:currentLog
-        Assert-Match "the run's window has two-sided minutes" '"twoSidedMinutes":[1-9]' $measured
-        Assert-Match "the run's window has an average spread" '"averageSpread":"[0-9]+\.[0-9]{4}"' $measured
         # The bots' commands were timed: Prometheus has a bucket edge at each latency budget, and the queue's size.
         $scrape = (Invoke-InContainer 'execution-service' @('curl', '-fsS', 'http://localhost:8080/actuator/prometheus')) -split "`n" |
             Where-Object { $_ -match '^mse_(commands_seconds_bucket\{command="place",outcome="committed",le="0\.(15|5)"\}|writer_queue_capacity) ' }

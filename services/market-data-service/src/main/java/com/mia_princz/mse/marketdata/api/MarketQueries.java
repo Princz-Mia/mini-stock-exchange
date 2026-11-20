@@ -244,7 +244,8 @@ class MarketQueries {
 		return jdbc.sql("""
 				SELECT minute_start, first_sequence, last_sequence, best_bid_cents, best_ask_cents, last_price_cents
 				FROM spread_minute
-				WHERE instrument_id = ? AND last_sequence >= ? AND first_sequence <= ?
+				WHERE instrument_id = ?
+				    AND int8range(first_sequence, last_sequence, '[]') && int8range(?, ?, '[]')
 				ORDER BY minute_start LIMIT ?""")
 			.params(instrumentId, from, to, limit)
 			.query((row, index) -> new SpreadMinute(row.getTimestamp("minute_start").toInstant(),

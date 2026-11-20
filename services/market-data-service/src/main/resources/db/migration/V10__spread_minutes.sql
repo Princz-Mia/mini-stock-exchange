@@ -8,7 +8,14 @@
 --
 -- Unlike the other projections, these rows are not all rebuilt from Kafka. mse.market.v1 is compacted, so a rebuild
 -- from the topic sees only the snapshots compaction has kept, at least each instrument's newest, and the history
--- before them is gone. A restore republishes every snapshot from Execution's outbox, so it rebuilds all of it.
+-- before them is gone. The same holds for snapshots compacted while the feed was paused or the service down. A restore
+-- republishes every snapshot from Execution's outbox, so it rebuilds all of it.
+--
+-- btree_gist lets one GiST index hold the instrument and each minute's sequence range, so a window finds exactly the
+-- minutes whose ranges overlap it, however long the history. It is a trusted extension: the database owner installs
+-- it.
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+
 CREATE TABLE spread_minute (
     instrument_id    UUID NOT NULL,
     minute_start     TIMESTAMPTZ NOT NULL CHECK (minute_start = date_trunc('minute', minute_start)),
@@ -23,7 +30,8 @@ CREATE TABLE spread_minute (
     CHECK (best_bid_cents < best_ask_cents)
 );
 
--- A window's minutes, found from the instrument by sequence.
-CREATE INDEX spread_minute_window ON spread_minute (instrument_id, last_sequence);
+-- A window's minutes: those whose sequence range overlaps it.
+CREATE INDEX spread_minute_window ON spread_minute
+    USING gist (instrument_id, int8range(first_sequence, last_sequence, '[]'));
 
 GRANT SELECT, INSERT, UPDATE ON spread_minute TO market_data_app;

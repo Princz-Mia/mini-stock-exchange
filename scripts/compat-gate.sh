@@ -401,6 +401,20 @@ bot_trading() {
   assert_match 'health: commands in the last minute' '"committed":[1-9]' "$health" &&
     assert_match 'health: writer available' '"available":true' "$health" &&
     assert_match 'health: outbox admitting' '"admitting":true' "$health" || return 1
+  # The run's window so far, measured from the public market data while the market maker quotes both sides of NOVA.
+  # Measured before the stop: the stop cancels its quotes, so the minute that ends the run is one-sided.
+  local window quality measured
+  window=$(execution_sql "SELECT b.start_sequence || '&toSequence=' || s.last_command_sequence
+    FROM bot_run b JOIN simulation s ON s.id = b.simulation_id WHERE b.id = '$run'")
+  quality="http://localhost:$web_port/api/v1/instruments/$(nova)/market-quality?fromSequence=$window"
+  for i in $(seq 1 15); do
+    measured=$(curl -s -m 10 "$quality")
+    printf '%s' "$measured" | grep -Eq '"twoSidedMinutes":[1-9]' && break
+    sleep 2
+  done
+  note "market quality $window => $measured"
+  assert_match "the run's window has two-sided minutes" '"twoSidedMinutes":[1-9]' "$measured" &&
+    assert_match "the run's window has an average spread" '"averageSpread":"[0-9]+\.[0-9]{4}"' "$measured" || return 1
   curl -s -b "$jar" -H "X-CSRF-TOKEN: $(csrf)" -H "Idempotency-Key: $(uuid)" -X POST \
     "$base/admin/bot-runs/$run/stop" >> "$log" 2>&1
   for i in $(seq 1 30); do
@@ -414,18 +428,6 @@ bot_trading() {
     assert_equal 'the worker confirmed it, after placing orders' 't' \
       "$(psql_as execution_owner execution_db "SELECT stopped_at IS NOT NULL AND placed > 0 FROM bot_run WHERE id = '$run'" | tr -d '\r')" &&
     assert_equal 'bot orders left open' 0 "$(psql_as execution_owner execution_db "$open" | tr -d '\r')" || return 1
-  # The run's window, measured from the public market data: the market maker quoted both sides of NOVA in it.
-  local window quality measured
-  window=$(execution_sql "SELECT start_sequence || '&toSequence=' || end_sequence FROM bot_run WHERE id = '$run'")
-  quality="http://localhost:$web_port/api/v1/instruments/$(nova)/market-quality?fromSequence=$window"
-  for i in $(seq 1 15); do
-    measured=$(curl -s -m 10 "$quality")
-    printf '%s' "$measured" | grep -Eq '"twoSidedMinutes":[1-9]' && break
-    sleep 2
-  done
-  note "market quality $window => $measured"
-  assert_match "the run's window has two-sided minutes" '"twoSidedMinutes":[1-9]' "$measured" &&
-    assert_match "the run's window has an average spread" '"averageSpread":"[0-9]+\.[0-9]{4}"' "$measured" || return 1
   # The bots' commands were timed: Prometheus has a bucket edge at each latency budget, and the queue's size.
   local scrape
   scrape=$(compose exec -T execution-service curl -fsS http://localhost:8080/actuator/prometheus 2>&1 |

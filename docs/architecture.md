@@ -179,7 +179,7 @@ erDiagram
 - `spread_minute`, each instrument's book minute by minute (best bid and ask, last price, and the command sequences each minute covers), from the market snapshots, for market quality over a window of sequences;
 - `processed_event`, for deduplication, and `projection_checkpoint`, the Kafka offsets.
 
-All of it is derived and can be rebuilt from Kafka, except the minutes of `spread_minute` older than what the compacted market topic still holds; a restore republishes every snapshot and rebuilds those too.
+All of it is derived and can be rebuilt from Kafka, except the minutes of `spread_minute` older than what the compacted market topic still holds, after a rebuild or a long enough pause of the market feed; a restore republishes every snapshot and rebuilds those too.
 
 **Money** is whole cents in a `long` everywhere, with overflow checked, and `BIGINT` in the databases. **Quantities** are whole shares.
 

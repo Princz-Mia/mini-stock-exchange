@@ -112,7 +112,7 @@ Market Data's database is derived from Kafka. To rebuild it, for example after a
 
 It reads every topic from the beginning, and reports each feed live once caught up. It refuses to look live before then.
 
-One thing a rebuild can't bring back: each instrument's book minute by minute (`spread_minute`, behind market quality over a bot run's window). It comes from the market snapshots, and that topic is compacted, so a rebuild sees only the snapshots compaction has kept, at least each instrument's newest. The minutes before them stay empty. A restore republishes every snapshot from Execution, so it rebuilds them all.
+One thing a rebuild can't bring back: each instrument's book minute by minute (`spread_minute`, behind market quality over a bot run's window). It comes from the market snapshots, and that topic is compacted, so a rebuild sees only the snapshots compaction has kept, at least each instrument's newest. The minutes before them stay empty. The same happens to snapshots compacted while the market feed was paused or Market Data was down, which under heavy bot load can take less than an hour: those minutes are missing, and market quality shows them held from the minute before, with nothing else to say so. A restore republishes every snapshot from Execution, so it rebuilds them all.
 
 **A feed paused on a record it can't use.** Look for `Feed paused: Unusable record at …` in its log, which names the record's topic, partition and offset. The feed stops there instead of skipping it, and its earlier records stay committed. Fix the cause, a bad deployment or a schema mismatch, then restart Market Data, which reads that record again.
 

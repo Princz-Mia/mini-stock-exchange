@@ -1,6 +1,7 @@
 package com.mia_princz.mse.marketdata;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.math.BigDecimal;
 import java.math.MathContext;
@@ -19,6 +20,7 @@ import java.util.Map;
 import java.util.Random;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.function.Function;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,6 +28,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -35,6 +38,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 import com.mia_princz.mse.contracts.events.MarketSnapshot;
 import com.mia_princz.mse.marketdata.projection.SnapshotProjection;
+import com.mia_princz.mse.marketdata.projection.UnusableRecordException;
 
 /**
  * Each instrument's book minute by minute, against an oracle that sees only the snapshots it sent. A seeded stream
@@ -183,6 +187,31 @@ class SpreadMinutesIT {
 
 		assertThat(rows(List.of(oneByOne))).isEqualTo(rows(List.of(inOnePoll)))
 			.containsExactly("instrument 0: " + START + " 1 7 9990 10010 -");
+	}
+
+	/**
+	 * A sample the table would refuse fails one by one, and fails a poll too, even when a newer snapshot of the same
+	 * minute would win the merge and hide it: a poll and its snapshots one by one must stop at the same place. A last
+	 * price below 1 is refused by the market's own table first.
+	 */
+	@Test
+	void aSampleTheTableWouldRefuseFailsEvenWhenANewerOneHidesIt() {
+		List<Function<UUID, MarketSnapshot>> refused = List.of(
+				(instrument) -> Snapshots.book(instrument, 1, START, 0L, 10_010L, null),
+				(instrument) -> Snapshots.book(instrument, 1, START, null, 0L, null),
+				(instrument) -> Snapshots.book(instrument, 1, START, 9_990L, 10_010L, 0L),
+				(instrument) -> Snapshots.book(instrument, 1, START, 10_010L, 10_010L, null));
+		for (Function<UUID, MarketSnapshot> bad : refused) {
+			UUID oneByOne = UUID.randomUUID();
+			assertThatThrownBy(() -> inTransaction(() -> snapshots.apply(bad.apply(oneByOne))))
+				.isInstanceOfAny(UnusableRecordException.class, DataIntegrityViolationException.class);
+			UUID inOnePoll = UUID.randomUUID();
+			List<MarketSnapshot> poll = List.of(bad.apply(inOnePoll),
+					Snapshots.book(inOnePoll, 2, START.plusSeconds(1), 9_990L, 10_010L, 10_000L));
+			assertThatThrownBy(() -> inTransaction(() -> snapshots.applyAll(poll, (instrument) -> {
+			}))).isInstanceOfAny(UnusableRecordException.class, DataIntegrityViolationException.class);
+			assertThat(rows(List.of(oneByOne, inOnePoll))).isEmpty();
+		}
 	}
 
 	/** A sequence between two snapshots of one minute still finds that minute: its sequences meet the window. */
