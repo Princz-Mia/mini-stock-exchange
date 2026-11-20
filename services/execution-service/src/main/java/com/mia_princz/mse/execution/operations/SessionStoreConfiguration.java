@@ -19,9 +19,11 @@ import com.zaxxer.hikari.HikariDataSource;
  * Every signed-in request updates its session's last access, so with the application's pool each request made one
  * durable commit beside the trading writer's, and at a high request rate those commits filled the pool and shared the
  * writer's flushes. A session row is not trading data: if PostgreSQL itself crashes, the session changes of its last
- * fraction of a second may be lost, so a trader signs in again or a sign-out made in that instant is undone. Commit
- * order is unchanged, as recovery replays the log in order. Orders, trades, balances and every other write stay
- * durable, on the application's and the writer's pools.
+ * fraction of a second may be lost, so a trader signs in again or a sign-out made in that instant is undone. A
+ * session a password change ended is still refused on its next request, by the durable password version, though an
+ * account stream it had open runs on until its own lifetime ends. Commit order is unchanged, as recovery replays the
+ * log in order. Orders, trades, balances and every other write stay durable, on the application's and the writer's
+ * pools.
  * <p>
  * Neither bean is a default candidate, so Spring Boot keeps its own data source and transaction manager as the
  * application's; only Spring Session, which asks for these by their qualifiers, uses them.

@@ -160,6 +160,7 @@ def test_the_feed_lag_and_the_pool_are_sampled_by_topic() -> None:
             stats.parse_prometheus(
                 'hikaricp_connections_pending{pool="execution"} 2\n'
                 'hikaricp_connections_pending{pool="writer"} 1\n'
+                'hikaricp_connections_pending{pool="sessions"} 3\n'
                 + ("" if backlog is None else f"mse_outbox_pending {backlog}\n")
             ),
             at * 5.0,
@@ -174,6 +175,7 @@ def test_the_feed_lag_and_the_pool_are_sampled_by_topic() -> None:
     assert sampled.backlog == [(0.0, 7), (10.0, 9)], "a backlog Execution did not report is no zero"
     assert max(sampled.pending) == 2, "the application pool alone"
     assert max(sampled.writer_pending) == 1, "the writer's pool apart"
+    assert max(sampled.session_pending) == 3, "the session store's pool apart"
 
 
 def series(value, later=None, seconds: int = 60) -> list[tuple[float, float]]:

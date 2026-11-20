@@ -34,8 +34,8 @@ class TradingConfiguration {
 	}
 
 	/**
-	 * The writer's own pool, from the same connection settings as the application's: reads, sessions and the outbox
-	 * relay use the application's pool, so they never hold a connection a command is waiting for.
+	 * The writer's own pool, from the same connection settings as the application's: reads and the outbox relay use
+	 * the application's pool and sessions their own, so none of them holds a connection a command is waiting for.
 	 */
 	@Bean(destroyMethod = "close")
 	WriterConnections writerConnections(DataSourceProperties properties, MeterRegistry meters,

@@ -8,6 +8,8 @@ import javax.sql.DataSource;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.health.actuate.endpoint.HealthEndpointGroup;
+import org.springframework.boot.health.actuate.endpoint.HealthEndpointGroups;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.boot.test.web.server.LocalServerPort;
@@ -59,6 +61,9 @@ class SessionStoreIT {
 	@Autowired
 	JdbcIndexedSessionRepository sessions;
 
+	@Autowired
+	HealthEndpointGroups health;
+
 	@Test
 	void onlyTheSessionStoreCommitsWithoutWaitingForTheFlush() throws Exception {
 		assertThat(applicationPool.unwrap(HikariDataSource.class).getPoolName()).isEqualTo("execution");
@@ -92,6 +97,18 @@ class SessionStoreIT {
 		assertThat(new JdbcTemplate(applicationPool)
 			.queryForObject("SELECT count(*) FROM spring_session WHERE principal_name = 'operator'", Long.class))
 			.isPositive();
+	}
+
+	@Test
+	void readinessChecksTheApplicationsPoolAloneAndIsUp() throws Exception {
+		HealthEndpointGroup readiness = health.get("readiness");
+		assertThat(readiness.isMember("db/dataSource")).isTrue();
+		assertThat(readiness.isMember("db/sessionStoreDataSource")).isFalse();
+
+		HttpResponse<String> probe = new TestBrowser(port).get("/actuator/health/readiness");
+
+		assertThat(probe.statusCode()).as(probe.body()).isEqualTo(200);
+		assertThat(probe.body()).contains("\"UP\"");
 	}
 
 	private static String synchronousCommit(DataSource pool) {

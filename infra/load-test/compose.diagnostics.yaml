@@ -1,5 +1,6 @@
 # Only for the load test: statement and I/O statistics, so a command's time can be split into the database's work,
-# the network and the WAL flush. Durability is unchanged: fsync and synchronous_commit keep their defaults (on).
+# the network and the WAL flush. Durability is unchanged: fsync and synchronous_commit keep their defaults (on), and
+# only Execution's session store turns synchronous_commit off, on its own connections.
 # An override's command replaces compose.yaml's whole list, so its durable settings are repeated here first.
 # Also a higher publication backlog limit, below.
 services:
