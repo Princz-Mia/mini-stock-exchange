@@ -1254,7 +1254,9 @@ public final class TradingEngine {
 					refusal == BotRunResult.Status.NOT_ENOUGH_BOTS ? shortfall : null);
 			return remember(key, refused.httpStatus(), refused);
 		}
-		running.ifPresent((expired) -> store.requestBotRunStop(expired.id(), expired.endsAt()));
+		running.ifPresent((expired) -> store.requestBotRunStop(expired.id(), expired.endsAt(), null));
+		// A run not yet ended (its worker hasn't confirmed, or it never had one) ends before this one starts.
+		store.endUnfinishedBotRuns(simulationId, sequence - 1);
 		store.insertBotRun(new TradingStore.NewBotRun(command.runId(), simulationId, command.seed(),
 				command.commandsPerSecondHundredths(), command.maxOrderQuantity(), command.maxPosition(),
 				command.actorUserId(), now, sequence, command.duration() == null ? null : now.plus(command.duration())));
@@ -1296,7 +1298,7 @@ public final class TradingEngine {
 		BotRunResult.Status status = state.isEmpty() ? BotRunResult.Status.NOT_FOUND
 				: "RUNNING".equals(state.get()) ? BotRunResult.Status.STOPPED : BotRunResult.Status.NOT_RUNNING;
 		if (status == BotRunResult.Status.STOPPED) {
-			store.requestBotRunStop(command.runId(), clock.instant());
+			store.requestBotRunStop(command.runId(), clock.instant(), sequence);
 		}
 		store.insertAudit(simulationId, command.actorUserId(), "BOT_RUN_STOP",
 				status == BotRunResult.Status.STOPPED ? "APPLIED" : "NOT_ALLOWED", key.idempotencyKey(), sequence);

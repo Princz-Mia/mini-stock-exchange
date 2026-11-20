@@ -20,6 +20,7 @@ export function botRun(overrides: Partial<BotRun> = {}): BotRun {
     },
     worker: { workerId: 'sim-1', heartbeatAt: '2026-11-06T10:01:20Z', leaseExpiresAt: '2026-11-06T10:01:35Z' },
     activity: { placed: 150, canceled: 40, rejected: 6, errors: 4, inFlight: 1, stopFailures: 0 },
+    window: { startSequence: '41', stopSequence: null, endSequence: null },
     ...overrides,
   };
 }

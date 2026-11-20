@@ -167,7 +167,7 @@ erDiagram
 **In `execution_db`:**
 - **The ledger:** append-only `ledger_entry` rows in `journal_batch`es, each summing to zero per asset, with available and reserved buckets.
 - **Balances and positions:** `cash_balance` and `position` are the ledger's running totals, and the startup reconciliation compares them with it.
-- **Bot runs:** each strategy in a run is assigned to the oldest bots tagged with it, and a foreign key from `bot_assignment` to the bot's tag refuses any other assignment. Neither the population nor a run has a size limit, so the simulator reads a run's bots in pages, once, since they never change.
+- **Bot runs:** each strategy in a run is assigned to the oldest bots tagged with it, and a foreign key from `bot_assignment` to the bot's tag refuses any other assignment. Neither the population nor a run has a size limit, so the simulator reads a run's bots in pages, once, since they never change. A run's window is a range of command sequences: from its start command to its last command, which is recorded when its worker confirms the stop (after the run's closing cancels) or by the next run's start, whichever comes first, so windows never overlap. Each instrument's newest trade sequence is kept at both edges.
 - **Resting orders** are limited per account (20 by default) and across the market (200,000), so a market of 10,000 bots fits; the market-wide count comes from the in-memory books, not a query per order.
 - **Answers and events:** `command_result` stores each idempotency key's answer, and `outbox` holds every event ever published.
 - **Sessions** are `spring_session` rows.

@@ -1252,6 +1252,16 @@ export interface components {
                 readonly inFlight: number;
                 readonly stopFailures: number;
             };
+            /**
+             * @description The run's commands in the command sequence, from its start to its end. stopSequence is the operator's stop
+             *     command, if there was one. endSequence is null until the run is finished: set when its worker confirms the
+             *     stop, or by the next run's start if that comes first. Runs recorded before windows were kept have none.
+             */
+            readonly window: {
+                readonly startSequence: components["schemas"]["Sequence"];
+                readonly stopSequence: components["schemas"]["Sequence"] | null;
+                readonly endSequence: components["schemas"]["Sequence"] | null;
+            };
         };
         readonly SimulatorAssignment: {
             readonly run: null | {

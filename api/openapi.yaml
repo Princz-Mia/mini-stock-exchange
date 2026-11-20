@@ -2032,7 +2032,8 @@ components:
     BotRun:
       type: object
       additionalProperties: false
-      required: [runId, status, desiredState, startedAt, endsAt, stopRequestedAt, stoppedAt, config, worker, activity]
+      required: [runId, status, desiredState, startedAt, endsAt, stopRequestedAt, stoppedAt, config, worker, activity,
+        window]
       properties:
         runId: { $ref: '#/components/schemas/Uuid' }
         status:
@@ -2091,6 +2092,18 @@ components:
             errors: { type: integer, format: int64, minimum: 0 }
             inFlight: { type: integer, minimum: 0 }
             stopFailures: { type: integer, minimum: 0 }
+        window:
+          type: object
+          additionalProperties: false
+          required: [startSequence, stopSequence, endSequence]
+          description: |
+            The run's commands in the command sequence, from its start to its end. stopSequence is the operator's stop
+            command, if there was one. endSequence is null until the run is finished: set when its worker confirms the
+            stop, or by the next run's start if that comes first. Runs recorded before windows were kept have none.
+          properties:
+            startSequence: { $ref: '#/components/schemas/Sequence' }
+            stopSequence: { oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }] }
+            endSequence: { oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }] }
 
     SimulatorAssignment:
       type: object
