@@ -57,8 +57,7 @@ class AccountSetupIT {
 		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
 		String nova = instrument(operator, "NOVA", "100.00");
 		String orbt = instrument(operator, "ORBT", "50.00");
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, 'other', ?, 'TRADER')",
-				UUID.randomUUID(), TestBrowser.passwordHash(PASSWORD));
+		TestUsers.insert(jdbc, UUID.randomUUID(), "other", TestBrowser.passwordHash(PASSWORD), "TRADER");
 
 		// A trader gets cash and shares in one balanced genesis batch, recorded as their initial allocation.
 		UUID traderKey = UUID.randomUUID();
@@ -178,8 +177,7 @@ class AccountSetupIT {
 		engine.start();
 		UUID lateKey = UUID.randomUUID();
 		assertThat(code(provision(operator, lateKey, "nobody-else", "1.00"), 422)).isEqualTo("UNKNOWN_TRADER");
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, 'late', ?, 'TRADER')",
-				UUID.randomUUID(), TestBrowser.passwordHash(PASSWORD));
+		TestUsers.insert(jdbc, UUID.randomUUID(), "late", TestBrowser.passwordHash(PASSWORD), "TRADER");
 		assertThat(code(provision(operator, lateKey, "late", "1.00"), 409)).isEqualTo("MARKET_NOT_IN_SETUP");
 
 		List<String> audit = jdbc.queryForList("""

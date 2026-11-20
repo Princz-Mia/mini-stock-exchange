@@ -2411,8 +2411,7 @@ class TradingEngineIT {
 	void anInstrumentAddedWhileRunningSharesTheCountOfRestingOrders() throws Exception {
 		int perAccount = jdbc.queryForObject("SELECT max_open_orders_per_account FROM simulation", Integer.class);
 		UUID operator = UUID.randomUUID();
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, 'unused', 'OPERATOR')",
-				operator, "op-" + operator.toString().substring(0, 8));
+		TestUsers.insert(jdbc, operator, "op-" + operator.toString().substring(0, 8), "unused", "OPERATOR");
 		UUID added = UUID.randomUUID();
 		jdbc.update("UPDATE simulation SET state = 'SETUP', opened_at = NULL");
 		try {
@@ -2516,8 +2515,7 @@ class TradingEngineIT {
 	@Test
 	void anInstrumentCommandThatRollsBackLeavesTheCatalogueAsCommitted() throws Exception {
 		UUID operator = UUID.randomUUID();
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, 'unused', 'OPERATOR')",
-				operator, "op-" + operator.toString().substring(0, 8));
+		TestUsers.insert(jdbc, operator, "op-" + operator.toString().substring(0, 8), "unused", "OPERATOR");
 		UUID neverAdded = UUID.randomUUID();
 		jdbc.update("UPDATE simulation SET state = 'SETUP', opened_at = NULL");
 		try {

@@ -111,7 +111,7 @@ class PasswordChangeIT {
 		assertThat(here.get("/api/v1/me").statusCode()).as("a new sign-in carries the new version").isEqualTo(200);
 
 		// The runtime role may change a login's password and its version, and nothing else of it.
-		assertThat(jdbc.queryForList("SELECT c FROM unnest(ARRAY['id', 'username', 'role', 'created_at', "
+		assertThat(jdbc.queryForList("SELECT c FROM unnest(ARRAY['id', 'username', 'created_at', "
 				+ "'password_hash', 'password_version']) c WHERE has_column_privilege(current_user, 'app_user', c, 'UPDATE')",
 				String.class))
 			.containsExactlyInAnyOrder("password_hash", "password_version");

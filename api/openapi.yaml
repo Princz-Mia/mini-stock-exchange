@@ -142,7 +142,8 @@ paths:
       operationId: changePassword
       summary: A signed-in trader changes their own password, confirming the current one.
       description: |
-        Traders only; the operator's password comes from configuration. The new password follows the same rules as
+        Traders only, and not the operator, which also trades: its password comes from configuration. The new
+        password follows the same rules as
         one the operator sets: 12 to 64 characters and at most 72 bytes, not only spaces, not the username, and not
         the current password. A wrong current password counts against the sign-in limit, and once the limit is
         reached the change is refused before any password is checked. Once changed, the trader's other sessions end
@@ -163,7 +164,7 @@ paths:
         '401':
           description: No session. No body.
         '403':
-          description: Not a trader, or a missing or invalid CSRF token. No body.
+          description: Not a trader, the operator, or a missing or invalid CSRF token. No body.
         '429':
           description: LOGIN_RATE_LIMITED, with Retry-After.
           headers:
@@ -270,7 +271,7 @@ paths:
         '401':
           description: No session. No body.
         '403':
-          description: Not a trader.
+          $ref: '#/components/responses/NotTrader'
         '404': { $ref: '#/components/responses/Problem' }
 
   /api/v1/orders/{orderId}/cancel:
@@ -335,7 +336,7 @@ paths:
         '401':
           description: No session. No body.
         '403':
-          description: Not a trader.
+          $ref: '#/components/responses/NotTrader'
         '404': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
@@ -594,9 +595,10 @@ paths:
     get:
       tags: [execution]
       operationId: listTraders
-      summary: Every trader login, oldest first unless order=newest. Operator only.
+      summary: Every login that trades, oldest first unless order=newest. Operator only.
       description: |
-        Wherever each login came from: added during setup or seeded from configuration. With funded=false, only the
+        Wherever each login came from: added during setup or seeded from configuration. The operator also trades,
+        so it is listed too and setup can fund it. With funded=false, only the
         logins still without an account in this market, which setup can fund; with funded=true, only those with one.
         A cursor keeps the filter it was issued with.
       parameters:

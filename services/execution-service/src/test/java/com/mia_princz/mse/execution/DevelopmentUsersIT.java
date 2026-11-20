@@ -3,6 +3,7 @@ package com.mia_princz.mse.execution;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.net.http.HttpResponse;
+import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -38,10 +39,10 @@ class DevelopmentUsersIT {
 
 	@Test
 	void aPasswordStoredInAnyOtherFormNeverMatches() throws Exception {
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES "
-				+ "('10000000-0000-0000-0000-0000000000a1', 'plaintext', '{noop}plain-password', 'TRADER'), "
-				+ "('10000000-0000-0000-0000-0000000000a2', 'hashed', ?, 'TRADER')",
-				TestBrowser.passwordHash("hashed-password"));
+		TestUsers.insert(jdbc, UUID.fromString("10000000-0000-0000-0000-0000000000a1"), "plaintext",
+				"{noop}plain-password", "TRADER");
+		TestUsers.insert(jdbc, UUID.fromString("10000000-0000-0000-0000-0000000000a2"), "hashed",
+				TestBrowser.passwordHash("hashed-password"), "TRADER");
 
 		assertThat(login("plaintext", "plain-password")).as("stored as plaintext").isEqualTo(401);
 		assertThat(login("hashed", "hashed-password")).as("stored as bcrypt").isEqualTo(200);

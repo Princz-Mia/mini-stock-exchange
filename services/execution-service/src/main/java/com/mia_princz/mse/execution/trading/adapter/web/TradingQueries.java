@@ -125,7 +125,7 @@ class TradingQueries {
 		return jdbc.sql("""
 				SELECT u.id, u.username, u.created_at, %1$s AS funded
 				FROM app_user u
-				WHERE u.role = 'TRADER'%2$s%3$s
+				WHERE EXISTS (SELECT 1 FROM user_role r WHERE r.user_id = u.id AND r.role = 'TRADER')%2$s%3$s
 				ORDER BY u.created_at %4$s, u.id %4$s LIMIT :limit""".formatted(hasAccount,
 				funded == null ? "" : funded ? " AND " + hasAccount : " AND NOT " + hasAccount,
 				after == null ? "" : " AND (u.created_at, u.id) " + order.after() + " (:afterAt, :afterId)",
@@ -209,7 +209,9 @@ class TradingQueries {
 
 	/** A user who may be given a trading account: one with the TRADER role. */
 	Optional<UUID> traderUserId(String username) {
-		return jdbc.sql("SELECT id FROM app_user WHERE username = ? AND role = 'TRADER'")
+		return jdbc.sql("""
+				SELECT id FROM app_user u WHERE username = ?
+				    AND EXISTS (SELECT 1 FROM user_role r WHERE r.user_id = u.id AND r.role = 'TRADER')""")
 			.param(username)
 			.query(UUID.class)
 			.optional();

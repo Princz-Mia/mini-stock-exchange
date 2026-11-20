@@ -621,8 +621,7 @@ class PortfolioApiIT {
 		UUID batch = UUID.randomUUID();
 		UUID simulation = jdbc.queryForObject("SELECT id FROM simulation", UUID.class);
 		UUID issuance = jdbc.queryForObject("SELECT id FROM account WHERE kind = 'ISSUANCE'", UUID.class);
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, ?, 'TRADER')", user,
-				username, TestBrowser.passwordHash(PASSWORD));
+		TestUsers.insert(jdbc, user, username, TestBrowser.passwordHash(PASSWORD), "TRADER");
 		jdbc.update("""
 				INSERT INTO account (id, simulation_id, kind, display_name, owner_user_id)
 				VALUES (?, ?, 'TRADER', ?, ?)""", account, simulation, username, user);

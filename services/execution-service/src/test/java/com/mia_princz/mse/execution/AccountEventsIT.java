@@ -204,8 +204,7 @@ class AccountEventsIT {
 				issuance, simulation);
 		jdbc.update("INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, 'EVT', 10000)",
 				instrument, simulation);
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, 'other', ?, 'TRADER')",
-				UUID.randomUUID(), TestBrowser.passwordHash(PASSWORD));
+		TestUsers.insert(jdbc, UUID.randomUUID(), "other", TestBrowser.passwordHash(PASSWORD), "TRADER");
 		for (String name : new String[] { "trader", "other" }) {
 			UUID account = UUID.randomUUID();
 			jdbc.update("""
