@@ -22,7 +22,8 @@ CREATE TABLE bot_run_instrument_figures (
 
 -- Per strategy, over the bots the run assigned to it:
 --   placements and cancels answered in the window (refusals included, counted again by reason below);
---   placed_quantity: what the orders accepted in the window asked for; filled_quantity: what of it filled in the window;
+--   placed_quantity: what the orders accepted in the window in the run's instruments asked for; filled_quantity: what
+--     of it filled in the window;
 --   trades, volume and notional: the strategy's side of each trade in the window (a trade between two of its bots
 --     counts twice);
 --   estimated P&L: the cash the window's trades moved, plus the run's instruments held at the end at the end marks,

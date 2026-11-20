@@ -75,8 +75,14 @@ public final class RunFigures {
 			.list();
 		int stored = 0;
 		for (UUID run : due) {
-			if (Boolean.TRUE.equals(snapshot.execute((status) -> compute(run)))) {
-				stored++;
+			try {
+				if (Boolean.TRUE.equals(snapshot.execute((status) -> compute(run)))) {
+					stored++;
+				}
+			}
+			catch (RuntimeException ex) {
+				// One run's failure doesn't hold back the runs after it; it is tried again on the next pass.
+				LOG.warn("The figures of bot run {} could not be computed", run, ex);
 			}
 		}
 		return stored;
@@ -142,6 +148,7 @@ public final class RunFigures {
 		jdbc.sql("""
 				SELECT a.strategy, sum(o.requested_quantity) FROM orders o
 				JOIN bot_assignment a ON a.run_id = ? AND a.account_id = o.account_id
+				JOIN bot_run_instrument r ON r.run_id = a.run_id AND r.instrument_id = o.instrument_id
 				WHERE o.simulation_id = ? AND o.accepted_sequence BETWEEN ? AND ?
 				GROUP BY a.strategy""")
 			.params(runId, window.simulationId(), window.start(), window.end())

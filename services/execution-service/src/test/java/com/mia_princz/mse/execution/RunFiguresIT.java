@@ -96,6 +96,12 @@ class RunFiguresIT {
 
 		Map<UUID, long[]> startBalances;
 
+		/** The run's instruments, by index; all unless it names some. */
+		final Set<Integer> traded = new HashSet<>(Set.of(0, 1));
+
+		/** Bots the run assigns that send nothing while it runs. */
+		final Set<UUID> silent = new HashSet<>();
+
 		Map<UUID, long[]> endBalances;
 
 	}
@@ -140,8 +146,17 @@ class RunFiguresIT {
 		send(browsers, 20);
 		finish(simulator, a, runA);
 		send(browsers, 15);
-		// Run B: the noise bots only, while the others keep trading outside it.
-		Tally b = start(operator, "{\"noise\":2," + RATE + "}");
+		// Run B: the noise bots and a momentum bot that sends nothing, on one instrument, while every bot keeps trading
+		// both: trades in the other instrument and by the unassigned bots stay out of its figures, and the silent bot's
+		// orders left from run A may still fill in it.
+		Tally b = start(operator, "{\"noise\":2,\"momentum\":1,\"instrumentIds\":[\"" + instruments.get(0) + "\"],"
+				+ RATE + "}");
+		b.traded.retainAll(Set.of(0));
+		b.assigned.forEach((account, strategy) -> {
+			if ("MOMENTUM".equals(strategy)) {
+				b.silent.add(account);
+			}
+		});
 		send(browsers, 100);
 		String runB = b.runId;
 		post(operator, "/api/v1/admin/bot-runs/" + runB + "/stop", "");
@@ -152,7 +167,8 @@ class RunFiguresIT {
 		assertThat(figures.computeFinished()).isZero();
 		expect(UUID.fromString(runA), a);
 		expect(UUID.fromString(runB), b);
-		assertThat(b.assigned.values()).containsOnly("NOISE");
+		assertThat(b.assigned.values()).containsOnly("NOISE", "MOMENTUM");
+		assertThat(b.commands).as("the silent bot sent nothing").doesNotContainKey("MOMENTUM");
 		// A run still going has no figures; figures are never rewritten.
 		post(operator, "/api/v1/admin/bot-runs", "{\"noise\":1," + RATE + "}");
 		assertThat(figures.computeFinished()).isZero();
@@ -188,10 +204,14 @@ class RunFiguresIT {
 	private void send(Map<Actor, TestBrowser> browsers, int commands) throws Exception {
 		for (int i = 0; i < commands; i++) {
 			Actor actor = actors.get(random.nextInt(actors.size()));
+			if (tally != null && tally.silent.contains(actor.account())) {
+				continue;
+			}
 			TestBrowser browser = browsers.get(actor);
 			String[] auth = actor.auth() == null ? new String[0] : actor.auth();
 			boolean cancel = random.nextInt(10) < 3 && (!actor.orders().isEmpty() || random.nextBoolean());
 			HttpResponse<String> answer;
+			int placedIn = -1;
 			if (cancel) {
 				String order = actor.orders().isEmpty() || random.nextInt(8) == 0 ? UUID.randomUUID().toString()
 						: actor.orders().get(random.nextInt(actor.orders().size()));
@@ -201,14 +221,16 @@ class RunFiguresIT {
 				boolean buy = random.nextBoolean();
 				long quantity = random.nextInt(25) == 0 ? (buy ? 200 : 1000) : 1 + random.nextInt(5);
 				String price = "%d.%02d".formatted(buy ? 99 + random.nextInt(2) : 100, random.nextInt(4) * 2 + (buy ? 92 : 0));
+				int instrument = random.nextInt(2);
 				answer = browser.post("/api/v1/orders", """
 						{"instrumentId":"%s","side":"%s","type":"LIMIT","timeInForce":"GTC","quantity":%d,
-						"limitPrice":"%s"}""".formatted(instruments.get(random.nextInt(2)), buy ? "BUY" : "SELL", quantity,
-						price), with(auth));
+						"limitPrice":"%s"}""".formatted(instruments.get(instrument), buy ? "BUY" : "SELL", quantity, price),
+						with(auth));
+				placedIn = instrument;
 				if (answer.statusCode() == 201) {
 					String id = JSON.readTree(answer.body()).get("orderId").asString();
 					actor.orders().add(id);
-					if (tally != null && tally.assigned.containsKey(actor.account())) {
+					if (tally != null && tally.assigned.containsKey(actor.account()) && tally.traded.contains(placedIn)) {
 						tally.orders.add(id);
 						tally.orderStrategy.put(id, actor.strategy());
 						tally.commands.computeIfAbsent(actor.strategy(), (s) -> new long[3])[2] += quantity;
@@ -265,7 +287,10 @@ class RunFiguresIT {
 		List<Map<String, Object>> trades = jdbc.queryForList("""
 				SELECT instrument_id, quantity, price_cents, buyer_account_id, seller_account_id, maker_order_id,
 				    taker_order_id FROM trades WHERE command_sequence BETWEEN ? AND ?""", oracle.start, oracle.end);
-		for (int i = 0; i < 2; i++) {
+		trades.removeIf((trade) -> !oracle.traded.contains(instruments.indexOf(trade.get("instrument_id").toString())));
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM bot_run_instrument_figures WHERE run_id = ?", Long.class,
+				run)).isEqualTo(oracle.traded.size());
+		for (int i : oracle.traded) {
 			UUID instrument = UUID.fromString(instruments.get(i));
 			long count = 0;
 			long volume = 0;
@@ -314,6 +339,16 @@ class RunFiguresIT {
 				}
 			}
 			long cash = 0;
+			for (Map<String, Object> trade : trades) {
+				long amount = (Long) trade.get("quantity") * (Long) trade.get("price_cents");
+				if (strategy.equals(oracle.assigned.get((UUID) trade.get("buyer_account_id")))) {
+					cash -= amount;
+				}
+				if (strategy.equals(oracle.assigned.get((UUID) trade.get("seller_account_id")))) {
+					cash += amount;
+				}
+			}
+			long snapshotCash = 0;
 			BigDecimal holdingsStart = BigDecimal.ZERO;
 			BigDecimal holdingsEnd = BigDecimal.ZERO;
 			for (Map.Entry<UUID, String> bot : oracle.assigned.entrySet()) {
@@ -322,11 +357,14 @@ class RunFiguresIT {
 				}
 				long[] before = oracle.startBalances.get(bot.getKey());
 				long[] after = oracle.endBalances.get(bot.getKey());
-				cash += after[0] - before[0];
-				for (int i = 0; i < 2; i++) {
+				snapshotCash += after[0] - before[0];
+				for (int i : oracle.traded) {
 					holdingsStart = holdingsStart.add(BigDecimal.valueOf(before[i + 1] * mark(i, oracle.start)));
 					holdingsEnd = holdingsEnd.add(BigDecimal.valueOf(after[i + 1] * mark(i, oracle.end)));
 				}
+			}
+			if (oracle.traded.size() == 2) {
+				assertThat(snapshotCash).as("the balances moved by the trades alone").isEqualTo(cash);
 			}
 			expected.put(strategy, List.of(Long.toString(bots.get(strategy)), Long.toString(commands[0]),
 					Long.toString(commands[1]), Long.toString(commands[2]), Long.toString(filled), Long.toString(sides),
