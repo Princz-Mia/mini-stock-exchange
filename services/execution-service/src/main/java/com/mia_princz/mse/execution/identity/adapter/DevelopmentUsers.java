@@ -35,7 +35,8 @@ class DevelopmentUsers implements ApplicationRunner {
 
 	@Override
 	public void run(ApplicationArguments args) {
-		seed("operator", operatorPassword, "OPERATOR");
+		// The operator also trades, once it has funded its own trader account in setup.
+		seed("operator", operatorPassword, "OPERATOR", "TRADER");
 		seed("trader", traderPassword, "TRADER");
 	}
 

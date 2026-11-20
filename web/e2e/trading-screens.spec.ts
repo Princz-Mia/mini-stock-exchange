@@ -668,6 +668,15 @@ for (const size of SIZES) {
       await expect(live.getByText('Checking…')).toHaveCount(0, { timeout: 15_000 });
       await expect(live.getByText('Not reachable')).toHaveCount(0);
       await capture(page, size, 'operator');
+
+      // The operator also trades: Trading shows the market, and in the ticket's place that it has no account yet.
+      const mode = page.getByRole('group', { name: 'Mode' });
+      await expect(mode.getByRole('link', { name: 'Operating' })).toHaveAttribute('aria-current', 'true');
+      await mode.getByRole('link', { name: 'Trading' }).click();
+      await expect(page.getByRole('heading', { name: 'No trading account' })).toBeVisible();
+      await expect(page.getByRole('heading', { level: 1, name: 'NOVA' })).toBeVisible();
+      await expect(mode.getByRole('link', { name: 'Trading' })).toHaveAttribute('aria-current', 'true');
+      await capture(page, size, 'operator-trading-no-account');
       await page.context().close();
 
       // Trading falling behind: a halted writer, a full queue, refusals and a backlog, each said in words.

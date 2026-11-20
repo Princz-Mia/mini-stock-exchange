@@ -25,7 +25,7 @@ function roleOf(pathname: string): TourRole | null {
  * A tour belongs to the page it opened on. Leaving that page (Back, say) closes it for this visit without recording
  * it, so it never reappears later unasked, nor turns into the other role's tour.
  */
-export function useTour(identity: Identity) {
+export function useTour(identity: Identity, current: TourRole) {
   const location = useLocation();
   const navigate = useNavigate();
   const client = useQueryClient();
@@ -65,9 +65,9 @@ export function useTour(identity: Identity) {
       setEnded(true);
       record.mutate();
     },
-    /** From Help: the tour for the user's start page, going there first if needed. */
+    /** From Help: the tour for the mode on screen, going to its start page first if needed. */
     replay() {
-      const target: TourRole = role ?? (identity.roles.includes('TRADER') ? 'TRADER' : 'OPERATOR');
+      const target: TourRole = role ?? current;
       if (role === target) {
         setOpen(target);
       } else {

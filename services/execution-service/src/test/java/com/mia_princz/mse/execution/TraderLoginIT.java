@@ -86,25 +86,27 @@ class TraderLoginIT {
 		assertThat(JSON.readTree(omarSession.get("/api/v1/me").body()).get("roles").toString()).contains("TRADER");
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM account WHERE display_name = 'omar'", Long.class))
 			.isZero();
-		// The list shows every trader login, the configured one included; the unfunded ones are those setup can fund.
+		// The list shows every login that trades, the configured ones included (the operator also trades); the unfunded
+		// ones are those setup can fund.
 		HttpResponse<String> everyone = operator.get(TRADERS);
 		CONTRACT.assertResponse("GET", TRADERS, 200, everyone.headers().firstValue("Content-Type").orElse(null),
 				everyone.body());
-		assertThat(listed(everyone)).containsExactly("trader false", "maria true", "omar false");
-		assertThat(listed(operator.get(TRADERS + "?funded=false"))).containsExactly("trader false", "omar false");
+		assertThat(listed(everyone)).containsExactly("operator false", "trader false", "maria true", "omar false");
+		assertThat(listed(operator.get(TRADERS + "?funded=false"))).containsExactly("operator false", "trader false",
+				"omar false");
 		assertThat(listed(operator.get(TRADERS + "?funded=true"))).containsExactly("maria true");
 		assertThat(listed(operator.get(TRADERS + "?order=newest"))).containsExactly("omar false", "maria true",
-				"trader false");
+				"trader false", "operator false");
 		// A page at a time, the filter kept by the cursor; a cursor from another filter is refused.
-		JsonNode first = JSON.readTree(operator.get(TRADERS + "?funded=false&limit=1").body());
-		assertThat(first.get("traders").get(0).get("username").asString()).isEqualTo("trader");
+		JsonNode first = JSON.readTree(operator.get(TRADERS + "?funded=false&limit=2").body());
+		assertThat(first.get("traders").get(1).get("username").asString()).isEqualTo("trader");
 		String next = first.get("nextCursor").asString();
-		JsonNode second = JSON.readTree(operator.get(TRADERS + "?funded=false&limit=1&cursor=" + next).body());
+		JsonNode second = JSON.readTree(operator.get(TRADERS + "?funded=false&limit=2&cursor=" + next).body());
 		assertThat(second.get("traders").get(0).get("username").asString()).isEqualTo("omar");
 		assertThat(second.get("nextCursor").isNull()).isTrue();
-		assertThat(fields(operator.get(TRADERS + "?funded=true&limit=1&cursor=" + next)))
+		assertThat(fields(operator.get(TRADERS + "?funded=true&limit=2&cursor=" + next)))
 			.containsExactly("cursor INVALID_CURSOR");
-		assertThat(fields(operator.get(TRADERS + "?limit=1&cursor=" + next))).containsExactly("cursor INVALID_CURSOR");
+		assertThat(fields(operator.get(TRADERS + "?limit=2&cursor=" + next))).containsExactly("cursor INVALID_CURSOR");
 		String unfiltered = JSON.readTree(operator.get(TRADERS + "?limit=1").body()).get("nextCursor").asString();
 		assertThat(fields(operator.get(TRADERS + "?funded=false&limit=1&cursor=" + unfiltered)))
 			.containsExactly("cursor INVALID_CURSOR");
@@ -112,13 +114,13 @@ class TraderLoginIT {
 		JsonNode newest = JSON.readTree(operator.get(TRADERS + "?order=newest&limit=2").body());
 		assertThat(newest.get("traders").get(1).get("username").asString()).isEqualTo("maria");
 		assertThat(listed(operator.get(TRADERS + "?order=newest&limit=2&cursor=" + newest.get("nextCursor").asString())))
-			.containsExactly("trader false");
+			.containsExactly("trader false", "operator false");
 		assertThat(omarSession.get(TRADERS).statusCode()).as("traders cannot list them").isEqualTo(403);
 
 		HttpResponse<String> funded = operator.post("/api/v1/admin/accounts",
 				"{\"username\":\"omar\",\"cash\":\"1000.00\"}", "Idempotency-Key", UUID.randomUUID().toString());
 		assertThat(funded.statusCode()).as(funded.body()).isEqualTo(201);
-		assertThat(listed(operator.get(TRADERS + "?funded=false"))).containsExactly("trader false");
+		assertThat(listed(operator.get(TRADERS + "?funded=false"))).containsExactly("operator false", "trader false");
 
 		// The same key repeats the first answer whatever password it carries: no second user, no new hash.
 		String hashBefore = jdbc.queryForObject("SELECT password_hash FROM app_user WHERE username = 'maria'",

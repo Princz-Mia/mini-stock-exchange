@@ -110,9 +110,9 @@ class AccountSetupIT {
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM account WHERE display_name = 'other'", Long.class))
 			.isZero();
 
-		// Only traders get accounts; that is checked before the writer, so nothing is committed or audited.
+		// Only logins that trade get accounts; that is checked before the writer, so nothing is committed or audited. The
+		// operator also trades, so it may fund its own (UserRolesIT).
 		assertThat(code(provision(operator, UUID.randomUUID(), "nobody", "1.00"), 422)).isEqualTo("UNKNOWN_TRADER");
-		assertThat(code(provision(operator, UUID.randomUUID(), "operator", "1.00"), 422)).isEqualTo("UNKNOWN_TRADER");
 
 		// Invalid endowments are refused before the writer, with every problem listed.
 		assertThat(fields(provision(operator, UUID.randomUUID(), "other", "-1.00", holding(nova, 1),

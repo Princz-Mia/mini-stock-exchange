@@ -488,7 +488,9 @@ try {
     Step 'Login: session and CSRF through the proxy' {
         # Traders are added by the operator during setup, as on the setup screen; the dev trader first, to sign in as.
         $operatorSession = New-ApiSession 'operator' $operatorPassword
-        $added = Invoke-ApiCommand $operatorSession '/admin/traders' (@{ username = 'trader'; password = $traderPassword } | ConvertTo-Json)
+        # The operator also trades: one session holds both roles.
+        Assert-Equal 'operator roles' 'OPERATOR TRADER' ((Invoke-RestMethod "$api/me" -WebSession $operatorSession).roles -join ' ')
+        $added =Invoke-ApiCommand $operatorSession '/admin/traders' (@{ username = 'trader'; password = $traderPassword } | ConvertTo-Json)
         Assert-Equal 'add the dev trader' 201 $added.Status
         $base = "http://localhost:$webPort/api/v1"
         $csrf = Invoke-RestMethod "$base/auth/csrf" -SessionVariable browser
