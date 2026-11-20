@@ -376,7 +376,9 @@ public final class JdbcTradingStore implements TradingStore {
 
 	@Override
 	public void insertBotRunInstrument(UUID runId, UUID simulationId, UUID instrumentId) {
-		expectOne(jdbc.sql("INSERT INTO bot_run_instrument (run_id, simulation_id, instrument_id) VALUES (?, ?, ?)")
+		expectOne(jdbc.sql("""
+				INSERT INTO bot_run_instrument (run_id, simulation_id, instrument_id, start_trade_sequence)
+				SELECT ?, simulation_id, id, last_trade_sequence FROM instrument WHERE simulation_id = ? AND id = ?""")
 			.params(runId, simulationId, instrumentId)
 			.update(), "insert bot run instrument");
 	}
@@ -393,12 +395,42 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void requestBotRunStop(UUID runId, Instant at) {
-		expectOne(jdbc.sql("""
-				UPDATE bot_run SET desired_state = 'STOPPED', stop_requested_at = ?
+	public boolean requestBotRunStop(UUID runId, Instant at, Long stopSequence) {
+		return jdbc.sql("""
+				UPDATE bot_run SET desired_state = 'STOPPED', stop_requested_at = ?, stop_sequence = ?
 				WHERE id = ? AND desired_state = 'RUNNING'""")
-			.params(Timestamp.from(at), runId)
-			.update(), "request bot run stop");
+			.params(Timestamp.from(at), stopSequence, runId)
+			.update() == 1;
+	}
+
+	@Override
+	public boolean botRunStopping(UUID simulationId, Instant now) {
+		Timestamp at = Timestamp.from(now);
+		return jdbc.sql("""
+				SELECT EXISTS (SELECT 1 FROM bot_run WHERE simulation_id = ? AND worker_id IS NOT NULL
+				    AND stopped_at IS NULL AND lease_expires_at > ? AND (desired_state = 'STOPPED' OR ends_at <= ?))""")
+			.params(simulationId, at, at)
+			.query(Boolean.class)
+			.single();
+	}
+
+	@Override
+	public void endUnfinishedBotRuns(UUID simulationId, long endSequence) {
+		// The runs first, then their instruments: the order the worker's confirmation takes its locks in.
+		List<UUID> ended = jdbc.sql("""
+				UPDATE bot_run SET end_sequence = ?, ended_by = 'NEXT_START' WHERE simulation_id = ? AND ended_by IS NULL
+				RETURNING id""")
+			.params(endSequence, simulationId)
+			.query(UUID.class)
+			.list();
+		if (!ended.isEmpty()) {
+			jdbc.sql("""
+					UPDATE bot_run_instrument r SET end_trade_sequence = i.last_trade_sequence
+					FROM instrument i
+					WHERE r.run_id = ANY(?::uuid[]) AND i.simulation_id = r.simulation_id AND i.id = r.instrument_id""")
+				.param(ended.stream().map(UUID::toString).toArray(String[]::new))
+				.update();
+		}
 	}
 
 	@Override

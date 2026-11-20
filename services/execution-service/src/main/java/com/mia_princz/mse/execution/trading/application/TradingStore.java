@@ -160,6 +160,7 @@ public interface TradingStore {
 
 	void insertBotRun(NewBotRun run);
 
+	/** Records an instrument the run trades, with the instrument's newest trade sequence as the run starts. */
 	void insertBotRunInstrument(UUID runId, UUID simulationId, UUID instrumentId);
 
 	/**
@@ -168,7 +169,24 @@ public interface TradingStore {
 	 */
 	int assignOldestBots(UUID runId, UUID simulationId, BotStrategy strategy, int count);
 
-	void requestBotRunStop(UUID runId, Instant at);
+	/**
+	 * Marks a running run stopped at {@code at}; {@code stopSequence} is the operator's stop command, if it was one.
+	 * False if the run was no longer running: its worker confirmed it stopped in the meantime, its time being up.
+	 */
+	boolean requestBotRunStop(UUID runId, Instant at, Long stopSequence);
+
+	/**
+	 * Whether a worker still holds a live lease on a run that should no longer run: it is still sending the run's last
+	 * commands and closing cancels, so the next run waits for its confirmation.
+	 */
+	boolean botRunStopping(UUID simulationId, Instant now);
+
+	/**
+	 * Ends every run of the simulation not yet ended at {@code endSequence}, with each of its instruments' newest trade
+	 * sequence; a run its worker already confirmed keeps the end it recorded, and one from before windows were kept
+	 * keeps none.
+	 */
+	void endUnfinishedBotRuns(UUID simulationId, long endSequence);
 
 	/** Every bot is created with its strategy; bots made untagged before it was required keep a null one. */
 	void insertBotAccount(UUID simulationId, UUID accountId, String displayName, BotStrategy strategy);

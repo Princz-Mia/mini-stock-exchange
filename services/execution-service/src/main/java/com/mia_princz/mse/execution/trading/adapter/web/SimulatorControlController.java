@@ -266,6 +266,23 @@ class SimulatorControlController {
 					body.rejected(), body.errors(), body.inFlight(), body.stopFailures(), stopping, at, stopping,
 					stopping, run.id())
 			.update();
+		if (stopping) {
+			// The confirmed stop ends the run's window at the newest committed command, unless the next start ended it
+			// first: nothing is in flight, and the worker hears back only after its commands commit, so every command
+			// of the run, its closing cancels included, is at or before it. One statement, so the command and each
+			// instrument's newest trade sequence come from one snapshot.
+			jdbc.sql("""
+					WITH ended AS (
+					    UPDATE bot_run b SET ended_by = 'WORKER', end_sequence = s.last_command_sequence
+					    FROM simulation s
+					    WHERE b.id = ? AND b.ended_by IS NULL AND s.id = b.simulation_id
+					    RETURNING b.id)
+					UPDATE bot_run_instrument r SET end_trade_sequence = i.last_trade_sequence
+					FROM ended e, instrument i
+					WHERE r.run_id = e.id AND i.simulation_id = r.simulation_id AND i.id = r.instrument_id""")
+				.param(run.id())
+				.update();
+		}
 		return new Heartbeat(run.id().toString(), shouldRun ? "RUNNING" : "STOPPED", leaseExpiresAt, stopping);
 	}
 

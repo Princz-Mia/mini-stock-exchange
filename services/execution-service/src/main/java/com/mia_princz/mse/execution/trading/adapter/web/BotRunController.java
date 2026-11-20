@@ -161,11 +161,19 @@ class BotRunController {
 	}
 
 	/**
+	 * The run's commands in the command sequence: from its start to its end. {@code stopSequence} is the operator's
+	 * stop command, if there was one; {@code endSequence} stays null until the run is finished, and {@code endedBy}
+	 * says how it ended: WORKER, NEXT_START, or NOT_KEPT for a run recorded before windows were kept.
+	 */
+	record Window(String startSequence, String stopSequence, String endSequence, String endedBy) {
+	}
+
+	/**
 	 * {@code status}: STARTING before a worker has taken it, RUNNING while a worker holds a live lease, STALE when the
 	 * lease ran out while it should run, STOPPING until the worker confirms, then STOPPED.
 	 */
 	record RunView(String runId, String status, String desiredState, Instant startedAt, Instant endsAt,
-			Instant stopRequestedAt, Instant stoppedAt, Config config, Worker worker, Activity activity) {
+			Instant stopRequestedAt, Instant stoppedAt, Config config, Worker worker, Activity activity, Window window) {
 	}
 
 	record RunList(List<RunView> runs, String nextCursor) {
@@ -181,12 +189,12 @@ class BotRunController {
 		Instant now = clock.instant();
 		record Row(UUID id, String desired, Instant startedAt, Instant endsAt, Instant stopRequestedAt,
 				Instant stoppedAt, long seed, BigDecimal rate, int maxOrderQuantity, int maxPosition, String workerId,
-				Instant heartbeatAt, Instant leaseExpiresAt, Activity activity) {
+				Instant heartbeatAt, Instant leaseExpiresAt, Activity activity, Window window) {
 		}
 		List<Row> rows = jdbc.sql("""
 				SELECT id, desired_state, started_at, ends_at, stop_requested_at, stopped_at, seed, commands_per_second,
 				    max_order_quantity, max_position, worker_id, heartbeat_at, lease_expires_at, placed, canceled,
-				    rejected, errors, in_flight, stop_failures
+				    rejected, errors, in_flight, stop_failures, start_sequence, stop_sequence, end_sequence, ended_by
 				FROM bot_run%1$s
 				ORDER BY started_at %2$s, id %2$s LIMIT :limit""".formatted(
 				after == null ? "" : " WHERE (started_at, id) " + direction.after() + " (:afterAt, :afterId)",
@@ -201,7 +209,9 @@ class BotRunController {
 					row.getInt("max_position"), row.getString("worker_id"), instant(row.getTimestamp("heartbeat_at")),
 					instant(row.getTimestamp("lease_expires_at")),
 					new Activity(row.getLong("placed"), row.getLong("canceled"), row.getLong("rejected"),
-							row.getLong("errors"), row.getInt("in_flight"), row.getInt("stop_failures"))))
+							row.getLong("errors"), row.getInt("in_flight"), row.getInt("stop_failures")),
+					new Window(row.getString("start_sequence"), row.getString("stop_sequence"),
+							row.getString("end_sequence"), row.getString("ended_by"))))
 			.list();
 		if (rows.isEmpty()) {
 			return new RunList(List.of(), null);
@@ -240,7 +250,7 @@ class BotRunController {
 					new Config(Long.toString(row.seed()), row.rate().setScale(2).toPlainString(), row.maxOrderQuantity(),
 							row.maxPosition(), instruments.getOrDefault(row.id(), List.of()),
 							new Strategies(counts[0], counts[1], counts[2])),
-					new Worker(row.workerId(), row.heartbeatAt(), row.leaseExpiresAt()), row.activity());
+					new Worker(row.workerId(), row.heartbeatAt(), row.leaseExpiresAt()), row.activity(), row.window());
 		}).toList(), next);
 	}
 

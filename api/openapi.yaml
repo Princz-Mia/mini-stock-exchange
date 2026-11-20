@@ -2032,7 +2032,8 @@ components:
     BotRun:
       type: object
       additionalProperties: false
-      required: [runId, status, desiredState, startedAt, endsAt, stopRequestedAt, stoppedAt, config, worker, activity]
+      required: [runId, status, desiredState, startedAt, endsAt, stopRequestedAt, stoppedAt, config, worker, activity,
+        window]
       properties:
         runId: { $ref: '#/components/schemas/Uuid' }
         status:
@@ -2091,6 +2092,21 @@ components:
             errors: { type: integer, format: int64, minimum: 0 }
             inFlight: { type: integer, minimum: 0 }
             stopFailures: { type: integer, minimum: 0 }
+        window:
+          type: object
+          additionalProperties: false
+          required: [startSequence, stopSequence, endSequence, endedBy]
+          description: |
+            The run's commands in the command sequence, from its start to its end. stopSequence is the operator's stop
+            command, if there was one. endSequence is null until the run is finished. endedBy says how it ended:
+            WORKER (its worker confirmed the stop, after every command of the run), NEXT_START (the next run started
+            first, after its worker had gone quiet or when it never had one), or NOT_KEPT (recorded before windows were
+            kept, so it has no end).
+          properties:
+            startSequence: { $ref: '#/components/schemas/Sequence' }
+            stopSequence: { oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }] }
+            endSequence: { oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }] }
+            endedBy: { type: [string, 'null'], enum: [WORKER, NEXT_START, NOT_KEPT, null] }
 
     SimulatorAssignment:
       type: object
