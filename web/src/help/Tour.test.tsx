@@ -22,6 +22,9 @@ function markupFor(anchor: string): string {
   if (labelled !== null) {
     return `<section aria-labelledby="${labelled[1]}"></section>`;
   }
+  if (anchor === 'section.ticket') {
+    return '<section class="ticket"></section>';
+  }
   if (anchor === '.terminal-orders .panel') {
     return '<div class="terminal-orders"><section class="panel"></section></div>';
   }

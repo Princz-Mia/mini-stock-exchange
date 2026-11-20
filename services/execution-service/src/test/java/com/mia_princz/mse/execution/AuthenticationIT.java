@@ -183,7 +183,8 @@ class AuthenticationIT {
 					FROM app_user u JOIN user_role r ON r.user_id = u.id GROUP BY u.id ORDER BY u.username""");
 
 		assertThat(users).extracting((user) -> user.get("username")).containsExactly("operator", "trader");
-		assertThat(users).extracting((user) -> user.get("role")).containsExactly("OPERATOR", "TRADER");
+		// The operator also trades; the trader only trades.
+		assertThat(users).extracting((user) -> user.get("role")).containsExactly("OPERATOR TRADER", "TRADER");
 		assertThat(users).allSatisfy((user) -> assertThat((String) user.get("password_hash")).startsWith("{bcrypt}"));
 	}
 

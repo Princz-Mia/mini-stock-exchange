@@ -4,7 +4,7 @@ import { Navigate, useLocation, useNavigate } from 'react-router';
 import { z } from 'zod';
 
 import { ApiError } from '../api/client';
-import { useLogin, useSession } from './session';
+import { homeOf, useLogin, useSession } from './session';
 
 const Credentials = z.object({
   username: z.string().trim().min(1, 'Enter your username'),
@@ -29,7 +29,8 @@ export function LoginPage() {
   const login = useLogin();
   const navigate = useNavigate();
   const location = useLocation();
-  const from = (location.state as { from?: string } | null)?.from ?? '/terminal';
+  // The page they came from, or their start page: an operator's is the operator screen, also when they trade.
+  const from = (location.state as { from?: string } | null)?.from;
   const {
     register,
     handleSubmit,
@@ -37,11 +38,11 @@ export function LoginPage() {
   } = useForm<Credentials>({ resolver: zodResolver(Credentials), defaultValues: { username: '', password: '' } });
 
   if (session.data) {
-    return <Navigate to={from} replace />;
+    return <Navigate to={from ?? homeOf(session.data)} replace />;
   }
 
   const submit = handleSubmit((credentials) =>
-    login.mutate(credentials, { onSuccess: () => void navigate(from, { replace: true }) }),
+    login.mutate(credentials, { onSuccess: (identity) => void navigate(from ?? homeOf(identity), { replace: true }) }),
   );
 
   return (
