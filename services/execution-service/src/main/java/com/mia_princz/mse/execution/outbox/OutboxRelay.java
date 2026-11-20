@@ -45,6 +45,18 @@ public final class OutboxRelay implements HealthIndicator, AutoCloseable {
 	public record Settings(int batchSize, Duration pollInterval, Duration ackTimeout, Duration maxBackoff) {
 	}
 
+	/** Hears each batch the relay published in full: how long it took, from reading it to marking it. */
+	@FunctionalInterface
+	public interface Timings {
+
+		Timings NONE = (nanos, events, rounds) -> {
+		};
+
+		/** {@code rounds} is how many waits for Kafka the batch needed: the most events any one key had in it. */
+		void batch(long nanos, int events, int rounds);
+
+	}
+
 	/** Kafka keeps order per partition, and a topic's key picks the partition. */
 	private record TopicKey(String topic, String key) {
 	}
@@ -61,6 +73,8 @@ public final class OutboxRelay implements HealthIndicator, AutoCloseable {
 	private final Settings settings;
 
 	private final Clock clock;
+
+	private final Timings timings;
 
 	private final Thread thread;
 
@@ -82,11 +96,17 @@ public final class OutboxRelay implements HealthIndicator, AutoCloseable {
 
 	public OutboxRelay(Outbox outbox, Supplier<Producer<String, byte[]>> producers, BooleanSupplier owner,
 			Settings settings, Clock clock) {
+		this(outbox, producers, owner, settings, clock, Timings.NONE);
+	}
+
+	public OutboxRelay(Outbox outbox, Supplier<Producer<String, byte[]>> producers, BooleanSupplier owner,
+			Settings settings, Clock clock, Timings timings) {
 		this.outbox = outbox;
 		this.producers = producers;
 		this.owner = owner;
 		this.settings = settings;
 		this.clock = clock;
+		this.timings = timings;
 		this.thread = Thread.ofPlatform().name("outbox-relay").unstarted(this::loop);
 	}
 
@@ -103,14 +123,16 @@ public final class OutboxRelay implements HealthIndicator, AutoCloseable {
 		if (!owner.getAsBoolean()) {
 			return 0;
 		}
+		long started = System.nanoTime();
 		List<Outbox.PendingEvent> batch = outbox.pending(settings.batchSize());
 		if (batch.isEmpty()) {
 			return 0;
 		}
 		Set<Long> acknowledged = new HashSet<>();
 		Failure failure = null;
+		List<List<Outbox.PendingEvent>> rounds = rounds(batch);
 		try {
-			for (List<Outbox.PendingEvent> round : rounds(batch)) {
+			for (List<Outbox.PendingEvent> round : rounds) {
 				failure = publish(round, acknowledged);
 				if (failure != null) {
 					break;
@@ -124,6 +146,7 @@ public final class OutboxRelay implements HealthIndicator, AutoCloseable {
 			resetProducer();
 			throw new OutboxPublishException(failure.event(), failure.cause());
 		}
+		timings.batch(System.nanoTime() - started, batch.size(), rounds.size());
 		return batch.size();
 	}
 

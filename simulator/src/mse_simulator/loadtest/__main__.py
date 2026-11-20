@@ -15,6 +15,7 @@ rate met every budget and the accounting checks afterwards passed.
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import math
@@ -26,6 +27,7 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -384,7 +386,7 @@ def measure(
             execution = stack.scrape()
             result.queue.append((now, stats.total(execution, "mse_writer_queue_depth")))
             result.feeds.append((now, listing()["feed"]["state"]))
-            sampled.scrape(stack.scrape("market-data-service"), execution)
+            sampled.scrape(stack.scrape("market-data-service"), execution, now)
         if tick % 15 == 0:
             pending = stack.sql(
                 "execution_owner",
@@ -479,7 +481,22 @@ def environment(stack: Stack) -> dict:
             "SELECT 'fsync=' || current_setting('fsync') || ', synchronous_commit=' "
             "|| current_setting('synchronous_commit') || ', ' || version()",
         ),
+        "admission": admission_limits(stack.scrape()),
     }
+
+
+def admission_limits(execution: diagnostics.Samples) -> tuple[float, float] | None:
+    """The publication backlog, in events and bytes, beyond which Execution refuses new orders, as
+    it reports them; None if it does not."""
+    names = {(name, dict(labels).get("limit")) for name, labels in execution}
+    if not {("mse_outbox_admission_limit", "events"), ("mse_outbox_admission_limit", "bytes")} <= (
+        names
+    ):
+        return None
+    return (
+        stats.total(execution, "mse_outbox_admission_limit", limit="events"),
+        stats.total(execution, "mse_outbox_admission_limit", limit="bytes"),
+    )
 
 
 def correctness(stack: Stack, instruments: list[str]) -> tuple[dict, float]:
@@ -557,6 +574,7 @@ def summarize(
     env: dict,
     checks: dict,
     phases: Phases,
+    downstream: diagnostics.Downstream,
     where: list[str] | None = None,
 ) -> tuple[str, bool]:
     seconds = after.at - before.at
@@ -601,6 +619,7 @@ def summarize(
         and unexpected / offered < FAILURE_BUDGET,
         f"Offered rate near {options.rate}/s ({offered / seconds:.1f}/s)": offered / seconds
         >= 0.9 * float(options.rate),
+        f"Publication and the feeds kept up ({downstream.describe()})": downstream.kept_up,
     } | checks
     passed = all(verdicts.values())
 
@@ -699,8 +718,19 @@ def environment_lines(
             for name, (mem, cpus) in sorted(env["limits"].items())
         )
         + ".",
+        admission_line(env.get("admission")),
         "",
     ]
+
+
+def admission_line(limits: tuple[float, float] | None) -> str:
+    if limits is None:
+        return "- Publication backlog limit: not read."
+    events, size = limits
+    return (
+        f"- Publication backlog limit, beyond which new orders are refused: {events:,.0f} events "
+        f"or {size / 2**20:,.0f} MiB."
+    )
 
 
 def begin_run(operator: Session, options: Options, rate: str, minutes: int) -> dict:
@@ -927,7 +957,15 @@ def run_stress(options: Options) -> int:
             (username, password, instruments[index % len(instruments)])
             for index, (username, password) in enumerate(credentials)
         ]
-        results, skipped, broke = asyncio.run(stress_rates(options, logins))
+        results, skipped, broke = asyncio.run(
+            stress_rates(
+                options,
+                logins,
+                lambda: (stack.scrape("market-data-service"), stack.scrape()),
+                stack.cpu,
+                lambda: cpu_stats(stack),
+            )
+        )
         env = read_environment(stack)
         logger.info("checking accounting and the public side")
         checks, restarted = checked(stack, instruments)
@@ -961,11 +999,88 @@ def run_stress(options: Options) -> int:
             stack.compose("down", "-v", "--remove-orphans", check=False)
 
 
+async def sample_downstream(
+    sample: Callable[[], tuple[diagnostics.Samples, diagnostics.Samples]],
+    sampled: diagnostics.Sampled,
+    every: float = 5.0,
+) -> None:
+    """Every few seconds until cancelled, Market Data's and Execution's scrapes, timed from the
+    start. A scrape that fails is skipped: a missing sample is not read as zero."""
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    taken = 0
+    while True:
+        at = loop.time() - start
+        try:
+            market_data, execution = await asyncio.to_thread(sample)
+        except Exception:  # noqa: BLE001 - the next sample may work; the verdict needs enough
+            logger.warning("a downstream sample at %.0f s failed", at, exc_info=True)
+        else:
+            sampled.scrape(market_data, execution, at)
+        taken += 1
+        await asyncio.sleep(max(0.0, start + taken * every - loop.time()))
+
+
+def cpu_stats(stack: Stack) -> dict[str, tuple[float, float, float]]:
+    """Each stress service's cgroup CPU counters now; a service that cannot be read is left out."""
+    counters = {}
+    for service in stress.SERVICES:
+        try:
+            parsed = diagnostics.cpu_stat(stack.exec(service, *diagnostics.CPU_STAT))
+        except Exception:  # noqa: BLE001 - the others are still read
+            logger.warning("the CPU counters of %s could not be read", service, exc_info=True)
+            continue
+        if parsed is not None:
+            counters[service] = parsed
+    return counters
+
+
+async def sample_cpu(
+    cpu: Callable[[], str], sampled: diagnostics.Sampled, every: float = 10.0
+) -> None:
+    """docker stats every few seconds until cancelled, each reading timed from the start."""
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    taken = 0
+    while True:
+        at = loop.time() - start
+        try:
+            text = await asyncio.to_thread(cpu)
+        except Exception:  # noqa: BLE001 - the next reading may work
+            logger.warning("a processor reading at %.0f s failed", at, exc_info=True)
+        else:
+            sampled.docker(text, PROJECT, at)
+        taken += 1
+        await asyncio.sleep(max(0.0, start + taken * every - loop.time()))
+
+
+async def throttled_between(
+    counters: Callable[[], dict[str, tuple[float, float, float]]], start: float, end: float
+) -> dict[str, tuple[float, float]]:
+    """The CPU counters read at start and at end seconds from now, and how much each service was
+    held back at its CPU limit between them."""
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    await asyncio.sleep(max(0.0, began + start - loop.time()))
+    first_at = loop.time()
+    first = await asyncio.to_thread(counters)
+    await asyncio.sleep(max(0.0, began + end - loop.time()))
+    last_at = loop.time()
+    last = await asyncio.to_thread(counters)
+    return diagnostics.throttling(first, last, last_at - first_at)
+
+
 async def stress_rates(
-    options: Options, logins: list[tuple[str, str, str]]
+    options: Options,
+    logins: list[tuple[str, str, str]],
+    sample: Callable[[], tuple[diagnostics.Samples, diagnostics.Samples]],
+    cpu: Callable[[], str] | None = None,
+    counters: Callable[[], dict[str, tuple[float, float, float]]] | None = None,
 ) -> tuple[list[stress.Result], list[float], str | None]:
-    """Signs every login in, then fires each rate in turn, each starting with no open orders. A
-    rate that cannot be measured ends the run; the rates before it are still returned."""
+    """Signs every login in, then fires each rate in turn, each starting with no open orders, while
+    the publication backlog, the feeds' lag, Execution's timers and each container's processor are
+    sampled, and its CPU throttling read at the measured window's ends. A rate that cannot be
+    measured ends the run; the rates before it are still returned."""
     assert options.stress is not None
     base_url = f"http://{HOST}:{WEB_PORT}"
     gate = asyncio.Semaphore(8)
@@ -989,13 +1104,35 @@ async def stress_rates(
             warmup = (
                 max(options.stress_warmup, FIRST_WARMUP) if index == 0 else options.stress_warmup
             )
+            sampled = diagnostics.Sampled()
+            throttled: dict[str, tuple[float, float]] = {}
             try:
                 await asyncio.gather(*(tidy(trader) for trader in traders))
-                sent = await stress.fire(
-                    traders[: stress.traders(rate)],
-                    rate,
-                    warmup + options.stress_duration,
-                )
+                samplers = [asyncio.create_task(sample_downstream(sample, sampled))]
+                if cpu is not None:
+                    samplers.append(asyncio.create_task(sample_cpu(cpu, sampled)))
+                held = None
+                if counters is not None:
+                    held = asyncio.create_task(
+                        throttled_between(counters, warmup, warmup + options.stress_duration)
+                    )
+                try:
+                    sent = await stress.fire(
+                        traders[: stress.traders(rate)],
+                        rate,
+                        warmup + options.stress_duration,
+                    )
+                finally:
+                    for task in samplers:
+                        task.cancel()
+                    for task in samplers:
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                if held is not None:
+                    try:
+                        throttled = await held
+                    except Exception:  # noqa: BLE001 - the rate is still reported without it
+                        logger.warning("the CPU throttling could not be read", exc_info=True)
             except Exception as error:  # noqa: BLE001 - the rates before it are still reported
                 logger.exception(
                     "rate %d at %.0f commands/s could not be measured", index + 1, rate
@@ -1003,7 +1140,9 @@ async def stress_rates(
                 broke = f"{rate:,.0f}/s ({type(error).__name__}: {error})"
                 skipped = options.stress[index + 1 :]
                 break
-            result = stress.measured(rate, warmup, options.stress_duration, sent)
+            result = stress.measured(
+                rate, warmup, options.stress_duration, sent, sampled, throttled
+            )
             results.append(result)
             logger.info(
                 "rate %d: answered %.1f/s, p99 %s, %s",
@@ -1089,7 +1228,10 @@ def run(options: Options) -> int:
             payloads,
             restarted,
         )
-        report, passed = summarize(options, before, after, window, env, checks, phases, where)
+        flow = diagnostics.downstream(
+            sampled, float(options.rate), min(60.0, (after.at - before.at) / 3)
+        )
+        report, passed = summarize(options, before, after, window, env, checks, phases, flow, where)
         path = stack.run_dir / f"report-{datetime.now(UTC):%Y%m%d-%H%M}.md"
         path.write_text(report, encoding="utf-8")
         print(report)
@@ -1102,6 +1244,22 @@ def run(options: Options) -> int:
             stack.compose("down", "-v", "--remove-orphans", check=False)
 
 
+def run_rate(text: str) -> str:
+    """A run rate as the API takes it, with two decimals: "225" becomes "225.00". Refused here,
+    before a stack is started, if the API would refuse it."""
+    try:
+        value = float(text)
+    except ValueError as error:
+        raise ValueError(f"--rate is not a number: {text!r}") from error
+    if not math.isfinite(value):
+        raise ValueError(f"--rate is not a finite number: {text!r}")
+    if round(value, 2) != value:
+        raise ValueError(f"--rate takes at most two decimals: {text!r}")
+    if not ramp.MIN_RATE <= value <= ramp.MAX_RATE:
+        raise ValueError(f"--rate must be from {ramp.MIN_RATE} to {ramp.MAX_RATE:.0f}")
+    return f"{value:.2f}"
+
+
 def parse(argv: list[str]) -> Options:
     parser = argparse.ArgumentParser(
         prog="python -m mse_simulator.loadtest",
@@ -1109,7 +1267,7 @@ def parse(argv: list[str]) -> Options:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--rate", default="100.00", help="run rate in commands/s, as the API takes it"
+        "--rate", default="100.00", help="run rate in commands/s, such as 225 or 12.5"
     )
     parser.add_argument("--bots", type=int, default=10_000)
     parser.add_argument("--warmup", type=int, default=120, help="seconds before measuring")
@@ -1157,9 +1315,13 @@ def parse(argv: list[str]) -> Options:
         stress_rates = None if args.stress is None else ramp.rates(args.stress)
     except ValueError as error:
         parser.error(str(error))
+    try:
+        rate = run_rate(args.rate)
+    except ValueError as error:
+        parser.error(str(error))
     return Options(
         root,
-        args.rate,
+        rate,
         args.bots,
         args.warmup,
         args.duration,

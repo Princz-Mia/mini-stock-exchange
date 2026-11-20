@@ -81,6 +81,15 @@ class BacklogAdmissionIT {
 		assertThat(place(trader, instrument).statusCode()).as("admission reopens").isEqualTo(201);
 	}
 
+	/** The limits in force are measured, so a load test can report what it ran with. */
+	@Test
+	void theLimitsInForceAreMeasured() {
+		assertThat(meters.get("mse.outbox.admission.limit").tag("limit", "events").gauge().value()).isEqualTo(3);
+		assertThat(meters.get("mse.outbox.admission.limit").tag("limit", "bytes").gauge().value())
+			.as("the default, 256 MiB")
+			.isEqualTo(268_435_456);
+	}
+
 	private UUID market() {
 		UUID simulation = UUID.randomUUID();
 		UUID issuance = UUID.randomUUID();

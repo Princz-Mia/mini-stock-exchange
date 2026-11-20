@@ -50,6 +50,19 @@ OUTBOX = "SELECT topic, count(*), avg(octet_length(payload))::bigint FROM outbox
 
 PHASES = ("queue_wait", "begin", "work", "commit", "apply")
 
+# Downstream of the writer, the outbox relay and Market Data's feeds must keep up with what it
+# commits. Each is judged like the writer's queue, on sustained growth between the window's ends,
+# with an allowance of a couple of seconds of commands: a batch or a poll in flight is not growth.
+DOWNSTREAM_ALLOWANCE_SECONDS = 2.0
+DOWNSTREAM_MIN_ALLOWANCE = 200.0
+BACKLOG = "publication backlog"
+# Each end of the window needs this many samples of a series before its growth is judged.
+MIN_SAMPLES_PER_SPAN = 2
+
+# A container's processor accounting under cgroup v2: how many scheduling periods it had, in how
+# many it used up its CPU limit and was held back, and for how long in all.
+CPU_STAT = ("cat", "/sys/fs/cgroup/cpu.stat")
+
 
 def rows(text: str) -> list[list[str]]:
     """psql -At output as rows of columns; blank lines and anything without a separator where one is
@@ -173,10 +186,13 @@ class WriterSplit:
     means: dict[str, dict[str, float]]
     service_ms: float | None
     ceiling: float | None
+    # Committed commands over the window, by command.
+    commands: dict[str, float] = field(default_factory=dict)
 
 
 def writer_split(before: Samples, after: Samples) -> WriterSplit:
     means: dict[str, dict[str, float]] = {}
+    counts: dict[str, float] = {}
     weighted = 0.0
     commands = 0.0
     for command in ("place", "cancel"):
@@ -199,9 +215,10 @@ def writer_split(before: Samples, after: Samples) -> WriterSplit:
         )
         weighted += service * done
         commands += done
+        counts[command] = done
     service_ms = weighted / commands if commands > 0 else None
     ceiling = 1000 / service_ms if service_ms else None
-    return WriterSplit(means, service_ms, ceiling)
+    return WriterSplit(means, service_ms, ceiling, counts)
 
 
 def reads_per_second(before: Samples, after: Samples, seconds: float) -> dict[str, float]:
@@ -223,15 +240,33 @@ def reads_per_second(before: Samples, after: Samples, seconds: float) -> dict[st
 class Sampled:
     """Values sampled during the window."""
 
-    feed_lag: dict[str, list[float]] = field(default_factory=dict)
+    # (seconds into the window, records on Kafka not yet projected), by topic.
+    feed_lag: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+    # (seconds into the window, 1 while the feed is live and Kafka answers, else 0), by topic.
+    feed_live: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+    # (seconds into the window, committed events not yet acknowledged by Kafka).
+    backlog: list[tuple[float, float]] = field(default_factory=list)
+    # (seconds into the window, Execution's whole scrape), to time the writer over part of it.
+    execution: list[tuple[float, Samples]] = field(default_factory=list)
     pending: list[float] = field(default_factory=list)
     writer_pending: list[float] = field(default_factory=list)
     cpu: dict[str, list[float]] = field(default_factory=dict)
+    # (seconds into the window, percent of one CPU), by service, when the reading was timed.
+    cpu_at: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
 
-    def scrape(self, market_data: Samples, execution: Samples) -> None:
+    def scrape(self, market_data: Samples, execution: Samples, at: float) -> None:
+        """One sample of each, taken at seconds into the window. A lag of -1 (not measured yet) and
+        a backlog Execution did not report are left out rather than read as zero."""
         for (name, labels), value in market_data.items():
+            topic = dict(labels).get("topic", "?")
             if name == "mse_feed_lag" and value >= 0:
-                self.feed_lag.setdefault(dict(labels).get("topic", "?"), []).append(value)
+                self.feed_lag.setdefault(topic, []).append((at, value))
+            elif name == "mse_feed_live":
+                self.feed_live.setdefault(topic, []).append((at, value))
+        if any(name == "mse_outbox_pending" for name, _ in execution):
+            self.backlog.append((at, stats.total(execution, "mse_outbox_pending")))
+        if execution:
+            self.execution.append((at, execution))
         self.pending.append(
             stats.total(execution, "hikaricp_connections_pending", pool="execution")
         )
@@ -239,19 +274,141 @@ class Sampled:
             stats.total(execution, "hikaricp_connections_pending", pool="writer")
         )
 
-    def docker(self, text: str, project: str) -> None:
-        """docker stats lines of "name|12.34%"; containers named <project>-<service>-<n>."""
+    def docker(self, text: str, project: str, at: float | None = None) -> None:
+        """docker stats lines of "name|12.34%"; containers named <project>-<service>-<n>. With at,
+        the reading is also kept with its time, so part of the window can be taken later."""
         for line in text.strip().splitlines():
             name, _, percent = line.partition("|")
             if not name.startswith(f"{project}-") or not percent.endswith("%"):
                 continue
             service = name[len(project) + 1 :].rsplit("-", 1)[0]
             self.cpu.setdefault(service, []).append(float(percent[:-1]))
+            if at is not None:
+                self.cpu_at.setdefault(service, []).append((at, float(percent[:-1])))
 
 
 def lag_by_topic(sampled: Sampled) -> dict[str, tuple[float, float]]:
     """Peak and last lag per topic."""
-    return {topic: (max(values), values[-1]) for topic, values in sorted(sampled.feed_lag.items())}
+    return {
+        topic: (max(value for _, value in series), series[-1][1])
+        for topic, series in sorted(sampled.feed_lag.items())
+        if series
+    }
+
+
+@dataclass(frozen=True)
+class Downstream:
+    """Whether the relay and each feed kept up: a growth verdict by name (the publication backlog,
+    then each topic), the names sampled too thinly to judge, and the topics seen not live."""
+
+    allowance: float
+    verdicts: dict[str, stats.QueueVerdict]
+    unsampled: tuple[str, ...] = ()
+    not_live: tuple[str, ...] = ()
+
+    @property
+    def measured(self) -> bool:
+        """The backlog and at least one feed were sampled enough, and nothing seen was too thin."""
+        topics = [name for name in self.verdicts if name != BACKLOG]
+        return BACKLOG in self.verdicts and bool(topics) and not self.unsampled
+
+    def grew(self) -> list[str]:
+        return [name for name, verdict in self.verdicts.items() if verdict.grew]
+
+    def fell_behind(self) -> bool:
+        return bool(self.grew() or self.not_live)
+
+    @property
+    def kept_up(self) -> bool:
+        return self.measured and not self.fell_behind()
+
+    def peak(self, name: str) -> float:
+        verdict = self.verdicts.get(name)
+        return 0.0 if verdict is None else verdict.peak
+
+    @property
+    def lag_peak(self) -> float:
+        return max((v.peak for name, v in self.verdicts.items() if name != BACKLOG), default=0.0)
+
+    def describe(self) -> str:
+        """For a verdict's name: what fell behind, or what was not sampled, or the peaks."""
+        parts = []
+        if self.grew():
+            parts.append(
+                "grew: "
+                + ", ".join(
+                    f"{name} {self.verdicts[name].first_minute:,.0f} to "
+                    f"{self.verdicts[name].last_minute:,.0f}"
+                    for name in self.grew()
+                )
+            )
+        if self.not_live:
+            parts.append("not live: " + ", ".join(self.not_live))
+        if parts:
+            return "; ".join(parts)
+        if not self.measured:
+            return "not sampled enough" + (
+                ": " + ", ".join(self.unsampled) if self.unsampled else ""
+            )
+        return f"backlog peak {self.peak(BACKLOG):,.0f}, feed lag peak {self.lag_peak:,.0f}"
+
+
+def downstream(sampled: Sampled, rate: float, span: float) -> Downstream:
+    """The backlog's and each feed lag's growth between the first and the last span of the window,
+    with an allowance of a couple of seconds of the offered rate. A series needs a few samples in
+    each span to be judged, or it is named as not sampled enough; a feed's lag stops changing when
+    its feed stops, so a topic seen not live in any sample fails too."""
+    allowance = max(DOWNSTREAM_MIN_ALLOWANCE, DOWNSTREAM_ALLOWANCE_SECONDS * rate)
+    verdicts: dict[str, stats.QueueVerdict] = {}
+    unsampled: list[str] = []
+    named = [(BACKLOG, sampled.backlog)] + sorted(sampled.feed_lag.items())
+    for name, series in named:
+        if not series and name == BACKLOG:
+            continue
+        end = max((at for at, _ in series), default=0.0)
+        first = sum(1 for at, _ in series if at <= span)
+        last = sum(1 for at, _ in series if at >= end - span)
+        if min(first, last) < MIN_SAMPLES_PER_SPAN:
+            unsampled.append(name)
+        else:
+            verdicts[name] = stats.queue_growth(series, allowance, span)
+    not_live = tuple(
+        topic
+        for topic, series in sorted(sampled.feed_live.items())
+        if any(value < 1 for _, value in series)
+    )
+    return Downstream(allowance, verdicts, tuple(unsampled), not_live)
+
+
+def cpu_stat(text: str) -> tuple[float, float, float] | None:
+    """Periods, throttled periods and throttled microseconds from a cgroup v2 cpu.stat; None if
+    the text has no throttling counters (no CPU limit, or cgroup v1)."""
+    values = {}
+    for line in text.strip().splitlines():
+        name, _, value = line.partition(" ")
+        if value.strip().isdigit():
+            values[name] = float(value)
+    if not {"nr_periods", "nr_throttled", "throttled_usec"} <= values.keys():
+        return None
+    return values["nr_periods"], values["nr_throttled"], values["throttled_usec"]
+
+
+def throttling(
+    before: Mapping[str, tuple[float, float, float]],
+    after: Mapping[str, tuple[float, float, float]],
+    seconds: float,
+) -> dict[str, tuple[float, float]]:
+    """Per service read at both ends: the share of scheduling periods in which it was held back at
+    its CPU limit, and the milliseconds a second it spent held back."""
+    shares = {}
+    for service in sorted(before.keys() & after.keys()):
+        periods = after[service][0] - before[service][0]
+        throttled = after[service][1] - before[service][1]
+        held = after[service][2] - before[service][2]
+        if periods <= 0 or seconds <= 0:
+            continue
+        shares[service] = (throttled / periods, held / 1000 / seconds)
+    return shares
 
 
 def cpu_by_service(sampled: Sampled) -> dict[str, tuple[float, float]]:

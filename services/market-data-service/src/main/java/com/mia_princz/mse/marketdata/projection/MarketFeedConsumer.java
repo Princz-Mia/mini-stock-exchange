@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongConsumer;
 import java.util.function.Supplier;
 
 import org.apache.avro.AvroRuntimeException;
@@ -21,6 +22,7 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.errors.InterruptException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.errors.WakeupException;
+import org.apache.kafka.common.record.TimestampType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.health.contributor.Health;
@@ -41,6 +43,11 @@ import org.springframework.transaction.support.TransactionTemplate;
  * projection, pauses the feed at that offset instead of being skipped. A checkpoint older than the topic's oldest retained record is reported as a
  * history gap. The feed's state is outside readiness: stale public data is reported, not treated as a reason to stop
  * serving.
+ *
+ * <p>
+ * While the feed is live, each record's delay is reported once its transaction has committed: the time from the
+ * record's Kafka timestamp, which the producer sets when it sends, to now. Records read while catching up are left
+ * out, since their delay is the age of the history being replayed.
  */
 public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable {
 
@@ -109,6 +116,8 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 
 	private final Clock clock;
 
+	private final LongConsumer delays;
+
 	private final Thread thread;
 
 	private final AtomicLong applied = new AtomicLong();
@@ -133,12 +142,20 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 
 	public MarketFeedConsumer(Supplier<Consumer<String, byte[]>> consumers, TransactionTemplate transactions,
 			Handler handler, Checkpoints checkpoints, Settings settings, Clock clock) {
+		this(consumers, transactions, handler, checkpoints, settings, clock, (millis) -> {
+		});
+	}
+
+	/** As above, with {@code delays} hearing each committed live record's delay in milliseconds. */
+	public MarketFeedConsumer(Supplier<Consumer<String, byte[]>> consumers, TransactionTemplate transactions,
+			Handler handler, Checkpoints checkpoints, Settings settings, Clock clock, LongConsumer delays) {
 		this.consumers = consumers;
 		this.transactions = transactions;
 		this.handler = handler;
 		this.checkpoints = checkpoints;
 		this.settings = settings;
 		this.clock = clock;
+		this.delays = delays;
 		this.thread = Thread.ofPlatform().name("feed-" + settings.topic()).unstarted(this::loop);
 	}
 
@@ -230,13 +247,37 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 
 	/**
 	 * Applies a poll: all at once when the handler can and the poll holds more than one record, otherwise, or when
-	 * that fails, one by one. False if a record could not be used.
+	 * that fails, one by one. False if a record could not be used. The delays of the records that committed are
+	 * reported afterwards, once, whichever path committed them.
 	 */
 	private boolean applyBatch(ConsumerRecords<String, byte[]> records) {
+		boolean live = state == State.LIVE;
 		if (handler instanceof BatchHandler batch && records.count() > 1 && applyAtOnce(batch, records)) {
+			reportDelays(live, records, records.count());
 			return true;
 		}
-		return applyOneByOne(records);
+		int[] committed = { 0 };
+		boolean complete = applyOneByOne(records, committed);
+		reportDelays(live, records, committed[0]);
+		return complete;
+	}
+
+	/** The first {@code count} records' delays, if the feed was live when it polled them. */
+	private void reportDelays(boolean live, ConsumerRecords<String, byte[]> records, int count) {
+		if (!live || count == 0) {
+			return;
+		}
+		long now = clock.millis();
+		int left = count;
+		for (ConsumerRecord<String, byte[]> record : records) {
+			if (left-- == 0) {
+				return;
+			}
+			if (record.timestampType() == TimestampType.CREATE_TIME && record.timestamp() >= 0) {
+				// The producer's clock and this one may differ a little; a record is never early.
+				delays.accept(Math.max(0, now - record.timestamp()));
+			}
+		}
 	}
 
 	/**
@@ -279,9 +320,11 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 	/**
 	 * Applies records in order and saves their checkpoints in one transaction; false if one could not be used. That
 	 * record's own writes, such as its processed-event mark, are rolled back to a savepoint while the records before
-	 * it commit, so once the cause is fixed it is read again instead of being skipped as already seen.
+	 * it commit, so once the cause is fixed it is read again instead of being skipped as already seen. Once the
+	 * transaction has committed, {@code committed} holds how many records, from the first, it kept.
 	 */
-	private boolean applyOneByOne(ConsumerRecords<String, byte[]> records) {
+	private boolean applyOneByOne(ConsumerRecords<String, byte[]> records, int[] committed) {
+		int[] kept = { 0 };
 		Boolean complete = transactions.execute((status) -> {
 			for (ConsumerRecord<String, byte[]> record : records) {
 				boolean changed;
@@ -302,9 +345,11 @@ public final class MarketFeedConsumer implements HealthIndicator, AutoCloseable 
 					applied.incrementAndGet();
 				}
 				checkpoints.save(record.topic(), record.partition(), record.offset() + 1);
+				kept[0]++;
 			}
 			return true;
 		});
+		committed[0] = kept[0];
 		return Boolean.TRUE.equals(complete);
 	}
 

@@ -5,6 +5,7 @@
 /.githooks/* text eol=lf
 /mvnw text eol=lf
 /.mvn/wrapper/maven-wrapper.properties text eol=lf
+/.mvn/maven.config text eol=lf
 **/Dockerfile text eol=lf
 *.yaml text eol=lf
 *.yml text eol=lf

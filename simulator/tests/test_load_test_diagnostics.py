@@ -151,7 +151,7 @@ def test_reads_are_get_requests_a_second_by_uri() -> None:
 
 def test_the_feed_lag_and_the_pool_are_sampled_by_topic() -> None:
     sampled = diagnostics.Sampled()
-    for trades, snapshots in ((0, 5), (12, 3), (4, -1)):
+    for at, (trades, snapshots, backlog) in enumerate(((0, 5, "7"), (12, 3, None), (4, -1, "9"))):
         sampled.scrape(
             stats.parse_prometheus(
                 f'mse_feed_lag{{topic="mse.trades.v1"}} {trades}\n'
@@ -160,15 +160,123 @@ def test_the_feed_lag_and_the_pool_are_sampled_by_topic() -> None:
             stats.parse_prometheus(
                 'hikaricp_connections_pending{pool="execution"} 2\n'
                 'hikaricp_connections_pending{pool="writer"} 1\n'
+                + ("" if backlog is None else f"mse_outbox_pending {backlog}\n")
             ),
+            at * 5.0,
         )
 
     assert diagnostics.lag_by_topic(sampled) == {
         "mse.market.v1": (5, 3),
         "mse.trades.v1": (12, 4),
     }, "a lag of -1 means not measured yet and is left out"
+    assert sampled.feed_lag["mse.trades.v1"] == [(0.0, 0), (5.0, 12), (10.0, 4)]
+    assert [at for at, _ in sampled.execution] == [0.0, 5.0, 10.0], "Execution's scrapes kept"
+    assert sampled.backlog == [(0.0, 7), (10.0, 9)], "a backlog Execution did not report is no zero"
     assert max(sampled.pending) == 2, "the application pool alone"
     assert max(sampled.writer_pending) == 1, "the writer's pool apart"
+
+
+def series(value, later=None, seconds: int = 60) -> list[tuple[float, float]]:
+    """Every 5 s, at value, then at later from two thirds of the window on."""
+    return [
+        (float(at), value if later is None or at < 2 * seconds / 3 else later)
+        for at in range(0, seconds + 1, 5)
+    ]
+
+
+def test_downstream_names_what_grew() -> None:
+    sampled = diagnostics.Sampled()
+    sampled.backlog = series(50.0, 900.0)
+    sampled.feed_lag = {"mse.trades.v1": series(2.0)}
+
+    flow = diagnostics.downstream(sampled, 300.0, 20.0)
+
+    assert flow.allowance == 600.0
+    assert list(flow.verdicts) == [diagnostics.BACKLOG, "mse.trades.v1"]
+    assert flow.measured and flow.grew() == [diagnostics.BACKLOG] and not flow.kept_up
+    assert flow.describe() == "grew: publication backlog 50 to 900"
+    assert flow.peak(diagnostics.BACKLOG) == 900.0 and flow.lag_peak == 2.0
+    sampled.backlog = series(50.0)
+    quiet = diagnostics.downstream(sampled, 300.0, 20.0)
+    assert quiet.kept_up and quiet.describe() == "backlog peak 50, feed lag peak 2"
+
+
+def test_downstream_needs_the_backlog_and_a_feed_each_sampled_at_both_ends() -> None:
+    sampled = diagnostics.Sampled()
+    sampled.backlog = series(50.0)
+    assert not diagnostics.downstream(sampled, 300.0, 20.0).measured, "no feed"
+    sampled.feed_lag = {"mse.trades.v1": series(2.0)}
+    sampled.backlog = []
+    assert not diagnostics.downstream(sampled, 300.0, 20.0).measured, "no backlog"
+    sampled.backlog = series(50.0)
+    # One sample in the last span: too thin to judge, whatever its value.
+    sampled.feed_lag["mse.market.v1"] = [(at, value) for at, value in series(2.0) if at < 40]
+    sampled.feed_lag["mse.market.v1"].append((60.0, 2.0))
+    thin = diagnostics.downstream(sampled, 300.0, 20.0)
+    assert thin.unsampled == ("mse.market.v1",) and not thin.measured and not thin.kept_up
+    assert thin.describe() == "not sampled enough: mse.market.v1"
+    sampled.feed_lag["mse.market.v1"] = []
+    assert diagnostics.downstream(sampled, 300.0, 20.0).unsampled == ("mse.market.v1",), (
+        "a topic seen with no lag measured"
+    )
+    sampled.feed_lag["mse.market.v1"] = series(2.0)
+    assert diagnostics.downstream(sampled, 300.0, 20.0).kept_up
+
+
+def test_a_feed_seen_not_live_has_not_kept_up_even_with_a_flat_lag() -> None:
+    sampled = diagnostics.Sampled()
+    sampled.backlog = series(50.0)
+    sampled.feed_lag = {"mse.trades.v1": series(7.0)}
+    sampled.feed_live = {"mse.trades.v1": series(1.0, 0.0), "mse.market.v1": series(1.0)}
+
+    flow = diagnostics.downstream(sampled, 300.0, 20.0)
+
+    assert flow.measured and flow.grew() == []
+    assert flow.not_live == ("mse.trades.v1",)
+    assert not flow.kept_up and flow.fell_behind()
+    assert flow.describe() == "not live: mse.trades.v1"
+
+
+def test_the_feed_state_is_sampled_by_topic() -> None:
+    sampled = diagnostics.Sampled()
+    sampled.scrape(
+        stats.parse_prometheus(
+            'mse_feed_live{topic="mse.trades.v1"} 1.0\nmse_feed_live{topic="mse.market.v1"} 0.0\n'
+        ),
+        {},
+        5.0,
+    )
+
+    assert sampled.feed_live == {"mse.market.v1": [(5.0, 0.0)], "mse.trades.v1": [(5.0, 1.0)]}
+
+
+def test_cgroup_cpu_counters_are_read_and_turned_into_throttling() -> None:
+    text = (
+        "usage_usec 912345\nuser_usec 800000\nsystem_usec 112345\nnr_periods 1000\n"
+        "nr_throttled 50\nthrottled_usec 2500000\nnr_bursts 0\nburst_usec 0\n"
+    )
+    assert diagnostics.cpu_stat(text) == (1000, 50, 2_500_000)
+    assert diagnostics.cpu_stat("usage_usec 1\nuser_usec 1\n") is None, "no CPU limit"
+
+    shares = diagnostics.throttling(
+        {"postgres": (1000, 50, 2_500_000), "web": (10, 0, 0), "kafka": (5, 0, 0)},
+        {"postgres": (1600, 230, 11_500_000), "web": (10, 0, 0)},
+        60.0,
+    )
+
+    # 180 of 600 periods held back, for 9 s in 60 s: 150 ms a second.
+    assert shares["postgres"] == (pytest.approx(0.30), pytest.approx(150.0))
+    assert "web" not in shares, "no periods passed"
+    assert "kafka" not in shares, "read at one end only"
+
+
+def test_timed_processor_readings_are_kept_with_their_time() -> None:
+    sampled = diagnostics.Sampled()
+    sampled.docker("mse-load-postgres-1|150.00%\n", "mse-load", 12.5)
+    sampled.docker("mse-load-postgres-1|50.00%\n", "mse-load")
+
+    assert sampled.cpu["postgres"] == [150.0, 50.0]
+    assert sampled.cpu_at == {"postgres": [(12.5, 150.0)]}, "an untimed reading is not timed"
 
 
 def test_processor_samples_are_read_by_service() -> None:

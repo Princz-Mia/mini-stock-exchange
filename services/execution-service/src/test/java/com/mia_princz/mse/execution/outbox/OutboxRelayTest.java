@@ -60,6 +60,35 @@ class OutboxRelayTest {
 		assertThat(outbox.pendingIds()).isEmpty();
 	}
 
+	/**
+	 * A batch published in full is timed with its size and its rounds, the most events one topic and key had in it.
+	 * An empty pass and a batch that stopped at a failure are not timed.
+	 */
+	@Test
+	void aBatchPublishedInFullIsTimedWithItsRounds() throws Exception {
+		List<long[]> timed = new ArrayList<>();
+		OutboxRelay timedRelay = new OutboxRelay(outbox, kafka, () -> true, SETTINGS, Clock.systemUTC(),
+				(nanos, events, rounds) -> timed.add(new long[] { nanos, events, rounds }));
+
+		assertThat(timedRelay.relayOnce()).isZero();
+		outbox.add("trades", "a", "a1");
+		outbox.add("trades", "b", "b1");
+		outbox.add("market", "a", "snapshot");
+		outbox.add("trades", "a", "a2");
+		outbox.add("trades", "a", "a3");
+		kafka.failOnce("a2");
+		assertThatThrownBy(timedRelay::relayOnce).isInstanceOf(OutboxPublishException.class);
+		assertThat(timed).as("neither the empty pass nor the failed batch").isEmpty();
+		outbox.add("trades", "b", "b2");
+
+		assertThat(timedRelay.relayOnce()).isEqualTo(3);
+
+		assertThat(timed).hasSize(1);
+		assertThat(timed.getFirst()[0]).isPositive();
+		assertThat(timed.getFirst()[1]).as("events").isEqualTo(3);
+		assertThat(timed.getFirst()[2]).as("a2 and b2, then a3").isEqualTo(2);
+	}
+
 	@Test
 	void theNextEventOfAKeyWaitsForTheAcknowledgementNotOnlyForTheSend() throws Exception {
 		outbox.add("trades", "k", "first");

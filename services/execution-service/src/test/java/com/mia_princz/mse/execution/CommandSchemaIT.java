@@ -144,6 +144,17 @@ class CommandSchemaIT {
 			.isFalse();
 	}
 
+	/**
+	 * Each published row leaves a dead one, and the table only grows, so it is vacuumed after a fixed number of dead
+	 * rows rather than a share of its size.
+	 */
+	@Test
+	void outboxIsVacuumedByCountNotByShare() {
+		assertThat(db.jdbc.queryForList("SELECT unnest(reloptions) FROM pg_class WHERE oid = 'outbox'::regclass",
+				String.class))
+			.containsExactlyInAnyOrder("autovacuum_vacuum_scale_factor=0", "autovacuum_vacuum_threshold=20000");
+	}
+
 	@Test
 	void topicsFollowTheNamingScheme() {
 		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION,
