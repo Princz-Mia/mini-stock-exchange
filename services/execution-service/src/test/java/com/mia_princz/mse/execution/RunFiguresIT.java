@@ -50,6 +50,8 @@ class RunFiguresIT {
 
 	private static final JsonMapper JSON = JsonMapper.builder().build();
 
+	private static final OpenApiContract CONTRACT = OpenApiContract.get();
+
 	private static final String RATE = "\"commandsPerSecond\":\"1.00\"";
 
 	private static final long REFERENCE = 10_000;
@@ -169,9 +171,15 @@ class RunFiguresIT {
 		expect(UUID.fromString(runB), b);
 		assertThat(b.assigned.values()).containsOnly("NOISE", "MOMENTUM");
 		assertThat(b.commands).as("the silent bot sent nothing").doesNotContainKey("MOMENTUM");
+		// The operator reads them as stored, amounts as decimals.
+		served(operator, UUID.fromString(runA));
+		served(operator, UUID.fromString(runB));
 		// A run still going has no figures; figures are never rewritten.
-		post(operator, "/api/v1/admin/bot-runs", "{\"noise\":1," + RATE + "}");
+		String going = post(operator, "/api/v1/admin/bot-runs", "{\"noise\":1," + RATE + "}").get("runId").asString();
 		assertThat(figures.computeFinished()).isZero();
+		assertThat(detail(operator, going, 200).get("figures").isNull()).isTrue();
+		assertThat(detail(operator, UUID.randomUUID().toString(), 404).get("code").asString()).isEqualTo("RUN_NOT_FOUND");
+		assertThat(person.get("/api/v1/admin/bot-runs/" + going).statusCode()).as("operators only").isEqualTo(403);
 		assertThatThrownBy(() -> jdbc.update("UPDATE bot_run_strategy_figures SET placements = 0")).rootCause()
 			.hasMessageContaining("permission denied");
 	}
@@ -385,6 +393,62 @@ class RunFiguresIT {
 				.put((String) row.get("code"), (Long) row.get("commands")));
 		assertThat(refusals).isEqualTo(oracle.refusals);
 		assertThat(oracle.refusals).as("the stream refuses some").isNotEmpty();
+	}
+
+	/** The run as the operator reads it, checked against the contract. */
+	private static JsonNode detail(TestBrowser operator, String run, int status) throws Exception {
+		HttpResponse<String> read = operator.get("/api/v1/admin/bot-runs/" + run);
+		assertThat(read.statusCode()).as(read.body()).isEqualTo(status);
+		CONTRACT.assertResponse("GET", "/api/v1/admin/bot-runs/{runId}", status,
+				read.headers().firstValue("Content-Type").orElse(null), read.body());
+		return JSON.readTree(read.body());
+	}
+
+	/** The served figures are the stored ones, amounts in decimals with two places. */
+	private void served(TestBrowser operator, UUID run) throws Exception {
+		JsonNode figures = detail(operator, run.toString(), 200).get("figures");
+		assertThat(figures.isNull()).isFalse();
+		List<String> instruments = new ArrayList<>();
+		figures.get("instruments").forEach((instrument) -> instruments.add(String.join(" ",
+				instrument.get("instrumentId").asString(), instrument.get("trades").asString(),
+				instrument.get("volume").asString(), instrument.get("notional").asString(),
+				instrument.get("startMark").get("price").asString(), instrument.get("startMark").get("source").asString(),
+				instrument.get("endMark").get("price").asString(), instrument.get("endMark").get("source").asString())));
+		assertThat(instruments).containsExactlyInAnyOrderElementsOf(jdbc.query("""
+				SELECT instrument_id, trades, volume, notional_cents, start_mark_cents, start_mark_source,
+				    end_mark_cents, end_mark_source FROM bot_run_instrument_figures WHERE run_id = ?""",
+				(row, index) -> String.join(" ", row.getString(1), row.getString(2), row.getString(3),
+						decimal(row.getBigDecimal(4)), decimal(row.getBigDecimal(5)), row.getString(6),
+						decimal(row.getBigDecimal(7)), row.getString(8)), run));
+		List<String> strategies = new ArrayList<>();
+		figures.get("strategies").forEach((strategy) -> {
+			List<String> refusals = new ArrayList<>();
+			strategy.get("refusals").forEach((refusal) -> refusals.add(refusal.get("code").asString() + "="
+					+ refusal.get("commands").asString()));
+			strategies.add(String.join(" ", strategy.get("strategy").asString(), strategy.get("bots").asString(),
+					strategy.get("placements").asString(), strategy.get("cancels").asString(), refusals.toString(),
+					strategy.get("placedQuantity").asString(), strategy.get("filledQuantity").asString(),
+					strategy.get("trades").asString(), strategy.get("volume").asString(),
+					strategy.get("notional").asString(), strategy.get("cashChange").asString(),
+					strategy.get("holdingsStart").asString(), strategy.get("holdingsEnd").asString(),
+					strategy.get("pnl").asString()));
+		});
+		assertThat(strategies).containsExactlyInAnyOrderElementsOf(jdbc.query("""
+				SELECT f.strategy, f.bots, f.placements, f.cancels,
+				    (SELECT coalesce(string_agg(r.code || '=' || r.commands, ', ' ORDER BY r.code), '')
+				        FROM bot_run_refusals r WHERE r.run_id = f.run_id AND r.strategy = f.strategy),
+				    f.placed_quantity, f.filled_quantity, f.trades, f.volume, f.notional_cents, f.cash_change_cents,
+				    f.holdings_start_cents, f.holdings_end_cents, f.pnl_cents
+				FROM bot_run_strategy_figures f WHERE f.run_id = ?""",
+				(row, index) -> String.join(" ", row.getString(1), row.getString(2), row.getString(3),
+						row.getString(4), "[" + row.getString(5) + "]", row.getString(6), row.getString(7),
+						row.getString(8), row.getString(9), decimal(row.getBigDecimal(10)),
+						decimal(row.getBigDecimal(11)), decimal(row.getBigDecimal(12)), decimal(row.getBigDecimal(13)),
+						decimal(row.getBigDecimal(14))), run));
+	}
+
+	private static String decimal(BigDecimal cents) {
+		return cents.movePointLeft(2).setScale(2).toPlainString();
 	}
 
 	private static String[] with(String[] auth) {

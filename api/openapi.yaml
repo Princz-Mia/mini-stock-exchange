@@ -848,6 +848,37 @@ paths:
         '504':
           $ref: '#/components/responses/OutcomeUnknown'
 
+  /api/v1/admin/bot-runs/{runId}:
+    get:
+      tags: [execution]
+      operationId: getBotRun
+      summary: One bot run, with its figures once it is finished.
+      description: |
+        Operator only. figures is null until the run is finished and its figures are computed (within a few
+        seconds of its end), and stays null for a run recorded before windows were kept. Figures are computed once,
+        from the run's window, and never change. Amounts are decimals with two places.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Uuid' }
+      responses:
+        '200':
+          description: The run and its figures.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotRunDetail' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator. No body.
+        '404':
+          description: RUN_NOT_FOUND.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
   /api/v1/admin/bot-runs/{runId}/stop:
     post:
       tags: [execution]
@@ -2107,6 +2138,86 @@ components:
             stopSequence: { oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }] }
             endSequence: { oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }] }
             endedBy: { type: [string, 'null'], enum: [WORKER, NEXT_START, NOT_KEPT, null] }
+
+    BotRunMark:
+      type: object
+      additionalProperties: false
+      required: [price, source]
+      description: A price at an edge of the run, and where it came from.
+      properties:
+        price: { $ref: '#/components/schemas/Price' }
+        source: { type: string, enum: [LAST_TRADE, REFERENCE] }
+
+    BotRunDetail:
+      type: object
+      additionalProperties: false
+      required: [run, figures]
+      properties:
+        run: { $ref: '#/components/schemas/BotRun' }
+        figures:
+          oneOf:
+            - type: 'null'
+            - type: object
+              additionalProperties: false
+              required: [computedAt, instruments, strategies]
+              properties:
+                computedAt: { $ref: '#/components/schemas/Timestamp' }
+                instruments:
+                  type: array
+                  description: |
+                    Per instrument the run traded: every trade in its window by anyone, people included, and the mark
+                    at each edge (the newest trade's price, or the reference price before any trade).
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [instrumentId, symbol, trades, volume, notional, startMark, endMark]
+                    properties:
+                      instrumentId: { $ref: '#/components/schemas/Uuid' }
+                      symbol: { type: string }
+                      trades: { type: integer, format: int64, minimum: 0 }
+                      volume: { type: integer, format: int64, minimum: 0 }
+                      notional: { $ref: '#/components/schemas/Money' }
+                      startMark: { $ref: '#/components/schemas/BotRunMark' }
+                      endMark: { $ref: '#/components/schemas/BotRunMark' }
+                strategies:
+                  type: array
+                  description: |
+                    Per strategy, over the run's bots. placements and cancels count the commands answered in the
+                    window, refusals included; refusals are counted again by the code their answer carried (refusals
+                    before the exchange records anything, such as rate limits, aren't counted). placedQuantity is what
+                    the orders accepted in the window in the run's instruments asked for, filledQuantity what of it
+                    filled in the window. trades, volume and notional are the strategy's side of each trade (a trade
+                    between two of its bots counts twice). pnl is an estimate: cashChange plus holdingsEnd minus
+                    holdingsStart, the run's instruments valued at the marks, reserved amounts counted once.
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [strategy, bots, placements, cancels, refusals, placedQuantity, filledQuantity, trades,
+                      volume, notional, cashChange, holdingsStart, holdingsEnd, pnl]
+                    properties:
+                      strategy: { type: string, enum: [MARKET_MAKER, NOISE, MOMENTUM] }
+                      bots: { type: integer, minimum: 1 }
+                      placements: { type: integer, format: int64, minimum: 0 }
+                      cancels: { type: integer, format: int64, minimum: 0 }
+                      refusals:
+                        type: array
+                        x-may-be-empty: true
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required: [code, commands]
+                          properties:
+                            code: { type: string }
+                            commands: { type: integer, format: int64, minimum: 1 }
+                      placedQuantity: { type: integer, format: int64, minimum: 0 }
+                      filledQuantity: { type: integer, format: int64, minimum: 0 }
+                      trades: { type: integer, format: int64, minimum: 0 }
+                      volume: { type: integer, format: int64, minimum: 0 }
+                      notional: { $ref: '#/components/schemas/Money' }
+                      cashChange: { $ref: '#/components/schemas/SignedAmount' }
+                      holdingsStart: { $ref: '#/components/schemas/Money' }
+                      holdingsEnd: { $ref: '#/components/schemas/Money' }
+                      pnl: { $ref: '#/components/schemas/SignedAmount' }
 
     SimulatorAssignment:
       type: object
