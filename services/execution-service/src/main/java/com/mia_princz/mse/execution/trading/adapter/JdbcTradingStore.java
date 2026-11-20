@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -602,6 +603,77 @@ public final class JdbcTradingStore implements TradingStore {
 				return new Opening<>(market, row.getLong("last_command_sequence"), prior);
 			})
 			.optional();
+	}
+
+	/** A stored answer as the run's opening statement read it, before it is read as its command's type. */
+	private record StoredRow(String route, byte[] requestHash, String body) {
+	}
+
+	/**
+	 * The opening of a run, as {@link #open} is the opening of one command, with the same reasoning about the snapshot.
+	 * The keys go as two arrays, each distinct key once; the sequence rises by the distinct keys without an answer.
+	 */
+	@Override
+	public Optional<RunOpening> openRun(UUID simulationId, long writerEpoch, List<RunKey> keys) {
+		Map<List<UUID>, Integer> distinct = new LinkedHashMap<>();
+		for (RunKey key : keys) {
+			distinct.putIfAbsent(identity(key.key()), distinct.size());
+		}
+		String[] principals = distinct.keySet().stream().map((id) -> id.get(0).toString()).toArray(String[]::new);
+		String[] idempotencyKeys = distinct.keySet().stream().map((id) -> id.get(1).toString()).toArray(String[]::new);
+		Market[] market = new Market[1];
+		long[] last = new long[1];
+		Map<List<UUID>, StoredRow> stored = new HashMap<>();
+		jdbc.sql("""
+				WITH run AS (
+				    SELECT * FROM unnest(?::uuid[], ?::uuid[]) AS run(principal_id, idempotency_key)),
+				prior AS (
+				    SELECT c.principal_id, c.idempotency_key, c.route, c.request_hash, c.response_body::text AS body
+				    FROM command_result c JOIN run
+				        ON c.principal_id = run.principal_id AND c.idempotency_key = run.idempotency_key
+				    WHERE c.simulation_id = ?),
+				market AS (
+				    UPDATE simulation
+				    SET last_command_sequence = last_command_sequence + ? - (SELECT count(*) FROM prior)
+				    WHERE id = ? AND writer_epoch = ?
+				    RETURNING id, state, writer_epoch, max_open_orders_per_account, max_open_orders_total,
+				        max_fills_per_command, last_command_sequence)
+				SELECT market.*, prior.principal_id, prior.idempotency_key, prior.route, prior.request_hash, prior.body
+				FROM market LEFT JOIN prior ON true""")
+			.params(principals, idempotencyKeys, simulationId, distinct.size(), simulationId, writerEpoch)
+			.query((java.sql.ResultSet row) -> {
+				market[0] = new Market(row.getObject("id", UUID.class), row.getString("state"),
+						row.getLong("writer_epoch"), row.getInt("max_open_orders_per_account"),
+						row.getInt("max_open_orders_total"), row.getInt("max_fills_per_command"));
+				last[0] = row.getLong("last_command_sequence");
+				String route = row.getString("route");
+				if (route != null) {
+					stored.put(List.of(row.getObject("principal_id", UUID.class),
+							row.getObject("idempotency_key", UUID.class)),
+							new StoredRow(route, row.getBytes("request_hash"), row.getString("body")));
+				}
+			});
+		if (market[0] == null) {
+			return Optional.empty();
+		}
+		List<Optional<StoredResult<?>>> priors = new ArrayList<>(keys.size());
+		for (RunKey key : keys) {
+			StoredRow row = stored.get(identity(key.key()));
+			if (row == null) {
+				priors.add(Optional.empty());
+				continue;
+			}
+			// Another route's answer need not fit this route's type; the caller refuses it as a conflict.
+			Object result = key.key().sameRequest(row.route(), row.requestHash())
+					? json.readValue(row.body(), key.type()) : null;
+			priors.add(Optional.of(new StoredResult<>(row.route(), row.requestHash(), result)));
+		}
+		int taken = distinct.size() - stored.size();
+		return Optional.of(new RunOpening(market[0], last[0] - taken + 1, last[0], priors));
+	}
+
+	private static List<UUID> identity(CommandKey key) {
+		return List.of(key.principalId(), key.idempotencyKey());
 	}
 
 	@Override

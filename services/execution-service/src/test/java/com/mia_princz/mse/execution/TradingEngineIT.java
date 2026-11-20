@@ -20,6 +20,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -114,7 +115,19 @@ class TradingEngineIT {
 	/** What the writer timed, as it recorded it. */
 	private final List<String> timed = java.util.Collections.synchronizedList(new ArrayList<>());
 
-	private final WriterTimings timings = (phase, command, nanos) -> timed.add(phase + " " + command + " " + nanos);
+	private final WriterTimings timings = new WriterTimings() {
+
+		@Override
+		public void record(Phase phase, String command, long nanos) {
+			timed.add(phase + " " + command + " " + nanos);
+		}
+
+		@Override
+		public void runFellBack(int commands) {
+			timed.add("FALLBACK run " + commands);
+		}
+
+	};
 
 	/** When set, the next transaction commits and its outcome is then lost, as if the process died right after. */
 	private final AtomicBoolean loseAnswer = new AtomicBoolean();
@@ -143,6 +156,11 @@ class TradingEngineIT {
 
 	private UUID instrument;
 
+	/** The writer's run limit for this class's engines; a subclass runs every scenario with runs of up to 32. */
+	int maxRun() {
+		return 1;
+	}
+
 	@BeforeEach
 	void market() {
 		simulation = jdbc.queryForList("SELECT id FROM simulation", UUID.class).stream().findFirst().orElseGet(() -> {
@@ -158,7 +176,7 @@ class TradingEngineIT {
 				instrument, simulation, symbol(SYMBOLS.incrementAndGet()));
 
 		store = new JdbcTradingStore(JdbcClient.create(dataSource), JsonMapper.builder().build());
-		writer = new CommandWriter("test-writer", 1_000);
+		writer = new CommandWriter("test-writer", 1_000, maxRun());
 		resting = new FailingRestingOrders();
 		engine = new TradingEngine(failingBeforeCommit(store), losingAnswers(new SpringTransactionRunner(transactionManager)),
 				writer,
@@ -303,6 +321,15 @@ class TradingEngineIT {
 			PlaceOrder repeated = order(seller, Side.SELL, OrderType.LIMIT, "200.00", 1);
 			engine.place(again, repeated).get();
 			statements.count(counts, "a repeated key", () -> engine.place(again, repeated).get());
+			byte[] otherRequest = new byte[32];
+			otherRequest[0] = 1;
+			CommandKey conflicting = new CommandKey(again.principalId(), again.idempotencyKey(), again.route(),
+					otherRequest);
+			statements.count(counts, "a conflicting key", () -> {
+				assertThatThrownBy(() -> engine.place(conflicting, order(seller, Side.SELL, OrderType.LIMIT, "200.00", 2))
+					.get()).hasCauseInstanceOf(IdempotencyConflictException.class);
+				return null;
+			});
 			asOwner("UPDATE simulation SET max_open_orders_per_account = 1");
 			try {
 				statements.count(counts, "order limit reached",
@@ -322,13 +349,15 @@ class TradingEngineIT {
 			// order reads cash and shares in one more, and the writer counts each account's resting orders itself. A
 			// snapshot reads nothing, and trades are numbered in memory, the counter written once per command. The
 			// rest of a command's writes go in one statement per kind of row, whatever the number of fills. A cancel of
-			// an order resting in the book updates it without reading it first.
+			// an order resting in the book updates it without reading it first. A repeated or conflicting key commits
+			// its opening, which took no sequence.
 			assertThat(counts).containsExactly(Map.entry("resting order", "8 statements, 1 commit"),
 					Map.entry("one fill", "11 statements, 1 commit"), Map.entry("cancel", "7 statements, 1 commit"),
 					Map.entry("three fills", "11 statements, 1 commit"),
 					Map.entry("cancel of an unknown order", "3 statements, 1 commit"),
 					Map.entry("insufficient cash", "4 statements, 1 commit"),
 					Map.entry("a repeated key", "1 statements, 1 commit"),
+					Map.entry("a conflicting key", "1 statements, 1 commit"),
 					Map.entry("order limit reached", "4 statements, 1 commit"),
 					Map.entry("market not open", "3 statements, 1 commit"));
 		}
@@ -530,6 +559,7 @@ class TradingEngineIT {
 			.as("in admission order")
 			.containsExactly(before + 1, before + 2, before + 3, before + 4);
 		assertThat(runs).as("the five queued together, one run").containsExactly(5);
+		assertThat(phases("run")).as("one transaction").containsExactly("BEGIN", "WORK", "COMMIT", "APPLY");
 		assertThat(engine.depth(instrument, Side.BUY).get()).isEmpty();
 		assertThat(engine.depth(instrument, Side.SELL).get()).singleElement()
 			.satisfies((level) -> assertThat(level.quantity()).isEqualTo(1));
@@ -537,32 +567,25 @@ class TradingEngineIT {
 	}
 
 	/**
-	 * A command that halts the writer in the middle of a run: the command before it keeps its committed result, it
-	 * fails with the halt, and the one after it fails as never run, as it would have queued behind it one by one.
+	 * The books fail as they take a command of a run that has committed: the command before it was applied and keeps
+	 * its result, it fails with the halt, and the one after it, committed but not in the books, fails as stopped. Its
+	 * key gives its committed result once a restart has rebuilt the books.
 	 */
 	@Test
-	void aHaltInARunKeepsTheResultsBeforeItAndFailsTheCommandsAfterItAsNeverRun() throws Exception {
-		writer.close(Duration.ofSeconds(5));
-		List<Integer> runs = new java.util.concurrent.CopyOnWriteArrayList<>();
-		writer = new CommandWriter("test-writer", 1_000, 8, runs::add);
-		resting = new FailingRestingOrders();
-		engine = new TradingEngine(store, new SpringTransactionRunner(transactionManager), writer, Clock.systemUTC(),
-				(account) -> {
-					throw new UnsupportedOperationException("no bots in these tests");
-				}, AccountChanges.NONE, timings, System::nanoTime, resting);
-		engine.start();
+	void aHaltApplyingARunAnswersTheCommandsBeforeItAndLeavesTheRestToTheirKeys() throws Exception {
+		List<Integer> runs = runningEngine(8);
 		UUID buyer = funded();
 		long before = commandSequence();
-		java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
-		writer.submit(() -> release.await(5, java.util.concurrent.TimeUnit.SECONDS));
+		java.util.concurrent.CountDownLatch release = hold();
 		// Nothing to buy, so the remainder is cancelled and nothing rests; the next one rests, and the books fail as
-		// they take it, after its commit.
+		// they take it.
 		CompletableFuture<PlacementResult> unfilled = engine.place(key(),
 				order(buyer, Side.BUY, OrderType.MARKET_PROTECTED, "101.00", 1));
 		PlaceOrder halting = order(buyer, Side.BUY, OrderType.LIMIT, "99.00", 1);
 		CompletableFuture<PlacementResult> halts = engine.place(key(), halting);
-		PlaceOrder never = order(buyer, Side.BUY, OrderType.LIMIT, "98.00", 1);
-		CompletableFuture<PlacementResult> neverRan = engine.place(key(), never);
+		CommandKey afterKey = key();
+		PlaceOrder after = order(buyer, Side.BUY, OrderType.LIMIT, "98.00", 1);
+		CompletableFuture<PlacementResult> committedAfter = engine.place(afterKey, after);
 		failBookAt.set("added");
 
 		try {
@@ -571,17 +594,748 @@ class TradingEngineIT {
 			assertThat(unfilled.get().state()).isEqualTo(OrderState.CANCELED);
 			assertThat(unfilled.get().commandSequence()).isEqualTo(before + 1);
 			assertThatThrownBy(halts::get).hasCauseInstanceOf(CommandWriter.WriterHaltException.class);
-			assertThatThrownBy(neverRan::get).hasCauseInstanceOf(CommandWriter.WriterStoppedException.class)
-				.hasMessageContaining("halted before this command ran");
+			assertThatThrownBy(committedAfter::get).hasCauseInstanceOf(CommandWriter.WriterStoppedException.class)
+				.hasMessageContaining("look it up by its key");
 			assertThat(runs).containsExactly(3);
-			assertThat(orderState(halting.orderId())).as("committed before the books failed").isEqualTo("OPEN");
-			assertThat(jdbc.queryForObject("SELECT count(*) FROM orders WHERE id = ?", Long.class, never.orderId()))
-				.as("never ran")
-				.isZero();
+			assertThat(writer.isAvailable()).isFalse();
+			assertThat(orderState(halting.orderId())).as("committed with its run").isEqualTo("OPEN");
+			assertThat(orderState(after.orderId())).as("committed with its run").isEqualTo("OPEN");
 		}
 		finally {
 			failBookAt.set(null);
 		}
+		restartEngine();
+		PlacementResult answer = engine.place(afterKey, after).get();
+		assertThat(answer.state()).isEqualTo(OrderState.OPEN);
+		assertThat(answer.commandSequence()).isEqualTo(before + 3);
+		assertThat(engine.depth(instrument, Side.BUY).get()).extracting(DepthLevel::quantity).containsExactly(1L, 1L);
+	}
+
+	/**
+	 * A command of a run that fails without halting, in its statements or when the database refuses the run's commit,
+	 * rolls the whole run back; its commands then run one by one, so the failing one fails alone and the others commit
+	 * with the sequences they would have had without it. Test-only triggers refuse an order of 6,667 shares as it is
+	 * written and one of 6,666 at commit.
+	 */
+	@Test
+	void aCommandFailingInARunFailsAloneAndTheOthersCommitInOrder() throws Exception {
+		List<Integer> runs = runningEngine(8);
+		UUID buyer = funded();
+		ddl("""
+				CREATE FUNCTION test_refused_order() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN
+				    IF NEW.requested_quantity IN (6666, 6667) THEN
+				        RAISE EXCEPTION 'refused' USING ERRCODE = 'check_violation';
+				    END IF;
+				    RETURN NULL;
+				END $$;
+				CREATE TRIGGER test_refused_now AFTER INSERT ON orders
+				    FOR EACH ROW WHEN (NEW.requested_quantity = 6667) EXECUTE FUNCTION test_refused_order();
+				CREATE CONSTRAINT TRIGGER test_refused_at_commit AFTER INSERT ON orders DEFERRABLE INITIALLY DEFERRED
+				    FOR EACH ROW WHEN (NEW.requested_quantity = 6666) EXECUTE FUNCTION test_refused_order();""");
+		try {
+			for (long refused : List.of(6_667L, 6_666L)) {
+				long before = commandSequence();
+				java.util.concurrent.CountDownLatch release = hold();
+				CompletableFuture<PlacementResult> first = engine.place(key(),
+						order(buyer, Side.BUY, OrderType.LIMIT, "1.00", 1));
+				PlaceOrder failing = order(buyer, Side.BUY, OrderType.LIMIT, "1.00", refused);
+				CompletableFuture<PlacementResult> fails = engine.place(key(), failing);
+				CompletableFuture<PlacementResult> third = engine.place(key(),
+						order(buyer, Side.BUY, OrderType.LIMIT, "1.00", 2));
+
+				release.countDown();
+
+				assertThat(first.get().commandSequence()).as(refused + ": first").isEqualTo(before + 1);
+				assertThatThrownBy(fails::get).as(refused + ": fails alone")
+					.cause()
+					.isNotInstanceOf(WriterHaltException.class)
+					.isNotInstanceOf(WriterStoppedException.class);
+				assertThat(third.get().commandSequence()).as(refused + ": next, no gap").isEqualTo(before + 2);
+				assertThat(commandSequence()).isEqualTo(before + 2);
+				assertThat(jdbc.queryForObject("SELECT count(*) FROM orders WHERE id = ?", Long.class,
+						failing.orderId()))
+					.isZero();
+				assertThat(writer.isAvailable()).isTrue();
+			}
+			assertThat(runs).as("each run reached the engine whole").containsExactly(3, 3);
+			assertThat(phases("run")).as("neither run committed as one; each fell back")
+				.containsExactly("FALLBACK", "FALLBACK");
+			assertThat(engine.depth(instrument, Side.BUY).get()).extracting(DepthLevel::quantity).containsExactly(6L);
+			assertLedgerMatchesBalances();
+		}
+		finally {
+			ddl("""
+					DROP TRIGGER test_refused_now ON orders; DROP TRIGGER test_refused_at_commit ON orders;
+					DROP FUNCTION test_refused_order();""");
+		}
+	}
+
+	/**
+	 * A run whose commit outcome is lost: every command of it fails, one with the halt and the others as stopped, since
+	 * any of them may have committed. After a restart each key gives the committed result, and nothing runs twice.
+	 */
+	@Test
+	void anUnknownCommitOfARunFailsEveryCommandAndEachKeyResolvesAfterARestart() throws Exception {
+		List<Integer> runs = runningEngine(8);
+		UUID seller = funded();
+		UUID buyer = funded();
+		long before = commandSequence();
+		java.util.concurrent.CountDownLatch release = hold();
+		List<CommandKey> keys = List.of(key(), key(), key());
+		PlaceOrder sell = order(seller, Side.SELL, OrderType.LIMIT, "100.00", 5);
+		PlaceOrder buy = order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 2);
+		CompletableFuture<PlacementResult> sold = engine.place(keys.get(0), sell);
+		CompletableFuture<PlacementResult> bought = engine.place(keys.get(1), buy);
+		CompletableFuture<CancelResult> canceled = engine.cancel(keys.get(2), new CancelOrder(sell.orderId(), seller));
+		loseAnswer.set(true);
+
+		release.countDown();
+
+		assertThatThrownBy(sold::get).hasCauseInstanceOf(WriterHaltException.class);
+		assertThatThrownBy(bought::get).hasCauseInstanceOf(WriterStoppedException.class)
+			.hasMessageContaining("look it up by its key");
+		assertThatThrownBy(canceled::get).hasCauseInstanceOf(WriterStoppedException.class);
+		assertThat(runs).containsExactly(3);
+		assertThat(writer.isAvailable()).isFalse();
+		Map<String, Object> committed = snapshot();
+
+		restartEngine();
+
+		assertThat(engine.place(keys.get(0), sell).get().commandSequence()).isEqualTo(before + 1);
+		PlacementResult boughtAgain = engine.place(keys.get(1), buy).get();
+		assertThat(boughtAgain.filled()).isEqualTo(2);
+		assertThat(boughtAgain.commandSequence()).isEqualTo(before + 2);
+		CancelResult canceledAgain = engine.cancel(keys.get(2), new CancelOrder(sell.orderId(), seller)).get();
+		assertThat(canceledAgain.status()).isEqualTo(CancelResult.Status.CANCELED);
+		assertThat(canceledAgain.canceledQuantity()).isEqualTo(3);
+		assertThat(snapshot()).as("nothing applied twice").isEqualTo(committed);
+		assertThat(engine.depth(instrument, Side.SELL).get()).isEmpty();
+		assertLedgerMatchesBalances();
+	}
+
+	/** A run that finds another writer has claimed the market halts and commits nothing. */
+	@Test
+	void aStaleWriterHaltsARunAndCommitsNothing() throws Exception {
+		runningEngine(8);
+		UUID seller = funded();
+		java.util.concurrent.CountDownLatch release = hold();
+		CompletableFuture<PlacementResult> first = engine.place(key(), order(seller, Side.SELL, OrderType.LIMIT, "100.00", 1));
+		CompletableFuture<PlacementResult> second = engine.place(key(), order(seller, Side.SELL, OrderType.LIMIT, "100.00", 2));
+		jdbc.update("UPDATE simulation SET writer_epoch = writer_epoch + 1");
+		Map<String, Object> before = snapshot();
+
+		release.countDown();
+
+		assertThatThrownBy(first::get).hasCauseInstanceOf(WriterHaltException.class)
+			.rootCause()
+			.hasMessageContaining("another writer owns the market");
+		assertThatThrownBy(second::get).hasCauseInstanceOf(WriterStoppedException.class)
+			.hasMessageContaining("before this command's run committed");
+		assertThat(writer.isAvailable()).isFalse();
+		assertThat(snapshot()).isEqualTo(before);
+		restartEngine();
+	}
+
+	/**
+	 * Keys repeated within a run answer as they would one by one: the same request again gets the first answer, another
+	 * request with the key is a conflict, neither takes a sequence, and only the first is written.
+	 */
+	@Test
+	void keysRepeatedInARunAnswerAsTheyWouldOneByOne() throws Exception {
+		List<Integer> runs = runningEngine(8);
+		UUID seller = funded();
+		long before = commandSequence();
+		CommandKey placing = key(seller, UUID.randomUUID(), "sell 3 at 100.00");
+		PlaceOrder sell = order(seller, Side.SELL, OrderType.LIMIT, "100.00", 3);
+		CommandKey canceling = key(seller, UUID.randomUUID(), "cancel it");
+		java.util.concurrent.CountDownLatch release = hold();
+		CompletableFuture<PlacementResult> first = engine.place(placing, sell);
+		CompletableFuture<PlacementResult> again = engine.place(placing, sell);
+		PlaceOrder other = order(seller, Side.SELL, OrderType.LIMIT, "100.00", 4);
+		CompletableFuture<PlacementResult> conflict = engine.place(key(seller, placing.idempotencyKey(), "sell 4"), other);
+		CompletableFuture<CancelResult> cancel = engine.cancel(canceling, new CancelOrder(sell.orderId(), seller));
+		CompletableFuture<CancelResult> cancelAgain = engine.cancel(canceling, new CancelOrder(sell.orderId(), seller));
+		CompletableFuture<PlacementResult> next = engine.place(key(), order(seller, Side.SELL, OrderType.LIMIT, "101.00", 1));
+
+		release.countDown();
+
+		assertThat(again.get()).isEqualTo(first.get());
+		assertThat(first.get().commandSequence()).isEqualTo(before + 1);
+		assertThatThrownBy(conflict::get).hasCauseInstanceOf(IdempotencyConflictException.class);
+		assertThat(cancel.get().status()).isEqualTo(CancelResult.Status.CANCELED);
+		assertThat(cancelAgain.get()).isEqualTo(cancel.get());
+		assertThat(cancel.get().commandSequence()).isEqualTo(before + 2);
+		assertThat(next.get().commandSequence()).isEqualTo(before + 3);
+		assertThat(commandSequence()).isEqualTo(before + 3);
+		assertThat(runs).containsExactly(6);
+		assertThat(phases("run")).as("one transaction").containsExactly("BEGIN", "WORK", "COMMIT", "APPLY");
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM orders WHERE id = ?", Long.class, other.orderId())).isZero();
+		assertThat(engine.depth(instrument, Side.SELL).get()).extracting(DepthLevel::quantity).containsExactly(1L);
+		// After the run, from the database, the same answers.
+		assertThat(engine.place(placing, sell).get()).isEqualTo(first.get());
+		assertThat(engine.cancel(canceling, new CancelOrder(sell.orderId(), seller)).get()).isEqualTo(cancel.get());
+	}
+
+	/**
+	 * Each command's snapshot in a run is its instrument's public state once that command commits: the book with the
+	 * run's earlier commands, and the tape with their trades.
+	 */
+	@Test
+	void eachSnapshotInARunCarriesTheRunsEarlierCommands() throws Exception {
+		runningEngine(8);
+		UUID seller = funded();
+		UUID buyer = funded();
+		java.util.concurrent.CountDownLatch release = hold();
+		CompletableFuture<PlacementResult> rests = engine.place(key(), order(seller, Side.SELL, OrderType.LIMIT, "100.00", 5));
+		CompletableFuture<PlacementResult> takes = engine.place(key(), order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 2));
+		CompletableFuture<PlacementResult> takesMore = engine.place(key(),
+				order(buyer, Side.BUY, OrderType.LIMIT, "100.00", 1));
+
+		release.countDown();
+
+		MarketSnapshot first = marketSnapshot(rests.get().commandSequence());
+		assertThat(first.getAsks()).containsExactly(new BookLevel(10_000L, 5L, 1));
+		assertThat(first.getRecentTrades()).isEmpty();
+		MarketSnapshot second = marketSnapshot(takes.get().commandSequence());
+		assertThat(second.getAsks()).containsExactly(new BookLevel(10_000L, 3L, 1));
+		assertThat(second.getRecentTrades()).extracting(PublicTrade::getTradeSequence).containsExactly(1L);
+		MarketSnapshot third = marketSnapshot(takesMore.get().commandSequence());
+		assertThat(third.getAsks()).containsExactly(new BookLevel(10_000L, 2L, 1));
+		assertThat(third.getRecentTrades()).extracting(PublicTrade::getTradeSequence).containsExactly(2L, 1L);
+		assertThat(third.getLastTradeSequence()).isEqualTo(2);
+		assertTapeMatchesDatabase(third);
+		assertThat(phases("run")).as("one transaction").containsExactly("BEGIN", "WORK", "COMMIT", "APPLY");
+	}
+
+	/**
+	 * Group commit leaves exactly what one command at a time leaves. A seeded stream of 20,000 orders and cancels runs
+	 * twice, each time on two new instruments and new accounts, submitted ahead of the writer so that runs form: once
+	 * with runs of one and once with runs of up to 32. The stream crosses, rests, sweeps several makers, meets its own
+	 * account's orders, sends protected market orders, orders it cannot pay for, orders for an unknown instrument,
+	 * cancels of orders placed just before (often in the same run), of filled, cancelled, unknown and others' orders,
+	 * and keys repeated for the same request and for another. The answers, sequences, order rows, trades, ledger,
+	 * balances, account versions, the accounts told of each change, outbox events and books are the same, ids aside,
+	 * and the database reconciles.
+	 */
+	@Test
+	void runsOfUpToThirtyTwoLeaveExactlyWhatRunsOfOneLeave() throws Exception {
+		org.junit.jupiter.api.Assumptions.assumeTrue(maxRun() == 1, "the test runs both run limits itself");
+		Map<String, Object> alone = streamRun(1, 1);
+		Map<String, Object> together = streamRun(32, 2);
+
+		assertThat(alone.get("largest run")).isEqualTo(1);
+		assertThat((int) together.get("largest run")).as("the largest run").isGreaterThan(8);
+		assertThat((int) together.get("in runs")).as("commands that shared a run").isGreaterThan(10_000);
+		// A run that fails is run again one by one and still gives the right answers, so a mistake that makes runs fail
+		// would pass unseen above: every run of several commands must have committed as one.
+		assertThat(together.get("committed whole")).as("runs of several committed as one")
+			.isEqualTo(together.get("runs of several"));
+		@SuppressWarnings("unchecked")
+		Map<String, Integer> coverage = (Map<String, Integer>) alone.get("coverage");
+		for (Map.Entry<String, Integer> least : Map.ofEntries(Map.entry("cancel CANCELED", 1_000),
+				Map.entry("cancel CANCELED soon after", 300), Map.entry("cancel ALREADY_CANCELED", 20),
+				Map.entry("cancel NOT_CANCELABLE", 50), Map.entry("cancel NOT_FOUND", 50),
+				Map.entry("failed IdempotencyConflictException", 100),
+				Map.entry("failed UnknownInstrumentException", 20), Map.entry("repeated", 300),
+				Map.entry("CANCELED traded IOC_REMAINDER_CANCELED", 20), Map.entry("CANCELED SELF_TRADE_PREVENTED", 20),
+				Map.entry("REJECTED INSUFFICIENT_CASH", 10), Map.entry("takers of several makers", 80),
+				Map.entry("REJECTED ORDER_LIMIT_EXCEEDED", 20))
+			.entrySet()) {
+			assertThat(coverage.getOrDefault(least.getKey(), 0)).as(least.getKey() + " in " + coverage)
+				.isGreaterThanOrEqualTo(least.getValue());
+		}
+		for (String part : List.of("coverage", "answers", "orders", "trades", "ledger", "balances", "versions", "told",
+				"events", "books")) {
+			assertThat(firstDifference(alone.get(part), together.get(part))).as(part).isNull();
+		}
+		assertThat(store.reconciliationProblems(simulation)).isEmpty();
+		assertLedgerMatchesBalances();
+		restartEngine();
+	}
+
+	/** Where two parts first differ, or null if they are the same. */
+	private static String firstDifference(Object alone, Object together) {
+		if (alone instanceof List<?> first && together instanceof List<?> second) {
+			for (int i = 0; i < Math.min(first.size(), second.size()); i++) {
+				if (!first.get(i).equals(second.get(i))) {
+					return "at " + i + ": alone " + first.get(i) + ", together " + second.get(i);
+				}
+			}
+			return first.size() == second.size() ? null : "sizes " + first.size() + " and " + second.size();
+		}
+		return alone.equals(together) ? null : "alone " + alone + ", together " + together;
+	}
+
+	/** A step of the stream: what was sent, with which key. */
+	private record Step(CommandKey key, Object command) {
+	}
+
+	/** The stream run on new instruments and accounts with this run limit; what it left, ids replaced by names. */
+	private Map<String, Object> streamRun(int maxRun, long salt) throws Exception {
+		Map<UUID, String> names = new HashMap<>();
+		List<UUID> instruments = new ArrayList<>();
+		Map<String, String> symbols = new HashMap<>();
+		for (int i = 0; i < 2; i++) {
+			UUID id = UUID.randomUUID();
+			String symbol = symbol(SYMBOLS.incrementAndGet());
+			jdbc.update("INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, ?, 10000)",
+					id, simulation, symbol);
+			instruments.add(id);
+			names.put(id, "i" + i);
+			symbols.put(symbol, "i" + i);
+		}
+		List<UUID> accounts = new ArrayList<>();
+		for (int i = 0; i < 12; i++) {
+			UUID account = new TransactionTemplate(transactionManager).execute((status) -> fundIn(instruments));
+			accounts.add(account);
+			names.put(account, "a" + i);
+		}
+		writer.close(Duration.ofSeconds(5));
+		List<Integer> runs = new java.util.concurrent.CopyOnWriteArrayList<>();
+		writer = new CommandWriter("test-writer", 1_000, maxRun, runs::add);
+		resting = new FailingRestingOrders();
+		List<Map.Entry<Long, Set<UUID>>> told = java.util.Collections.synchronizedList(new ArrayList<>());
+		// One instant for both runs, so trades and snapshots carry the same times.
+		Clock clock = Clock.fixed(java.time.Instant.parse("2026-11-19T09:30:00.123456Z"), java.time.ZoneOffset.UTC);
+		engine = new TradingEngine(store, new SpringTransactionRunner(transactionManager), writer, clock, (account) -> {
+			throw new UnsupportedOperationException("no bots in these tests");
+		}, (ids, sequence) -> told.add(Map.entry(sequence, Set.copyOf(ids))), timings, System::nanoTime, resting);
+		engine.start();
+		long base = commandSequence();
+		timed.clear();
+
+		// The stream depends only on the seed, never on answers, so both runs send the same commands.
+		Random random = new Random(16_016L);
+		List<Step> steps = new ArrayList<>();
+		Map<String, Integer> coverage = new java.util.TreeMap<>();
+		// Each account's limit orders not yet sent a cancel, oldest first: cancelling them in turn keeps the books
+		// turning over, so accounts stay under their limit of resting orders.
+		Map<UUID, java.util.Deque<Integer>> waiting = new HashMap<>();
+		accounts.forEach((account) -> waiting.put(account, new java.util.ArrayDeque<>()));
+		for (int step = 0; step < 20_000; step++) {
+			int roll = random.nextInt(100);
+			UUID account = accounts.get(random.nextInt(accounts.size()));
+			int back = 1 + random.nextInt(Math.min(40, Math.max(1, step)));
+			java.util.Deque<Integer> mine = waiting.get(account);
+			if (roll < 35 && !mine.isEmpty()) {
+				// Usually the account's oldest order, sometimes its newest, often in the same run.
+				int target = random.nextInt(3) == 0 ? mine.pollLast() : mine.pollFirst();
+				UUID order = new UUID(salt, target);
+				UUID by = account;
+				int odd = random.nextInt(20);
+				if (odd == 0) {
+					order = new UUID(salt + 100, step);
+					names.put(order, "x" + step);
+				}
+				else if (odd == 1) {
+					// Someone else's order, unless the draw picks its owner.
+					by = accounts.get(random.nextInt(accounts.size()));
+				}
+				steps.add(new Step(streamKey(by, new UUID(salt + 200, step), "DELETE /api/v1/orders", "cancel " + step),
+						new CancelOrder(order, by)));
+				continue;
+			}
+			if (roll >= 35 && roll < 39 && step >= back) {
+				// The same key and request again, a little later.
+				steps.add(steps.get(step - back));
+				coverage.merge("repeated", 1, Integer::sum);
+				continue;
+			}
+			UUID instrument = instruments.get(random.nextInt(instruments.size()));
+			Side side = random.nextBoolean() ? Side.BUY : Side.SELL;
+			OrderType type = roll >= 92 ? OrderType.MARKET_PROTECTED : OrderType.LIMIT;
+			long quantity = roll >= 86 && roll < 92 ? 6 + random.nextInt(10) : 1 + random.nextInt(4);
+			// Bids from 99.00 to 100.40 and asks from 99.60 to 101.00: many cross, many rest.
+			long cents = (side == Side.BUY ? 9_900 : 9_960) + 10L * random.nextInt(15);
+			if (roll == 99) {
+				cents = 90_000;
+				quantity = 10_000;
+			}
+			if (random.nextInt(200) == 0) {
+				instrument = UUID.randomUUID();
+			}
+			UUID order = new UUID(salt, step);
+			names.put(order, "o" + step);
+			CommandKey key = streamKey(account, new UUID(salt + 200, step), "POST /api/v1/orders", "place " + step);
+			if (roll >= 39 && roll < 41 && step >= back) {
+				// An earlier key, for this other request: a conflict.
+				CommandKey earlier = steps.get(step - back).key();
+				key = streamKey(earlier.principalId(), earlier.idempotencyKey(), "POST /api/v1/orders", "other " + step);
+				account = earlier.principalId();
+			}
+			if (type == OrderType.LIMIT) {
+				waiting.get(account).addLast(step);
+			}
+			steps.add(new Step(key, new PlaceOrder(order, account, instrument, side, type, new Price(cents),
+					new Quantity(quantity))));
+		}
+
+		List<CompletableFuture<?>> futures = new ArrayList<>(steps.size());
+		for (int step = 0; step < steps.size(); step++) {
+			if (step >= 600) {
+				// At most 600 waiting, well inside the queue.
+				futures.get(step - 600).handle((result, failure) -> null).join();
+			}
+			Step sent = steps.get(step);
+			futures.add(sent.command() instanceof PlaceOrder place ? engine.place(sent.key(), place)
+					: engine.cancel(sent.key(), (CancelOrder) sent.command()));
+		}
+		List<String> answers = new ArrayList<>(steps.size());
+		for (int step = 0; step < steps.size(); step++) {
+			Object result;
+			try {
+				result = futures.get(step).get();
+			}
+			catch (ExecutionException ex) {
+				coverage.merge("failed " + ex.getCause().getClass().getSimpleName(), 1, Integer::sum);
+				answers.add("failed " + ex.getCause().getClass().getSimpleName());
+				continue;
+			}
+			if (result instanceof PlacementResult placed) {
+				answers.add(names.get(placed.orderId()) + " " + placed.state() + " " + placed.reason() + " "
+						+ placed.filled() + "/" + placed.working() + "/" + placed.canceled() + " at "
+						+ (placed.commandSequence() - base));
+				coverage.merge(placed.state() + (placed.filled() > 0 ? " traded" : "")
+						+ (placed.reason() == null ? "" : " " + placed.reason()), 1, Integer::sum);
+			}
+			else {
+				CancelResult canceled = (CancelResult) result;
+				answers.add(names.get(canceled.orderId()) + " " + canceled.status() + " " + canceled.canceledQuantity()
+						+ " at " + (canceled.commandSequence() - base));
+				coverage.merge("cancel " + canceled.status(), 1, Integer::sum);
+				String target = names.get(canceled.orderId());
+				if (canceled.status() == CancelResult.Status.CANCELED && target.startsWith("o")
+						&& step - Integer.parseInt(target.substring(1)) <= 32) {
+					coverage.merge("cancel CANCELED soon after", 1, Integer::sum);
+				}
+			}
+		}
+
+		Map<String, Object> footprint = new java.util.LinkedHashMap<>();
+		footprint.put("largest run", runs.stream().mapToInt(Integer::intValue).max().orElse(0));
+		footprint.put("in runs", runs.stream().filter((size) -> size > 1).mapToInt(Integer::intValue).sum());
+		footprint.put("runs of several", runs.stream().filter((size) -> size > 1).count());
+		footprint.put("committed whole", phases("run").stream().filter("COMMIT"::equals).count());
+		Object[] both = instruments.toArray();
+		footprint.put("orders", jdbc.query("""
+				SELECT id, account_id, instrument_id, side, type, bound_cents, requested_quantity, filled_quantity,
+				    working_quantity, canceled_quantity, state, coalesce(reason, '-'), accepted_sequence, version
+				FROM orders WHERE instrument_id IN (?, ?)""", (row, index) -> names.get(row.getObject(1, UUID.class)) + " "
+				+ names.get(row.getObject(2, UUID.class)) + " " + names.get(row.getObject(3, UUID.class)) + " "
+				+ row.getString(4) + " " + row.getString(5) + " " + row.getLong(6) + " " + row.getLong(7) + " "
+				+ row.getLong(8) + "/" + row.getLong(9) + "/" + row.getLong(10) + " " + row.getString(11) + " "
+				+ row.getString(12) + " at " + (row.getObject(13) == null ? "-" : row.getLong(13) - base) + " v"
+				+ row.getLong(14), both).stream().sorted().toList());
+		Map<UUID, String> tradeNames = new HashMap<>();
+		Map<String, Integer> takers = new HashMap<>();
+		footprint.put("trades", jdbc.query("""
+				SELECT id, instrument_id, trade_sequence, maker_order_id, taker_order_id, buyer_account_id,
+				    seller_account_id, price_cents, quantity, executed_at, command_sequence
+				FROM trades WHERE instrument_id IN (?, ?) ORDER BY instrument_id = ?, trade_sequence""", (row, index) -> {
+			String name = names.get(row.getObject(2, UUID.class)) + "#" + row.getLong(3);
+			tradeNames.put(row.getObject(1, UUID.class), name);
+			takers.merge(names.get(row.getObject(5, UUID.class)), 1, Integer::sum);
+			return name + " maker " + names.get(row.getObject(4, UUID.class)) + " taker "
+					+ names.get(row.getObject(5, UUID.class)) + " buyer " + names.get(row.getObject(6, UUID.class))
+					+ " seller " + names.get(row.getObject(7, UUID.class)) + " " + row.getLong(8) + " x " + row.getLong(9)
+					+ " " + row.getTimestamp(10).toInstant() + " at " + (row.getLong(11) - base);
+		}, both[0], both[1], both[1]));
+		coverage.put("takers of several makers", (int) takers.values().stream().filter((fills) -> fills > 1).count());
+		footprint.put("coverage", coverage);
+		footprint.put("ledger", jdbc.query("""
+				SELECT b.command_sequence, b.cause, b.trade_id, e.account_id, e.instrument_id, e.bucket, e.delta
+				FROM ledger_entry e JOIN journal_batch b ON b.id = e.batch_id
+				WHERE b.command_sequence > ? AND b.cause <> 'GENESIS' AND e.account_id = ANY(?::uuid[])""",
+				(row, index) -> (row.getLong(1) - base) + " " + row.getString(2) + " "
+						+ tradeNames.get(row.getObject(3, UUID.class)) + " " + names.get(row.getObject(4, UUID.class))
+						+ " " + names.get(row.getObject(5, UUID.class)) + " " + row.getString(6) + " " + row.getLong(7),
+				base, accounts.stream().map(UUID::toString).toArray(String[]::new))
+			.stream()
+			.sorted(Comparator.comparingLong((String line) -> Long.parseLong(line.substring(0, line.indexOf(' '))))
+				.thenComparing(Comparator.naturalOrder()))
+			.toList());
+		List<String> balances = new ArrayList<>();
+		List<String> versions = new ArrayList<>();
+		for (UUID account : accounts) {
+			balances.add(names.get(account) + " " + cash(account) + " " + jdbc.query(
+					"SELECT instrument_id, total_quantity, reserved_quantity FROM position WHERE account_id = ?",
+					(row, index) -> names.get(row.getObject(1, UUID.class)) + " " + row.getLong(2) + "/" + row.getLong(3),
+					account).stream().sorted().toList());
+			versions.add(names.get(account) + " v" + jdbc.queryForObject("SELECT version FROM account WHERE id = ?",
+					Long.class, account));
+		}
+		footprint.put("balances", balances);
+		footprint.put("versions", versions);
+		footprint.put("told", told.stream()
+			.map((change) -> (change.getKey() - base) + " "
+					+ change.getValue().stream().map(names::get).sorted().toList())
+			.toList());
+		List<String> events = new ArrayList<>();
+		for (Map<String, Object> row : jdbc.queryForList(
+				"SELECT topic, payload, command_sequence FROM outbox WHERE event_key IN (?, ?) ORDER BY id",
+				simulation + "|" + instruments.get(0), simulation + "|" + instruments.get(1))) {
+			byte[] payload = (byte[]) row.get("payload");
+			long at = ((Number) row.get("command_sequence")).longValue() - base;
+			if ("mse.trades.v1".equals(row.get("topic"))) {
+				TradeExecuted trade = WireEvents.decodeTrade(payload);
+				events.add(at + " trade " + tradeNames.get(trade.getTradeId()) + " " + names.get(trade.getInstrumentId())
+						+ " " + symbols.get(trade.getSymbol()) + " " + trade.getTradeSequence() + " "
+						+ (trade.getCommandSequence() - base) + " " + trade.getPriceCents() + " x " + trade.getQuantity()
+						+ " " + trade.getExecutedAt());
+			}
+			else {
+				MarketSnapshot snapshot = WireEvents.decodeSnapshot(payload);
+				events.add(at + " snapshot " + names.get(snapshot.getInstrumentId()) + " "
+						+ symbols.get(snapshot.getSymbol()) + " " + snapshot.getVenueState() + " last "
+						+ snapshot.getLastTradeSequence() + " bids " + snapshot.getBids() + " asks " + snapshot.getAsks()
+						+ " tape " + snapshot.getRecentTrades().stream()
+							.map((trade) -> tradeNames.get(trade.getTradeId()) + " " + trade.getPriceCents() + " x "
+									+ trade.getQuantity() + " " + trade.getAggressorSide() + " " + trade.getExecutedAt())
+							.toList()
+						+ " last trade " + (snapshot.getLastTrade() == null ? null
+								: tradeNames.get(snapshot.getLastTrade().getTradeId()))
+						+ " source " + (snapshot.getSourceCommandSequence() - base) + " " + snapshot.getGeneratedAt()
+						+ " " + snapshot.getRules() + " " + snapshot.getRemoved());
+			}
+		}
+		footprint.put("events", events);
+		List<String> books = new ArrayList<>();
+		for (UUID instrument : instruments) {
+			books.add(names.get(instrument) + " bids " + engine.depth(instrument, Side.BUY).get() + " asks "
+					+ engine.depth(instrument, Side.SELL).get());
+		}
+		footprint.put("books", books);
+		footprint.put("answers", answers);
+		return footprint;
+	}
+
+	private static CommandKey streamKey(UUID principal, UUID idempotencyKey, String route, String request) {
+		try {
+			return new CommandKey(principal, idempotencyKey, route,
+					MessageDigest.getInstance("SHA-256").digest(request.getBytes(StandardCharsets.UTF_8)));
+		}
+		catch (NoSuchAlgorithmException ex) {
+			throw new IllegalStateException(ex);
+		}
+	}
+
+	/** A trader funded with cash and shares of each instrument, by one balanced genesis batch. */
+	private UUID fundIn(List<UUID> instruments) {
+		UUID account = UUID.randomUUID();
+		jdbc.update("INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'BOT', 'Bot')", account,
+				simulation);
+		UUID batch = UUID.randomUUID();
+		jdbc.update("INSERT INTO journal_batch (id, simulation_id, cause, command_sequence) VALUES (?, ?, 'GENESIS', 1)",
+				batch, simulation);
+		String post = "INSERT INTO ledger_entry (batch_id, account_id, instrument_id, bucket, delta) VALUES (?, ?, ?, 'AVAILABLE', ?)";
+		jdbc.update(post, batch, issuance, null, -STARTING_CASH);
+		jdbc.update(post, batch, account, null, STARTING_CASH);
+		jdbc.update("INSERT INTO cash_balance (account_id, account_kind, total_cents, reserved_cents) VALUES (?, 'BOT', ?, 0)",
+				account, STARTING_CASH);
+		for (UUID held : instruments) {
+			jdbc.update(post, batch, issuance, held, -STARTING_SHARES);
+			jdbc.update(post, batch, account, held, STARTING_SHARES);
+			jdbc.update("""
+					INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
+					VALUES (?, 'BOT', ?, ?, 0)""", account, held, STARTING_SHARES);
+		}
+		return account;
+	}
+
+	/**
+	 * A command in the middle of a run finds the book out of step with the database: the run rolls back whole, that
+	 * command fails with the halt, and the ones before and after it fail as stopped, none of them written.
+	 */
+	@Test
+	void aHaltInsideARunFailsItWholeAndBlamesTheCommandThatCausedIt() throws Exception {
+		runningEngine(8);
+		UUID seller = funded();
+		UUID hidden = restingOnlyInTheDatabase(seller);
+		Map<String, Object> before = snapshot();
+		java.util.concurrent.CountDownLatch release = hold();
+		CompletableFuture<PlacementResult> first = engine.place(key(), order(seller, Side.SELL, OrderType.LIMIT, "100.00", 1));
+		CompletableFuture<CancelResult> halting = engine.cancel(key(), new CancelOrder(hidden, seller));
+		CompletableFuture<PlacementResult> third = engine.place(key(), order(seller, Side.SELL, OrderType.LIMIT, "101.00", 1));
+		try {
+			release.countDown();
+
+			assertThatThrownBy(first::get).hasCauseInstanceOf(WriterStoppedException.class)
+				.hasMessageContaining("before this command's run committed");
+			assertThatThrownBy(halting::get).hasCauseInstanceOf(WriterHaltException.class)
+				.rootCause()
+				.hasMessageContaining("disagree about order " + hidden);
+			assertThatThrownBy(third::get).hasCauseInstanceOf(WriterStoppedException.class);
+			assertThat(writer.isAvailable()).isFalse();
+			assertThat(snapshot()).as("nothing committed").isEqualTo(before);
+		}
+		finally {
+			cancelInTheDatabase(hidden);
+		}
+		restartEngine();
+	}
+
+	/**
+	 * A run that fails without halting runs again one by one, and a command that halts the writer then stops the ones
+	 * after it, as one by one: the first commits, the refused one fails alone, the one whose book is out of step halts
+	 * the writer, and the last fails as never run.
+	 */
+	@Test
+	void aHaltWhileARunRunsAgainOneByOneStopsTheCommandsAfterIt() throws Exception {
+		runningEngine(8);
+		UUID seller = funded();
+		UUID hidden = restingOnlyInTheDatabase(seller);
+		ddl("""
+				CREATE FUNCTION test_refused_now() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN
+				    RAISE EXCEPTION 'refused' USING ERRCODE = 'check_violation';
+				END $$;
+				CREATE TRIGGER test_refused_now AFTER INSERT ON orders
+				    FOR EACH ROW WHEN (NEW.requested_quantity = 6667) EXECUTE FUNCTION test_refused_now();""");
+		try {
+			long before = commandSequence();
+			java.util.concurrent.CountDownLatch release = hold();
+			CompletableFuture<PlacementResult> first = engine.place(key(),
+					order(seller, Side.SELL, OrderType.LIMIT, "100.00", 1));
+			CompletableFuture<PlacementResult> refused = engine.place(key(),
+					order(seller, Side.SELL, OrderType.LIMIT, "100.00", 6_667));
+			CompletableFuture<CancelResult> halting = engine.cancel(key(), new CancelOrder(hidden, seller));
+			PlaceOrder last = order(seller, Side.SELL, OrderType.LIMIT, "101.00", 1);
+			CompletableFuture<PlacementResult> never = engine.place(key(), last);
+
+			release.countDown();
+
+			assertThat(first.get().commandSequence()).isEqualTo(before + 1);
+			assertThatThrownBy(refused::get).cause()
+				.isNotInstanceOf(WriterHaltException.class)
+				.isNotInstanceOf(WriterStoppedException.class);
+			assertThatThrownBy(halting::get).hasCauseInstanceOf(WriterHaltException.class);
+			assertThatThrownBy(never::get).hasCauseInstanceOf(WriterStoppedException.class)
+				.hasMessageContaining("halted before this command ran");
+			assertThat(phases("run")).containsExactly("FALLBACK");
+			assertThat(commandSequence()).isEqualTo(before + 1);
+			assertThat(jdbc.queryForObject("SELECT count(*) FROM orders WHERE id = ?", Long.class, last.orderId()))
+				.isZero();
+		}
+		finally {
+			ddl("DROP TRIGGER test_refused_now ON orders; DROP FUNCTION test_refused_now();");
+			cancelInTheDatabase(hidden);
+		}
+		restartEngine();
+	}
+
+	/** The market-wide limit of resting orders counts the orders the run's earlier commands rested. */
+	@Test
+	void theMarketWideLimitCountsTheRunsEarlierOrders() throws Exception {
+		runningEngine(8);
+		int total = jdbc.queryForObject("SELECT max_open_orders_total FROM simulation", Integer.class);
+		UUID seller = funded();
+		UUID buyer = funded();
+		int resting = jdbc.queryForObject("SELECT count(*) FROM orders WHERE state IN ('OPEN', 'PARTIALLY_FILLED')",
+				Integer.class);
+		asOwner("UPDATE simulation SET max_open_orders_total = ?", resting + 1);
+		try {
+			java.util.concurrent.CountDownLatch release = hold();
+			CompletableFuture<PlacementResult> ask = engine.place(key(), order(seller, Side.SELL, OrderType.LIMIT, "490.00", 1));
+			CompletableFuture<PlacementResult> bid = engine.place(key(), order(buyer, Side.BUY, OrderType.LIMIT, "10.00", 1));
+
+			release.countDown();
+
+			assertThat(ask.get().rejection()).isNull();
+			assertThat(bid.get().rejection()).isEqualTo(RejectionCode.ORDER_LIMIT_EXCEEDED);
+			assertThat(phases("run")).as("one transaction").containsExactly("BEGIN", "WORK", "COMMIT", "APPLY");
+		}
+		finally {
+			asOwner("UPDATE simulation SET max_open_orders_total = ?", total);
+		}
+	}
+
+	/**
+	 * Anything failing after a run's commit halts the writer, not just a book: here the account listener throws for
+	 * the first command. It was applied but halts the writer; the two after it committed without reaching the books,
+	 * fail as stopped, and their keys give their results once a restart has rebuilt the books.
+	 */
+	@Test
+	void aListenerFailingAfterARunsCommitHaltsTheWriter() throws Exception {
+		AtomicBoolean failNext = new AtomicBoolean(true);
+		runningEngine(8, (accounts, sequence) -> {
+			if (failNext.getAndSet(false)) {
+				throw new IllegalStateException("injected listener failure");
+			}
+		});
+		UUID seller = funded();
+		long before = commandSequence();
+		List<CommandKey> keys = List.of(key(), key(), key());
+		List<PlaceOrder> orders = List.of(order(seller, Side.SELL, OrderType.LIMIT, "300.00", 1),
+				order(seller, Side.SELL, OrderType.LIMIT, "301.00", 1), order(seller, Side.SELL, OrderType.LIMIT, "302.00", 1));
+		java.util.concurrent.CountDownLatch release = hold();
+		List<CompletableFuture<PlacementResult>> answers = new ArrayList<>();
+		for (int i = 0; i < 3; i++) {
+			answers.add(engine.place(keys.get(i), orders.get(i)));
+		}
+
+		release.countDown();
+
+		assertThatThrownBy(answers.get(0)::get).hasCauseInstanceOf(WriterHaltException.class)
+			.rootCause()
+			.hasMessage("injected listener failure");
+		for (CompletableFuture<PlacementResult> later : answers.subList(1, 3)) {
+			assertThatThrownBy(later::get).hasCauseInstanceOf(WriterStoppedException.class)
+				.hasMessageContaining("look it up by its key");
+		}
+		assertThat(writer.isAvailable()).isFalse();
+
+		restartEngine();
+		for (int i = 0; i < 3; i++) {
+			PlacementResult answer = engine.place(keys.get(i), orders.get(i)).get();
+			assertThat(answer.state()).isEqualTo(OrderState.OPEN);
+			assertThat(answer.commandSequence()).isEqualTo(before + 1 + i);
+		}
+		assertThat(engine.depth(instrument, Side.SELL).get()).extracting(DepthLevel::quantity)
+			.containsExactly(1L, 1L, 1L);
+	}
+
+	/** An order the database has resting that no book holds, as a book out of step would leave it. */
+	private UUID restingOnlyInTheDatabase(UUID seller) throws Exception {
+		UUID hidden = UUID.randomUUID();
+		asOwner("""
+				INSERT INTO orders (id, simulation_id, account_id, instrument_id, side, type, time_in_force, bound_cents,
+				    requested_quantity, working_quantity, state, accepted_sequence)
+				VALUES (?, ?, ?, ?, 'SELL', 'LIMIT', 'GTC', 50000, 2, 2, 'OPEN', ?)""", hidden, simulation, seller, instrument,
+				9_000_000_000_000L + SYMBOLS.incrementAndGet());
+		return hidden;
+	}
+
+	/** Cancelled, it holds nothing, so the next startup's reconciliation has nothing to find. */
+	private void cancelInTheDatabase(UUID order) throws Exception {
+		asOwner("""
+				UPDATE orders SET state = 'CANCELED', working_quantity = 0, canceled_quantity = 2, reason = 'TEST'
+				WHERE id = ?""", order);
+	}
+
+	/** Holds the writer until the latch is released, so the commands queued meanwhile reach it as one run. */
+	private java.util.concurrent.CountDownLatch hold() {
+		java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+		writer.submit(() -> release.await(5, java.util.concurrent.TimeUnit.SECONDS));
+		return release;
+	}
+
+	/** A started engine on a writer with this run limit and the failing store and runner; returns the run sizes. */
+	private List<Integer> runningEngine(int maxRun) throws InterruptedException {
+		return runningEngine(maxRun, AccountChanges.NONE);
+	}
+
+	private List<Integer> runningEngine(int maxRun, AccountChanges changes) throws InterruptedException {
+		writer.close(Duration.ofSeconds(5));
+		List<Integer> runs = new java.util.concurrent.CopyOnWriteArrayList<>();
+		writer = new CommandWriter("test-writer", 1_000, maxRun, runs::add);
+		resting = new FailingRestingOrders();
+		engine = new TradingEngine(failingBeforeCommit(store), losingAnswers(new SpringTransactionRunner(transactionManager)),
+				writer, Clock.systemUTC(), (account) -> {
+					throw new UnsupportedOperationException("no bots in these tests");
+				}, changes, timings, System::nanoTime, resting);
+		engine.start();
+		return runs;
 	}
 
 	/** Golden fixture, end to end: three sellers rest 3@100.00, 4@100.00, 5@101.00; a buyer takes 10@101.00. */
@@ -1350,7 +2104,7 @@ class TradingEngineIT {
 	/** A new process up to the point where its web server takes requests: the engine exists but hasn't started. */
 	private void replaceEngine() throws InterruptedException {
 		writer.close(Duration.ofSeconds(5));
-		writer = new CommandWriter("test-writer", 1_000);
+		writer = new CommandWriter("test-writer", 1_000, maxRun());
 		resting = new FailingRestingOrders();
 		engine = new TradingEngine(failingBeforeCommit(store), losingAnswers(new SpringTransactionRunner(transactionManager)),
 				writer,

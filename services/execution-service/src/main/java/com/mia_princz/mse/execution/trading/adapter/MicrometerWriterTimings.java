@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 
@@ -15,15 +16,23 @@ import com.mia_princz.mse.execution.trading.application.WriterTimings;
 /**
  * The writer's timings as timers: {@code mse.writer.queue.wait}, {@code mse.writer.begin}, {@code mse.writer.work},
  * {@code mse.writer.commit} and {@code mse.writer.apply}, each tagged {@code command} ({@code place}, {@code cancel},
- * {@code other}) and published with a histogram, so the time a command spends on the writer can be split.
+ * {@code other}, or {@code run} for a transaction of several orders and cancels together) and published with a
+ * histogram, so the time a command spends on the writer can be split; and {@code mse.writer.run.fallbacks}, the runs
+ * that failed without halting and ran again one by one.
  */
 public final class MicrometerWriterTimings implements WriterTimings {
 
-	static final List<String> COMMANDS = List.of("place", "cancel", "other");
+	static final List<String> COMMANDS = List.of("place", "cancel", "other", "run");
 
 	private final Map<Phase, Map<String, Timer>> timers = new EnumMap<>(Phase.class);
 
+	private final Counter fallbacks;
+
 	public MicrometerWriterTimings(MeterRegistry meters) {
+		fallbacks = Counter.builder("mse.writer.run.fallbacks")
+			.description("Runs of orders and cancels that failed without halting and ran again one by one")
+			.baseUnit("runs")
+			.register(meters);
 		for (Phase phase : Phase.values()) {
 			Map<String, Timer> byCommand = new HashMap<>();
 			for (String command : COMMANDS) {
@@ -45,6 +54,11 @@ public final class MicrometerWriterTimings implements WriterTimings {
 		if (timer != null && nanos >= 0) {
 			timer.record(nanos, TimeUnit.NANOSECONDS);
 		}
+	}
+
+	@Override
+	public void runFellBack(int commands) {
+		fallbacks.increment();
 	}
 
 	static String name(Phase phase) {

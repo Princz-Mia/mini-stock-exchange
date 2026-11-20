@@ -82,6 +82,20 @@ class SpringTransactionRunnerTest {
 		assertThat(database.calls).containsSubsequence("rollback").doesNotContain("commit");
 	}
 
+	/** A rollback that fails, as on a broken connection, must not hide why the work failed: a halt, say. */
+	@Test
+	void aRollbackThatFailsKeepsTheWorksOwnFailure() {
+		Database database = new Database(null);
+		database.rollbackFailure = new SQLException("connection lost", "08006");
+		IllegalStateException failure = new IllegalStateException("work failed");
+
+		assertThatThrownBy(() -> database.runner().inTransaction(() -> {
+			throw failure;
+		})).isSameAs(failure);
+		assertThat(failure.getSuppressed()).hasSize(1);
+		assertThat(database.calls).contains("rollback");
+	}
+
 	@Test
 	void aSuccessfulCommitAnswersTheWork() {
 		Database database = new Database(null);
@@ -98,6 +112,8 @@ class SpringTransactionRunnerTest {
 		private final SQLException commitFailure;
 
 		Error commitError;
+
+		SQLException rollbackFailure;
 
 		Database(SQLException commitFailure) {
 			this.commitFailure = commitFailure;
@@ -134,6 +150,12 @@ class SpringTransactionRunnerTest {
 								}
 								if (commitFailure != null) {
 									throw commitFailure;
+								}
+								yield null;
+							}
+							case "rollback" -> {
+								if (rollbackFailure != null) {
+									throw rollbackFailure;
 								}
 								yield null;
 							}

@@ -21,7 +21,7 @@ class MicrometerWriterTimingsTest {
 
 		for (String name : new String[] { "mse.writer.queue.wait", "mse.writer.begin", "mse.writer.work",
 				"mse.writer.commit", "mse.writer.apply" }) {
-			for (String command : new String[] { "place", "cancel", "other" }) {
+			for (String command : new String[] { "place", "cancel", "other", "run" }) {
 				assertThat(meters.find(name).tag("command", command).timer()).as(name + " " + command).isNotNull();
 			}
 		}
@@ -42,6 +42,17 @@ class MicrometerWriterTimingsTest {
 		assertThat(meters.get("mse.writer.work").tag("command", "cancel").timer().count()).isEqualTo(1);
 		assertThat(meters.get("mse.writer.work").tag("command", "place").timer().count()).isZero();
 		assertThat(meters.get("mse.writer.commit").tag("command", "cancel").timer().count()).isZero();
+	}
+
+	@Test
+	void aRunThatFellBackIsCounted() {
+		SimpleMeterRegistry meters = new SimpleMeterRegistry();
+		MicrometerWriterTimings timings = new MicrometerWriterTimings(meters);
+		assertThat(meters.get("mse.writer.run.fallbacks").counter().count()).isZero();
+
+		timings.runFellBack(32);
+
+		assertThat(meters.get("mse.writer.run.fallbacks").counter().count()).isEqualTo(1.0);
 	}
 
 	@Test

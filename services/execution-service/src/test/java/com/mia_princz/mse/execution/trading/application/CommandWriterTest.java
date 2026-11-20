@@ -385,6 +385,29 @@ class CommandWriterTest {
 		return writer;
 	}
 
+	/** Whoever hears a run's answer sees the run counted, and the writer halted if the run halted it. */
+	@Test
+	void aRunIsCountedAndItsHaltMarkedBeforeAnyAnswer() throws Exception {
+		List<Integer> sizes = Collections.synchronizedList(new ArrayList<>());
+		CommandWriter writer = writer(100, 4, sizes::add);
+		WriterHaltException halt = new WriterHaltException("state unknown", new RuntimeException());
+		CommandWriter.RunProcessor<String> processor = (commands) -> List.of(CommandWriter.RunOutcome.done("kept"),
+				CommandWriter.RunOutcome.halted(halt));
+		CountDownLatch release = new CountDownLatch(1);
+		writer.submit(() -> release.await(5, TimeUnit.SECONDS));
+		List<String> seen = Collections.synchronizedList(new ArrayList<>());
+		CompletableFuture<Object> kept = writer.submitInRun(processor, "kept");
+		// Runs on the writer's thread as the answer completes.
+		CompletableFuture<Object> heard = kept.whenComplete(
+				(result, failure) -> seen.add(sizes + " available " + writer.isAvailable()));
+		writer.submitInRun(processor, "halting");
+
+		release.countDown();
+
+		heard.get(5, TimeUnit.SECONDS);
+		assertThat(seen).containsExactly("[2] available false");
+	}
+
 	private CommandWriter writer(int capacity, int maxRun) {
 		CommandWriter writer = new CommandWriter("test-writer", capacity, maxRun);
 		writers.add(writer);

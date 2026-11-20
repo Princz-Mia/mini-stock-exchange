@@ -302,17 +302,25 @@ public final class CommandWriter implements AutoCloseable {
 			return false;
 		}
 		WriterHaltException halt = null;
+		for (RunOutcome outcome : outcomes) {
+			if (outcome instanceof RunOutcome.Halted halted) {
+				halt = halted.cause();
+			}
+		}
+		// Counted, and the writer marked halted, before any caller hears back, so whoever sees an answer sees both.
+		runs.accept(run.size());
+		if (halt != null) {
+			synchronized (admission) {
+				state = State.HALTED;
+			}
+		}
 		for (int i = 0; i < run.size(); i++) {
 			switch (outcomes.get(i)) {
 				case RunOutcome.Done done -> run.get(i).future().complete(done.result());
 				case RunOutcome.Failed failed -> run.get(i).future().completeExceptionally(failed.failure());
-				case RunOutcome.Halted halted -> {
-					run.get(i).future().completeExceptionally(halted.cause());
-					halt = halted.cause();
-				}
+				case RunOutcome.Halted halted -> run.get(i).future().completeExceptionally(halted.cause());
 			}
 		}
-		runs.accept(run.size());
 		if (halt != null) {
 			halt(List.of(), halt);
 			return true;

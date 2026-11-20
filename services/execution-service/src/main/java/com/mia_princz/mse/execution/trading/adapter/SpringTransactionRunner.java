@@ -30,7 +30,14 @@ public final class SpringTransactionRunner implements TransactionRunner {
 			result = work.get();
 		}
 		catch (RuntimeException | Error ex) {
-			transactionManager.rollback(status);
+			try {
+				transactionManager.rollback(status);
+			}
+			catch (RuntimeException | Error rollback) {
+				// The work's own failure says what went wrong, a halt above all; a lost connection undoes the
+				// transaction anyway.
+				ex.addSuppressed(rollback);
+			}
 			throw ex;
 		}
 		try {
