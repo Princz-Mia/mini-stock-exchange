@@ -14,7 +14,7 @@ The runs are not independent. They take place one after another in one simulatio
 
 ### 2026-11-21, 40 bots at 20 commands a second
 
-Shares of 10%, 30% and 50%, seeds 1 and 2, each run stopped 5 minutes after its bots began trading. Commit `96232bc721c4`; the simulator reported version `0.1.0+96232bc721c4`, numpy 2.5.4, Python 3.14.10 and the same settings in every run. Windows 11, Docker Desktop (WSL 2) with 16 CPUs and 15.2 GiB; Execution limited to 2 CPUs and 2 GiB, Market Data to 1.5 CPUs, the simulator to 1 CPU; PostgreSQL 18.6 with `fsync` and `synchronous_commit` on.
+Shares of 10%, 30% and 50%, seeds 1 and 2, each run stopped 5 minutes after its bots began trading. Commit `96232bc721c4`; the simulator reported version `0.1.0+96232bc721c4`, numpy 2.5.4, Python 3.14.10 and the same settings in every run. Windows 11, Docker Desktop (WSL 2) with 16 CPUs and 15.2 GiB; Execution limited to 2 CPUs and 2 GiB, Market Data to 1.5 CPUs, the simulator to 1 CPU; PostgreSQL 18.6 with `fsync` and `synchronous_commit` on, except that Execution's sign-in session store commits asynchronously on its own connections.
 
 The runs, in the order they ran:
 
@@ -52,7 +52,7 @@ What it shows, in this model and these six runs:
 - With more market makers, and so fewer noise and momentum bots, there were fewer trades (about 2,800 at 10%, 2,400 at 30%, 2,050 at 50%), and a smaller share of the market makers' quoted quantity filled (48.7% at 10%, 39.2% at 50%).
 - One-minute volatility was lower with more market makers (0.078% at 10%, 0.052% at 50%), though the two 10% runs differed widely.
 - The average spread hardly moved (0.021 to 0.023 a share), and the seeds' ranges overlap at every share.
-- P&L is not a strategy's skill here. Within a run every strategy lost about the same per bot, because each bot holds 1,000 shares and the estimate values them at the marks: it mostly measures how far prices fell during the run, and the trades between bots largely cancel out.
+- P&L is not a strategy's skill here. Within a run every strategy lost about the same per bot, because each bot holds 1,000 shares in all, 200 of each of the five instruments, and the estimate values them at the marks: it mostly measures how far prices fell during the run, and the trades between bots largely cancel out.
 
 Two seeds a share are few, and each run inherits the books and inventories the earlier runs left: these are descriptions of what the runs did, not effects measured with confidence.
 
