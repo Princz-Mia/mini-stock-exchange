@@ -1316,6 +1316,11 @@ export interface components {
                 readonly endSequence: components["schemas"]["Sequence"] | null;
                 /** @enum {string|null} */
                 readonly endedBy: "WORKER" | "NEXT_START" | "NOT_KEPT" | null;
+                /**
+                 * @description When the window ended: when its worker confirmed the stop, or when the next run started. Null until
+                 *     then, and for a run recorded before windows were kept. A run's length is from startedAt to this.
+                 */
+                readonly endedAt: components["schemas"]["Timestamp"] | null;
             };
             /** @description What the worker reported about itself with the run; null until a worker reports one. */
             readonly manifest: components["schemas"]["BotRunManifest"] | null;

@@ -45,6 +45,7 @@ describe('comparing bot runs', () => {
     const faster = run(SECOND, {
       startedAt: '2026-11-06T11:00:00Z',
       stoppedAt: '2026-11-06T11:05:00Z',
+      window: { ...finishedRun().window, endedAt: '2026-11-06T11:05:00Z' },
       config: { ...finishedRun().config, commandsPerSecond: '8.00', strategies: { marketMakers: 0, noise: 2, momentum: 0 } },
       manifest: { ...finishedRun().manifest!, version: '0.1.0+9f00c0ffee12.dirty', reports: 2 },
     });
@@ -73,13 +74,14 @@ describe('comparing bot runs', () => {
     const markets = screen.getByRole('table', { name: 'Markets' });
     expect(within(markets).getByRole('rowheader', { name: 'NOVA' })).toBeInTheDocument();
     expect(row(markets, 'Notional')).toEqual(['125,430.50', '125,430.50']);
+    expect(row(markets, 'Price at the start')).toEqual(['100.00 (reference)', '100.00 (reference)']);
     expect(row(markets, 'Price at the end')).toEqual(['101.25 (last trade)', '101.25 (last trade)']);
 
     const strategies = screen.getByRole('table', { name: 'Strategies' });
     // The faster run had no market makers: its column says so rather than showing zeros.
     expect(row(strategies, 'Bots')).toEqual(['1', 'No bots', '2', '2']);
     expect(row(strategies, 'Fill ratio')).toEqual(['62.5%', 'No bots', '—', '—']);
-    expect(row(strategies, 'Refused')).toContain('3 (INSUFFICIENT_CASH 2, MARKET_NOT_OPEN 1)');
+    expect(row(strategies, 'Refused')).toEqual(['0', 'No bots', '3 (INSUFFICIENT_CASH 2, MARKET_NOT_OPEN 1)', '3 (INSUFFICIENT_CASH 2, MARKET_NOT_OPEN 1)']);
     expect(row(strategies, 'Estimated profit or loss')).toEqual(['100.50', 'No bots', '-0.75', '-0.75']);
 
     expect(screen.getByRole('link', { name: 'Back to bot runs' })).toHaveAttribute(
@@ -91,7 +93,7 @@ describe('comparing bot runs', () => {
   it('keeps a column for each run it cannot compare, and says why', async () => {
     const running = botRun({ runId: SECOND });
     const legacy = run(THIRD, {
-      window: { startSequence: '5', stopSequence: null, endSequence: null, endedBy: 'NOT_KEPT' },
+      window: { startSequence: '5', stopSequence: null, endSequence: null, endedBy: 'NOT_KEPT', endedAt: null },
     });
     const missing = '20000000-0000-0000-0000-000000000099';
     server({ [FIRST]: runDetail(run(FIRST), null), [SECOND]: runDetail(running, null), [THIRD]: runDetail(legacy, null), [missing]: 404 });
@@ -127,6 +129,65 @@ describe('comparing bot runs', () => {
     worked = true;
     await waitFor(() => expect(within(strategies).getAllByText('62.5%')).toHaveLength(2), { timeout: 8_000 });
   }, 12_000);
+
+  it('says when a run had another instrument, or could not be loaded', async () => {
+    const orbt = { ...runFigures().instruments[0]!, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
+    server({
+      [FIRST]: runDetail(run(FIRST)),
+      [SECOND]: runDetail(run(SECOND), runFigures({ instruments: [orbt] })),
+      [THIRD]: 503,
+    });
+
+    openAt(`/operator/runs/compare?runs=${FIRST},${SECOND},${THIRD}`);
+
+    const markets = await screen.findByRole('table', { name: 'Markets' });
+    await within(markets).findByRole('rowheader', { name: 'ORBT' });
+    expect(row(markets, 'Trades')).toEqual(['320', 'Not in this run', '—', 'Not in this run', '320', '—']);
+    const settings = screen.getByRole('table', { name: 'Settings' });
+    await within(settings).findAllByText('Could not be loaded', undefined, { timeout: 5_000 });
+    expect(row(settings, 'Comparable')[2]).toBe('Could not be loaded');
+  });
+
+  it('stops asking once a run is finished with figures, unknown or not comparable, and follows one still going', async () => {
+    let finished = false;
+    const legacy = run(SECOND, { window: { startSequence: '5', stopSequence: null, endSequence: null, endedBy: 'NOT_KEPT', endedAt: null } });
+    const missing = '20000000-0000-0000-0000-000000000099';
+    const fake = server({ [FIRST]: runDetail(run(FIRST)), [SECOND]: runDetail(legacy, null), [missing]: 404 });
+    fake.on(`GET /api/v1/admin/bot-runs/${THIRD}`, () => ({
+      status: 200,
+      json: finished ? runDetail(run(THIRD)) : runDetail(botRun({ runId: THIRD }), null),
+    }));
+    const reads = (id: string) => fake.requests.filter((request) => request.url.endsWith(`/bot-runs/${id}`)).length;
+
+    openAt(`/operator/runs/compare?runs=${FIRST},${SECOND},${THIRD},${missing}`);
+
+    const settings = await screen.findByRole('table', { name: 'Settings' });
+    await within(settings).findByText('Not finished yet: Running');
+    finished = true;
+    await waitFor(() => expect(row(settings, 'Comparable')[2]).toBe('Finished'), { timeout: 8_000 });
+    // Long past another round of asking: the settled ones were read once.
+    await new Promise((resolve) => setTimeout(resolve, 5_500));
+    expect([reads(FIRST), reads(SECOND), reads(missing)]).toEqual([1, 1, 1]);
+    const third = reads(THIRD);
+    await new Promise((resolve) => setTimeout(resolve, 5_500));
+    expect(reads(THIRD)).toBe(third);
+  }, 25_000);
+
+  it('goes back to the operator screen as it was left, ticking only runs the server knows', async () => {
+    const missing = '20000000-0000-0000-0000-000000000099';
+    server({ [FIRST]: runDetail(run(FIRST)), [SECOND]: runDetail(run(SECOND)), [missing]: 404 });
+
+    window.history.pushState({ usr: { from: '?runsSize=50&runsOrder=oldest&compare=x' }, key: 'k', idx: 0 }, '',
+      `/operator/runs/compare?runs=${FIRST},${SECOND},${missing}`);
+    render(<App />);
+
+    const settings = await screen.findByRole('table', { name: 'Settings' });
+    await within(settings).findAllByText('No such run');
+    expect(screen.getByRole('link', { name: 'Back to bot runs' })).toHaveAttribute(
+      'href',
+      `/operator?runsSize=50&runsOrder=oldest&compare=${FIRST},${SECOND}`,
+    );
+  });
 
   it('names what it left out of the address, and asks for two runs when it has fewer', async () => {
     server({ [FIRST]: runDetail(run(FIRST)) });

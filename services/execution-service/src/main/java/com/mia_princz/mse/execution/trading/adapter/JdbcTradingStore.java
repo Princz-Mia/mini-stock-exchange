@@ -417,12 +417,13 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public void endUnfinishedBotRuns(UUID simulationId, long endSequence) {
+	public void endUnfinishedBotRuns(UUID simulationId, long endSequence, Instant endedAt) {
 		// The runs first, then their instruments: the order the worker's confirmation takes its locks in.
 		List<UUID> ended = jdbc.sql("""
-				UPDATE bot_run SET end_sequence = ?, ended_by = 'NEXT_START' WHERE simulation_id = ? AND ended_by IS NULL
+				UPDATE bot_run SET end_sequence = ?, ended_by = 'NEXT_START', ended_at = ?
+				WHERE simulation_id = ? AND ended_by IS NULL
 				RETURNING id""")
-			.params(endSequence, simulationId)
+			.params(endSequence, Timestamp.from(endedAt), simulationId)
 			.query(UUID.class)
 			.list();
 		if (!ended.isEmpty()) {

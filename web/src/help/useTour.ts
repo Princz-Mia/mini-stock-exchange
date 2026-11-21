@@ -12,7 +12,7 @@ function roleOf(pathname: string): TourRole | null {
     return 'TRADER';
   }
   // The operator screen itself: the comparison page under it has none of the parts the tour points at.
-  if (pathname === '/operator') {
+  if (pathname.replace(/\/+$/, '') === '/operator') {
     return 'OPERATOR';
   }
   return null;

@@ -1,9 +1,10 @@
 import { useQueries } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { Link, useLocation, useSearchParams } from 'react-router';
 
 import { ApiError, api, isRefusal } from '../api/client';
 import type { BotRunDetail, BotRunMark, InstrumentFigures, StrategyFigures } from '../api/types';
+import { useKeyboardScroll } from '../app/useKeyboardScroll';
 import { groupDigits, groupInteger, utcTime } from '../format';
 import {
   achievedRate,
@@ -67,13 +68,17 @@ export function RunComparePage() {
   });
   const loaded = columns.flatMap((column) => (column.detail === undefined ? [] : [column.detail]));
   const warnings = comparisonWarnings(loaded.map((detail) => detail.run));
+  const back = backTo(
+    useLocation().state,
+    columns.filter((column) => column.missing !== 'No such run').map((column) => column.id),
+  );
 
   return (
     <div className="compare">
       <section className="panel" aria-labelledby="compare-title">
         <div className="heading-row">
           <h1 id="compare-title">Compare bot runs</h1>
-          <Link to={ids.length > 0 ? `/operator?compare=${ids.join(',')}` : '/operator'}>Back to bot runs</Link>
+          <Link to={back}>Back to bot runs</Link>
         </div>
         <p className="muted">
           Simulation-model evidence: what simulated bots did in this simulated market, such as how the share of market
@@ -109,6 +114,19 @@ export function RunComparePage() {
       )}
     </div>
   );
+}
+
+/**
+ * The operator screen as it was left, its table's page size and order kept, with the runs still ticked: those the
+ * server knows, so an unknown one doesn't take a place that can't be unticked.
+ */
+function backTo(state: unknown, ticked: readonly string[]): string {
+  const from = (state as { from?: unknown } | null)?.from;
+  const params = new URLSearchParams(typeof from === 'string' && from.startsWith('?') ? from : '');
+  if (ticked.length > 0) params.set('compare', ticked.join(','));
+  else params.delete('compare');
+  const query = params.toString();
+  return query === '' ? '/operator' : `/operator?${query.replaceAll('%2C', ',')}`;
 }
 
 /** The column headers: each run by its number and start, so the tables below read the same way. */
@@ -179,8 +197,10 @@ const SETTINGS: readonly Row[] = [
 ];
 
 function Settings({ columns }: { columns: readonly Compared[] }) {
+  // Four runs are wider than a phone: the table scrolls inside its panel, and the keyboard has to reach it too.
+  const panel = useKeyboardScroll<HTMLElement>();
   return (
-    <section className="panel" aria-labelledby="compare-settings-title">
+    <section ref={panel} className="panel" aria-labelledby="compare-settings-title">
       <h2 id="compare-settings-title">Settings</h2>
       <table aria-labelledby="compare-settings-title">
         <RunHeaders columns={columns} corner="Setting" />
@@ -202,8 +222,9 @@ function Settings({ columns }: { columns: readonly Compared[] }) {
         </tbody>
       </table>
       <p className="muted">
-        The achieved rate counts the placements and cancels answered in the run's window, over how long it ran; a run
-        the next one ended has no confirmed stop, so its length runs to its last report.
+        A run ran from its start to the end of its window: when its worker confirmed the stop, or when the next run
+        started. The achieved rate counts the placements and cancels answered in that window, over that time; a command
+        refused before it was queued, such as for its rate, left no record and isn't counted.
       </p>
     </section>
   );
@@ -252,12 +273,14 @@ function Figures({ columns }: { columns: readonly Compared[] }) {
   }
   const bySymbol = [...instruments].sort((a, b) => a[1].localeCompare(b[1]));
   const span = columns.length + 1;
+  const panel = useKeyboardScroll<HTMLElement>();
   return (
-    <section className="panel" aria-labelledby="compare-figures-title">
+    <section ref={panel} className="panel" aria-labelledby="compare-figures-title">
       <h2 id="compare-figures-title">What happened</h2>
       <p className="muted">
         Worked out once each run finished, from its window. The market's figures count every trade in the run's
-        instruments, people's too; a strategy's count its bots' side of each trade.
+        instruments, people's too. A strategy's count its bots' side of each trade, so a trade between two of its own
+        bots counts twice, and a strategy can show more than the market.
       </p>
       <h3 id="compare-markets-title">Markets</h3>
       <table aria-labelledby="compare-markets-title">

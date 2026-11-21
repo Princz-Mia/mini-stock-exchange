@@ -40,16 +40,21 @@ describe('the runs an address names', () => {
     const random = seeded(20261121);
     for (let round = 0; round < 300; round++) {
       const parts: string[] = [];
+      // Ids, some in capitals or with spaces round them, and near misses that are not ids at all.
+      const near = (one: string) =>
+        [`${one}x`, `x${one}`, one.slice(1), one.replaceAll('-', ''), one.replace('2', 'g')][random(5)]!;
       for (let part = random(10); part > 0; part--) {
-        const roll = random(10);
-        parts.push(roll < 7 ? id(1 + random(8)) : roll < 9 ? `junk-${random(5)}` : '');
+        const one = id(1 + random(8));
+        const roll = random(12);
+        parts.push(roll < 5 ? one : roll < 7 ? one.toUpperCase() : roll < 8 ? `  ${one} ` : roll < 11 ? near(one) : '');
       }
       const { ids, dropped, overflow } = parseRunIds(parts.join(','));
-      const valid = [...new Set(parts.filter((part) => part.startsWith('2000')))];
+      const isId = (part: string) => /^2000[0-9-]{32}$/.test(part.trim().toLowerCase()) && part.trim().length === 36;
+      const valid = [...new Set(parts.filter(isId).map((part) => part.trim().toLowerCase()))];
       expect(new Set(ids).size).toBe(ids.length);
       expect(ids.length).toBeLessThanOrEqual(MAX_COMPARED);
       expect([...ids, ...overflow]).toEqual(valid);
-      expect(dropped).toEqual(parts.filter((part) => part.startsWith('junk')));
+      expect(dropped).toEqual(parts.filter((part) => part.trim() !== '' && !isId(part)).map((part) => part.trim()));
     }
   });
 });
@@ -61,7 +66,9 @@ describe('a run for a comparison', () => {
     // Stopped, but its worker has not confirmed it, so its window has no end yet.
     expect(comparability(botRun({ status: 'STOPPED', desiredState: 'STOPPED' }))).toBe('UNFINISHED');
     expect(
-      comparability(botRun({ window: { startSequence: '1', stopSequence: null, endSequence: null, endedBy: 'NOT_KEPT' } })),
+      comparability(
+        botRun({ window: { startSequence: '1', stopSequence: null, endSequence: null, endedBy: 'NOT_KEPT', endedAt: null } }),
+      ),
     ).toBe('NOT_KEPT');
   });
 
@@ -72,12 +79,20 @@ describe('a run for a comparison', () => {
     expect(marketMakerShare({ marketMakers: 0, noise: 0, momentum: 0 })).toBe('—');
   });
 
-  it('ran from its start to its confirmed stop, or about to its last report, or for an unknown time', () => {
+  it('ran from its start to the end of its window, or about to its last report before that, or for an unknown time', () => {
     expect(runSeconds(finishedRun())).toEqual({ seconds: 600, approximate: false });
-    const ended = finishedRun({ stoppedAt: null });
-    expect(runSeconds(ended)).toEqual({ seconds: 600, approximate: true });
-    expect(actualDuration(ended)).toBe('About 10 min');
-    const never = finishedRun({ stoppedAt: null, worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null } });
+    // Ended by the next start at 10:07; its worker came back and confirmed the stop at 10:40, after the window.
+    const nextStart = finishedRun({
+      stoppedAt: '2026-11-06T10:40:00Z',
+      worker: { workerId: 'sim-1', heartbeatAt: '2026-11-06T10:40:00Z', leaseExpiresAt: '2026-11-06T10:40:00Z' },
+      window: { ...finishedRun().window, endedBy: 'NEXT_START', endedAt: '2026-11-06T10:07:00Z' },
+    });
+    expect(runSeconds(nextStart)).toEqual({ seconds: 420, approximate: false });
+    expect(actualDuration(nextStart)).toBe('7 min');
+    const going = botRun();
+    expect(runSeconds(going)).toEqual({ seconds: 80, approximate: true });
+    expect(actualDuration(going)).toBe('About 1 min 20 s');
+    const never = botRun({ worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null } });
     expect(runSeconds(never)).toBeNull();
     expect(actualDuration(never)).toBe('Unknown');
     expect(plannedDuration(finishedRun())).toBe('Until stopped');
@@ -95,7 +110,15 @@ describe('a run for a comparison', () => {
     // 600 + 300 + 800 + 100 placements and cancels in 600 seconds.
     expect(achievedRate(finishedRun(), runFigures())).toBe('3.00');
     expect(achievedRate(finishedRun(), null)).toBeNull();
-    expect(achievedRate(finishedRun({ stoppedAt: null, worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null } }), runFigures())).toBeNull();
+    expect(
+      achievedRate(
+        finishedRun({
+          window: { ...finishedRun().window, endedAt: null },
+          worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null },
+        }),
+        runFigures(),
+      ),
+    ).toBeNull();
   });
 
   it('fills a share of what it placed, and counts its refusals by code', () => {
@@ -122,6 +145,8 @@ describe('why runs may not compare like for like', () => {
     expect(comparisonWarnings([at('8.00', ['NOVA']), at('4.00', ['NOVA'])])).toEqual([
       'The runs asked for different rates (4.00, 8.00 commands a second), so more trading in one may be only its rate.',
     ]);
+    // In numeric order, which text order is not.
+    expect(comparisonWarnings([at('12.50', ['NOVA']), at('4.00', ['NOVA'])])[0]).toContain('(4.00, 12.50 commands a second)');
     expect(comparisonWarnings([at('4.00', ['NOVA', 'ORBT']), at('4.00', ['ORBT', 'NOVA'])])).toEqual([]);
     expect(comparisonWarnings([at('4.00', ['NOVA']), at('4.00', ['NOVA', 'ORBT'])])).toHaveLength(1);
   });

@@ -20,7 +20,7 @@ export function botRun(overrides: Partial<BotRun> = {}): BotRun {
     },
     worker: { workerId: 'sim-1', heartbeatAt: '2026-11-06T10:01:20Z', leaseExpiresAt: '2026-11-06T10:01:35Z' },
     activity: { placed: 150, canceled: 40, rejected: 6, errors: 4, inFlight: 1, stopFailures: 0 },
-    window: { startSequence: '41', stopSequence: null, endSequence: null, endedBy: null },
+    window: { startSequence: '41', stopSequence: null, endSequence: null, endedBy: null, endedAt: null },
     manifest: null,
     ...overrides,
   };
@@ -35,7 +35,13 @@ export function finishedRun(overrides: Partial<BotRun> = {}): BotRun {
     stoppedAt: '2026-11-06T10:10:00Z',
     worker: { workerId: 'sim-1', heartbeatAt: '2026-11-06T10:10:00Z', leaseExpiresAt: '2026-11-06T10:10:00Z' },
     activity: { placed: 1500, canceled: 400, rejected: 60, errors: 0, inFlight: 0, stopFailures: 0 },
-    window: { startSequence: '41', stopSequence: '2100', endSequence: '2104', endedBy: 'WORKER' },
+    window: {
+      startSequence: '41',
+      stopSequence: '2100',
+      endSequence: '2104',
+      endedBy: 'WORKER',
+      endedAt: '2026-11-06T10:10:00Z',
+    },
     manifest: {
       version: '0.1.0+27a70d6c1e2f',
       workerId: 'sim-1',

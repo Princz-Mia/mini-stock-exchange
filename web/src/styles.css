@@ -472,6 +472,21 @@ tbody th {
   font-weight: normal;
 }
 
+.compare-picks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.compare-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  white-space: nowrap;
+  font-size: 12px;
+}
+
 .compare-group {
   text-align: left;
   padding-top: var(--space-3);

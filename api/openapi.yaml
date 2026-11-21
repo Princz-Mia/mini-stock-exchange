@@ -2162,7 +2162,7 @@ components:
         window:
           type: object
           additionalProperties: false
-          required: [startSequence, stopSequence, endSequence, endedBy]
+          required: [startSequence, stopSequence, endSequence, endedBy, endedAt]
           description: |
             The run's commands in the command sequence, from its start to its end. stopSequence is the operator's stop
             command, if there was one. endSequence is null until the run is finished. endedBy says how it ended:
@@ -2174,6 +2174,11 @@ components:
             stopSequence: { oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }] }
             endSequence: { oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }] }
             endedBy: { type: [string, 'null'], enum: [WORKER, NEXT_START, NOT_KEPT, null] }
+            endedAt:
+              description: |
+                When the window ended: when its worker confirmed the stop, or when the next run started. Null until
+                then, and for a run recorded before windows were kept. A run's length is from startedAt to this.
+              oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
         manifest:
           description: What the worker reported about itself with the run; null until a worker reports one.
           oneOf: [{ $ref: '#/components/schemas/BotRunManifest' }, { type: 'null' }]

@@ -47,16 +47,17 @@ export function marketMakerShare({ marketMakers, noise, momentum }: BotRun['conf
 }
 
 /**
- * How long the run ran: from its start to the stop its worker confirmed. A run the next start ended has no confirmed
- * stop, so its last heartbeat stands in and the length is approximate; with neither, it is unknown.
+ * How long the run ran: from its start to the end of its window, when its worker confirmed the stop or the next run
+ * started. Its stop can't stand in: a worker may confirm a run the next start ended long after its window closed. Until
+ * the window ends, the last report stands in and the length is approximate; with neither, it is unknown.
  */
 export function runSeconds(run: BotRun): { seconds: number; approximate: boolean } | null {
-  const end = run.stoppedAt ?? run.worker.heartbeatAt;
+  const end = run.window.endedAt ?? run.worker.heartbeatAt;
   if (end === null) {
     return null;
   }
   const seconds = (Date.parse(end) - Date.parse(run.startedAt)) / 1000;
-  return seconds <= 0 ? null : { seconds, approximate: run.stoppedAt === null };
+  return seconds <= 0 ? null : { seconds, approximate: run.window.endedAt === null };
 }
 
 /** "1 h 5 min", "12 min 30 s", "45 s": whole seconds. */

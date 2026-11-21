@@ -304,14 +304,15 @@ class SimulatorControlController {
 			// instrument's newest trade sequence come from one snapshot.
 			jdbc.sql("""
 					WITH ended AS (
-					    UPDATE bot_run b SET ended_by = 'WORKER', end_sequence = s.last_command_sequence
+					    UPDATE bot_run b SET ended_by = 'WORKER', end_sequence = s.last_command_sequence,
+					        ended_at = CAST(? AS timestamptz)
 					    FROM simulation s
 					    WHERE b.id = ? AND b.ended_by IS NULL AND s.id = b.simulation_id
 					    RETURNING b.id)
 					UPDATE bot_run_instrument r SET end_trade_sequence = i.last_trade_sequence
 					FROM ended e, instrument i
 					WHERE r.run_id = e.id AND i.simulation_id = r.simulation_id AND i.id = r.instrument_id""")
-				.param(run.id())
+				.params(at, run.id())
 				.update();
 		}
 		return new Heartbeat(run.id().toString(), shouldRun ? "RUNNING" : "STOPPED", leaseExpiresAt, stopping);
