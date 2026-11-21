@@ -55,7 +55,8 @@ Say: the hold, the order and the ledger entries commit in one transaction before
 3. Open **Portfolio**:
    - **Holdings** shows NOVA up by 5 shares, its average cost now between the reference price and what you paid, and its estimated unrealized profit or loss;
    - **Executions** lists the fill, at the price of the order it matched;
-   - the summary shows the cash spent.
+   - the summary's **Cash** is lower by what the fill cost.
+4. Select **Terminal** and **NOVA** in the watchlist again: the terminal opens on the first instrument.
 
 Say: the private views refresh as soon as the trade commits, through the trader's own stream, and an order is filled at the resting order's price, so a higher limit can't cost more.
 
