@@ -148,6 +148,16 @@ Either writes `ramp-<time>.md` or `stress-<time>.md` to `runtime/load-test/`. Th
 
 The steady and ramp reports also name the simulator they measured, from the manifest each run's worker reported: its version (the package version and the commit its image was built from), its runtime and its strategies' settings, with each run's id. A run whose simulator differs from the first, or changed during the run, is flagged, as its rate is then not directly comparable. Stress runs no bots, so it has no such section.
 
+#### Market-maker share experiment
+
+```powershell
+uv run --project simulator python -m mse_simulator.loadtest.experiment   # about 45 minutes
+```
+
+A small, repeatable experiment on the share of market makers at a fixed total rate, labelled simulation-model evidence: what this exchange's own bots do with each other, not how a real market would behave. It starts its own throwaway Compose project (`mse-experiment`, on port 38090), tags the bots the shares need on five instruments, and runs one bot run per share and seed in turn: by default 40 bots at 20 commands a second, market-maker shares of 10%, 30% and 50%, seeds 1 and 2, each run stopped 5 minutes after its bots begin trading. The bots that are not market makers are three noise bots to one momentum bot. The runs share the bots' accounts and the books, so each starts where the ones before it left off; the share order turns with each seed, and the report keeps the order. `--help` lists the options; `--keep-stack` leaves the stack up so the runs can be compared on the operator screen.
+
+It writes `experiment-<time>.md` to `runtime/experiment/`: each run's achieved rate, trades and volume, Market Data's average spread and volatility over its window, each strategy's fill and estimated P&L (in all and per bot), the runs grouped by share, the simulator each ran on and the environment. Its exit code is 0 when every run ran, stopped and had its figures worked out. The first report is in [docs/experiments.md](docs/experiments.md).
+
 ### Browser tests
 
 `web/e2e/` holds Playwright tests that drive the real stack through the reverse proxy. `operator-setup.spec.ts` runs first, on the fresh stack: the operator adds a named instrument in the setup editor, changes its name and price, removes the name and deletes it, then adds a trader login with a generated password and signs in as that trader, who changes the password, leaving an empty market in setup and that login without an account. Then the trading tests sign in, buy into a partial fill, cancel the rest, check the portfolio, then check the layout at phone width. They set up their market through the operator API: an instrument, two funded traders, then opening. The operator then runs two bot runs at different rates, one from the screen and one through the API, and compares them side by side: their settings, the rate warning, the simulator both ran on, their figures and the market over each, from Market Data.

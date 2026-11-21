@@ -5,6 +5,7 @@ development stack or a gate run is never touched."""
 
 import json
 import logging
+import math
 import os
 import platform
 import secrets
@@ -17,6 +18,7 @@ from pathlib import Path
 import httpx
 
 from mse_simulator.loadtest import diagnostics, manifests, stats
+from mse_simulator.loadtest.ramp import MAX_RATE, MIN_RATE
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +316,22 @@ def start_run(
             "durationMinutes": minutes,
         },
     )
+
+
+def run_rate(text: str) -> str:
+    """A run rate as the API takes it, with two decimals: "225" becomes "225.00". Refused here,
+    before a stack is started, if the API would refuse it."""
+    try:
+        value = float(text)
+    except ValueError as error:
+        raise ValueError(f"--rate is not a number: {text!r}") from error
+    if not math.isfinite(value):
+        raise ValueError(f"--rate is not a finite number: {text!r}")
+    if round(value, 2) != value:
+        raise ValueError(f"--rate takes at most two decimals: {text!r}")
+    if not MIN_RATE <= value <= MAX_RATE:
+        raise ValueError(f"--rate must be from {MIN_RATE} to {MAX_RATE:.0f}")
+    return f"{value:.2f}"
 
 
 def listing(base_url: str) -> dict:

@@ -42,6 +42,7 @@ from mse_simulator.loadtest.stack import (
     listing,
     read_environment,
     read_manifest,
+    run_rate,
     set_up,
     start_run,
     stop_any_run,
@@ -889,22 +890,6 @@ def run(options: Options) -> int:
             logger.info("stack kept: docker compose -p %s", PROJECT)
         else:
             stack.compose("down", "-v", "--remove-orphans", check=False)
-
-
-def run_rate(text: str) -> str:
-    """A run rate as the API takes it, with two decimals: "225" becomes "225.00". Refused here,
-    before a stack is started, if the API would refuse it."""
-    try:
-        value = float(text)
-    except ValueError as error:
-        raise ValueError(f"--rate is not a number: {text!r}") from error
-    if not math.isfinite(value):
-        raise ValueError(f"--rate is not a finite number: {text!r}")
-    if round(value, 2) != value:
-        raise ValueError(f"--rate takes at most two decimals: {text!r}")
-    if not ramp.MIN_RATE <= value <= ramp.MAX_RATE:
-        raise ValueError(f"--rate must be from {ramp.MIN_RATE} to {ramp.MAX_RATE:.0f}")
-    return f"{value:.2f}"
 
 
 def parse(argv: list[str]) -> Options:
