@@ -51,3 +51,22 @@ export function isTrader(identity: Identity | null | undefined): boolean {
 export function isOperator(identity: Identity | null | undefined): boolean {
   return identity?.roles.includes('OPERATOR') ?? false;
 }
+
+/** What a user holding both roles is doing: the screen decides it, there is no mode on the server. */
+export type Mode = 'TRADING' | 'OPERATING';
+
+/** The mode a page belongs to, or null for pages both share (help). */
+export function modeOf(pathname: string): Mode | null {
+  if (pathname.startsWith('/operator')) {
+    return 'OPERATING';
+  }
+  if (['/terminal', '/portfolio', '/account'].some((page) => pathname.startsWith(page))) {
+    return 'TRADING';
+  }
+  return null;
+}
+
+/** Where a user starts: the operator screen for anyone who operates, the terminal for a trader. */
+export function homeOf(identity: Identity): string {
+  return isOperator(identity) ? '/operator' : '/terminal';
+}

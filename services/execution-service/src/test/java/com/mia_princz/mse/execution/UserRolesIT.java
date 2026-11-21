@@ -45,8 +45,9 @@ class UserRolesIT {
 		TestBrowser operator = TestBrowser.loggedIn(port, "both", PASSWORD);
 		TestBrowser trader = TestBrowser.loggedIn(port, "trader", PASSWORD);
 		assertThat(operator.get("/api/v1/me").body()).isEqualTo("{\"username\":\"both\",\"roles\":[\"OPERATOR\",\"TRADER\"]}");
+		// The configured operator holds both too.
 		assertThat(TestBrowser.loggedIn(port, "operator", PASSWORD).get("/api/v1/me").body())
-			.isEqualTo("{\"username\":\"operator\",\"roles\":[\"OPERATOR\"]}");
+			.isEqualTo("{\"username\":\"operator\",\"roles\":[\"OPERATOR\",\"TRADER\"]}");
 		assertThat(trader.get("/api/v1/me").body()).isEqualTo("{\"username\":\"trader\",\"roles\":[\"TRADER\"]}");
 
 		// Without a trader account it can't trade yet; operating works as before.

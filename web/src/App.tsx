@@ -1,10 +1,10 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router';
+import { BrowserRouter, Route, Routes } from 'react-router';
 
 import { AccountPage } from './account/AccountPage';
 import { isRefusal } from './api/client';
-import { AppShell, RequireRole } from './app/AppShell';
+import { AppShell, Home, RequireRole } from './app/AppShell';
 import { LoginPage } from './auth/LoginPage';
 import { HowItWorks } from './help/HowItWorks';
 import { OperatorPage } from './operator/OperatorPage';
@@ -33,13 +33,16 @@ export function App() {
             <Route element={<RequireRole role="TRADER" />}>
               <Route path="/terminal" element={<TerminalPage />} />
               <Route path="/portfolio" element={<PortfolioPage />} />
+            </Route>
+            {/* An operator's password comes from configuration, so one who also trades has no account page. */}
+            <Route element={<RequireRole role="TRADER" unless="OPERATOR" />}>
               <Route path="/account" element={<AccountPage />} />
             </Route>
             <Route element={<RequireRole role="OPERATOR" />}>
               <Route path="/operator" element={<OperatorPage />} />
             </Route>
+            <Route path="*" element={<Home />} />
           </Route>
-          <Route path="*" element={<Navigate to="/terminal" replace />} />
         </Routes>
       </BrowserRouter>
     </QueryClientProvider>

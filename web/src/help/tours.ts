@@ -51,7 +51,8 @@ export const TOURS: Record<TourRole, TourScript> = {
         absent: LATER,
       },
       {
-        anchor: 'section[aria-labelledby="ticket-title"]',
+        // The ticket's place: the ticket, or what a user without a trading account sees there instead.
+        anchor: 'section.ticket',
         title: 'Order ticket',
         body:
           'Buy or sell. A limit order waits in the book at your price or better; a protected market order fills now, ' +

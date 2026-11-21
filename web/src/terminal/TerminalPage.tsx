@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
 import { createContext, useContext } from 'react';
-import { useSearchParams } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 
-import { api, pollEvery } from '../api/client';
+import { ApiError, api, pollEvery } from '../api/client';
 import type { MarketStatus } from '../api/types';
 import { FeedStatus } from '../app/FeedStatus';
+import { isOperator, useSession } from '../auth/session';
 import { groupDigits } from '../format';
 import { TermTip } from '../help/TermTip';
 import { InstrumentFigures } from './InstrumentFigures';
@@ -47,6 +48,10 @@ export function TerminalPage() {
     queryFn: () => api.orders('active'),
     refetchInterval: pollEvery(5_000),
   });
+  // A trader login without an account yet, such as an operator who also trades before funding itself: the market is
+  // shown, the ticket is not.
+  const noAccount = portfolio.error instanceof ApiError && portfolio.error.code === 'NO_TRADING_ACCOUNT';
+  const operator = isOperator(useSession().data);
 
   const list = instruments.data?.instruments ?? [];
   const selectedId = params.get('instrument') ?? list[0]?.instrumentId ?? null;
@@ -124,12 +129,16 @@ export function TerminalPage() {
               <Tape trades={frame?.recentTrades ?? []} waiting={frame === null} />
             </div>
           </div>
-          <OrderTicket
-            key={selected.instrumentId}
-            instrument={selected}
-            portfolio={portfolio.data}
-            paused={paused?.reason ?? null}
-          />
+          {noAccount ? (
+            <NoAccount operator={operator} />
+          ) : (
+            <OrderTicket
+              key={selected.instrumentId}
+              instrument={selected}
+              portfolio={portfolio.data}
+              paused={paused?.reason ?? null}
+            />
+          )}
         </>
       )}
       <div className="terminal-orders">
@@ -139,5 +148,24 @@ export function TerminalPage() {
         />
       </div>
     </div>
+  );
+}
+
+/** In the ticket's place while the user has no trading account: what is missing, and who provides it. */
+function NoAccount({ operator }: { operator: boolean }) {
+  return (
+    <section className="panel ticket" aria-labelledby="no-account-title">
+      <h2 id="no-account-title">No trading account</h2>
+      <p role="status">
+        {operator ? (
+          <>
+            You have no trading account yet. While the market is set up, give yourself one under Accounts on the{' '}
+            <Link to="/operator">operator screen</Link>.
+          </>
+        ) : (
+          'You have no trading account yet. An operator creates accounts when the market is set up.'
+        )}
+      </p>
+    </section>
   );
 }
