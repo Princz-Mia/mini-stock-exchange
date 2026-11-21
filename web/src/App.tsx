@@ -26,7 +26,10 @@ export function App() {
   const [queryClient] = useState(newQueryClient);
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      {/* Each new address commits with the event that made it, not in a transition: state kept in the address, such
+          as the runs ticked to compare or a table's page size, is then current for the next event, and a box or a
+          choice bound to it never springs back while a transition is pending. No route suspends, so none waits. */}
+      <BrowserRouter useTransitions={false}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route element={<AppShell />}>

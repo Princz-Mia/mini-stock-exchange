@@ -16,6 +16,7 @@ import {
   plannedDuration,
   refusalsText,
   runSeconds,
+  withTick,
 } from './compare';
 
 const id = (n: number) => `20000000-0000-0000-0000-${String(n).padStart(12, '0')}`;
@@ -55,6 +56,33 @@ describe('the runs an address names', () => {
       expect(ids.length).toBeLessThanOrEqual(MAX_COMPARED);
       expect([...ids, ...overflow]).toEqual(valid);
       expect(dropped).toEqual(parts.filter((part) => part.trim() !== '' && !isId(part)).map((part) => part.trim()));
+    }
+  });
+});
+
+describe('ticking runs to compare', () => {
+  it('adds a ticked run last and drops an unticked one, keeping the others in order', () => {
+    expect(withTick(['a', 'b'], 'c', true)).toEqual(['a', 'b', 'c']);
+    expect(withTick(['a', 'b', 'c'], 'b', false)).toEqual(['a', 'c']);
+    expect(withTick(['a', 'b'], 'a', true)).toEqual(['b', 'a']);
+    expect(withTick([], 'a', false)).toEqual([]);
+  });
+
+  it('never lists a run twice, and lists exactly the runs left ticked', () => {
+    const random = seeded(20261121);
+    for (let round = 0; round < 200; round++) {
+      let ids: string[] = [];
+      const on = new Set<string>();
+      for (let step = 0; step < 20; step++) {
+        const id = `run-${random(6)}`;
+        const tick = random(2) === 0;
+        ids = withTick(ids, id, tick);
+        if (tick) on.add(id);
+        else on.delete(id);
+        expect(new Set(ids).size).toBe(ids.length);
+        expect([...ids].sort()).toEqual([...on].sort());
+        if (tick) expect(ids.at(-1)).toBe(id);
+      }
     }
   });
 });
