@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { BotRun } from '../api/types';
-import { botRun, finishedRun, runFigures } from '../test/botRun';
+import { botRun, finishedRun, manifest, runFigures } from '../test/botRun';
 import { seeded } from '../test/seeded';
 import {
   achievedRate,
@@ -177,6 +177,20 @@ describe('why runs may not compare like for like', () => {
     expect(comparisonWarnings([at('12.50', ['NOVA']), at('4.00', ['NOVA'])])[0]).toContain('(4.00, 12.50 commands a second)');
     expect(comparisonWarnings([at('4.00', ['NOVA', 'ORBT']), at('4.00', ['ORBT', 'NOVA'])])).toEqual([]);
     expect(comparisonWarnings([at('4.00', ['NOVA']), at('4.00', ['NOVA', 'ORBT'])])).toHaveLength(1);
+  });
+
+  it('names simulators that differ, but not a run that reported none', () => {
+    const plain = at('4.00', ['NOVA']);
+    const tuned = { ...plain, manifest: manifest({ defaults: { ...manifest().defaults, maxInFlight: 64 } }) };
+    const rebuilt = { ...tuned, manifest: { ...tuned.manifest, version: '0.1.0+9f00c0ffee12' } };
+
+    expect(comparisonWarnings([plain, tuned])).toEqual([
+      "The runs' simulators differ in 1 setting, marked under Simulator, so a difference may come from the code or its settings rather than the bots.",
+    ]);
+    expect(comparisonWarnings([rebuilt, plain])[0]).toContain('differ in 2 settings');
+    expect(comparisonWarnings([plain, { ...tuned, manifest: null }])).toEqual([]);
+    // However many runs, and wherever the one that differs is.
+    expect(comparisonWarnings([plain, plain, plain, tuned])[0]).toContain('differ in 1 setting');
   });
 
   it('says the same whatever order the runs come in', () => {

@@ -263,6 +263,8 @@ test.describe.serial('trading through the browser', () => {
     const current = runs.getByRole('group', { name: 'Current run' });
     await expect(current).toContainText('1 market maker, 1 noise');
     await expect(current).toContainText(/Placed[1-9]/, { timeout: 30_000 });
+    // The worker reported its simulator with the run: the package version and the commit its image was built from.
+    await expect(current).toContainText(/Simulator\d+\.\d+\.\d+\+[0-9a-f]{12}(\.dirty)?/);
 
     // The trader is told, wherever they are, with a link to their portfolio.
     const notice = trader.getByRole('region', { name: 'Fills' });

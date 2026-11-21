@@ -1,4 +1,22 @@
-import type { BotRun, BotRunDetail, RunFigures } from '../api/types';
+import type { BotRun, BotRunDetail, BotRunManifest, RunFigures } from '../api/types';
+
+/** What the simulator reports with a run, with its own setting names and defaults. */
+export function manifest(overrides: Partial<BotRunManifest> = {}): BotRunManifest {
+  return {
+    version: '0.1.0+27a70d6c1e2f',
+    workerId: 'sim-1',
+    reportedAt: '2026-11-06T10:00:01Z',
+    runtime: { python: '3.14.10', numpy: '2.5.4' },
+    strategies: {
+      MARKET_MAKER: { halfSpreadTicks: 2, quoteLifetimeSeconds: 30, requoteTicks: 2, skewTicks: 1 },
+      NOISE: { maxOpenOrders: 5, quoteLifetimeSeconds: 10, spreadTicks: 5 },
+      MOMENTUM: { cooldownSeconds: 5, longPolls: 20, orderLifetimeSeconds: 10, shortPolls: 5, threshold: 0.001 },
+    },
+    defaults: { marketPollSeconds: 1, maxDataAgeSeconds: 2, maxInFlight: 32, maxReadsInFlight: 64 },
+    reports: 1,
+    ...overrides,
+  };
+}
 
 /** A running run with one market maker and two noise bots: 200 answered commands in its first 80 seconds. */
 export function botRun(overrides: Partial<BotRun> = {}): BotRun {
@@ -42,15 +60,7 @@ export function finishedRun(overrides: Partial<BotRun> = {}): BotRun {
       endedBy: 'WORKER',
       endedAt: '2026-11-06T10:10:00Z',
     },
-    manifest: {
-      version: '0.1.0+27a70d6c1e2f',
-      workerId: 'sim-1',
-      reportedAt: '2026-11-06T10:00:01Z',
-      runtime: { python: '3.14.10', numpy: '2.5.4' },
-      strategies: {},
-      defaults: {},
-      reports: 1,
-    },
+    manifest: manifest(),
     ...overrides,
   });
 }

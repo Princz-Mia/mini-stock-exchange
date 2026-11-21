@@ -1,5 +1,6 @@
 import type { BotRun, RunFigures, StrategyFigures } from '../api/types';
 import { groupInteger } from '../format';
+import { differingSettings } from './manifest';
 
 /** Runs compared at once: four columns still fit a laptop, and a phone scrolls them inside the panel. */
 export const MAX_COMPARED = 4;
@@ -115,8 +116,8 @@ export function refusalsText({ refusals }: StrategyFigures): string {
 }
 
 /**
- * Why the runs' figures don't compare like for like: a different requested rate, or different instruments. The
- * order of the runs makes no difference.
+ * Why the runs' figures don't compare like for like: a different requested rate, different instruments, or simulators
+ * that differ in their version or settings. The order of the runs makes no difference.
  */
 export function comparisonWarnings(runs: readonly BotRun[]): string[] {
   const warnings: string[] = [];
@@ -131,6 +132,12 @@ export function comparisonWarnings(runs: readonly BotRun[]): string[] {
   );
   if (instruments.size > 1) {
     warnings.push('The runs traded different instruments, so their market figures are not for the same markets.');
+  }
+  const differing = differingSettings(runs.map((run) => run.manifest));
+  if (differing > 0) {
+    warnings.push(
+      `The runs' simulators differ in ${groupInteger(differing)} ${differing === 1 ? 'setting' : 'settings'}, marked under Simulator, so a difference may come from the code or its settings rather than the bots.`,
+    );
   }
   return warnings;
 }
