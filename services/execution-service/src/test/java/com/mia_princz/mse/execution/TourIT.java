@@ -38,8 +38,7 @@ class TourIT {
 	/** A new user of the given role, so each test starts from no tour seen whatever ran before it. */
 	private TestBrowser newUser(String role) throws Exception {
 		String username = role.toLowerCase() + "-" + UUID.randomUUID().toString().substring(0, 8);
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, ?, ?)", UUID.randomUUID(),
-				username, TestBrowser.passwordHash(PASSWORD), role);
+		TestUsers.insert(jdbc, UUID.randomUUID(), username, TestBrowser.passwordHash(PASSWORD), role);
 		return TestBrowser.loggedIn(port, username, PASSWORD);
 	}
 

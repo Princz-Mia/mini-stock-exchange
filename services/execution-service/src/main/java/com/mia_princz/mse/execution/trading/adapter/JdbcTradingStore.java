@@ -309,9 +309,11 @@ public final class JdbcTradingStore implements TradingStore {
 
 	@Override
 	public void insertTraderUser(UUID userId, String username, String passwordHash) {
-		expectOne(jdbc.sql("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, ?, 'TRADER')")
+		expectOne(jdbc.sql("INSERT INTO app_user (id, username, password_hash) VALUES (?, ?, ?)")
 			.params(userId, username, passwordHash)
 			.update(), "insert trader user");
+		expectOne(jdbc.sql("INSERT INTO user_role (user_id, role) VALUES (?, 'TRADER')").param(userId).update(),
+				"insert trader role");
 	}
 
 	@Override
