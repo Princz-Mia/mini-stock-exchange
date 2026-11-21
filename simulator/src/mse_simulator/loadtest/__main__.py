@@ -16,17 +16,12 @@ rate met every budget and the accounting checks afterwards passed.
 import argparse
 import asyncio
 import contextlib
-import json
 import logging
 import math
-import os
-import platform
 import secrets
-import subprocess
 import sys
 import threading
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -35,16 +30,33 @@ from pathlib import Path
 import httpx
 
 from mse_simulator.loadtest import diagnostics, manifests, ramp, stats, stress
+from mse_simulator.loadtest.stack import (
+    HOST,
+    SYMBOLS,
+    Ports,
+    Session,
+    Stack,
+    activity,
+    environment,
+    environment_lines,
+    listing,
+    read_environment,
+    read_manifest,
+    set_up,
+    start_run,
+    stop_any_run,
+    wait_for,
+)
 from mse_simulator.population import split_text, strategy_split
 
 logger = logging.getLogger("mse_simulator.loadtest")
 
 PROJECT = "mse-load"
-SYMBOLS = ("ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO")
 WEB_PORT = 38080
-# Not "localhost": on Windows that tries IPv6 first and waits about two seconds before falling back,
-# which would show up as client latency whenever a connection is reopened.
-HOST = "127.0.0.1"
+# The load test's own ports, apart from a development stack's and a gate run's.
+PORTS = Ports(web=WEB_PORT, postgres=35432, kafka=39092, flink_ui=38081)
+# Raises the publication backlog limit and records statement statistics while it measures.
+DIAGNOSTICS = str(Path("infra", "load-test", "compose.diagnostics.yaml"))
 P95_BUDGET = 0.150
 P99_BUDGET = 0.500
 FAILURE_BUDGET = 0.001
@@ -104,246 +116,6 @@ class Window:
     outbox: list[tuple[float, int]] = field(default_factory=list)
 
 
-class Stack:
-    """The throwaway Compose project and the commands run inside it."""
-
-    def __init__(self, root: Path) -> None:
-        self.root = root
-        self.run_dir = root / "runtime" / "load-test"
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.env_file = self.run_dir / "load.env"
-        self.passwords = {
-            name: secrets.token_hex(24)
-            for name in (
-                "postgres",
-                "execution_owner",
-                "execution_app",
-                "market_data_owner",
-                "market_data_app",
-                "grafana",
-                "operator",
-                "trader",
-                "export",
-                "simulator",
-            )
-        }
-        lines = [
-            f"POSTGRES_PASSWORD={self.passwords['postgres']}",
-            f"EXECUTION_DB_OWNER_PASSWORD={self.passwords['execution_owner']}",
-            f"EXECUTION_DB_APP_PASSWORD={self.passwords['execution_app']}",
-            f"MARKET_DATA_DB_OWNER_PASSWORD={self.passwords['market_data_owner']}",
-            f"MARKET_DATA_DB_APP_PASSWORD={self.passwords['market_data_app']}",
-            f"GRAFANA_ADMIN_PASSWORD={self.passwords['grafana']}",
-            f"DEV_OPERATOR_PASSWORD={self.passwords['operator']}",
-            f"MSE_EXPORT_TOKEN={self.passwords['export']}",
-            f"MSE_SIMULATOR_TOKEN={self.passwords['simulator']}",
-            f"WEB_HOST_PORT={WEB_PORT}",
-            "POSTGRES_HOST_PORT=35432",
-            "KAFKA_HOST_PORT=39092",
-            "FLINK_UI_HOST_PORT=38081",
-            # The commit the simulator image is built from, which its worker reports with each run.
-            f"MSE_SIMULATOR_REVISION={revision(root)}",
-        ]
-        self.env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        try:
-            os.chmod(self.env_file, 0o600)
-        except OSError:
-            pass
-
-    def compose(self, *args: str, check: bool = True, timeout: float = 900) -> str:
-        command = [
-            "docker",
-            "compose",
-            "-p",
-            PROJECT,
-            "--env-file",
-            str(self.env_file),
-            "-f",
-            "compose.yaml",
-            "-f",
-            str(Path("infra", "load-test", "compose.diagnostics.yaml")),
-            "--profile",
-            "full",
-            *args,
-        ]
-        result = subprocess.run(
-            command,
-            cwd=self.root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        )
-        if check and result.returncode != 0:
-            raise RuntimeError(f"docker compose {' '.join(args)} failed: {result.stderr[-2000:]}")
-        return result.stdout + result.stderr
-
-    def exec(self, service: str, *command: str, env: dict[str, str] | None = None) -> str:
-        flags = [item for name, value in (env or {}).items() for item in ("-e", f"{name}={value}")]
-        return self.compose("exec", "-T", *flags, service, *command, timeout=120)
-
-    def sql(self, role: str, database: str, query: str) -> str:
-        return self.exec(
-            "postgres",
-            "psql",
-            "-h",
-            "127.0.0.1",
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-U",
-            role,
-            "-d",
-            database,
-            "-Atc",
-            query,
-            env={"PGPASSWORD": self.passwords[role]},
-        ).strip()
-
-    def memory(self, service: str) -> str:
-        """The service's memory use and limit as Docker reports it, such as "61.2MiB / 512MiB"."""
-        container = self.compose("ps", "-q", service).strip()
-        if not container:
-            return "n/a"
-        result = subprocess.run(
-            ["docker", "stats", "--no-stream", "--format", "{{.MemUsage}}", container],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        return result.stdout.strip() or "n/a"
-
-    def scrape(self, service: str = "execution-service") -> dict:
-        text = self.exec(service, "curl", "-fsS", "http://localhost:8080/actuator/prometheus")
-        return stats.parse_prometheus(text)
-
-    def database(self) -> diagnostics.Database:
-        """The database's statistics now, read as its superuser."""
-
-        def read(query: str, database: str = "execution_db") -> str:
-            return self.sql("postgres", database, query)
-
-        return diagnostics.database(
-            read(diagnostics.STATEMENTS),
-            read(diagnostics.WAL_IO),
-            read(diagnostics.WAL),
-            read(diagnostics.CHECKPOINTER),
-            read(diagnostics.TABLES),
-        )
-
-    def cpu(self) -> str:
-        """One docker stats reading of every container's processor, as "name|12.34%" lines."""
-        result = subprocess.run(
-            ["docker", "stats", "--no-stream", "--format", "{{.Name}}|{{.CPUPerc}}"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        return result.stdout
-
-
-class Session:
-    """One user's session through the proxy, with its CSRF token and a fresh key per command."""
-
-    def __init__(self, username: str, password: str) -> None:
-        self.http = httpx.Client(base_url=f"http://{HOST}:{WEB_PORT}", timeout=15.0)
-        csrf = self.http.get("/api/v1/auth/csrf").json()
-        login = self.http.post(
-            "/api/v1/auth/login",
-            json={"username": username, "password": password},
-            headers={csrf["headerName"]: csrf["token"]},
-        )
-        login.raise_for_status()
-        # Login rotates the token; it then stays the same for the session.
-        csrf = self.http.get("/api/v1/auth/csrf").json()
-        self.csrf = {csrf["headerName"]: csrf["token"]}
-
-    def command(self, path: str, body: dict | None = None) -> httpx.Response:
-        headers = self.csrf | {"Idempotency-Key": str(uuid.uuid4())}
-        return self.http.post(path, json=body, headers=headers)
-
-    def expect(self, status: int, path: str, body: dict | None = None) -> dict:
-        response = self.command(path, body)
-        if response.status_code != status:
-            raise RuntimeError(
-                f"POST {path}: expected {status}, got {response.status_code}: {response.text}"
-            )
-        return response.json() if response.content else {}
-
-
-def wait_for(what: str, condition, timeout: float, interval: float = 2.0):
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            value = condition()
-        except httpx.HTTPError, RuntimeError, ValueError, KeyError:
-            value = None
-        if value:
-            return value
-        if time.monotonic() > deadline:
-            raise RuntimeError(f"timed out waiting for {what}")
-        time.sleep(interval)
-
-
-def set_up(
-    operator: Session,
-    bots: int,
-    trader_password: str,
-    logins: list[tuple[str, str]] | None = None,
-) -> list[str]:
-    """Five instruments at 100.00, a trader for the probe, added and funded as the operator adds
-    one, any further trader logins (username, password) with cash only, the bots tagged in the
-    split the run uses, and an open market."""
-    instruments = [
-        operator.expect(
-            201, "/api/v1/admin/instruments", {"symbol": symbol, "referencePrice": "100.00"}
-        )["instrumentId"]
-        for symbol in SYMBOLS
-    ]
-    holdings = [{"instrumentId": instrument, "quantity": 1000} for instrument in instruments]
-    operator.expect(
-        201,
-        "/api/v1/admin/traders",
-        {
-            "username": "trader",
-            "password": trader_password,
-            "cash": "1000000.00",
-            "holdings": holdings,
-        },
-    )
-    for username, password in logins or []:
-        operator.expect(
-            201,
-            "/api/v1/admin/traders",
-            {"username": username, "password": password, "cash": "1000000.00"},
-        )
-    bot_holdings = [{"instrumentId": instrument, "quantity": 200} for instrument in instruments]
-    for strategy, total in strategy_split(bots).items():
-        for start in range(0, total, 100):
-            operator.expect(
-                201,
-                "/api/v1/admin/bots",
-                {
-                    "count": min(100, total - start),
-                    "cash": "100000.00",
-                    "holdings": bot_holdings,
-                    "strategy": strategy,
-                },
-            )
-    operator.expect(200, "/api/v1/admin/market/open")
-    return instruments
-
-
-def activity(operator: Session) -> dict:
-    return operator.http.get("/api/v1/admin/bot-runs?limit=1").json()["runs"][0]
-
-
-def listing() -> dict:
-    return httpx.get(f"http://{HOST}:{WEB_PORT}/api/v1/instruments", timeout=10.0).json()
-
-
 def measure(
     stack: Stack,
     operator: Session,
@@ -387,7 +159,7 @@ def measure(
         if tick % 5 == 0:
             execution = stack.scrape()
             result.queue.append((now, stats.total(execution, "mse_writer_queue_depth")))
-            result.feeds.append((now, listing()["feed"]["state"]))
+            result.feeds.append((now, listing(stack.web_url)["feed"]["state"]))
             sampled.scrape(stack.scrape("market-data-service"), execution, now)
         if tick % 15 == 0:
             pending = stack.sql(
@@ -421,84 +193,6 @@ def restart_line(restarted: float) -> str:
 
 def snapshot(stack: Stack, operator: Session) -> Snapshot:
     return Snapshot(time.monotonic(), stack.scrape(), activity(operator)["activity"])
-
-
-def environment(stack: Stack) -> dict:
-    info = json.loads(
-        subprocess.run(
-            ["docker", "info", "--format", "{{json .}}"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        ).stdout
-    )
-    config = json.loads(stack.compose("config", "--format", "json"))
-    limits = {
-        name: (service.get("mem_limit"), service.get("cpus"))
-        for name, service in config["services"].items()
-        if name
-        in (
-            "execution-service",
-            "market-data-service",
-            "postgres",
-            "kafka",
-            "simulator",
-            "flink-jobmanager",
-            "flink-taskmanager",
-            "web",
-        )
-    }
-    commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=stack.root, capture_output=True, text=True
-    ).stdout.strip()
-    dirty = bool(
-        subprocess.run(
-            ["git", "status", "--porcelain"], cwd=stack.root, capture_output=True, text=True
-        ).stdout.strip()
-    )
-    java = [
-        line
-        for line in stack.exec("execution-service", "java", "-version").splitlines()
-        if "version" in line
-    ]
-    flags = stack.exec(
-        "execution-service",
-        "sh",
-        "-c",
-        "jcmd 1 VM.command_line 2>/dev/null | grep -i 'jvm_args' || echo none",
-    ).strip()
-    return {
-        "host": f"{platform.system()} {platform.release()} ({platform.machine()})",
-        "docker": f"{info.get('ServerVersion')} on {info.get('OperatingSystem')}, kernel "
-        f"{info.get('KernelVersion')}",
-        "cpus": info.get("NCPU"),
-        "memory_gib": round(info.get("MemTotal", 0) / 2**30, 1),
-        "limits": limits,
-        "commit": commit + (" (uncommitted changes)" if dirty else ""),
-        "java": java[0] if java else "unknown",
-        "jvm_args": flags,
-        "postgres": stack.sql(
-            "execution_owner",
-            "execution_db",
-            "SELECT 'fsync=' || current_setting('fsync') || ', synchronous_commit=' "
-            "|| current_setting('synchronous_commit') || ', ' || version()",
-        ),
-        "admission": admission_limits(stack.scrape()),
-    }
-
-
-def admission_limits(execution: diagnostics.Samples) -> tuple[float, float] | None:
-    """The publication backlog, in events and bytes, beyond which Execution refuses new orders, as
-    it reports them; None if it does not."""
-    names = {(name, dict(labels).get("limit")) for name, labels in execution}
-    if not {("mse_outbox_admission_limit", "events"), ("mse_outbox_admission_limit", "bytes")} <= (
-        names
-    ):
-        return None
-    return (
-        stats.total(execution, "mse_outbox_admission_limit", limit="events"),
-        stats.total(execution, "mse_outbox_admission_limit", limit="bytes"),
-    )
 
 
 def correctness(stack: Stack, instruments: list[str]) -> tuple[dict, float]:
@@ -704,56 +398,14 @@ def summarize(
     return "\n".join(lines), passed
 
 
-def environment_lines(
-    env: dict, generator: str = "the simulator container on the same host"
-) -> list[str]:
-    return [
-        "## Environment",
-        "",
-        f"- Host: {env['host']}; Docker {env['docker']}; {env['cpus']} CPUs and "
-        f"{env['memory_gib']} GiB "
-        f"visible to Docker. Generator: {generator}.",
-        f"- Commit: {env['commit']}.",
-        f"- Execution JVM: {env['java']}; {env['jvm_args']}.",
-        f"- PostgreSQL: {env['postgres']}.",
-        "- Container limits (memory, CPUs): "
-        + "; ".join(
-            f"{name} {mem or '-'}, {cpus or '-'}"
-            for name, (mem, cpus) in sorted(env["limits"].items())
-        )
-        + ".",
-        admission_line(env.get("admission")),
-        "",
-    ]
-
-
-def admission_line(limits: tuple[float, float] | None) -> str:
-    if limits is None:
-        return "- Publication backlog limit: not read."
-    events, size = limits
-    return (
-        f"- Publication backlog limit, beyond which new orders are refused: {events:,.0f} events "
-        f"or {size / 2**20:,.0f} MiB."
-    )
+def load_stack(root: Path) -> Stack:
+    """The load test's own Compose project, "mse-load", with its passwords in runtime/load-test/."""
+    return Stack(root, PROJECT, "load-test", PORTS, (DIAGNOSTICS,), "load.env")
 
 
 def begin_run(operator: Session, options: Options, rate: str, minutes: int) -> dict:
     """Starts a bot run with every bot, in the split the bots were tagged with."""
-    split = strategy_split(options.bots)
-    return operator.expect(
-        201,
-        "/api/v1/admin/bot-runs",
-        {
-            "marketMakers": split["MARKET_MAKER"],
-            "momentum": split["MOMENTUM"],
-            "noise": split["NOISE"],
-            "seed": options.seed,
-            "commandsPerSecond": rate,
-            "maxOrderQuantity": 10,
-            "maxPosition": 200,
-            "durationMinutes": minutes,
-        },
-    )
+    return start_run(operator, strategy_split(options.bots), options.seed, rate, minutes)
 
 
 def run_ramp(options: Options) -> int:
@@ -761,20 +413,20 @@ def run_ramp(options: Options) -> int:
     and stopped; the ramp ends at the first rate that misses a budget. The accounting checks run
     once, after the last step."""
     assert options.ramp is not None
-    stack = Stack(options.root)
+    stack = load_stack(options.root)
     logger.info("starting a clean stack as Compose project %s", PROJECT)
     stack.compose("down", "-v", "--remove-orphans", check=False)
     try:
         stack.compose("up", "-d", "--build", "--wait", "--wait-timeout", "600", timeout=1800)
         stack.sql("postgres", "execution_db", "CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
-        operator = Session("operator", stack.passwords["operator"])
-        instruments = set_up(operator, options.bots, stack.passwords["trader"])
+        operator = Session("operator", stack.passwords["operator"], stack.web_url)
+        instruments = set_up(operator, strategy_split(options.bots), stack.passwords["trader"])
         wait_for(
             "Market Data to list the instruments",
-            lambda: len(listing()["instruments"]) >= len(SYMBOLS),
+            lambda: len(listing(stack.web_url)["instruments"]) >= len(SYMBOLS),
             120,
         )
-        trader = Session("trader", stack.passwords["trader"])
+        trader = Session("trader", stack.passwords["trader"], stack.web_url)
         minutes = (
             math.ceil(
                 (max(options.step_warmup, FIRST_WARMUP) + options.step_duration + LOADING) / 60
@@ -898,73 +550,6 @@ def ramp_step(
     )
 
 
-def stop_any_run(operator: Session) -> bool:
-    """Stops the latest run after a step broke, sending the stop until it is taken and waiting for
-    the worker to confirm (STOPPING becomes STOPPED). False if that could not be confirmed, so the
-    accounting checks do not run beside a run still trading."""
-    try:
-        latest = activity(operator)
-        if latest["status"] == "STOPPED":
-            return True
-
-        def stop_taken() -> bool:
-            status = operator.command(f"/api/v1/admin/bot-runs/{latest['runId']}/stop").status_code
-            # 409: the run is not running, already stopping or stopped.
-            return status in (200, 409)
-
-        wait_for("the stop to be taken", stop_taken, 120)
-        wait_for("the run to stop", lambda: activity(operator)["status"] == "STOPPED", 600)
-        return True
-    except Exception:  # noqa: BLE001 - the report is still written
-        logger.exception("could not stop the run")
-        return False
-
-
-def read_manifest(operator: Session, run_id: str) -> manifests.Reading:
-    """The manifest the run's worker reported, None if none did, or why it could not be read: the
-    report is written either way."""
-    try:
-        response = operator.http.get(f"/api/v1/admin/bot-runs/{run_id}")
-        response.raise_for_status()
-        return response.json()["run"]["manifest"]
-    except httpx.HTTPStatusError as error:
-        # Its message runs over two lines with a link; the status says it.
-        return f"HTTP {error.response.status_code}"
-    except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
-        return f"{type(error).__name__}: {error}"
-
-
-def revision(root: Path) -> str:
-    """The checkout's revision label for the simulator image, or empty without git."""
-
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args], cwd=root, capture_output=True, text=True, check=True
-        ).stdout.strip()
-
-    try:
-        return manifests.revision_label(
-            git("rev-parse", "--short=12", "HEAD"),
-            git("status", "--porcelain", "--untracked-files=no"),
-        )
-    except OSError, subprocess.CalledProcessError:
-        return ""
-
-
-def read_environment(stack: Stack) -> dict:
-    """The environment for the report, or placeholders if it could not be read: the measured
-    rates are reported either way."""
-    try:
-        return environment(stack)
-    except Exception:  # noqa: BLE001 - the report is still written
-        logger.exception("the environment could not be read")
-        unknown = "not read"
-        return {
-            key: unknown
-            for key in ("host", "docker", "cpus", "memory_gib", "commit", "java", "jvm_args")
-        } | {"postgres": unknown, "limits": {}}
-
-
 def checked(stack: Stack, instruments: list[str]) -> tuple[dict, float]:
     """The accounting checks, or one failed check if they could not run at all."""
     try:
@@ -979,22 +564,22 @@ def run_stress(options: Options) -> int:
     each rate in turn, ending at the first rate that misses a budget. The accounting checks run
     once, after the last rate."""
     assert options.stress is not None
-    stack = Stack(options.root)
+    stack = load_stack(options.root)
     logger.info("starting a clean stack as Compose project %s", PROJECT)
     stack.compose("down", "-v", "--remove-orphans", check=False)
     try:
         stack.compose("up", "-d", "--build", "--wait", "--wait-timeout", "600", timeout=1800)
-        operator = Session("operator", stack.passwords["operator"])
+        operator = Session("operator", stack.passwords["operator"], stack.web_url)
         # Traders can only be added before the market opens, which set_up does last.
         credentials = [
             (f"stress-{index:04d}", secrets.token_urlsafe(24))
             for index in range(stress.traders(max(options.stress)))
         ]
-        instruments = set_up(operator, 0, stack.passwords["trader"], credentials)
+        instruments = set_up(operator, strategy_split(0), stack.passwords["trader"], credentials)
         logger.info("%d trader logins added", len(credentials))
         wait_for(
             "Market Data to list the instruments",
-            lambda: len(listing()["instruments"]) >= len(SYMBOLS),
+            lambda: len(listing(stack.web_url)["instruments"]) >= len(SYMBOLS),
             120,
         )
         logins = [
@@ -1227,23 +812,23 @@ def run(options: Options) -> int:
         return run_ramp(options)
     if options.stress is not None:
         return run_stress(options)
-    stack = Stack(options.root)
+    stack = load_stack(options.root)
     logger.info("starting a clean stack as Compose project %s", PROJECT)
     stack.compose("down", "-v", "--remove-orphans", check=False)
     try:
         stack.compose("up", "-d", "--build", "--wait", "--wait-timeout", "600", timeout=1800)
         stack.sql("postgres", "execution_db", "CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
-        operator = Session("operator", stack.passwords["operator"])
+        operator = Session("operator", stack.passwords["operator"], stack.web_url)
         phases = Phases()
         began = time.monotonic()
-        instruments = set_up(operator, options.bots, stack.passwords["trader"])
+        instruments = set_up(operator, strategy_split(options.bots), stack.passwords["trader"])
         phases.provisioned = time.monotonic() - began
         wait_for(
             "Market Data to list the instruments",
-            lambda: len(listing()["instruments"]) >= len(SYMBOLS),
+            lambda: len(listing(stack.web_url)["instruments"]) >= len(SYMBOLS),
             120,
         )
-        trader = Session("trader", stack.passwords["trader"])
+        trader = Session("trader", stack.passwords["trader"], stack.web_url)
         # Room for the bots to load (up to LOADING seconds) as well as the warm-up and the window;
         # the run is stopped by hand at the end anyway.
         minutes = math.ceil((options.warmup + options.duration + LOADING) / 60) + 3
