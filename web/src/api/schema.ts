@@ -1293,7 +1293,10 @@ export interface components {
         readonly ManifestRuntime: {
             readonly [key: string]: string;
         };
-        /** @description Settings by name, each a number, a boolean or a short text. */
+        /**
+         * @description Settings by name, each a boolean, a printable ASCII text of at most 64 characters, or a finite number of at
+         *     most 32 characters written out in full (so 1e300 is refused).
+         */
         readonly ManifestSettings: {
             readonly [key: string]: number | boolean | string;
         };
@@ -1302,8 +1305,9 @@ export interface components {
             readonly [key: string]: components["schemas"]["ManifestSettings"];
         };
         /**
-         * @description What the worker reports about itself, sent with its heartbeats until one for the run is held; at most 8 KiB.
-         *     The first one stays the run's; a different later one is kept beside it.
+         * @description What the worker reports about itself, sent with its heartbeats until one for the run is held; at most 8 KiB as
+         *     stored (TOO_LARGE otherwise). The first one stays the run's; a different later one is kept beside it, up to
+         *     eight in all, after which more are answered but not kept.
          */
         readonly SimulatorManifest: {
             readonly version: components["schemas"]["ManifestVersion"];

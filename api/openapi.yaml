@@ -2135,14 +2135,16 @@ components:
       description: The versions the worker's decisions depend on, by name.
       maxProperties: 20
       propertyNames: { pattern: '^[A-Za-z][A-Za-z0-9]{0,39}$' }
-      additionalProperties: { type: string, minLength: 1, maxLength: 64 }
+      additionalProperties: { type: string, pattern: '^[ -~]{1,64}$' }
     ManifestSettings:
       type: object
-      description: Settings by name, each a number, a boolean or a short text.
+      description: |
+        Settings by name, each a boolean, a printable ASCII text of at most 64 characters, or a finite number of at
+        most 32 characters written out in full (so 1e300 is refused).
       maxProperties: 20
       propertyNames: { pattern: '^[A-Za-z][A-Za-z0-9]{0,39}$' }
       additionalProperties:
-        oneOf: [{ type: number }, { type: boolean }, { type: string, minLength: 1, maxLength: 64 }]
+        oneOf: [{ type: number }, { type: boolean }, { type: string, pattern: '^[ -~]{1,64}$' }]
     ManifestStrategies:
       type: object
       description: The settings each strategy runs with.
@@ -2152,8 +2154,9 @@ components:
       type: object
       additionalProperties: false
       description: |
-        What the worker reports about itself, sent with its heartbeats until one for the run is held; at most 8 KiB.
-        The first one stays the run's; a different later one is kept beside it.
+        What the worker reports about itself, sent with its heartbeats until one for the run is held; at most 8 KiB as
+        stored (TOO_LARGE otherwise). The first one stays the run's; a different later one is kept beside it, up to
+        eight in all, after which more are answered but not kept.
       required: [version, runtime, strategies, defaults]
       properties:
         version: { $ref: '#/components/schemas/ManifestVersion' }

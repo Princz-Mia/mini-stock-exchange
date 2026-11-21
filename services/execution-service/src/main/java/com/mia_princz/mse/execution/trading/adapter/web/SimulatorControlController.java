@@ -238,6 +238,19 @@ class SimulatorControlController {
 	}
 
 	private Heartbeat beat(HeartbeatBody body) {
+		if (body.manifest() != null) {
+			// Its size as it would be stored, measured as the table's CHECK measures it, before anything is written:
+			// PostgreSQL's text of it is a little longer than what was sent.
+			int stored = jdbc.sql("SELECT octet_length(CAST(? AS jsonb)::text)")
+				.param(body.manifest().toString())
+				.query(Integer.class)
+				.single();
+			if (stored > Manifests.MAX_BYTES) {
+				throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "The heartbeat is invalid",
+						List.of(new ApiException.FieldError("manifest", "TOO_LARGE",
+								"manifest must be at most " + Manifests.MAX_BYTES + " bytes as stored")));
+			}
+		}
 		Run run = jdbc.sql(select("WHERE id = ? FOR UPDATE"))
 			.param(body.runId())
 			.query((row, index) -> {

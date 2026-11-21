@@ -120,11 +120,15 @@ class RunManifestIT {
 				 "strategies":{"ARBITRAGE":{"edge":1}},"defaults":{"nested":{"maxInFlight":32}}}""")))
 			.containsExactly("manifest.version INVALID_VALUE", "manifest.runtime INVALID_VALUE",
 					"manifest.strategies INVALID_VALUE", "manifest.defaults INVALID_VALUE");
-		StringBuilder many = new StringBuilder();
-		for (int setting = 0; setting < 21; setting++) {
-			many.append(setting == 0 ? "" : ",").append("\"setting").append(setting).append("\":1");
-		}
-		assertThat(fields(beat(simulator, run, "worker-a", MANIFEST.replace("\"liveOnly\":true", many))))
+		// Twenty-one settings are one too many.
+		assertThat(fields(beat(simulator, run, "worker-a", MANIFEST.replace(DEFAULTS, settings(21)))))
+			.containsExactly("manifest.defaults INVALID_VALUE");
+		// Only plain values: no control character, nothing but printable ASCII, no number written out at length.
+		assertThat(fields(beat(simulator, run, "worker-a", MANIFEST.replace("3.14.10", "3.14\\u0000"))))
+			.containsExactly("manifest.runtime INVALID_VALUE");
+		assertThat(fields(beat(simulator, run, "worker-a", MANIFEST.replace("3.14.10", "3.14.10é"))))
+			.containsExactly("manifest.runtime INVALID_VALUE");
+		assertThat(fields(beat(simulator, run, "worker-a", MANIFEST.replace("\"maxInFlight\":32", "\"maxInFlight\":1e300"))))
 			.containsExactly("manifest.defaults INVALID_VALUE");
 		assertThat(fields(beat(simulator, run, "worker-a",
 				MANIFEST.replace("\"python\":\"3.14.10\"", "\"python\":\"" + "x".repeat(65) + "\""))))
@@ -139,9 +143,37 @@ class RunManifestIT {
 		assertThat(fields(beat(simulator, run, "worker-a", """
 				{"version":"0.1.0+27a70d6c1e2f","runtime":{%s},"strategies":%s,"defaults":{%s}}"""
 			.formatted(large, strategies, large)))).containsExactly("manifest TOO_LARGE");
+		// Within 8 KiB as sent, but not as stored, where PostgreSQL writes a space after each colon and comma.
+		StringBuilder near = new StringBuilder();
+		for (int setting = 10; setting < 30; setting++) {
+			near.append(setting == 10 ? "" : ",").append("\"n").append("k".repeat(27)).append(setting).append("\":\"")
+				.append("v".repeat(44)).append('"');
+		}
+		String edge = """
+				{"version":"0.1.0+27a70d6c1e2f","runtime":{%1$s},
+				 "strategies":{"MARKET_MAKER":{%1$s},"NOISE":{%1$s},"MOMENTUM":{%1$s}},"defaults":{%1$s}}"""
+			.formatted(near);
+		assertThat(JSON.readTree(edge).toString().length()).as("as sent").isLessThanOrEqualTo(8_192);
+		assertThat(jdbc.queryForObject("SELECT octet_length(CAST(? AS jsonb)::text)", Integer.class,
+				JSON.readTree(edge).toString())).as("as stored").isGreaterThan(8_192);
+		assertThat(fields(beat(simulator, run, "worker-a", edge))).containsExactly("manifest TOO_LARGE");
 		// Nothing refused was kept, and the run was never taken.
 		assertThat(view(operator, run).get("manifest").isNull()).isTrue();
 		assertThat(view(operator, run).get("worker").get("workerId").isNull()).isTrue();
+		// Twenty settings are allowed.
+		assertThat(beat(simulator, run, "worker-a", MANIFEST.replace(DEFAULTS, settings(20))).statusCode()).isEqualTo(200);
+		assertThat(view(operator, run).get("manifest").get("defaults").size()).isEqualTo(20);
+	}
+
+	private static final String DEFAULTS = "{\"marketPollSeconds\":1.0,\"maxInFlight\":32,\"liveOnly\":true}";
+
+	/** A defaults object of this many settings. */
+	private static String settings(int count) {
+		StringBuilder settings = new StringBuilder("{");
+		for (int setting = 0; setting < count; setting++) {
+			settings.append(setting == 0 ? "" : ",").append("\"setting").append(setting).append("\":").append(setting);
+		}
+		return settings.append('}').toString();
 	}
 
 	private UUID startRun(TestBrowser operator) throws Exception {

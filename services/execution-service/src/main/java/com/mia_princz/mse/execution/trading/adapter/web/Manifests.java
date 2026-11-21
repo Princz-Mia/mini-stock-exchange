@@ -10,8 +10,11 @@ import tools.jackson.databind.JsonNode;
 
 /**
  * The shape a worker's manifest must have. Its settings are open, so a simulator can report a new one without
- * Execution changing first, but bounded: named strategies, at most twenty settings each, plain values, 8 KiB in all.
- * The body comes from the simulator's credential, so it is checked like any other input.
+ * Execution changing first, but bounded: named strategies, at most twenty settings each, plain values (printable
+ * ASCII texts, numbers of at most 32 characters written out), 8 KiB in all. The body comes from the simulator's
+ * credential, so it is checked like any other input. Plain values also keep PostgreSQL's text of the manifest, which
+ * the size is finally measured on, close to what was sent: it writes a number such as 1e300 out in full, and refuses
+ * a NUL.
  */
 final class Manifests {
 
@@ -23,6 +26,10 @@ final class Manifests {
 	private static final int MAX_ENTRIES = 20;
 
 	private static final int MAX_TEXT = 64;
+
+	private static final int MAX_NUMBER = 32;
+
+	private static final Pattern TEXT = Pattern.compile("[ -~]{1," + MAX_TEXT + "}");
 
 	private static final Set<String> FIELDS = Set.of("version", "runtime", "strategies", "defaults");
 
@@ -74,13 +81,21 @@ final class Manifests {
 		}
 		for (Map.Entry<String, JsonNode> entry : node.properties()) {
 			JsonNode value = entry.getValue();
-			boolean text = value.isString() && !value.asString().isEmpty() && value.asString().length() <= MAX_TEXT;
-			boolean plain = text || (!textOnly && (value.isNumber() || value.isBoolean()));
+			boolean text = value.isString() && TEXT.matcher(value.asString()).matches();
+			boolean plain = text || (!textOnly && (number(value) || value.isBoolean()));
 			if (!NAME.matcher(entry.getKey()).matches() || !plain) {
 				return false;
 			}
 		}
 		return true;
+	}
+
+	/** A finite number of at most 32 characters written out in full, as PostgreSQL will write it. */
+	private static boolean number(JsonNode value) {
+		if (!value.isNumber() || (value.isFloatingPointNumber() && !Double.isFinite(value.asDouble()))) {
+			return false;
+		}
+		return value.decimalValue().toPlainString().length() <= MAX_NUMBER;
 	}
 
 	private static Set<String> names(JsonNode node) {
