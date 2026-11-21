@@ -146,6 +146,8 @@ Two more modes look for the highest rate that meets those budgets. Each stops at
 
 Either writes `ramp-<time>.md` or `stress-<time>.md` to `runtime/load-test/`. Their exit code is 0 when at least one rate met every budget and the accounting checks afterwards passed.
 
+The steady and ramp reports also name the simulator they measured, from the manifest each run's worker reported: its version (the package version and the commit its image was built from), its runtime and its strategies' settings, with each run's id. A run whose simulator differs from the first, or changed during the run, is flagged, as its rate is then not directly comparable. Stress runs no bots, so it has no such section.
+
 ### Browser tests
 
 `web/e2e/` holds Playwright tests that drive the real stack through the reverse proxy. `operator-setup.spec.ts` runs first, on the fresh stack: the operator adds a named instrument in the setup editor, changes its name and price, removes the name and deletes it, then adds a trader login with a generated password and signs in as that trader, who changes the password, leaving an empty market in setup and that login without an account. Then the trading tests sign in, buy into a partial fill, cancel the rest, check the portfolio, then check the layout at phone width. They set up their market through the operator API: an instrument, two funded traders, then opening.
