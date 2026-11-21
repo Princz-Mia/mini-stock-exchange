@@ -20,6 +20,7 @@ from mse_simulator import market
 from mse_simulator.client import TraderClient
 from mse_simulator.control import STOPPED, Assignment, Beat, ControlClient, Totals
 from mse_simulator.credentials import load_token
+from mse_simulator.manifest import manifest
 from mse_simulator.market import CLOSED, MarketView
 from mse_simulator.market_maker import MarketMaker, MarketMakerConfig
 from mse_simulator.momentum import MomentumBot, MomentumConfig, PriceSignal
@@ -108,6 +109,10 @@ class Runner:
         self._pacer: Pacer | None = None
         self._shutdown = asyncio.Event()
         self.activity = Activity()
+        # What this worker reports with each run, built once: its settings never change.
+        self._manifest = manifest(settings)
+        # Whether Execution has heard the manifest for the current run: sent until a beat is held.
+        self._manifest_heard = False
 
     @property
     def execution_url(self) -> str:
@@ -166,6 +171,7 @@ class Runner:
         self._lease_until = float("-inf")
         self.activity = Activity(**asdict(run.totals))
         self._signal = self._new_signal()
+        self._manifest_heard = False
 
     async def load_bots(self) -> None:
         """The run's bots, each with its own generators seeded by the run and its account, market
@@ -334,6 +340,7 @@ class Runner:
             len(self._tasks),
             self.activity.stop_failures,
             stopped,
+            None if self._manifest_heard else self._manifest,
         )
         if answer is None:
             return None
@@ -343,6 +350,8 @@ class Runner:
             self._lost = True
             return answer
         self._lease_until = sent + self._run.lease_seconds * LEASE_MARGIN
+        # Only an accepted beat stored it: a refusal kept as held (RUN_NOT_STOPPING) stored nothing.
+        self._manifest_heard = self._manifest_heard or answer.code is None
         if answer.desired_state == STOPPED and not self._stopping:
             logger.info("run %s: stop requested", self._run.run_id)
             self._stopping = True

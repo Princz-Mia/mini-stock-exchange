@@ -2033,7 +2033,7 @@ components:
       type: object
       additionalProperties: false
       required: [runId, status, desiredState, startedAt, endsAt, stopRequestedAt, stoppedAt, config, worker, activity,
-        window]
+        window, manifest]
       properties:
         runId: { $ref: '#/components/schemas/Uuid' }
         status:
@@ -2107,6 +2107,59 @@ components:
             stopSequence: { oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }] }
             endSequence: { oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }] }
             endedBy: { type: [string, 'null'], enum: [WORKER, NEXT_START, NOT_KEPT, null] }
+        manifest:
+          description: What the worker reported about itself with the run; null until a worker reports one.
+          oneOf: [{ $ref: '#/components/schemas/BotRunManifest' }, { type: 'null' }]
+    BotRunManifest:
+      type: object
+      additionalProperties: false
+      description: |
+        The first manifest a worker reported with the run, which never changes. reports counts the different ones:
+        more than one means a worker with other code or settings took the run over, so the run changed midway.
+      required: [version, workerId, reportedAt, runtime, strategies, defaults, reports]
+      properties:
+        version: { $ref: '#/components/schemas/ManifestVersion' }
+        workerId: { type: string, pattern: '^[A-Za-z0-9._:-]{1,100}$' }
+        reportedAt: { $ref: '#/components/schemas/Timestamp' }
+        runtime: { $ref: '#/components/schemas/ManifestRuntime' }
+        strategies: { $ref: '#/components/schemas/ManifestStrategies' }
+        defaults: { $ref: '#/components/schemas/ManifestSettings' }
+        reports: { type: integer, minimum: 1, maximum: 8 }
+    ManifestVersion:
+      type: string
+      pattern: '^[0-9A-Za-z.+_-]{1,64}$'
+      description: The worker's package version and the commit it was built from, such as 0.1.0+27a70d6c1e2f.
+      examples: ['0.1.0+27a70d6c1e2f', '0.1.0+27a70d6c1e2f.dirty', '0.1.0+unknown']
+    ManifestRuntime:
+      type: object
+      description: The versions the worker's decisions depend on, by name.
+      maxProperties: 20
+      propertyNames: { pattern: '^[A-Za-z][A-Za-z0-9]{0,39}$' }
+      additionalProperties: { type: string, minLength: 1, maxLength: 64 }
+    ManifestSettings:
+      type: object
+      description: Settings by name, each a number, a boolean or a short text.
+      maxProperties: 20
+      propertyNames: { pattern: '^[A-Za-z][A-Za-z0-9]{0,39}$' }
+      additionalProperties:
+        oneOf: [{ type: number }, { type: boolean }, { type: string, minLength: 1, maxLength: 64 }]
+    ManifestStrategies:
+      type: object
+      description: The settings each strategy runs with.
+      propertyNames: { enum: [MARKET_MAKER, NOISE, MOMENTUM] }
+      additionalProperties: { $ref: '#/components/schemas/ManifestSettings' }
+    SimulatorManifest:
+      type: object
+      additionalProperties: false
+      description: |
+        What the worker reports about itself, sent with its heartbeats until one for the run is held; at most 8 KiB.
+        The first one stays the run's; a different later one is kept beside it.
+      required: [version, runtime, strategies, defaults]
+      properties:
+        version: { $ref: '#/components/schemas/ManifestVersion' }
+        runtime: { $ref: '#/components/schemas/ManifestRuntime' }
+        strategies: { $ref: '#/components/schemas/ManifestStrategies' }
+        defaults: { $ref: '#/components/schemas/ManifestSettings' }
 
     SimulatorAssignment:
       type: object
@@ -2200,6 +2253,7 @@ components:
           type: boolean
           default: false
           description: Confirms the stop; only with inFlight 0, once desiredState is STOPPED.
+        manifest: { $ref: '#/components/schemas/SimulatorManifest' }
     SimulatorHeartbeat:
       type: object
       additionalProperties: false

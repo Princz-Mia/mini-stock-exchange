@@ -10,6 +10,7 @@ import pytest
 from mse_simulator import runner as runner_module
 from mse_simulator.control import Assignment
 from mse_simulator.credentials import load_token
+from mse_simulator.manifest import manifest
 from mse_simulator.market import fetch
 from mse_simulator.pacing import Pacer
 from mse_simulator.runner import Runner
@@ -334,6 +335,8 @@ def test_a_run_trades_its_instruments_until_stopped_then_cancels_quotes_and_conf
     assert not any(beat["stopped"] for beat in exchange.beats[:-1])
     counts = [beat["placed"] for beat in exchange.beats]
     assert counts == sorted(counts), "cumulative totals never go back"
+    assert exchange.beats[0]["manifest"] == manifest(settings(tmp_path / "tokens"))
+    assert not any("manifest" in beat for beat in exchange.beats[1:]), "heard once, sent once"
 
 
 def test_a_run_left_stopping_by_another_worker_is_settled_without_trading(tmp_path) -> None:
@@ -374,6 +377,59 @@ def test_without_the_lease_nothing_trades(tmp_path, code, monkeypatch) -> None:
     assert exchange.canceled == [], "another worker's quotes are its to cancel"
     assert len(exchange.beats) == 1
     assert read == [], "a worker without the lease reads no token"
+
+
+def test_the_manifest_goes_again_until_a_beat_for_the_run_is_held(tmp_path) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 1)
+    exchange = Exchange()
+    exchange.refuse = "LEASE_HELD"
+    exchange.run = run_body(accounts, ["NOISE"])
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            await asyncio.wait_for(runner.follow(assigned(exchange.run)), 5)
+            # Another worker held it; once free, the next try sends the manifest again.
+            exchange.refuse = None
+            exchange.desired = "STOPPED"
+            await asyncio.wait_for(runner.follow(assigned(exchange.run)), 5)
+
+    asyncio.run(scenario())
+    with_manifest = ["manifest" in beat for beat in exchange.beats]
+    assert with_manifest[:2] == [True, True], "refused, then held: both carry it"
+    assert not any(with_manifest[2:]), "nothing after the first held beat"
+    assert exchange.beats[-1]["stopped"] is True
+
+
+def test_the_manifest_goes_until_an_accepted_beat_and_again_for_the_next_run(tmp_path) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 1)
+    exchange = Exchange()
+    first = run_body(accounts, ["NOISE"])
+    second = run_body(accounts, ["NOISE"])
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            runner.start_run(assigned(first))
+            # Kept as held, but refused before anything was stored: still unheard.
+            exchange.refuse = "RUN_NOT_STOPPING"
+            await runner.beat()
+            exchange.refuse = None
+            await runner.beat()
+            await runner.beat()
+            # A new run: its first beat carries it again.
+            runner.start_run(assigned(second))
+            await runner.beat()
+            await runner.beat()
+
+    asyncio.run(scenario())
+    assert [(beat["runId"], "manifest" in beat) for beat in exchange.beats] == [
+        (first["runId"], True),
+        (first["runId"], True),
+        (first["runId"], False),
+        (second["runId"], True),
+        (second["runId"], False),
+    ]
 
 
 def test_heartbeats_go_on_while_a_run_loads_and_nothing_trades_until_it_has(

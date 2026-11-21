@@ -25,6 +25,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import tools.jackson.databind.JsonNode;
+
 /**
  * The simulator's control plane: which run to work on, its bots, and its heartbeat. Internal, by the simulator's own
  * token, which can't trade. A run's bots are read in pages, since a run has no size limit; they never change once the
@@ -185,9 +187,13 @@ class SimulatorControlController {
 	private record AssignedBot(UUID accountId, String strategy, Instant createdAt) {
 	}
 
-	/** Totals are cumulative for the run. {@code stopped} confirms the stop, with nothing left in flight. */
+	/**
+	 * Totals are cumulative for the run. {@code stopped} confirms the stop, with nothing left in flight.
+	 * {@code manifest} is what the worker reports about itself ({@link Manifests}), sent until a beat of the run is
+	 * held; optional, so a worker that sends none still holds its run.
+	 */
 	record HeartbeatBody(UUID runId, String workerId, Long placed, Long canceled, Long rejected, Long errors,
-			Integer inFlight, Integer stopFailures, Boolean stopped) {
+			Integer inFlight, Integer stopFailures, Boolean stopped, JsonNode manifest) {
 
 		void validate() {
 			List<ApiException.FieldError> errors = new ArrayList<>();
@@ -208,6 +214,7 @@ class SimulatorControlController {
 				errors.add(new ApiException.FieldError("inFlight", "IN_FLIGHT",
 						"a stop is confirmed only with nothing in flight"));
 			}
+			Manifests.check(manifest, errors);
 			if (!errors.isEmpty()) {
 				throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "The heartbeat is invalid", errors);
 			}
@@ -266,6 +273,17 @@ class SimulatorControlController {
 					body.rejected(), body.errors(), body.inFlight(), body.stopFailures(), stopping, at, stopping,
 					stopping, run.id())
 			.update();
+		if (body.manifest() != null) {
+			// Only past every refusal above, under the run's row lock: the first manifest stays the run's, the same one
+			// again adds nothing, and a different one goes beside it, up to eight.
+			jdbc.sql("""
+					INSERT INTO bot_run_manifest (run_id, manifest, worker_id, reported_at)
+					SELECT ?, CAST(? AS jsonb), ?, ?
+					WHERE (SELECT count(*) FROM bot_run_manifest WHERE run_id = ?) < 8
+					ON CONFLICT DO NOTHING""")
+				.params(run.id(), body.manifest().toString(), body.workerId(), at, run.id())
+				.update();
+		}
 		if (stopping) {
 			// The confirmed stop ends the run's window at the newest committed command, unless the next start ended it
 			// first: nothing is in flight, and the worker hears back only after its commands commit, so every command

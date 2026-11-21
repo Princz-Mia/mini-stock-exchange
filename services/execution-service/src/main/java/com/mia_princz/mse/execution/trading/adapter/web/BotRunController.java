@@ -26,6 +26,9 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.json.JsonMapper;
+
 import com.mia_princz.mse.execution.trading.application.BotRunResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.StartBotRun;
@@ -42,6 +45,9 @@ import com.mia_princz.mse.execution.trading.application.TradingEngine;
 class BotRunController {
 
 	static final String START_ROUTE = "POST /api/v1/admin/bot-runs";
+
+	/** Reads stored manifests with a plain mapper, independent of the web layer's settings. */
+	private static final JsonMapper STORED = JsonMapper.builder().build();
 
 	static final String STOP_ROUTE = "POST /api/v1/admin/bot-runs/{id}/stop";
 
@@ -169,11 +175,21 @@ class BotRunController {
 	}
 
 	/**
+	 * What the worker reported about itself with the run: the first manifest, which never changes, and
+	 * {@code reports}, how many different ones came: more than one means the code or settings changed during the run.
+	 */
+	record Manifest(String version, String workerId, Instant reportedAt, JsonNode runtime, JsonNode strategies,
+			JsonNode defaults, int reports) {
+	}
+
+	/**
 	 * {@code status}: STARTING before a worker has taken it, RUNNING while a worker holds a live lease, STALE when the
-	 * lease ran out while it should run, STOPPING until the worker confirms, then STOPPED.
+	 * lease ran out while it should run, STOPPING until the worker confirms, then STOPPED. {@code manifest} is null
+	 * until a worker reports one.
 	 */
 	record RunView(String runId, String status, String desiredState, Instant startedAt, Instant endsAt,
-			Instant stopRequestedAt, Instant stoppedAt, Config config, Worker worker, Activity activity, Window window) {
+			Instant stopRequestedAt, Instant stoppedAt, Config config, Worker worker, Activity activity, Window window,
+			Manifest manifest) {
 	}
 
 	record RunList(List<RunView> runs, String nextCursor) {
@@ -242,6 +258,19 @@ class BotRunController {
 					default -> 2;
 				}] = row.getInt("bots");
 			});
+		// Each run's first manifest, by when it came, and how many different ones did.
+		Map<UUID, Manifest> manifests = new HashMap<>();
+		jdbc.sql("""
+				SELECT DISTINCT ON (run_id) run_id, manifest::text AS manifest, worker_id, reported_at,
+				    count(*) OVER (PARTITION BY run_id) AS reports
+				FROM bot_run_manifest WHERE run_id IN (:ids) ORDER BY run_id, reported_at, digest""")
+			.param("ids", ids)
+			.query((row) -> {
+				JsonNode manifest = STORED.readTree(row.getString("manifest"));
+				manifests.put(row.getObject("run_id", UUID.class), new Manifest(manifest.get("version").asString(),
+						row.getString("worker_id"), instant(row.getTimestamp("reported_at")), manifest.get("runtime"),
+						manifest.get("strategies"), manifest.get("defaults"), row.getInt("reports")));
+			});
 		return new RunList(rows.stream().map((row) -> {
 			int[] counts = strategies.getOrDefault(row.id(), new int[3]);
 			return new RunView(row.id().toString(), status(row.desired(), row.endsAt(), row.stoppedAt(), row.workerId(),
@@ -250,7 +279,8 @@ class BotRunController {
 					new Config(Long.toString(row.seed()), row.rate().setScale(2).toPlainString(), row.maxOrderQuantity(),
 							row.maxPosition(), instruments.getOrDefault(row.id(), List.of()),
 							new Strategies(counts[0], counts[1], counts[2])),
-					new Worker(row.workerId(), row.heartbeatAt(), row.leaseExpiresAt()), row.activity(), row.window());
+					new Worker(row.workerId(), row.heartbeatAt(), row.leaseExpiresAt()), row.activity(), row.window(),
+					manifests.get(row.id()));
 		}).toList(), next);
 	}
 

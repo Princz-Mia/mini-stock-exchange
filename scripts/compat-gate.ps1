@@ -33,6 +33,10 @@ $operatorPassword = New-Secret
 # The browser test's counterparty; the Kafka outage step trades as it too.
 $counterpartyPassword = New-Secret
 $grafanaPassword = New-Secret
+# The commit the simulator image is built from, which its worker reports with each bot run; .dirty when tracked files
+# have uncommitted changes, so a build of them never passes for the commit.
+$revision = (& git -C $root rev-parse --short=12 HEAD).Trim()
+if (& git -C $root status --porcelain --untracked-files=no) { $revision += '.dirty' }
 $envLines = @(
     "POSTGRES_PASSWORD=$($passwords.postgres)"
     "EXECUTION_DB_OWNER_PASSWORD=$($passwords.execution_owner)"
@@ -44,6 +48,7 @@ $envLines = @(
     "DEV_TRADER_PASSWORD=$traderPassword"
     "MSE_EXPORT_TOKEN=$(New-Secret)"
     "MSE_SIMULATOR_TOKEN=$(New-Secret)"
+    "MSE_SIMULATOR_REVISION=$revision"
     "WEB_HOST_PORT=$webPort"
     'POSTGRES_HOST_PORT=25432'
     "KAFKA_HOST_PORT=$kafkaPort"
@@ -634,6 +639,11 @@ try {
         Assert-Equal 'run status after the stop' 'STOPPED' $status
         $confirmed = Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' "SELECT stopped_at IS NOT NULL AND placed > 0 FROM bot_run WHERE id = '$($started.runId)'"
         Assert-Equal 'the worker confirmed it, after placing orders' 't' $confirmed.Output
+        # With the run, the worker reported the commit this gate built its image from, once.
+        $manifest = (Invoke-RestMethod "$base/admin/bot-runs?limit=1" -WebSession $operator).runs[0].manifest
+        "manifest => $($manifest | ConvertTo-Json -Compress -Depth 5)" | Add-Content -Encoding utf8 $script:currentLog
+        Assert-Match 'the worker reports the commit built' ('\+' + [regex]::Escape($revision) + '$') "$($manifest.version)"
+        Assert-Equal 'one manifest for the run' '1' "$($manifest.reports)"
         $open = Invoke-Psql 'execution_owner' $passwords.execution_owner 'execution_db' "SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id WHERE a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')"
         Assert-Equal 'bot orders left open' '0' $open.Output
         # The bots' commands were timed: Prometheus has a bucket edge at each latency budget, and the queue's size.

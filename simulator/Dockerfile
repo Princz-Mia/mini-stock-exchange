@@ -13,5 +13,9 @@ RUN python -m pip uninstall --yes --root-user-action ignore pip \
     && groupadd --system --gid 10001 mse && useradd --system --uid 10001 --gid mse --no-create-home mse
 COPY --from=build /app/.venv /app/.venv
 ENV PATH=/app/.venv/bin:$PATH
+# The commit the image was built from, which the worker reports with each run: the image has no git history to ask.
+# Last, so a new commit rebuilds only this layer. Empty when the build names none, reported as unknown.
+ARG MSE_SIMULATOR_REVISION=
+ENV MSE_SIMULATOR_REVISION=$MSE_SIMULATOR_REVISION
 USER mse
 ENTRYPOINT ["python", "-m", "mse_simulator"]
