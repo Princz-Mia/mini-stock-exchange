@@ -7,13 +7,13 @@ How the exchange is put together, who owns what, and how a command, a failure an
 ```mermaid
 flowchart LR
   T(["Trader<br/>browser"]) -->|"HTTPS: REST, SSE"| X["Mini Stock Exchange"]
-  O(["Operator<br/>browser"]) -->|"HTTPS: REST"| X
+  O(["Operator<br/>browser"]) -->|"HTTPS: REST, SSE"| X
   S(["Simulator<br/>bots"]) -->|"REST with bot tokens"| X
 ```
 
 **Users:**
 - **Traders** sign in, watch the market and trade with virtual funds.
-- **The operator** sets the market up (instruments, accounts, bots), opens, halts and resumes it, and starts and stops bot runs.
+- **The operator** sets the market up (instruments, accounts, bots), opens, halts and resumes it, starts and stops bot runs, and compares finished runs. The operator's login may also trade, like a trader's.
 - **The simulator** runs bots that trade like any client, each with its own credential.
 
 Everything runs locally under Docker Compose; there are no external systems.
@@ -38,7 +38,7 @@ flowchart TD
 
 | Container | Owns | Never does |
 | --- | --- | --- |
-| **execution-service** | Identity, accounts, instruments, market state, orders, matching, risk, settlement, the ledger, bot configuration; private REST and the private stream | Serve public market history |
+| **execution-service** | Identity, accounts, instruments, market state, orders, matching, risk, settlement, the ledger, bot configuration, bot runs and their figures; private REST and the private stream | Serve public market history |
 | **market-data-service** | Rebuildable public projections: instruments, snapshots, the tape, candles; public REST and the public stream | Touch money, or write anything Execution reads |
 | **Flink job** | One-minute candles (OHLCV and VWAP) from the trade stream | Read either database |
 | **nginx** | One origin for the app, the APIs and both streams; security headers | Business logic; forwarding `/internal` |
@@ -61,6 +61,7 @@ flowchart TD
   REL --> K["Kafka"]
   SEC["security chains<br/>session, bot token, service token"] --> W
   START["TradingStartup<br/>lock, epoch, rebuild, reconcile"] --> ENG
+  FIG["RunFigures<br/>scheduled, off the writer"] --> DB
 ```
 
 **Packages:**
@@ -72,6 +73,8 @@ flowchart TD
 Architecture tests keep the domain free of Spring, SQL and Kafka, and keep the application layer reaching the database only through its ports.
 
 **The single writer** ([why](#decisions)): every order, cancel and operator command runs on one thread, in admission order. Orders and cancels waiting in the queue together run as one database transaction, a run of up to 32 in Compose, so they share one commit; an operator command runs alone. HTTP threads only validate, rate-limit and queue, and a full queue answers `503` at once.
+
+**Run figures** come from `RunFigures`, a scheduled pass in the `trading` package's JDBC adapter. It runs outside the writer, every 5 seconds by default (`mse.runs.figures-interval`). Each pass takes up to five finished runs that have no figures yet, oldest first. For each, it reads the run's window from `execution_db` in one repeatable-read snapshot and writes the figures in the same transaction. A run that fails is tried again on the next pass, and the runs after it are not held back.
 
 ## Placing an order
 
@@ -162,18 +165,44 @@ erDiagram
   simulation ||--o{ command_result : "remembers answers"
   simulation ||--o{ audit_log : "records operator actions"
   simulation ||--o{ bot_run : runs
+  bot_run ||--|{ bot_run_instrument : trades
   bot_run ||--o{ bot_assignment : assigns
   bot_run ||--o{ bot_run_manifest : "is reported with"
   account ||--o{ bot_assignment : "runs its tagged strategy in"
+  bot_run ||--o| bot_run_figures : "is measured by, once finished"
+  bot_run_figures ||--|{ bot_run_instrument_figures : "per instrument"
+  bot_run_figures ||--|{ bot_run_strategy_figures : "per strategy"
+  bot_run_strategy_figures ||--o{ bot_run_refusals : "by refusal code"
+  bot_run {
+    bigint start_sequence
+    bigint end_sequence
+    timestamptz ended_at
+  }
 ```
 
 **In `execution_db`:**
 - **The ledger:** append-only `ledger_entry` rows in `journal_batch`es, each summing to zero per asset, with available and reserved buckets.
 - **Balances and positions:** `cash_balance` and `position` are the ledger's running totals, and the startup reconciliation compares them with it.
-- **Bot runs:** each strategy in a run is assigned to the oldest bots tagged with it, and a foreign key from `bot_assignment` to the bot's tag refuses any other assignment. Neither the population nor a run has a size limit, so the simulator reads a run's bots in pages, once, since they never change. A run's window is a range of command sequences: from its start command to its last command, which is recorded when its worker confirms the stop, after the run's closing cancels. A new run waits while a worker is still finishing the previous one; if that worker has gone quiet, or there never was one, the new run's start ends the previous run instead. Windows never overlap, and each instrument's newest trade sequence is kept at both edges. Once a run is finished, a background pass computes its figures once from its window, off the writer, and stores them: the trades in its instruments, and per strategy its bots' commands, refusals by code, fills and estimated profit or loss, marked at the newest trade at each edge. The worker also reports a manifest with its first heartbeat of a run: its version and commit, the runtime its decisions depend on, and its strategy settings. The first stays the run's and never changes; a different one, from a worker that took the run over with other code, is kept beside it and counted.
+- **Bot runs:** each strategy in a run is assigned to the oldest bots tagged with it, and a foreign key from `bot_assignment` to the bot's tag refuses any other assignment. Neither the population nor a run has a size limit, so the simulator reads a run's bots in pages, once, since they never change. A run's window is a range of command sequences: from its start command to its last command, which is recorded when its worker confirms the stop, after the run's closing cancels. A new run waits while a worker is still finishing the previous one; if that worker has gone quiet, or there never was one, the new run's start ends the previous run instead. Windows never overlap, and each instrument's newest trade sequence is kept at both edges. The time a window ended is kept beside its last command (`ended_at`), so a run's length is exact whichever way it ended. Once a run is finished, a background pass computes its figures once from its window, off the writer, and stores them in `bot_run_figures` and the tables under it: the trades in its instruments, and per strategy its bots' commands, refusals by code, fills and estimated profit or loss, marked at the newest trade at each edge. The worker also reports a manifest with its first heartbeat of a run: its version and commit, the runtime its decisions depend on, and its strategy settings. The first stays the run's and never changes; a different one, from a worker that took the run over with other code, is kept beside it and counted.
 - **Resting orders** are limited per account (20 by default) and across the market (200,000), so a market of 10,000 bots fits; the market-wide count comes from the in-memory books, not a query per order.
 - **Answers and events:** `command_result` stores each idempotency key's answer, and `outbox` holds every event ever published.
 - **Sessions** are `spring_session` rows, written through their own small connection pool whose commits don't wait for the WAL flush. Each signed-in request saves its last access, so this keeps a commit per request off the trading writer's path. If PostgreSQL itself crashes, session changes from its last fraction of a second may be lost: a trader signs in again, or a sign-out in that instant is undone. Everything else stays durable.
+
+```mermaid
+erDiagram
+  instrument_projection ||--o| market_snapshot : "is quoted in"
+  instrument_projection ||--o{ public_trade : "is traded in"
+  instrument_projection ||--o{ candle_1m : "is charted in"
+  instrument_projection ||--o{ spread_minute : "is measured minute by minute in"
+  spread_minute {
+    timestamptz minute_start
+    bigint first_sequence
+    bigint last_sequence
+    bigint best_bid_cents
+    bigint best_ask_cents
+    bigint last_price_cents
+  }
+```
 
 **In `market_data_db`:**
 - `instrument_projection`, `market_snapshot` (depth and quotes), `public_trade` and `candle_1m`;
@@ -182,6 +211,8 @@ erDiagram
 - `processed_event`, for deduplication, and `projection_checkpoint`, the Kafka offsets.
 
 All of it is derived and can be rebuilt from Kafka, except the minutes of `spread_minute` older than what the compacted market topic still holds, after a rebuild or a long enough pause of the market feed; a restore republishes every snapshot and rebuilds those too.
+
+**Comparing runs** adds no state to either service. The operator ticks two to four finished runs and opens `/operator/runs/compare`. The browser takes each run's stored figures and manifest from Execution (`GET /api/v1/admin/bot-runs/{runId}`), and each instrument's minutes from Market Data's market-quality endpoint (`GET /api/v1/instruments/{instrumentId}/market-quality`) over the run's window of command sequences. It lines the minutes up from each run's start, so runs from different hours sit side by side, and it names the simulator settings that differ between them.
 
 **Money** is whole cents in a `long` everywhere, with overflow checked, and `BIGINT` in the databases. **Quantities** are whole shares.
 
@@ -224,6 +255,7 @@ The main decisions, each with its consequences and the condition for revisiting 
 - **Analytics as a separate Flink job** that reads Kafka only, never a database, so its failure can't touch trading.
 - **Whole cents in a `long`** for every amount, with overflow checked.
 - **Server-side sessions for people and hashed bearer tokens for bots.** The private stream carries only account versions and is tied to the session. Session writes commit asynchronously; revisit if a lost sign-out ever matters more than a commit per request.
+- **An operator who may also trade,** with one login holding both roles. In a simulation it can halt, resume and edit the setup of the market it trades in, and it sees every account's allocation and every run's figures. This is accepted for a teaching simulation; revisit if the exchange ever has traders who compete for real.
 
 ## Requirements and where they are met
 
@@ -233,9 +265,9 @@ The main decisions, each with its consequences and the condition for revisiting 
 | F02 | Orders | Limit GTC and protected market IOC; committed rejections with reasons; idempotency keys; command lookup |
 | F03 | Matching | Price then acceptance sequence; the resting order's price; partial fills; self-trade prevention (`domain/OrderBook`) |
 | F04 | Accounting | Reservations, executions, transfers and releases as balanced ledger batches in one transaction; no negative balances, enforced by checks and reconciled at startup |
-| F05 | Terminal | Live depth, tape and chart from the public stream; ticket, own orders, holdings and cash from REST, refreshed by the private stream |
+| F05 | Terminal | Live depth, tape and chart from the public stream; ticket, own orders, holdings and cash from REST, refreshed by the private stream; a notice when a resting order fills; under Help, a tour for each role, shown once by itself, and a "How this exchange works" page; term tips that explain the market's words where they appear |
 | F06 | Market control | Instruments, endowments and bots in SETUP; open, halt and resume as sequenced, audited commands |
-| F07 | Simulation | Market-maker, noise and momentum bots; seeded runs with rate, limits and duration; heartbeats and activity telemetry |
+| F07 | Simulation | Market-maker, noise and momentum bots; seeded runs with rate, limits and duration; heartbeats and activity telemetry; each run's window of command sequences; figures per instrument and strategy, computed once a run finishes (`RunFigures`); the simulator's manifest with each run; two to four finished runs compared side by side, with their market quality from Market Data |
 | F08 | Analytics | Outbox, Kafka and Avro, the Flink job, Kafka again, then PostgreSQL candles, reconciled exactly with the trade export |
 | F09 | Reliability | Idempotent commands; restart rebuild and reconciliation; bounded queue and rate limits; outbox admission; analytics isolated from trading; backup and restore |
-| F10 | Evidence | Unit, integration, browser and gate tests with planted bugs; [benchmarks](benchmarks.md); this document; the decision records; the runbook |
+| F10 | Evidence | Unit, integration, browser and gate tests with planted bugs; [benchmarks](benchmarks.md); this document, with its main decisions and their trade-offs under [Decisions](#decisions); the [runbook](runbook.md) |

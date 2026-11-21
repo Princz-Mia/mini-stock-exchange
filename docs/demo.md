@@ -1,6 +1,6 @@
 # Five-minute demo
 
-A scripted walk through the exchange: an operator runs the market, bots trade, a trader places and cancels orders and sees fills settle, the market halts and resumes, and analytics fails without stopping trading. The times are a guide for presenting it in five minutes.
+A scripted walk through the exchange: an operator runs the market, bots trade, a trader places and cancels orders and sees fills settle, the market halts and resumes, analytics fails without stopping trading, and two bot runs are compared. The times are a guide for presenting it in five minutes.
 
 ## Before you start
 
@@ -17,26 +17,28 @@ The passwords for `operator` and `trader` are `DEV_OPERATOR_PASSWORD` and `DEV_T
 
 On each user's first sign-in a short tour of their screen opens. Select **Skip tour** to go straight on; **Help** in the top bar has it again, with a page on how the exchange works.
 
+Then make one short bot run, so a finished run is there to compare with later. Sign in as `operator`, set **Commands per second** to 10.00 and **Duration in minutes** to 2, and select **Start run**. It stops by itself after two minutes: wait until its row in **Recent runs** has an end time and the form offers **Start run** again.
+
 ## 0:00 The operator starts the bots
 
-Sign in as `operator`.
+In the operator window, the operator screen is open. The demo operator also trades, so the top bar has a **Trading** and **Operating** switch; this demo stays on **Operating**.
 
 1. Point out the **Market** panel: the market is open, with the time it opened and the last command's sequence number.
-2. In **Bot runs**, the counts start at every bot on its strategy: **Market makers** 4, **Noise** 12 and **Momentum** 4. Set **Commands per second** to 20.00.
+2. In **Bot runs**, the counts start at every bot on its strategy: **Market makers** 4, **Noise** 12 and **Momentum** 4. Set **Commands per second** to 20.00 and leave **Duration in minutes** empty, so the run goes on until stopped.
 3. Select **Start run**. The run turns **Running** once the simulator picks it up, and its placed and cancelled counts start to climb.
 
 Say: each bot is an ordinary client with its own token, and the run's seed makes its decisions repeatable.
 
-## 0:45 The trader watches the live market
+## 0:40 The trader watches the live market
 
 In the other window, sign in as `trader`. The terminal opens on the first instrument; select **NOVA** in the watchlist.
 
-1. The order book's bids and asks and the recent trades move as the bots trade. The chart draws the trades.
+1. The order book's bids and asks and the recent trades move as the bots trade. The **Price** chart draws candles, topped up with live trades; **Line** and **Area** show the same prices as a line or an area.
 2. The header says **Market data: Live** and **Connected**.
 
 Say: the book and tape are public data, streamed by Market Data from Kafka, separately from trading.
 
-## 1:30 A resting order, and a cancel
+## 1:20 A resting order, and a cancel
 
 In the ticket, with **Buy** selected:
 1. Enter 10 **Shares** and a **Limit price** a few dollars below the best bid.
@@ -46,7 +48,7 @@ In the ticket, with **Buy** selected:
 
 Say: the hold, the order and the ledger entries commit in one transaction before the answer comes back; nothing is shown optimistically.
 
-## 2:15 A fill that settles
+## 2:00 A fill that settles
 
 1. Enter 5 **Shares** and a **Limit price** about a dollar above the best ask, so it reaches past the first ask if that one is small.
 2. Select **Buy NOVA**. It takes the cheapest asks first, each at its own price, until all 5 are filled. The ticket says it filled, and the trades appear at the top of the tape.
@@ -57,7 +59,7 @@ Say: the hold, the order and the ledger entries commit in one transaction before
 
 Say: the private views refresh as soon as the trade commits, through the trader's own stream, and an order is filled at the resting order's price, so a higher limit can't cost more.
 
-## 3:00 Halt and resume
+## 2:45 Halt and resume
 
 In the operator window, select **Halt trading**.
 
@@ -68,7 +70,7 @@ Select **Resume trading**. The badge goes, the ticket accepts orders again, and 
 
 Say: halt and resume are commands like any order, sequenced and audited, and the books keep every resting order's place.
 
-## 3:45 Analytics fails, trading doesn't
+## 3:25 Analytics fails, trading doesn't
 
 In a terminal:
 
@@ -86,11 +88,24 @@ The candles catch up from where they stopped.
 
 Say: Kafka sits after the commit and analytics only reads Kafka, so it can stop without touching trading; it resumes from its checkpoint and counts nothing twice.
 
-## 4:30 Wrap up
+## 4:10 Stop the run
 
 In the operator window, select **Stop run**. Once the simulator confirms, the run's row in **Recent runs** gets its end time with the final placed and cancelled counts, the form offers **Start run** again, and the bots' open orders are cancelled.
 
-Close with what was shown: matching with price-time priority, settlement in one transaction, live public and private streams, operator control, and isolated analytics. [architecture.md](architecture.md) explains how; [benchmarks.md](benchmarks.md) has the measured load results, and [runbook.md](runbook.md) the recovery procedures.
+## 4:25 Compare the runs
+
+1. In **Recent runs**, tick the run just stopped and the short one from before. Follow **Compare 2 runs**.
+2. **Compare bot runs** shows the runs side by side. A note at the top says they asked for different rates, so more trading in one may be only its rate. A run just stopped may show **Being worked out…** until its figures are ready.
+3. Point out the **Simulator** panel: what each run's simulator reported, with any setting that differs marked **Differs**; here every setting is the same.
+4. Under **The market over each run**, select **NOVA**; the **Spread** and **Last price** charts show both runs minute by minute.
+
+Select **Back to bot runs** to return.
+
+Say: each run's figures are worked out once it finishes, from its own window of commands, so runs can be compared after the fact.
+
+## 4:45 Wrap up
+
+Close with what was shown: matching with price-time priority, settlement in one transaction, live public and private streams, operator control, comparable bot runs, and isolated analytics. [architecture.md](architecture.md) explains how; [benchmarks.md](benchmarks.md) has the measured load results, and [runbook.md](runbook.md) the recovery procedures.
 
 ## Resetting
 
