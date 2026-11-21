@@ -90,6 +90,7 @@ class BatchedProjectionIT {
 			.isGreaterThan(300);
 		assertThat(catalogue(atOnce)).isEqualTo(catalogue(oneByOne)).hasSize(INSTRUMENTS);
 		assertThat(markets(atOnce)).isEqualTo(markets(oneByOne)).hasSize(INSTRUMENTS);
+		assertThat(spreads(atOnce)).isEqualTo(spreads(oneByOne)).hasSizeGreaterThan(INSTRUMENTS * 20);
 		assertThat(seen(atOnce)).isEqualTo(seen(oneByOne));
 	}
 
@@ -288,7 +289,8 @@ class BatchedProjectionIT {
 				.setLastTrade(random.nextInt(5) == 0 ? null : last)
 				.setLastTradeSequence(at)
 				.setSourceCommandSequence(at)
-				.setGeneratedAt(START.plusSeconds(at))
+				// Seven seconds a sequence, so each instrument's snapshots span many minutes, several to a minute.
+				.setGeneratedAt(START.plusSeconds(at * 7))
 				.build());
 		}
 		return stream;
@@ -420,6 +422,14 @@ class BatchedProjectionIT {
 		return rows(run, """
 				SELECT instrument_id::text, minute_start || ' ' || last_price_cents || ' ' || last_trade_sequence
 				FROM session_minute WHERE instrument_id IN (%s)""");
+	}
+
+	private List<String> spreads(Run run) {
+		return rows(run, """
+				SELECT instrument_id::text, minute_start || ' ' || first_sequence || ' ' || last_sequence || ' '
+				    || coalesce(best_bid_cents::text, '-') || ' ' || coalesce(best_ask_cents::text, '-') || ' '
+				    || coalesce(last_price_cents::text, '-')
+				FROM spread_minute WHERE instrument_id IN (%s)""");
 	}
 
 	/** Each row's simulation, by table. */

@@ -231,6 +231,30 @@ class MarketQueries {
 			.orElse(null);
 	}
 
+	/** A minute of an instrument's book: its last snapshot's best bid and ask, null for an empty side, and last price. */
+	record SpreadMinute(Instant minute, long firstSequence, long lastSequence, Long bidCents, Long askCents,
+			Long lastPriceCents) {
+	}
+
+	/**
+	 * The instrument's minutes whose sequences meet {@code from..to}, both inclusive, oldest first, at most
+	 * {@code limit}. A minute at either edge may also hold snapshots outside the window; its state is its last.
+	 */
+	List<SpreadMinute> spreadMinutes(UUID instrumentId, long from, long to, int limit) {
+		return jdbc.sql("""
+				SELECT minute_start, first_sequence, last_sequence, best_bid_cents, best_ask_cents, last_price_cents
+				FROM spread_minute
+				WHERE instrument_id = ?
+				    AND int8range(first_sequence, last_sequence, '[]') && int8range(?, ?, '[]')
+				ORDER BY minute_start LIMIT ?""")
+			.params(instrumentId, from, to, limit)
+			.query((row, index) -> new SpreadMinute(row.getTimestamp("minute_start").toInstant(),
+					row.getLong("first_sequence"), row.getLong("last_sequence"),
+					row.getObject("best_bid_cents", Long.class), row.getObject("best_ask_cents", Long.class),
+					row.getObject("last_price_cents", Long.class)))
+			.list();
+	}
+
 	long latestTradeSequence(UUID instrumentId) {
 		return jdbc.sql("SELECT coalesce(max(trade_sequence), 0) FROM public_trade WHERE instrument_id = ?")
 			.param(instrumentId)

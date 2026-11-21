@@ -723,6 +723,33 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/instruments/{instrumentId}/market-quality": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * The instrument's book minute by minute over a window of command sequences, with its spread and volatility.
+         * @description Public facts only, so a bot run's window can be measured from its start and end sequences. The minutes are
+         *     those whose snapshots meet fromSequence..toSequence (both inclusive), from the first to the last, at most
+         *     1,440; a minute at either edge may also hold snapshots outside the window. A minute's book is its last
+         *     snapshot's, and a minute without one holds the minute before (changed false). The average spread is the mean
+         *     of the minutes' best ask minus best bid, over minutes with both sides. Volatility is the sample standard
+         *     deviation of the one-minute returns of the last price (price / previous price - 1, a held price counting as
+         *     0), not annualised. Both are null with nothing to measure. The history comes from the market snapshots: a
+         *     rebuild from Kafka keeps only what the compacted topic still holds, a restore all of it.
+         */
+        readonly get: operations["getMarketQuality"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/internal/reconciliation/candles": {
         readonly parameters: {
             readonly query?: never;
@@ -1610,6 +1637,34 @@ export interface components {
             readonly to: components["schemas"]["Timestamp"];
             readonly candles: readonly components["schemas"]["Candle"][];
             readonly freshness: components["schemas"]["CandleFreshness"];
+        };
+        /** @description A minute's book, its last snapshot's; changed is false when it holds the minute before. */
+        readonly QualityMinute: {
+            readonly minute: components["schemas"]["Timestamp"];
+            /** @description Null while no one bids. */
+            readonly bestBid: components["schemas"]["Price"] | null;
+            /** @description Null while no one asks. */
+            readonly bestAsk: components["schemas"]["Price"] | null;
+            /** @description Best ask minus best bid; null unless both sides are there. */
+            readonly spread: components["schemas"]["Price"] | null;
+            /** @description Null before the first trade. */
+            readonly lastPrice: components["schemas"]["Price"] | null;
+            readonly changed: boolean;
+        };
+        readonly MarketQuality: {
+            readonly instrumentId: components["schemas"]["Uuid"];
+            readonly fromSequence: components["schemas"]["Sequence"];
+            readonly toSequence: components["schemas"]["Sequence"];
+            readonly minutes: readonly components["schemas"]["QualityMinute"][];
+            /** @description A price with four places, rounded half-even; null without a minute with both sides. */
+            readonly averageSpread: string | null;
+            /** @description The minutes the average spread is taken over. */
+            readonly twoSidedMinutes: number;
+            /** @description A fraction with six places, rounded half-even; null with fewer than two returns. */
+            readonly volatility: string | null;
+            /** @description The one-minute returns the volatility is taken over. */
+            readonly returns: number;
+            readonly feed: components["schemas"]["Feed"];
         };
         readonly ExportedTrade: {
             readonly tradeId: components["schemas"]["Uuid"];
@@ -3566,6 +3621,34 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["Candles"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            readonly 404: components["responses"]["Problem"];
+        };
+    };
+    readonly getMarketQuality: {
+        readonly parameters: {
+            readonly query: {
+                readonly fromSequence: number;
+                /** @description Inclusive; not below fromSequence. */
+                readonly toSequence: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly instrumentId: components["parameters"]["InstrumentId"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The minutes and their figures. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["MarketQuality"];
                 };
             };
             readonly 400: components["responses"]["Problem"];
