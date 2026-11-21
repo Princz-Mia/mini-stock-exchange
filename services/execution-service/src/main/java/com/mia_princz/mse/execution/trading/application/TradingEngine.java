@@ -1258,7 +1258,7 @@ public final class TradingEngine {
 		}
 		running.ifPresent((expired) -> store.requestBotRunStop(expired.id(), expired.endsAt(), null));
 		// A run not yet ended (its worker hasn't confirmed, or it never had one) ends before this one starts.
-		store.endUnfinishedBotRuns(simulationId, sequence - 1);
+		store.endUnfinishedBotRuns(simulationId, sequence - 1, now);
 		store.insertBotRun(new TradingStore.NewBotRun(command.runId(), simulationId, command.seed(),
 				command.commandsPerSecondHundredths(), command.maxOrderQuantity(), command.maxPosition(),
 				command.actorUserId(), now, sequence, command.duration() == null ? null : now.plus(command.duration())));

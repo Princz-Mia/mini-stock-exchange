@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetSession } from '../api/client';
 import type { BotRun, MarketStatus } from '../api/types';
 import { TOURS } from '../help/tours';
-import { botRun } from '../test/botRun';
+import { botRun, finishedRun } from '../test/botRun';
 import { signedIn } from '../test/fakeServer';
 import { noTrades } from '../test/fakeStream';
 import { inUseMessage } from './InstrumentSetup';
@@ -79,10 +79,15 @@ function renderPage() {
   return renderWith(client);
 }
 
-function renderWith(client: QueryClient) {
+function renderAt(at: string) {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  return renderWith(client, at);
+}
+
+function renderWith(client: QueryClient, at = '/operator') {
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter initialEntries={['/operator']}>
+      <MemoryRouter initialEntries={[at]}>
         <OperatorPage />
       </MemoryRouter>
     </QueryClientProvider>,
@@ -1319,6 +1324,65 @@ describe('bot runs on the operator screen', () => {
 
   const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
   const runs = () => screen.findByRole('region', { name: 'Bot runs' });
+
+  it('ticks finished runs for a comparison, four at most, and links to it', async () => {
+    const { state } = exchange('OPEN');
+    const finished = (n: number, minute: number) =>
+      finishedRun({ runId: `20000000-0000-0000-0000-00000000000${n}`, startedAt: `2026-11-06T0${minute}:00:00Z` });
+    const unconfirmed = botRun({
+      runId: '20000000-0000-0000-0000-000000000009',
+      status: 'STOPPED',
+      desiredState: 'STOPPED',
+      startedAt: '2026-11-06T09:30:00Z',
+    });
+    state.runs = [unconfirmed, finished(5, 5), finished(4, 4), finished(3, 3), finished(2, 2), finished(1, 1)];
+    renderPage();
+
+    const panel = await runs();
+    await within(panel).findByRole('table', { name: 'Recent runs' });
+    expect(within(panel).getByText('Tick two to four finished runs to compare them.')).toBeInTheDocument();
+    const box = (time: string) => within(panel).getByRole('checkbox', { name: new RegExp(`started ${time}`) });
+    expect(box('09:30:00')).toBeDisabled();
+    expect(box('09:30:00')).toHaveAccessibleDescription('Not finished');
+    expect(within(panel).getByText('Not finished')).toBeVisible();
+
+    fireEvent.click(box('05:00:00'));
+    fireEvent.click(box('04:00:00'));
+    expect(within(panel).getByRole('link', { name: 'Compare 2 runs' })).toHaveAttribute(
+      'href',
+      '/operator/runs/compare?runs=20000000-0000-0000-0000-000000000005,20000000-0000-0000-0000-000000000004',
+    );
+    fireEvent.click(box('03:00:00'));
+    fireEvent.click(box('02:00:00'));
+    expect(box('01:00:00')).toBeDisabled();
+    expect(box('01:00:00')).toHaveAccessibleDescription('4 ticked');
+    // Unticking makes room again; clearing unticks them all.
+    fireEvent.click(box('04:00:00'));
+    expect(box('01:00:00')).toBeEnabled();
+    expect(within(panel).getByRole('link', { name: 'Compare 3 runs' })).toBeInTheDocument();
+    fireEvent.click(within(panel).getByRole('button', { name: 'Clear 3 ticks' }));
+    expect(box('05:00:00')).not.toBeChecked();
+    expect(within(panel).getByText('Tick two to four finished runs to compare them.')).toBeInTheDocument();
+  });
+
+  it('finds its ticks in the address, so coming back from a comparison keeps them', async () => {
+    const { state } = exchange('OPEN');
+    const finished = (n: number, minute: number) =>
+      finishedRun({ runId: `20000000-0000-0000-0000-00000000000${n}`, startedAt: `2026-11-06T0${minute}:00:00Z` });
+    state.runs = [finished(3, 3), finished(2, 2), finished(1, 1)];
+    renderAt(`/operator?runsSize=25&compare=20000000-0000-0000-0000-000000000003,20000000-0000-0000-0000-000000000001`);
+
+    const panel = await runs();
+    await within(panel).findByRole('table', { name: 'Recent runs' });
+    const box = (time: string) => within(panel).getByRole('checkbox', { name: new RegExp(`started ${time}`) });
+    expect(box('03:00:00')).toBeChecked();
+    expect(box('02:00:00')).not.toBeChecked();
+    expect(box('01:00:00')).toBeChecked();
+    expect(within(panel).getByRole('link', { name: 'Compare 2 runs' })).toHaveAttribute(
+      'href',
+      '/operator/runs/compare?runs=20000000-0000-0000-0000-000000000003,20000000-0000-0000-0000-000000000001',
+    );
+  });
 
   it('starts a run with every tagged bot on its strategy, sending only what the exchange needs', async () => {
     const { server, state } = exchange('OPEN', [NOVA, ORBT]);

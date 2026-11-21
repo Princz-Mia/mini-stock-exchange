@@ -3,6 +3,7 @@ import type {
   AccountPage,
   AccountRequest,
   BotPopulation,
+  BotRunDetail,
   BotRunList,
   BotRunRequest,
   BotRunStarted,
@@ -221,6 +222,9 @@ export const api = {
   /** Every run, a page at a time. */
   botRunPage: (cursor: string | undefined, limit: number, order: ListOrder) =>
     request<BotRunList>('GET', `/api/v1/admin/bot-runs${query({ cursor, limit, order })}`),
+
+  /** One run with its figures, null until it is finished and they are worked out. */
+  botRun: (runId: string) => request<BotRunDetail>('GET', `/api/v1/admin/bot-runs/${runId}`),
 
   startBotRun: (run: BotRunRequest, idempotencyKey: string) =>
     request<BotRunStarted>('POST', '/api/v1/admin/bot-runs', { body: run, idempotencyKey }),

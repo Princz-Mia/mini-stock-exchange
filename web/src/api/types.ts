@@ -57,6 +57,10 @@ export type BotRun = Schemas['BotRun'];
 export type BotRunManifest = Schemas['BotRunManifest'];
 export type BotRunDetail = Schemas['BotRunDetail'];
 export type BotRunMark = Schemas['BotRunMark'];
+/** A finished run's figures, and their rows: one per instrument, one per strategy that had bots. */
+export type RunFigures = NonNullable<BotRunDetail['figures']>;
+export type InstrumentFigures = RunFigures['instruments'][number];
+export type StrategyFigures = RunFigures['strategies'][number];
 export type HealthSummary = Schemas['HealthSummary'];
 export type TourSeen = Schemas['TourSeen'];
 export type PasswordChangeRequest = Schemas['PasswordChangeRequest'];

@@ -461,6 +461,38 @@ tbody th {
 }
 
 /* Operator: the market card beside the setup editor; stacked on narrow screens. */
+/* Comparing bot runs: one panel after another, each table one column per run, scrolling inside its panel on a phone. */
+.compare {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.compare-run span {
+  display: block;
+  font-weight: normal;
+}
+
+.compare-picks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.compare-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.compare-group {
+  text-align: left;
+  padding-top: var(--space-3);
+  background: var(--surface-sunken);
+}
+
 .operator {
   display: grid;
   grid-template-columns: minmax(280px, 340px) 1fr;

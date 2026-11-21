@@ -8,6 +8,7 @@ import { AppShell, Home, RequireRole } from './app/AppShell';
 import { LoginPage } from './auth/LoginPage';
 import { HowItWorks } from './help/HowItWorks';
 import { OperatorPage } from './operator/OperatorPage';
+import { RunComparePage } from './operator/RunComparePage';
 import { PortfolioPage } from './portfolio/PortfolioPage';
 import { TerminalPage } from './terminal/TerminalPage';
 
@@ -40,6 +41,7 @@ export function App() {
             </Route>
             <Route element={<RequireRole role="OPERATOR" />}>
               <Route path="/operator" element={<OperatorPage />} />
+              <Route path="/operator/runs/compare" element={<RunComparePage />} />
             </Route>
             <Route path="*" element={<Home />} />
           </Route>

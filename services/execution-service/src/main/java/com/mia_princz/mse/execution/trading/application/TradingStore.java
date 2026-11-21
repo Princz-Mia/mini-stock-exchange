@@ -186,7 +186,7 @@ public interface TradingStore {
 	 * sequence; a run its worker already confirmed keeps the end it recorded, and one from before windows were kept
 	 * keeps none.
 	 */
-	void endUnfinishedBotRuns(UUID simulationId, long endSequence);
+	void endUnfinishedBotRuns(UUID simulationId, long endSequence, Instant endedAt);
 
 	/** Every bot is created with its strategy; bots made untagged before it was required keep a null one. */
 	void insertBotAccount(UUID simulationId, UUID accountId, String displayName, BotStrategy strategy);

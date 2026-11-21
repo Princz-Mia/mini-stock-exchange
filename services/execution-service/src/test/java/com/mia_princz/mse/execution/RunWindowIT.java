@@ -7,6 +7,7 @@ import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -103,6 +104,9 @@ class RunWindowIT {
 		beat(simulator, first, true);
 		assertThat(window(operator, first)).containsExactly(Long.toString(firstStart), Long.toString(firstStop),
 				Long.toString(tail), "WORKER");
+		// It ended when its worker confirmed the stop.
+		assertThat(listed(operator, first).get("window").get("endedAt").asString())
+			.isEqualTo(listed(operator, first).get("stoppedAt").asString());
 		assertThat(edges(first, nova)).containsExactly(1L, 2L);
 		assertThat(edges(first, zeta)).containsExactly(1L, 2L);
 
@@ -119,6 +123,9 @@ class RunWindowIT {
 		long thirdStart = replacing.get("commandSequence").asLong();
 		assertThat(thirdStart - 1).isEqualTo(between);
 		assertThat(window(operator, second).subList(2, 4)).containsExactly(Long.toString(between), "NEXT_START");
+		// It ended when the next run started.
+		String secondEnded = listed(operator, second).get("window").get("endedAt").asString();
+		assertThat(secondEnded).isEqualTo(listed(operator, third).get("startedAt").asString());
 		assertThat(edges(second, nova)).containsExactly(2L, 3L);
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM bot_run_instrument WHERE run_id = ?", Long.class, second))
 			.as("only its own instrument").isEqualTo(1);
@@ -126,6 +133,10 @@ class RunWindowIT {
 		trade(nova);
 		beat(simulator, second, true);
 		assertThat(window(operator, second).subList(2, 4)).containsExactly(Long.toString(between), "NEXT_START");
+		// Nor when it ended: the confirmation came after, and its stop says so.
+		JsonNode confirmed = listed(operator, second);
+		assertThat(confirmed.get("window").get("endedAt").asString()).isEqualTo(secondEnded);
+		assertThat(Instant.parse(confirmed.get("stoppedAt").asString())).isAfterOrEqualTo(Instant.parse(secondEnded));
 		assertThat(edges(second, nova)).containsExactly(2L, 3L);
 
 		// A worker that went quiet doesn't hold the next start up: its lease lapsed, so the start ends the run.
@@ -137,6 +148,8 @@ class RunWindowIT {
 		UUID timed = UUID.fromString(afterQuiet.get("runId").asString());
 		assertThat(window(operator, third).subList(2, 4))
 			.containsExactly(Long.toString(afterQuiet.get("commandSequence").asLong() - 1), "NEXT_START");
+		assertThat(listed(operator, third).get("window").get("endedAt").asString())
+			.isEqualTo(listed(operator, timed).get("startedAt").asString());
 
 		// A run whose time ran out ends when its worker confirms, with no operator stop.
 		asOwner("UPDATE bot_run SET started_at = started_at - interval '2 minutes', "
@@ -151,6 +164,7 @@ class RunWindowIT {
 				WHERE a.end_sequence IS NOT NULL AND b.start_sequence BETWEEN a.start_sequence AND a.end_sequence""",
 				Long.class)).isZero();
 		assertThat(window(operator, legacy).subList(2, 4)).containsExactly(null, "NOT_KEPT");
+		assertThat(listed(operator, legacy).get("window").get("endedAt").isNull()).isTrue();
 
 		// The runtime role records ends, never rewrites where a run started, and can't end a run before its start.
 		assertThatThrownBy(() -> jdbc.update("UPDATE bot_run SET start_sequence = 1 WHERE id = ?", first)).rootCause()
@@ -195,6 +209,18 @@ class RunWindowIT {
 					window.add(value.isNull() ? null : value.asString());
 				}
 				return window;
+			}
+		}
+		throw new AssertionError("run " + run + " is not listed");
+	}
+
+	/** The run as the operator's list shows it. */
+	private static JsonNode listed(TestBrowser operator, UUID run) throws Exception {
+		HttpResponse<String> read = operator.get("/api/v1/admin/bot-runs?limit=200");
+		assertThat(read.statusCode()).as(read.body()).isEqualTo(200);
+		for (JsonNode listed : JSON.readTree(read.body()).get("runs")) {
+			if (listed.get("runId").asString().equals(run.toString())) {
+				return listed;
 			}
 		}
 		throw new AssertionError("run " + run + " is not listed");

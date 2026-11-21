@@ -1,5 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { Link, useLocation, useSearchParams } from 'react-router';
 
 import { api, pollEvery } from '../api/client';
 import type { BotPopulation, BotRun, BotRunRequest, Instrument, MarketStatus } from '../api/types';
@@ -22,6 +23,7 @@ import {
 import { populationText } from './strategies';
 import { CommandStatus } from './CommandStatus';
 import { useCommand } from './useCommand';
+import { comparability, MAX_COMPARED, parseRunIds } from './compare';
 
 type Typed = Partial<Omit<RunForm, 'instrumentIds'>> & { instrumentIds?: readonly string[] };
 
@@ -61,6 +63,33 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
       void client.invalidateQueries({ queryKey: ['bot-runs', 'history'] });
     }
   }, [client, newestState]);
+  // The runs ticked for a comparison live in the address, so going back from the comparison finds them ticked.
+  const [params, setParams] = useSearchParams();
+  const picked = parseRunIds(params.get('compare')).ids;
+  const pick = (runId: string, on: boolean) =>
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        const ids = parseRunIds(current.get('compare')).ids.filter((id) => id !== runId);
+        if (on) ids.push(runId);
+        if (ids.length > 0) next.set('compare', ids.join(','));
+        else next.delete('compare');
+        return next;
+      },
+      { replace: true },
+    );
+  const clear = () =>
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete('compare');
+        return next;
+      },
+      { replace: true },
+    );
+  const columns = [compareColumn(picked, pick), ...RUN_COLUMNS];
+  // The screen's own address goes along, so coming back keeps the table's page size and order.
+  const from = useLocation().search;
 
   return (
     <section className="panel" aria-labelledby="runs-title">
@@ -85,10 +114,24 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
       {list.length > 0 && (
         <>
           <h3>Recent runs</h3>
+          <p className="compare-picks">
+            {picked.length >= 2 ? (
+              <Link to={`/operator/runs/compare?runs=${picked.join(',')}`} state={{ from }}>
+                Compare {picked.length} runs
+              </Link>
+            ) : (
+              <span className="muted">Tick two to four finished runs to compare them.</span>
+            )}
+            {picked.length > 0 && (
+              <button type="button" className="quiet" onClick={clear}>
+                Clear {picked.length === 1 ? 'the tick' : `${picked.length} ticks`}
+              </button>
+            )}
+          </p>
           <PagedTable
             label="Recent runs"
             list={history}
-            columns={RUN_COLUMNS}
+            columns={columns}
             rowKey={(run) => run.runId}
             empty="No runs yet."
             noun="runs"
@@ -355,6 +398,48 @@ function ended(run: BotRun): string {
     return utcTime(run.stoppedAt) + failures;
   }
   return (run.status === 'STOPPED' ? 'Not confirmed' : STATUS_LABELS[run.status]) + failures;
+}
+
+/**
+ * A tick per run for the comparison: only a finished run can be ticked, and four at most. One that can't be ticked
+ * says why beside it, and in its description, as a disabled control can't be focused to find out.
+ */
+function compareColumn(picked: readonly string[], pick: (runId: string, on: boolean) => void): Column<BotRun> {
+  return {
+    key: 'compare',
+    header: <span className="visually-hidden">Compare</span>,
+    cell: (run) => {
+      const on = picked.includes(run.runId);
+      const state = comparability(run);
+      const reason =
+        state === 'NOT_KEPT'
+          ? 'No window kept'
+          : state === 'UNFINISHED'
+            ? 'Not finished'
+            : picked.length >= MAX_COMPARED
+              ? `${MAX_COMPARED} ticked`
+              : null;
+      const blocked = !on && reason !== null;
+      const why = `compare-why-${run.runId}`;
+      return (
+        <span className="compare-pick">
+          <input
+            type="checkbox"
+            checked={on}
+            disabled={blocked}
+            aria-label={`Compare the run started ${utcTime(run.startedAt)}`}
+            aria-describedby={blocked ? why : undefined}
+            onChange={(event) => pick(run.runId, event.target.checked)}
+          />
+          {blocked && (
+            <span id={why} className="muted">
+              {reason}
+            </span>
+          )}
+        </span>
+      );
+    },
+  };
 }
 
 const RUN_COLUMNS: readonly Column<BotRun>[] = [

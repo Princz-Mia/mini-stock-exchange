@@ -11,7 +11,8 @@ function roleOf(pathname: string): TourRole | null {
   if (pathname.startsWith('/terminal')) {
     return 'TRADER';
   }
-  if (pathname.startsWith('/operator')) {
+  // The operator screen itself: the comparison page under it has none of the parts the tour points at.
+  if (pathname.replace(/\/+$/, '') === '/operator') {
     return 'OPERATOR';
   }
   return null;
