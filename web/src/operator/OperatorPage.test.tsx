@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetSession } from '../api/client';
 import type { BotRun, MarketStatus } from '../api/types';
 import { TOURS } from '../help/tours';
-import { botRun, finishedRun } from '../test/botRun';
+import { botRun, finishedRun, manifest } from '../test/botRun';
 import { signedIn } from '../test/fakeServer';
 import { noTrades } from '../test/fakeStream';
 import { inUseMessage } from './InstrumentSetup';
@@ -1513,7 +1513,37 @@ describe('bot runs on the operator screen', () => {
     expect(within(history).getAllByRole('row')).toHaveLength(2);
     expect(within(history).getAllByRole('row')[1]).toHaveTextContent('Running');
     expect(within(panel).getByRole('button', { name: 'Stop run' })).toBeEnabled();
+    // Its worker hasn't reported its simulator yet: nothing to open.
+    expect(counters).toHaveTextContent('SimulatorNot reported yet');
+    expect(within(panel).queryByText('Simulator settings')).toBeNull();
   });
+
+  it("shows the simulator a running run's worker reported, and when another took over", async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [botRun({ manifest: manifest() })];
+    renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(current).toHaveTextContent('Simulator0.1.0+27a70d6c1e2f');
+    expect(within(current).queryByRole('table', { name: 'Simulator settings' })).toBeNull();
+    fireEvent.click(within(current).getByText('Simulator settings'));
+    const settings = await within(current).findByRole('table', { name: 'Simulator settings' });
+    expect(within(settings).getByRole('columnheader', { name: 'Value' })).toBeInTheDocument();
+    expect(within(settings).getByRole('rowheader', { name: 'Momentum' })).toBeInTheDocument();
+    expect(within(settings).getByRole('row', { name: /^Defaults: maxInFlight/ })).toHaveTextContent('32');
+    // One run alone differs from nothing.
+    expect(within(settings).queryByText('Differs')).toBeNull();
+    expect(within(current).queryByText(/changed during the run/)).toBeNull();
+
+    state.runs = [botRun({ manifest: manifest({ reports: 2, workerId: 'sim-2' }) })];
+    expect(
+      await within(current).findByText(
+        'The simulator changed during the run: 2 different reports. The version and settings shown are the first, from sim-2 at 10:00:01 UTC.',
+        {},
+        { timeout: 10_000 },
+      ),
+    ).toBeInTheDocument();
+  }, 15_000);
 
   it('stops a run under one key, even after a busy answer, then waits for the worker', async () => {
     const { server, state } = exchange('OPEN');

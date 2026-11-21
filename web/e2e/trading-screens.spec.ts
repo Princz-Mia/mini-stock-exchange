@@ -744,6 +744,11 @@ for (const size of SIZES) {
       await expect(page.getByRole('heading', { name: 'Compare bot runs' })).toBeVisible();
       // Market Data has read both windows; a run that ended in the minute it started may have no spread, but counts.
       await expect(counted.getByRole('cell')).toHaveText([/^\d+$/, /^\d+$/], { timeout: 30_000 });
+      // Both runs ran on the same simulator build and settings.
+      const simulator = page.getByRole('table', { name: 'Simulator' });
+      await expect(simulator.getByRole('rowheader', { name: 'Version and runtime: version', exact: true })).toBeVisible();
+      await expect(simulator.getByText('Differs')).toHaveCount(0);
+      await expect(page.getByText('Every setting is the same in each run that reported.')).toBeVisible();
       await capture(page, size, 'compare');
       // Each chart's minutes as a table, both open.
       await market.getByText('Spread by minute, as a table').click();
@@ -767,6 +772,25 @@ for (const size of SIZES) {
       await expect(pending.getByRole('status').filter({ hasText: 'Market data is catching up' })).toBeVisible();
       await capture(pending, size, 'compare-pending');
       await pending.context().close();
+
+      // One run's simulator ran with a different default: marked in its row, counted, and warned of at the top.
+      const differ = await at(browser, size, 'operator');
+      await differ.route(`**/api/v1/admin/bot-runs/${finished[0]}`, async (route) => {
+        const detail = (await (await route.fetch()).json()) as {
+          run: { manifest: { defaults: Record<string, unknown> } | null };
+        };
+        const manifest = detail.run.manifest;
+        expect(manifest, 'the run reported its simulator').not.toBeNull();
+        await route.fulfill({
+          json: { ...detail, run: { ...detail.run, manifest: { ...manifest, defaults: { ...manifest!.defaults, maxInFlight: 7 } } } },
+        });
+      });
+      await differ.goto(address);
+      const marked = differ.getByRole('table', { name: 'Simulator' }).getByRole('row', { name: /^Defaults: maxInFlight Differs/ });
+      await expect(marked).toBeVisible();
+      await expect(differ.getByText(/simulators differ in 1 setting, marked under Simulator/)).toBeVisible();
+      await capture(differ, size, 'compare-settings-differ');
+      await differ.context().close();
 
       // Market Data not answering: the settings and figures still compare, the market section says why it is empty.
       const down = await at(browser, size, 'operator');

@@ -3,9 +3,10 @@ import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router';
 
 import { api, pollEvery } from '../api/client';
-import type { BotPopulation, BotRun, BotRunRequest, Instrument, MarketStatus } from '../api/types';
+import type { BotPopulation, BotRun, BotRunManifest, BotRunRequest, Instrument, MarketStatus } from '../api/types';
 import { type Column, PagedTable } from '../app/PagedTable';
 import { usePagedList } from '../app/paging';
+import { useKeyboardScroll } from '../app/useKeyboardScroll';
 import { groupInteger, utcTime } from '../format';
 import {
   activeRun,
@@ -24,6 +25,7 @@ import { populationText } from './strategies';
 import { CommandStatus } from './CommandStatus';
 import { useCommand } from './useCommand';
 import { comparability, MAX_COMPARED, parseRunIds, withTick } from './compare';
+import { SimulatorSettings } from './SimulatorSettings';
 
 type Typed = Partial<Omit<RunForm, 'instrumentIds'>> & { instrumentIds?: readonly string[] };
 
@@ -194,7 +196,15 @@ function ActiveRun({ run }: { run: BotRun }) {
         <dd>{run.endsAt === null ? 'When stopped' : utcTime(run.endsAt)}</dd>
         <dt>Last heartbeat</dt>
         <dd>{run.worker.heartbeatAt === null ? 'None yet' : utcTime(run.worker.heartbeatAt)}</dd>
+        <dt>Simulator</dt>
+        <dd>{run.manifest === null ? 'Not reported yet' : run.manifest.version}</dd>
       </dl>
+      {run.manifest !== null && run.manifest.reports > 1 && (
+        <p className="chart-note">
+          The simulator changed during the run: {run.manifest.reports} different reports. The version and settings shown
+          are the first, from {run.manifest.workerId} at {utcTime(run.manifest.reportedAt)}.
+        </p>
+      )}
       <dl className="counters" aria-label="Activity">
         <div>
           <dt>Placed</dt>
@@ -227,6 +237,7 @@ function ActiveRun({ run }: { run: BotRun }) {
         Counts are what the worker last reported. Per second is the average since the start, against the run&apos;s
         budget.
       </p>
+      {run.manifest !== null && <RunSettings manifest={run.manifest} />}
       {activity.stopFailures > 0 && (
         <p role="alert" className="form-error">
           {groupInteger(activity.stopFailures)} {activity.stopFailures === 1 ? 'order' : 'orders'} could not be
@@ -397,6 +408,38 @@ function ended(run: BotRun): string {
     return utcTime(run.stoppedAt) + failures;
   }
   return (run.status === 'STOPPED' ? 'Not confirmed' : STATUS_LABELS[run.status]) + failures;
+}
+
+/** The settings the run's simulator reported, collapsed: the table is drawn only while open. */
+function RunSettings({ manifest }: { manifest: BotRunManifest }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary id="run-settings-title">Simulator settings</summary>
+      {open && <RunSettingsTable manifest={manifest} />}
+    </details>
+  );
+}
+
+/** Scrolls inside the panel on a phone, with the keyboard too, rather than widen it. */
+function RunSettingsTable({ manifest }: { manifest: BotRunManifest }) {
+  const scroll = useKeyboardScroll<HTMLDivElement>();
+  return (
+    <div ref={scroll} className="run-settings">
+        <SimulatorSettings
+          labelledBy="run-settings-title"
+          head={
+            <thead>
+              <tr>
+                <th scope="col">Setting</th>
+                <th scope="col">Value</th>
+              </tr>
+            </thead>
+          }
+          manifests={[manifest]}
+        />
+    </div>
+  );
 }
 
 /**

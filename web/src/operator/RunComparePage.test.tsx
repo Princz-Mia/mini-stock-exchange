@@ -4,12 +4,13 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { App } from '../App';
 import { resetSession } from '../api/client';
 import type { BotRun, BotRunDetail } from '../api/types';
-import { botRun, finishedRun, runDetail, runFigures } from '../test/botRun';
+import { botRun, finishedRun, manifest, runDetail, runFigures } from '../test/botRun';
 import { signedIn } from '../test/fakeServer';
 
 const FIRST = '20000000-0000-0000-0000-000000000011';
 const SECOND = '20000000-0000-0000-0000-000000000012';
 const THIRD = '20000000-0000-0000-0000-000000000013';
+const MISSING = '20000000-0000-0000-0000-000000000019';
 
 /** The operator signed in, with each run's detail at its own address. */
 function server(details: Record<string, BotRunDetail | number>) {
@@ -88,6 +89,52 @@ describe('comparing bot runs', () => {
       'href',
       `/operator?compare=${FIRST},${SECOND}`,
     );
+  });
+
+  it("shows each run's simulator side by side, and marks the settings that differ", async () => {
+    const tuned = run(SECOND, {
+      manifest: manifest({
+        defaults: { ...manifest().defaults, maxInFlight: 64 },
+        strategies: { ...manifest().strategies, MARKET_MAKER: { ...manifest().strategies.MARKET_MAKER!, halfSpreadTicks: 3 } },
+      }),
+    });
+    server({
+      [FIRST]: runDetail(run(FIRST)),
+      [SECOND]: runDetail(tuned),
+      [THIRD]: runDetail(run(THIRD, { manifest: null })),
+      [MISSING]: 404,
+    });
+
+    openAt(`/operator/runs/compare?runs=${FIRST},${SECOND},${THIRD},${MISSING}`);
+
+    const simulator = await screen.findByRole('table', { name: 'Simulator' });
+    // A run that reported nothing says so; a run that isn't there has nothing to say.
+    await waitFor(() => expect(row(simulator, 'Defaults: maxInFlight')).toEqual(['32', '64', 'Not reported', '—']));
+    expect(row(simulator, 'Market makers: halfSpreadTicks')).toEqual(['2', '3', 'Not reported', '—']);
+    expect(within(simulator).getByRole('rowheader', { name: 'Defaults: maxInFlight Differs' })).toBeInTheDocument();
+    // Tinted as well as said.
+    expect(within(simulator).getByRole('row', { name: /^Defaults: maxInFlight/ })).toHaveClass('differs');
+    expect(within(simulator).getByRole('row', { name: /^Noise: spreadTicks/ })).not.toHaveClass('differs');
+    // Each strategy's settings under its own name, to the eye and in each row's name, so the two quote lifetimes are
+    // told apart.
+    expect(within(simulator).getByRole('rowheader', { name: 'Market makers' })).toBeInTheDocument();
+    expect(row(simulator, 'Market makers: quoteLifetimeSeconds')).toEqual(['30', '30', 'Not reported', '—']);
+    expect(row(simulator, 'Noise: quoteLifetimeSeconds')).toEqual(['10', '10', 'Not reported', '—']);
+    expect(screen.getByText(/2 settings differ, marked Differs/)).toBeInTheDocument();
+    expect(screen.getByText(/simulators differ in 2 settings, marked under Simulator/)).toBeInTheDocument();
+  });
+
+  it('claims no likeness from one run that reported, and nothing before the runs are in', async () => {
+    server({ [FIRST]: runDetail(run(FIRST)), [THIRD]: runDetail(run(THIRD, { manifest: null })) });
+
+    openAt(`/operator/runs/compare?runs=${FIRST},${THIRD}`);
+
+    const panel = await screen.findByRole('region', { name: 'Simulator' });
+    expect(within(panel).queryByText(/No run reported|Every setting is the same/)).toBeNull();
+    expect(
+      await within(panel).findByText(/Only one run reported its simulator, so there is nothing to compare it with\./),
+    ).toBeInTheDocument();
+    expect(within(panel).queryByText('Differs')).toBeNull();
   });
 
   it('keeps a column for each run it cannot compare, and says why', async () => {

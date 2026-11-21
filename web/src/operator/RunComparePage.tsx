@@ -17,17 +17,16 @@ import {
   plannedDuration,
   refusalsText,
 } from './compare';
+import { differingSettings, STRATEGIES, simulatorText } from './manifest';
 import { QualityCharts } from './QualityCharts';
+import { SimulatorSettings } from './SimulatorSettings';
 import { STATUS_LABELS, strategiesText } from './runView';
+
+/** What a column says while its run is being asked for. */
+const LOADING = 'Loading…';
 
 /** While a run is not finished, or its figures are not worked out yet, it is asked for again this often. */
 const PENDING_POLL = 5_000;
-
-const STRATEGIES = [
-  ['MARKET_MAKER', 'Market makers'],
-  ['NOISE', 'Noise'],
-  ['MOMENTUM', 'Momentum'],
-] as const;
 
 /** One column: the run as the server answered it, or why it isn't there. */
 type Compared = { id: string; detail: BotRunDetail | undefined; missing: string | null };
@@ -62,7 +61,7 @@ export function RunComparePage() {
       if (answer?.isError) {
         missing = answer.error instanceof ApiError && answer.error.status === 404 ? 'No such run' : 'Could not be loaded';
       } else {
-        missing = 'Loading…';
+        missing = LOADING;
       }
     }
     return { id, detail, missing };
@@ -110,6 +109,7 @@ export function RunComparePage() {
       {ids.length > 0 && (
         <>
           <Settings columns={columns} />
+          <Simulator columns={columns} />
           <Figures columns={columns} />
           <QualityCharts runs={columns} />
         </>
@@ -166,12 +166,6 @@ function standing(column: Compared): string {
   }
 }
 
-function versionText(detail: BotRunDetail): string {
-  const manifest = detail.run.manifest;
-  if (manifest === null) return 'Not reported';
-  return manifest.reports > 1 ? `${manifest.version} · changed during the run` : manifest.version;
-}
-
 type Row = { label: string; value: (detail: BotRunDetail) => ReactNode };
 
 const SETTINGS: readonly Row[] = [
@@ -191,7 +185,7 @@ const SETTINGS: readonly Row[] = [
   { label: 'Largest order', value: (detail) => `${groupInteger(detail.run.config.maxOrderQuantity)} shares` },
   { label: 'Largest position', value: (detail) => `${groupInteger(detail.run.config.maxPosition)} shares` },
   { label: 'Instruments', value: (detail) => detail.run.config.instruments.map((each) => each.symbol).join(', ') },
-  { label: 'Simulator version', value: versionText },
+  { label: 'Simulator version', value: (detail) => simulatorText(detail.run.manifest) },
   {
     label: 'Command sequences',
     value: ({ run }) => `${run.window.startSequence} to ${run.window.endSequence ?? 'not ended'}`,
@@ -230,6 +224,44 @@ function Settings({ columns }: { columns: readonly Compared[] }) {
       </p>
     </section>
   );
+}
+
+/**
+ * What each run's simulator reported when its worker took the run, side by side: two runs on different code or
+ * defaults then look different, and the settings that differ say so.
+ */
+function Simulator({ columns }: { columns: readonly Compared[] }) {
+  const panel = useKeyboardScroll<HTMLElement>();
+  const manifests = columns.map((column) => (column.detail === undefined ? undefined : column.detail.run.manifest));
+  const loading = columns.some((column) => column.detail === undefined && column.missing === LOADING);
+  const reported = manifests.filter((manifest) => manifest != null).length;
+  const differing = differingSettings(manifests);
+  const verdict = loading ? '' : simulatorVerdict(reported, differing);
+  return (
+    <section ref={panel} className="panel" aria-labelledby="compare-simulator-title">
+      <h2 id="compare-simulator-title">Simulator</h2>
+      <p className="muted">
+        What each run&apos;s worker reported when it took the run: its version, the runtime its decisions depend on and
+        its strategies&apos; settings. {verdict}
+      </p>
+      {reported > 0 && (
+        <SimulatorSettings
+          labelledBy="compare-simulator-title"
+          head={<RunHeaders columns={columns} corner="Setting" />}
+          manifests={manifests}
+        />
+      )}
+    </section>
+  );
+}
+
+/** What the Simulator panel concludes, once every run is in: never more than the runs that reported can show. */
+function simulatorVerdict(reported: number, differing: number): string {
+  if (reported === 0) return 'No run reported its simulator.';
+  if (reported === 1) return 'Only one run reported its simulator, so there is nothing to compare it with.';
+  if (differing === 0) return 'Every setting is the same in each run that reported.';
+  const count = `${groupInteger(differing)} ${differing === 1 ? 'setting differs' : 'settings differ'}`;
+  return `${count}, marked Differs: a difference in the figures may come from them rather than from the bots.`;
 }
 
 /** What a column shows in place of a figure it doesn't have. */
