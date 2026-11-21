@@ -207,6 +207,14 @@ describe('the first-login tour', () => {
     openAt('/operator');
     expect(await screen.findByText(TOURS.OPERATOR.welcome.body)).toBeInTheDocument();
   });
+
+  it('waits for the operator screen rather than showing over the run comparison, which has none of its parts', async () => {
+    signedIn('operator', ['OPERATOR']).on('GET /api/v1/me/tour', { status: 200, json: { seenVersion: 0 } });
+    openAt('/operator/runs/compare');
+    expect(await screen.findByRole('heading', { name: 'Compare bot runs' })).toBeInTheDocument();
+    // Long enough for the seen version to arrive and a due tour to open, were it going to.
+    await expect(screen.findByText(TOURS.OPERATOR.welcome.body, undefined, { timeout: 800 })).rejects.toThrow();
+  });
 });
 
 describe('the Help menu', () => {
