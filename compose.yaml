@@ -224,6 +224,9 @@ services:
     profiles: [full]
     build:
       context: ./simulator
+      # The commit the worker reports with each run; the compatibility gate sets it.
+      args:
+        MSE_SIMULATOR_REVISION: ${MSE_SIMULATOR_REVISION:-}
     restart: unless-stopped
     # After the demo seed has finished (at once when seeding is off): `up --wait` then counts its exit as done.
     depends_on:
@@ -251,6 +254,8 @@ services:
     profiles: [full]
     build:
       context: ./simulator
+      args:
+        MSE_SIMULATOR_REVISION: ${MSE_SIMULATOR_REVISION:-}
     restart: "no"
     depends_on:
       execution-service:

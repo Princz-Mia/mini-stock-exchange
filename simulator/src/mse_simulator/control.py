@@ -2,6 +2,7 @@
 lease."""
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -137,10 +138,11 @@ class ControlClient:
         in_flight: int,
         stop_failures: int,
         stopped: bool = False,
+        manifest: Mapping[str, Any] | None = None,
     ) -> Beat | None:
         """None when the answer says nothing either way (a transport error or a server error), so
-        the caller tries again with the same cumulative totals."""
-        body = {
+        the caller tries again with the same cumulative totals. A manifest goes only if given."""
+        body: dict[str, Any] = {
             "runId": str(run_id),
             "workerId": worker_id,
             "placed": totals.placed,
@@ -151,6 +153,8 @@ class ControlClient:
             "stopFailures": stop_failures,
             "stopped": stopped,
         }
+        if manifest is not None:
+            body["manifest"] = manifest
         try:
             response = await self._http.post(
                 f"{self._base}/internal/simulator/heartbeat", json=body, headers=self._headers
