@@ -454,6 +454,28 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/bot-runs/{runId}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * One bot run, with its figures once it is finished.
+         * @description Operator only. figures is null until the run is finished and its figures are computed (within a few
+         *     seconds of its end), and stays null for a run recorded before windows were kept. Figures are computed once,
+         *     from the run's window, and never change. Amounts are decimals with two places.
+         */
+        readonly get: operations["getBotRun"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/api/v1/admin/bot-runs/{runId}/stop": {
         readonly parameters: {
             readonly query?: never;
@@ -1265,6 +1287,70 @@ export interface components {
                 readonly endSequence: components["schemas"]["Sequence"] | null;
                 /** @enum {string|null} */
                 readonly endedBy: "WORKER" | "NEXT_START" | "NOT_KEPT" | null;
+            };
+        };
+        /** @description A price at an edge of the run, and where it came from. */
+        readonly BotRunMark: {
+            readonly price: components["schemas"]["Price"];
+            /** @enum {string} */
+            readonly source: "LAST_TRADE" | "REFERENCE";
+        };
+        readonly BotRunDetail: {
+            readonly run: components["schemas"]["BotRun"];
+            readonly figures: null | {
+                readonly computedAt: components["schemas"]["Timestamp"];
+                /**
+                 * @description Per instrument the run traded: every trade in its window by anyone, people included, and the mark
+                 *     at each edge (the newest trade's price, or the reference price before any trade).
+                 */
+                readonly instruments: readonly {
+                    readonly instrumentId: components["schemas"]["Uuid"];
+                    readonly symbol: string;
+                    /** Format: int64 */
+                    readonly trades: number;
+                    /** Format: int64 */
+                    readonly volume: number;
+                    readonly notional: components["schemas"]["Money"];
+                    readonly startMark: components["schemas"]["BotRunMark"];
+                    readonly endMark: components["schemas"]["BotRunMark"];
+                }[];
+                /**
+                 * @description Per strategy, over the run's bots. placements and cancels count the commands answered in the
+                 *     window, refusals included; refusals are counted again by the code their answer carried (refusals
+                 *     before the exchange records anything, such as rate limits, aren't counted). placedQuantity is what
+                 *     the orders accepted in the window in the run's instruments asked for, filledQuantity what of it
+                 *     filled in the window. trades, volume and notional are the strategy's side of each trade (a trade
+                 *     between two of its bots counts twice). pnl is an estimate: cashChange plus holdingsEnd minus
+                 *     holdingsStart, the run's instruments valued at the marks, reserved amounts counted once.
+                 */
+                readonly strategies: readonly {
+                    /** @enum {string} */
+                    readonly strategy: "MARKET_MAKER" | "NOISE" | "MOMENTUM";
+                    readonly bots: number;
+                    /** Format: int64 */
+                    readonly placements: number;
+                    /** Format: int64 */
+                    readonly cancels: number;
+                    /** @description Empty when none of the strategy's commands were refused. */
+                    readonly refusals: readonly {
+                        readonly code: string;
+                        /** Format: int64 */
+                        readonly commands: number;
+                    }[];
+                    /** Format: int64 */
+                    readonly placedQuantity: number;
+                    /** Format: int64 */
+                    readonly filledQuantity: number;
+                    /** Format: int64 */
+                    readonly trades: number;
+                    /** Format: int64 */
+                    readonly volume: number;
+                    readonly notional: components["schemas"]["Money"];
+                    readonly cashChange: components["schemas"]["SignedAmount"];
+                    readonly holdingsStart: components["schemas"]["Money"];
+                    readonly holdingsEnd: components["schemas"]["Money"];
+                    readonly pnl: components["schemas"]["SignedAmount"];
+                }[];
             };
         };
         readonly SimulatorAssignment: {
@@ -2955,6 +3041,52 @@ export interface operations {
             };
             readonly 503: components["responses"]["Unavailable"];
             readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly getBotRun: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly runId: components["schemas"]["Uuid"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The run and its figures. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BotRunDetail"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description RUN_NOT_FOUND. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
         };
     };
     readonly stopBotRun: {
