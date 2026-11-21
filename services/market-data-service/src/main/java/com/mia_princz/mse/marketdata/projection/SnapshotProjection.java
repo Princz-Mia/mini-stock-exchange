@@ -31,6 +31,9 @@ import com.mia_princz.mse.contracts.events.WireEvents;
  * that says the instrument was removed deletes both rows under the same rule, and after a removal it is the event id,
  * not the sequence, that stops a redelivered add. Each event id is recorded in the same transaction. Callers run each
  * batch in one transaction.
+ * <p>
+ * Every new snapshot, older or not, is also a sample of its instrument's minute ({@link SpreadMinutes}); a removal is
+ * none, its book being empty.
  */
 public final class SnapshotProjection {
 
@@ -76,8 +79,8 @@ public final class SnapshotProjection {
 
 	/**
 	 * A poll of snapshots in a few statements: the new event ids marked at once, then for each instrument only the
-	 * newest new snapshot written, since each replaces the last only when newer. The projection ends as applying them
-	 * one by one would leave it. Empty when the poll holds a removal: a removal applies even when seen before and its
+	 * newest new snapshot written, since each replaces the last only when newer, and every new one added to its minute
+	 * in one statement. The projection ends as applying them one by one would leave it. Empty when the poll holds a removal: a removal applies even when seen before and its
 	 * place in the order matters, so such a poll is applied one by one.
 	 * <p>
 	 * One by one, every new snapshot is offered to both tables, and PostgreSQL checks a row's constraints before it
@@ -136,6 +139,8 @@ public final class SnapshotProjection {
 				.params(marketRows(offered, Map.of()))
 				.update();
 		}
+		// Every new snapshot is a sample of its minute, the older ones too: each was the book at its sequence.
+		SpreadMinutes.write(jdbc, fresh);
 		int counted = 0;
 		Map<UUID, Long> highest = new LinkedHashMap<>();
 		for (MarketSnapshot snapshot : fresh) {
@@ -286,6 +291,7 @@ public final class SnapshotProjection {
 					last == null ? null : last.getPriceCents(), snapshot.getLastTradeSequence(),
 					snapshot.getSourceCommandSequence(), Timestamp.from(snapshot.getGeneratedAt()))
 			.update();
+		SpreadMinutes.write(jdbc, List.of(snapshot));
 		return replaced == 1;
 	}
 

@@ -5,7 +5,8 @@
 # Execution is the only authority, so after its database goes back to the backup, anything newer elsewhere would
 # describe trades that no longer happened. In order:
 #   1. stop the services that write or derive: simulator, Flink, Market Data, Execution;
-#   2. restore execution_db from the dump, in one transaction;
+#   2. restore execution_db from the dump into an empty schema, in one transaction, so tables newer than the backup
+#      can't block it and Execution migrates the result forward when it starts;
 #   3. mark every outbox event unpublished again, so the relay republishes the whole history in order;
 #   4. empty Market Data's projections and checkpoints, and delete Kafka's and Flink's volumes;
 #   5. recreate the topics, and start again whatever was running before.
@@ -46,13 +47,19 @@ Invoke-Compose @('stop', 'simulator', 'flink-taskmanager', 'flink-jobmanager', '
 
 'Restoring execution_db'
 Invoke-Compose @('cp', $dump, 'postgres:/tmp/restore.dump') | Out-Null
-Invoke-Compose @('exec', '-T', 'postgres', 'pg_restore', '-U', 'postgres', '-d', 'execution_db', '--clean', '--if-exists', '--single-transaction', '--exit-on-error', '/tmp/restore.dump')
-Invoke-Compose @('exec', '-T', 'postgres', 'rm', '-f', '/tmp/restore.dump')
+# The dump as SQL first, so a damaged file fails before anything changes; then the schema emptied and recreated as
+# the init script made it, and the dump applied, in one transaction: all of it, or nothing.
+Invoke-Compose @('exec', '-T', 'postgres', 'pg_restore', '-f', '/tmp/restore.sql', '/tmp/restore.dump')
+Invoke-Compose @('exec', '-T', 'postgres', 'psql', '-U', 'postgres', '-d', 'execution_db', '-v', 'ON_ERROR_STOP=1', '-q', '--single-transaction',
+    '-c', 'DROP SCHEMA public CASCADE', '-c', 'CREATE SCHEMA public AUTHORIZATION execution_owner',
+    '-c', 'REVOKE ALL ON SCHEMA public FROM PUBLIC', '-c', 'GRANT USAGE ON SCHEMA public TO execution_app',
+    '-f', '/tmp/restore.sql')
+Invoke-Compose @('exec', '-T', 'postgres', 'rm', '-f', '/tmp/restore.dump', '/tmp/restore.sql')
 # Publication is one-way for the services; only this maintenance step, as the database superuser, resets it.
 Invoke-Sql 'execution_db' 'BEGIN; ALTER TABLE outbox DISABLE TRIGGER outbox_published_once; UPDATE outbox SET published_at = NULL; ALTER TABLE outbox ENABLE TRIGGER outbox_published_once; COMMIT;'
 
 'Emptying Market Data, Kafka and Flink'
-Invoke-Sql 'market_data_db' 'TRUNCATE instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, instrument_session, session_minute, candle_1m'
+Invoke-Sql 'market_data_db' 'TRUNCATE instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, instrument_session, session_minute, spread_minute, candle_1m'
 Invoke-Compose @('rm', '-sf', 'kafka', 'flink-jobmanager', 'flink-taskmanager') | Out-Null
 & docker volume rm -f "${name}_kafka-data" "${name}_flink-checkpoints" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'removing the Kafka and Flink volumes failed' }

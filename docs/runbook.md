@@ -28,7 +28,7 @@ That one database is all a restore needs. `backups/` is ignored by Git, and hold
 
 **Restore** puts Execution back exactly as it was at the backup and rebuilds everything derived from it. Anything newer would describe trades that, after the restore, never happened. It:
 1. stops the simulator, Flink, Market Data and Execution;
-2. restores `execution_db` in one transaction;
+2. restores `execution_db` into an emptied schema, in one transaction: all of it, or nothing;
 3. marks every outbox event unpublished again;
 4. empties Market Data's projections and checkpoints, and deletes Kafka's and Flink's volumes;
 5. recreates the topics, and starts again whatever was running.
@@ -38,7 +38,7 @@ Execution then republishes its whole history in order. Market Data and the candl
 After a restore:
 - **Trades and orders after the backup are gone.** So are sessions started since, so people sign in again, and trader logins added since, which the operator adds again.
 - **A bot token revoked after the backup works again.** Revoke it again from the operator screen.
-- **A backup from an older version** is migrated forward when Execution starts. A backup from a newer version holds schema changes this code doesn't know, so restore it only with code at least as new as the backup's `commit`.
+- **A backup from an older version** is restored as it was, tables added since included, and migrated forward when Execution starts. A backup from a newer version holds schema changes this code doesn't know, so restore it only with code at least as new as the backup's `commit`.
 
 ## Execution won't become healthy
 
@@ -106,11 +106,13 @@ Market Data's database is derived from Kafka. To rebuild it, for example after a
 1. `docker compose stop market-data-service`.
 2. Empty its projections:
    ```bash
-   docker compose exec postgres psql -U postgres -d market_data_db -c "TRUNCATE instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, instrument_session, session_minute, candle_1m"
+   docker compose exec postgres psql -U postgres -d market_data_db -c "TRUNCATE instrument_projection, market_snapshot, processed_event, projection_checkpoint, public_trade, instrument_session, session_minute, spread_minute, candle_1m"
    ```
 3. `docker compose up -d --wait market-data-service`.
 
 It reads every topic from the beginning, and reports each feed live once caught up. It refuses to look live before then.
+
+One thing a rebuild can't bring back: each instrument's book minute by minute (`spread_minute`, behind market quality over a bot run's window). It comes from the market snapshots, and that topic is compacted, so a rebuild sees only the snapshots compaction has kept, at least each instrument's newest. The minutes before them stay empty. The same happens to snapshots compacted while the market feed was paused or Market Data was down, which under heavy bot load can take less than an hour: those minutes are missing, and market quality shows them held from the minute before, with nothing else to say so. A restore republishes every snapshot from Execution, so it rebuilds them all.
 
 **A feed paused on a record it can't use.** Look for `Feed paused: Unusable record at …` in its log, which names the record's topic, partition and offset. The feed stops there instead of skipping it, and its earlier records stay committed. Fix the cause, a bad deployment or a schema mismatch, then restart Market Data, which reads that record again.
 

@@ -15,6 +15,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.session.FindByIndexNameSessionRepository;
@@ -35,6 +36,14 @@ import com.mia_princz.mse.execution.identity.PasswordRules;
 @RestController
 @RequestMapping("/api/v1")
 class PasswordController {
+
+	/**
+	 * A login that trades and doesn't operate. The operator also trades, but its password comes from configuration and
+	 * would drift from it; the route's role check alone would let its session through.
+	 */
+	private static final String TRADER_ONLY = """
+			EXISTS (SELECT 1 FROM user_role r WHERE r.user_id = app_user.id AND r.role = 'TRADER')
+			    AND NOT EXISTS (SELECT 1 FROM user_role r WHERE r.user_id = app_user.id AND r.role = 'OPERATOR')""";
 
 	private static final Logger log = LoggerFactory.getLogger(PasswordController.class);
 
@@ -70,6 +79,10 @@ class PasswordController {
 	@PostMapping("/me/password")
 	ResponseEntity<?> change(@RequestBody PasswordChange change, Authentication authentication,
 			HttpServletRequest request) {
+		// The operator also trades, but its password comes from configuration: refused as an operator-only session is.
+		if (authentication.getAuthorities().stream().anyMatch((role) -> "ROLE_OPERATOR".equals(role.getAuthority()))) {
+			throw new AccessDeniedException("The operator's password comes from configuration");
+		}
 		String username = authentication.getName();
 		List<FieldError> errors = new ArrayList<>();
 		if (change.currentPassword() == null || change.currentPassword().isEmpty()) {
@@ -98,7 +111,7 @@ class PasswordController {
 				.header(HttpHeaders.RETRY_AFTER, Long.toString(seconds))
 				.body(problem);
 		}
-		String hash = jdbc.sql("SELECT password_hash FROM app_user WHERE username = ? AND role = 'TRADER'")
+		String hash = jdbc.sql("SELECT password_hash FROM app_user WHERE username = ? AND " + TRADER_ONLY)
 			.param(username)
 			.query(String.class)
 			.optional()
@@ -112,7 +125,7 @@ class PasswordController {
 		// session signed in with the old password on its next request.
 		Optional<Integer> version = jdbc.sql("""
 				UPDATE app_user SET password_hash = ?, password_version = password_version + 1
-				WHERE username = ? AND role = 'TRADER' AND password_hash = ? RETURNING password_version""")
+				WHERE username = ? AND password_hash = ? AND\s""" + TRADER_ONLY + " RETURNING password_version")
 			.params(passwords.encode(change.newPassword()), username, hash)
 			.query(Integer.class)
 			.optional();

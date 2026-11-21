@@ -227,7 +227,7 @@ class SnapshotProjectionIT {
 	void theRuntimeRoleDeletesOnlyInstrumentsAndTheirMarkets() {
 		// The privilege is checked before any row is read, so WHERE false deletes nothing even if it were granted.
 		for (String table : List.of("processed_event", "projection_checkpoint", "public_trade", "instrument_session",
-				"session_minute")) {
+				"session_minute", "spread_minute")) {
 			assertThatThrownBy(() -> jdbc.update("DELETE FROM " + table + " WHERE false"))
 				.as(table)
 				.satisfies((thrown) -> assertThat(

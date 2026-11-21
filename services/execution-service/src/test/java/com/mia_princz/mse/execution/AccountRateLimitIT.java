@@ -240,8 +240,7 @@ class AccountRateLimitIT {
 					INSERT INTO api_token (id, account_id, account_kind, token_hash, scope, revoked_at)
 					VALUES (?, ?, 'BOT', ?, 'TRADE', NULL)""", UUID.randomUUID(), bot, TOKENS.get(i).hash());
 		}
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, 'other', ?, 'TRADER')",
-				UUID.randomUUID(), TestBrowser.passwordHash(PASSWORD));
+		TestUsers.insert(jdbc, UUID.randomUUID(), "other", TestBrowser.passwordHash(PASSWORD), "TRADER");
 		for (String username : List.of("trader", "other")) {
 			UUID account = UUID.randomUUID();
 			jdbc.update("""

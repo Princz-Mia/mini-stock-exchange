@@ -142,7 +142,8 @@ paths:
       operationId: changePassword
       summary: A signed-in trader changes their own password, confirming the current one.
       description: |
-        Traders only; the operator's password comes from configuration. The new password follows the same rules as
+        Traders only, and not the operator, which also trades: its password comes from configuration. The new
+        password follows the same rules as
         one the operator sets: 12 to 64 characters and at most 72 bytes, not only spaces, not the username, and not
         the current password. A wrong current password counts against the sign-in limit, and once the limit is
         reached the change is refused before any password is checked. Once changed, the trader's other sessions end
@@ -163,7 +164,7 @@ paths:
         '401':
           description: No session. No body.
         '403':
-          description: Not a trader, or a missing or invalid CSRF token. No body.
+          description: Not a trader, the operator, or a missing or invalid CSRF token. No body.
         '429':
           description: LOGIN_RATE_LIMITED, with Retry-After.
           headers:
@@ -270,7 +271,7 @@ paths:
         '401':
           description: No session. No body.
         '403':
-          description: Not a trader.
+          $ref: '#/components/responses/NotTrader'
         '404': { $ref: '#/components/responses/Problem' }
 
   /api/v1/orders/{orderId}/cancel:
@@ -335,7 +336,7 @@ paths:
         '401':
           description: No session. No body.
         '403':
-          description: Not a trader.
+          $ref: '#/components/responses/NotTrader'
         '404': { $ref: '#/components/responses/Problem' }
         '409': { $ref: '#/components/responses/Problem' }
         '422': { $ref: '#/components/responses/Problem' }
@@ -594,9 +595,10 @@ paths:
     get:
       tags: [execution]
       operationId: listTraders
-      summary: Every trader login, oldest first unless order=newest. Operator only.
+      summary: Every login that trades, oldest first unless order=newest. Operator only.
       description: |
-        Wherever each login came from: added during setup or seeded from configuration. With funded=false, only the
+        Wherever each login came from: added during setup or seeded from configuration. The operator also trades,
+        so it is listed too and setup can fund it. With funded=false, only the
         logins still without an account in this market, which setup can fund; with funded=true, only those with one.
         A cursor keeps the filter it was issued with.
       parameters:
@@ -847,6 +849,37 @@ paths:
           $ref: '#/components/responses/Unavailable'
         '504':
           $ref: '#/components/responses/OutcomeUnknown'
+
+  /api/v1/admin/bot-runs/{runId}:
+    get:
+      tags: [execution]
+      operationId: getBotRun
+      summary: One bot run, with its figures once it is finished.
+      description: |
+        Operator only. figures is null until the run is finished and its figures are computed (within a few
+        seconds of its end), and stays null for a run recorded before windows were kept. Figures are computed once,
+        from the run's window, and never change. Amounts are decimals with two places.
+      parameters:
+        - name: runId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Uuid' }
+      responses:
+        '200':
+          description: The run and its figures.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotRunDetail' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator. No body.
+        '404':
+          description: RUN_NOT_FOUND.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
 
   /api/v1/admin/bot-runs/{runId}/stop:
     post:
@@ -1195,6 +1228,40 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Candles' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+
+  /api/v1/instruments/{instrumentId}/market-quality:
+    get:
+      tags: [market-data]
+      operationId: getMarketQuality
+      summary: The instrument's book minute by minute over a window of command sequences, with its spread and volatility.
+      description: |
+        Public facts only, so a bot run's window can be measured from its start and end sequences. The minutes are
+        those whose snapshots meet fromSequence..toSequence (both inclusive), from the first to the last, at most
+        1,440; a minute at either edge may also hold snapshots outside the window. A minute's book is its last
+        snapshot's, and a minute without one holds the minute before (changed false). The average spread is the mean
+        of the minutes' best ask minus best bid, over minutes with both sides. Volatility is the sample standard
+        deviation of the one-minute returns of the last price (price / previous price - 1, a held price counting as
+        0), not annualised. Both are null with nothing to measure. The history comes from the market snapshots: a
+        rebuild from Kafka keeps only what the compacted topic still holds, a restore all of it.
+      parameters:
+        - $ref: '#/components/parameters/InstrumentId'
+        - name: fromSequence
+          in: query
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: toSequence
+          in: query
+          required: true
+          description: Inclusive; not below fromSequence.
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        '200':
+          description: The minutes and their figures.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MarketQuality' }
         '400': { $ref: '#/components/responses/Problem' }
         '404': { $ref: '#/components/responses/Problem' }
 
@@ -2164,6 +2231,86 @@ components:
         strategies: { $ref: '#/components/schemas/ManifestStrategies' }
         defaults: { $ref: '#/components/schemas/ManifestSettings' }
 
+    BotRunMark:
+      type: object
+      additionalProperties: false
+      required: [price, source]
+      description: A price at an edge of the run, and where it came from.
+      properties:
+        price: { $ref: '#/components/schemas/Price' }
+        source: { type: string, enum: [LAST_TRADE, REFERENCE] }
+
+    BotRunDetail:
+      type: object
+      additionalProperties: false
+      required: [run, figures]
+      properties:
+        run: { $ref: '#/components/schemas/BotRun' }
+        figures:
+          oneOf:
+            - type: 'null'
+            - type: object
+              additionalProperties: false
+              required: [computedAt, instruments, strategies]
+              properties:
+                computedAt: { $ref: '#/components/schemas/Timestamp' }
+                instruments:
+                  type: array
+                  description: |
+                    Per instrument the run traded: every trade in its window by anyone, people included, and the mark
+                    at each edge (the newest trade's price, or the reference price before any trade).
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [instrumentId, symbol, trades, volume, notional, startMark, endMark]
+                    properties:
+                      instrumentId: { $ref: '#/components/schemas/Uuid' }
+                      symbol: { type: string }
+                      trades: { type: integer, format: int64, minimum: 0 }
+                      volume: { type: integer, format: int64, minimum: 0 }
+                      notional: { $ref: '#/components/schemas/Money' }
+                      startMark: { $ref: '#/components/schemas/BotRunMark' }
+                      endMark: { $ref: '#/components/schemas/BotRunMark' }
+                strategies:
+                  type: array
+                  description: |
+                    Per strategy, over the run's bots. placements and cancels count the commands answered in the
+                    window, refusals included; refusals are counted again by the code their answer carried (refusals
+                    before the exchange records anything, such as rate limits, aren't counted). placedQuantity is what
+                    the orders accepted in the window in the run's instruments asked for, filledQuantity what of it
+                    filled in the window. trades, volume and notional are the strategy's side of each trade (a trade
+                    between two of its bots counts twice). pnl is an estimate: cashChange plus holdingsEnd minus
+                    holdingsStart, the run's instruments valued at the marks, reserved amounts counted once.
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [strategy, bots, placements, cancels, refusals, placedQuantity, filledQuantity, trades,
+                      volume, notional, cashChange, holdingsStart, holdingsEnd, pnl]
+                    properties:
+                      strategy: { type: string, enum: [MARKET_MAKER, NOISE, MOMENTUM] }
+                      bots: { type: integer, minimum: 1 }
+                      placements: { type: integer, format: int64, minimum: 0 }
+                      cancels: { type: integer, format: int64, minimum: 0 }
+                      refusals:
+                        type: array
+                        description: Empty when none of the strategy's commands were refused.
+                        items:
+                          type: object
+                          additionalProperties: false
+                          required: [code, commands]
+                          properties:
+                            code: { type: string }
+                            commands: { type: integer, format: int64, minimum: 1 }
+                      placedQuantity: { type: integer, format: int64, minimum: 0 }
+                      filledQuantity: { type: integer, format: int64, minimum: 0 }
+                      trades: { type: integer, format: int64, minimum: 0 }
+                      volume: { type: integer, format: int64, minimum: 0 }
+                      notional: { $ref: '#/components/schemas/Money' }
+                      cashChange: { $ref: '#/components/schemas/SignedAmount' }
+                      holdingsStart: { $ref: '#/components/schemas/Money' }
+                      holdingsEnd: { $ref: '#/components/schemas/Money' }
+                      pnl: { $ref: '#/components/schemas/SignedAmount' }
+
     SimulatorAssignment:
       type: object
       additionalProperties: false
@@ -2538,6 +2685,50 @@ components:
           maxItems: 1440
           items: { $ref: '#/components/schemas/Candle' }
         freshness: { $ref: '#/components/schemas/CandleFreshness' }
+    QualityMinute:
+      type: object
+      additionalProperties: false
+      description: A minute's book, its last snapshot's; changed is false when it holds the minute before.
+      required: [minute, bestBid, bestAsk, spread, lastPrice, changed]
+      properties:
+        minute: { $ref: '#/components/schemas/Timestamp' }
+        bestBid:
+          description: Null while no one bids.
+          oneOf: [{ $ref: '#/components/schemas/Price' }, { type: 'null' }]
+        bestAsk:
+          description: Null while no one asks.
+          oneOf: [{ $ref: '#/components/schemas/Price' }, { type: 'null' }]
+        spread:
+          description: Best ask minus best bid; null unless both sides are there.
+          oneOf: [{ $ref: '#/components/schemas/Price' }, { type: 'null' }]
+        lastPrice:
+          description: Null before the first trade.
+          oneOf: [{ $ref: '#/components/schemas/Price' }, { type: 'null' }]
+        changed: { type: boolean }
+    MarketQuality:
+      type: object
+      additionalProperties: false
+      required: [instrumentId, fromSequence, toSequence, minutes, averageSpread, twoSidedMinutes, volatility, returns,
+        feed]
+      properties:
+        instrumentId: { $ref: '#/components/schemas/Uuid' }
+        fromSequence: { $ref: '#/components/schemas/Sequence' }
+        toSequence: { $ref: '#/components/schemas/Sequence' }
+        minutes:
+          type: array
+          maxItems: 1440
+          items: { $ref: '#/components/schemas/QualityMinute' }
+        averageSpread:
+          description: A price with four places, rounded half-even; null without a minute with both sides.
+          type: [string, 'null']
+          pattern: '^(0|[1-9][0-9]{0,18})\.[0-9]{4}$'
+        twoSidedMinutes: { type: integer, minimum: 0, description: The minutes the average spread is taken over. }
+        volatility:
+          description: A fraction with six places, rounded half-even; null with fewer than two returns.
+          type: [string, 'null']
+          pattern: '^(0|[1-9][0-9]*)\.[0-9]{6}$'
+        returns: { type: integer, minimum: 0, description: The one-minute returns the volatility is taken over. }
+        feed: { $ref: '#/components/schemas/Feed' }
     ExportedTrade:
       type: object
       additionalProperties: false

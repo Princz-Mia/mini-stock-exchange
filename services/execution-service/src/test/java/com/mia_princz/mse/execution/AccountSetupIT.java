@@ -57,8 +57,7 @@ class AccountSetupIT {
 		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
 		String nova = instrument(operator, "NOVA", "100.00");
 		String orbt = instrument(operator, "ORBT", "50.00");
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, 'other', ?, 'TRADER')",
-				UUID.randomUUID(), TestBrowser.passwordHash(PASSWORD));
+		TestUsers.insert(jdbc, UUID.randomUUID(), "other", TestBrowser.passwordHash(PASSWORD), "TRADER");
 
 		// A trader gets cash and shares in one balanced genesis batch, recorded as their initial allocation.
 		UUID traderKey = UUID.randomUUID();
@@ -111,9 +110,11 @@ class AccountSetupIT {
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM account WHERE display_name = 'other'", Long.class))
 			.isZero();
 
-		// Only traders get accounts; that is checked before the writer, so nothing is committed or audited.
+		// Only logins that trade get accounts; that is checked before the writer, so nothing is committed or audited. The
+		// operator also trades, so it may fund its own (UserRolesIT); a login that only operates may not be funded.
 		assertThat(code(provision(operator, UUID.randomUUID(), "nobody", "1.00"), 422)).isEqualTo("UNKNOWN_TRADER");
-		assertThat(code(provision(operator, UUID.randomUUID(), "operator", "1.00"), 422)).isEqualTo("UNKNOWN_TRADER");
+		TestUsers.insert(jdbc, UUID.randomUUID(), "watcher", TestBrowser.passwordHash(PASSWORD), "OPERATOR");
+		assertThat(code(provision(operator, UUID.randomUUID(), "watcher", "1.00"), 422)).isEqualTo("UNKNOWN_TRADER");
 
 		// Invalid endowments are refused before the writer, with every problem listed.
 		assertThat(fields(provision(operator, UUID.randomUUID(), "other", "-1.00", holding(nova, 1),
@@ -178,8 +179,7 @@ class AccountSetupIT {
 		engine.start();
 		UUID lateKey = UUID.randomUUID();
 		assertThat(code(provision(operator, lateKey, "nobody-else", "1.00"), 422)).isEqualTo("UNKNOWN_TRADER");
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, 'late', ?, 'TRADER')",
-				UUID.randomUUID(), TestBrowser.passwordHash(PASSWORD));
+		TestUsers.insert(jdbc, UUID.randomUUID(), "late", TestBrowser.passwordHash(PASSWORD), "TRADER");
 		assertThat(code(provision(operator, lateKey, "late", "1.00"), 409)).isEqualTo("MARKET_NOT_IN_SETUP");
 
 		List<String> audit = jdbc.queryForList("""

@@ -391,16 +391,23 @@ class OrderApiIT {
 	@Test
 	void ordersNeedATraderSessionAndACsrfToken() throws Exception {
 		TestBrowser anonymous = new TestBrowser(port);
-		TestBrowser operator = TestBrowser.loggedIn(port, "operator", OPERATOR_PASSWORD);
+		TestUsers.insert(jdbc, UUID.randomUUID(), "watcher", TestBrowser.passwordHash(OTHER_PASSWORD), "OPERATOR");
+		TestBrowser watcher = TestBrowser.loggedIn(port, "watcher", OTHER_PASSWORD);
 
 		assertThat(anonymous.get("/api/v1/orders/" + UUID.randomUUID()).statusCode()).isEqualTo(401);
-		// An empty body means the filter chain refused it; the controller would answer with a problem.
-		HttpResponse<String> operatorRead = operator.get("/api/v1/commands/" + UUID.randomUUID());
-		assertThat(operatorRead.statusCode()).isEqualTo(403);
-		assertThat(operatorRead.body()).as("refused by the role rule").isEmpty();
+		// A login that only operates. An empty body means the filter chain refused it; the controller would answer
+		// with a problem.
+		HttpResponse<String> watcherRead = watcher.get("/api/v1/commands/" + UUID.randomUUID());
+		assertThat(watcherRead.statusCode()).isEqualTo(403);
+		assertThat(watcherRead.body()).as("refused by the role rule").isEmpty();
+		HttpResponse<String> watcherPlace = place(watcher, UUID.randomUUID(), limit("BUY", 1, "93.00"));
+		assertThat(watcherPlace.statusCode()).isEqualTo(403);
+		assertThat(watcherPlace.body()).as("refused by the role rule").isEmpty();
+		// The operator also trades, so it gets past the role rule, and is refused for having no account yet.
+		TestBrowser operator = TestBrowser.loggedIn(port, "operator", OPERATOR_PASSWORD);
 		HttpResponse<String> operatorPlace = place(operator, UUID.randomUUID(), limit("BUY", 1, "93.00"));
 		assertThat(operatorPlace.statusCode()).isEqualTo(403);
-		assertThat(operatorPlace.body()).as("refused by the role rule").isEmpty();
+		assertThat(code(operatorPlace)).isEqualTo("NO_TRADING_ACCOUNT");
 
 		trader.csrfToken = null;
 		assertThat(place(trader, UUID.randomUUID(), limit("BUY", 1, "93.00")).statusCode()).isEqualTo(403);
@@ -432,8 +439,7 @@ class OrderApiIT {
 			instruments.add(id);
 		}
 		for (String username : List.of("other", "unfunded")) {
-			jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, ?, 'TRADER')",
-					UUID.randomUUID(), username, TestBrowser.passwordHash(OTHER_PASSWORD));
+			TestUsers.insert(jdbc, UUID.randomUUID(), username, TestBrowser.passwordHash(OTHER_PASSWORD), "TRADER");
 		}
 		for (String username : List.of("trader", "other")) {
 			fund(simulation, issuance, username);

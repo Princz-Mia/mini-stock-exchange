@@ -527,8 +527,9 @@ class PortfolioApiIT {
 		assertThat(trader.get("/api/v1/portfolio/trades?cursor=%25").statusCode()).isEqualTo(400);
 		assertThat(trader.get("/api/v1/orders?order=sideways").statusCode()).isEqualTo(400);
 		assertThat(trader.get("/api/v1/portfolio/trades?order=OLDEST").statusCode()).isEqualTo(400);
-		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
-		assertThat(operator.get("/api/v1/portfolio").statusCode()).isEqualTo(403);
+		// A login that only operates has no portfolio.
+		TestUsers.insert(jdbc, UUID.randomUUID(), "watcher", TestBrowser.passwordHash(PASSWORD), "OPERATOR");
+		assertThat(TestBrowser.loggedIn(port, "watcher", PASSWORD).get("/api/v1/portfolio").statusCode()).isEqualTo(403);
 		assertThat(new TestBrowser(port).get("/api/v1/orders").statusCode()).isEqualTo(401);
 	}
 
@@ -621,8 +622,7 @@ class PortfolioApiIT {
 		UUID batch = UUID.randomUUID();
 		UUID simulation = jdbc.queryForObject("SELECT id FROM simulation", UUID.class);
 		UUID issuance = jdbc.queryForObject("SELECT id FROM account WHERE kind = 'ISSUANCE'", UUID.class);
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, ?, 'TRADER')", user,
-				username, TestBrowser.passwordHash(PASSWORD));
+		TestUsers.insert(jdbc, user, username, TestBrowser.passwordHash(PASSWORD), "TRADER");
 		jdbc.update("""
 				INSERT INTO account (id, simulation_id, kind, display_name, owner_user_id)
 				VALUES (?, ?, 'TRADER', ?, ?)""", account, simulation, username, user);

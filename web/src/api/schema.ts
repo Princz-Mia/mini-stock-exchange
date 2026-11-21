@@ -101,7 +101,8 @@ export interface paths {
         readonly put?: never;
         /**
          * A signed-in trader changes their own password, confirming the current one.
-         * @description Traders only; the operator's password comes from configuration. The new password follows the same rules as
+         * @description Traders only, and not the operator, which also trades: its password comes from configuration. The new
+         *     password follows the same rules as
          *     one the operator sets: 12 to 64 characters and at most 72 bytes, not only spaces, not the username, and not
          *     the current password. A wrong current password counts against the sign-in limit, and once the limit is
          *     reached the change is refused before any password is checked. Once changed, the trader's other sessions end
@@ -341,8 +342,9 @@ export interface paths {
             readonly cookie?: never;
         };
         /**
-         * Every trader login, oldest first unless order=newest. Operator only.
-         * @description Wherever each login came from: added during setup or seeded from configuration. With funded=false, only the
+         * Every login that trades, oldest first unless order=newest. Operator only.
+         * @description Wherever each login came from: added during setup or seeded from configuration. The operator also trades,
+         *     so it is listed too and setup can fund it. With funded=false, only the
          *     logins still without an account in this market, which setup can fund; with funded=true, only those with one.
          *     A cursor keeps the filter it was issued with.
          */
@@ -448,6 +450,28 @@ export interface paths {
          *     instrumentIds the bots trade every listed instrument; without durationMinutes the run lasts until stopped.
          */
         readonly post: operations["startBotRun"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/bot-runs/{runId}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * One bot run, with its figures once it is finished.
+         * @description Operator only. figures is null until the run is finished and its figures are computed (within a few
+         *     seconds of its end), and stays null for a run recorded before windows were kept. Figures are computed once,
+         *     from the run's window, and never change. Amounts are decimals with two places.
+         */
+        readonly get: operations["getBotRun"];
+        readonly put?: never;
+        readonly post?: never;
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -691,6 +715,33 @@ export interface paths {
          *     hours. A minute without trades has no bar. Bars come from the computation epoch this instance serves.
          */
         readonly get: operations["listCandles"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/instruments/{instrumentId}/market-quality": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * The instrument's book minute by minute over a window of command sequences, with its spread and volatility.
+         * @description Public facts only, so a bot run's window can be measured from its start and end sequences. The minutes are
+         *     those whose snapshots meet fromSequence..toSequence (both inclusive), from the first to the last, at most
+         *     1,440; a minute at either edge may also hold snapshots outside the window. A minute's book is its last
+         *     snapshot's, and a minute without one holds the minute before (changed false). The average spread is the mean
+         *     of the minutes' best ask minus best bid, over minutes with both sides. Volatility is the sample standard
+         *     deviation of the one-minute returns of the last price (price / previous price - 1, a held price counting as
+         *     0), not annualised. Both are null with nothing to measure. The history comes from the market snapshots: a
+         *     rebuild from Kafka keeps only what the compacted topic still holds, a restore all of it.
+         */
+        readonly get: operations["getMarketQuality"];
         readonly put?: never;
         readonly post?: never;
         readonly delete?: never;
@@ -1315,6 +1366,70 @@ export interface components {
             readonly strategies: components["schemas"]["ManifestStrategies"];
             readonly defaults: components["schemas"]["ManifestSettings"];
         };
+        /** @description A price at an edge of the run, and where it came from. */
+        readonly BotRunMark: {
+            readonly price: components["schemas"]["Price"];
+            /** @enum {string} */
+            readonly source: "LAST_TRADE" | "REFERENCE";
+        };
+        readonly BotRunDetail: {
+            readonly run: components["schemas"]["BotRun"];
+            readonly figures: null | {
+                readonly computedAt: components["schemas"]["Timestamp"];
+                /**
+                 * @description Per instrument the run traded: every trade in its window by anyone, people included, and the mark
+                 *     at each edge (the newest trade's price, or the reference price before any trade).
+                 */
+                readonly instruments: readonly {
+                    readonly instrumentId: components["schemas"]["Uuid"];
+                    readonly symbol: string;
+                    /** Format: int64 */
+                    readonly trades: number;
+                    /** Format: int64 */
+                    readonly volume: number;
+                    readonly notional: components["schemas"]["Money"];
+                    readonly startMark: components["schemas"]["BotRunMark"];
+                    readonly endMark: components["schemas"]["BotRunMark"];
+                }[];
+                /**
+                 * @description Per strategy, over the run's bots. placements and cancels count the commands answered in the
+                 *     window, refusals included; refusals are counted again by the code their answer carried (refusals
+                 *     before the exchange records anything, such as rate limits, aren't counted). placedQuantity is what
+                 *     the orders accepted in the window in the run's instruments asked for, filledQuantity what of it
+                 *     filled in the window. trades, volume and notional are the strategy's side of each trade (a trade
+                 *     between two of its bots counts twice). pnl is an estimate: cashChange plus holdingsEnd minus
+                 *     holdingsStart, the run's instruments valued at the marks, reserved amounts counted once.
+                 */
+                readonly strategies: readonly {
+                    /** @enum {string} */
+                    readonly strategy: "MARKET_MAKER" | "NOISE" | "MOMENTUM";
+                    readonly bots: number;
+                    /** Format: int64 */
+                    readonly placements: number;
+                    /** Format: int64 */
+                    readonly cancels: number;
+                    /** @description Empty when none of the strategy's commands were refused. */
+                    readonly refusals: readonly {
+                        readonly code: string;
+                        /** Format: int64 */
+                        readonly commands: number;
+                    }[];
+                    /** Format: int64 */
+                    readonly placedQuantity: number;
+                    /** Format: int64 */
+                    readonly filledQuantity: number;
+                    /** Format: int64 */
+                    readonly trades: number;
+                    /** Format: int64 */
+                    readonly volume: number;
+                    readonly notional: components["schemas"]["Money"];
+                    readonly cashChange: components["schemas"]["SignedAmount"];
+                    readonly holdingsStart: components["schemas"]["Money"];
+                    readonly holdingsEnd: components["schemas"]["Money"];
+                    readonly pnl: components["schemas"]["SignedAmount"];
+                }[];
+            };
+        };
         readonly SimulatorAssignment: {
             readonly run: null | {
                 readonly runId: components["schemas"]["Uuid"];
@@ -1571,6 +1686,34 @@ export interface components {
             readonly to: components["schemas"]["Timestamp"];
             readonly candles: readonly components["schemas"]["Candle"][];
             readonly freshness: components["schemas"]["CandleFreshness"];
+        };
+        /** @description A minute's book, its last snapshot's; changed is false when it holds the minute before. */
+        readonly QualityMinute: {
+            readonly minute: components["schemas"]["Timestamp"];
+            /** @description Null while no one bids. */
+            readonly bestBid: components["schemas"]["Price"] | null;
+            /** @description Null while no one asks. */
+            readonly bestAsk: components["schemas"]["Price"] | null;
+            /** @description Best ask minus best bid; null unless both sides are there. */
+            readonly spread: components["schemas"]["Price"] | null;
+            /** @description Null before the first trade. */
+            readonly lastPrice: components["schemas"]["Price"] | null;
+            readonly changed: boolean;
+        };
+        readonly MarketQuality: {
+            readonly instrumentId: components["schemas"]["Uuid"];
+            readonly fromSequence: components["schemas"]["Sequence"];
+            readonly toSequence: components["schemas"]["Sequence"];
+            readonly minutes: readonly components["schemas"]["QualityMinute"][];
+            /** @description A price with four places, rounded half-even; null without a minute with both sides. */
+            readonly averageSpread: string | null;
+            /** @description The minutes the average spread is taken over. */
+            readonly twoSidedMinutes: number;
+            /** @description A fraction with six places, rounded half-even; null with fewer than two returns. */
+            readonly volatility: string | null;
+            /** @description The one-minute returns the volatility is taken over. */
+            readonly returns: number;
+            readonly feed: components["schemas"]["Feed"];
         };
         readonly ExportedTrade: {
             readonly tradeId: components["schemas"]["Uuid"];
@@ -1950,7 +2093,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Not a trader, or a missing or invalid CSRF token. No body. */
+            /** @description Not a trader, the operator, or a missing or invalid CSRF token. No body. */
             readonly 403: {
                 headers: {
                     readonly [name: string]: unknown;
@@ -2102,13 +2245,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Not a trader. */
-            readonly 403: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content?: never;
-            };
+            readonly 403: components["responses"]["NotTrader"];
             readonly 404: components["responses"]["Problem"];
         };
     };
@@ -2203,13 +2340,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Not a trader. */
-            readonly 403: {
-                headers: {
-                    readonly [name: string]: unknown;
-                };
-                content?: never;
-            };
+            readonly 403: components["responses"]["NotTrader"];
             readonly 404: components["responses"]["Problem"];
             readonly 409: components["responses"]["Problem"];
             readonly 422: components["responses"]["Problem"];
@@ -3006,6 +3137,52 @@ export interface operations {
             readonly 504: components["responses"]["OutcomeUnknown"];
         };
     };
+    readonly getBotRun: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly runId: components["schemas"]["Uuid"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The run and its figures. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BotRunDetail"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description RUN_NOT_FOUND. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     readonly stopBotRun: {
         readonly parameters: {
             readonly query?: never;
@@ -3493,6 +3670,34 @@ export interface operations {
                 };
                 content: {
                     readonly "application/json": components["schemas"]["Candles"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            readonly 404: components["responses"]["Problem"];
+        };
+    };
+    readonly getMarketQuality: {
+        readonly parameters: {
+            readonly query: {
+                readonly fromSequence: number;
+                /** @description Inclusive; not below fromSequence. */
+                readonly toSequence: number;
+            };
+            readonly header?: never;
+            readonly path: {
+                readonly instrumentId: components["parameters"]["InstrumentId"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The minutes and their figures. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["MarketQuality"];
                 };
             };
             readonly 400: components["responses"]["Problem"];

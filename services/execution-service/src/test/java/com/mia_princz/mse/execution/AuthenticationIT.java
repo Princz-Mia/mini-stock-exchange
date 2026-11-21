@@ -178,10 +178,13 @@ class AuthenticationIT {
 	@Test
 	void passwordsAreStoredHashedAndRolesAreSeparate() {
 		List<Map<String, Object>> users = jdbcTemplate
-			.queryForList("SELECT username, password_hash, role FROM app_user ORDER BY username");
+			.queryForList("""
+					SELECT u.username, u.password_hash, string_agg(r.role, ' ' ORDER BY r.role) AS role
+					FROM app_user u JOIN user_role r ON r.user_id = u.id GROUP BY u.id ORDER BY u.username""");
 
 		assertThat(users).extracting((user) -> user.get("username")).containsExactly("operator", "trader");
-		assertThat(users).extracting((user) -> user.get("role")).containsExactly("OPERATOR", "TRADER");
+		// The operator also trades; the trader only trades.
+		assertThat(users).extracting((user) -> user.get("role")).containsExactly("OPERATOR TRADER", "TRADER");
 		assertThat(users).allSatisfy((user) -> assertThat((String) user.get("password_hash")).startsWith("{bcrypt}"));
 	}
 

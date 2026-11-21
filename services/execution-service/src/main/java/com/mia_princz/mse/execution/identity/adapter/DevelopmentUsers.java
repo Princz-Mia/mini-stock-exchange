@@ -35,24 +35,38 @@ class DevelopmentUsers implements ApplicationRunner {
 
 	@Override
 	public void run(ApplicationArguments args) {
-		seed("operator", "OPERATOR", operatorPassword);
-		seed("trader", "TRADER", traderPassword);
+		// The operator also trades, once it has funded its own trader account in setup.
+		seed("operator", operatorPassword, "OPERATOR", "TRADER");
+		seed("trader", traderPassword, "TRADER");
 	}
 
-	private void seed(String username, String role, String password) {
+	/**
+	 * Adds the login if it is missing, and each role it lacks: an existing login keeps its password and gains a role
+	 * added to the configuration at the next start. Roles are never removed.
+	 */
+	private void seed(String username, String password, String... roles) {
 		if (password.isBlank()) {
 			return;
 		}
 		jdbc.sql("""
-				INSERT INTO app_user (id, username, password_hash, role)
-				VALUES (:id, :username, :hash, :role)
+				INSERT INTO app_user (id, username, password_hash)
+				VALUES (:id, :username, :hash)
 				ON CONFLICT (username) DO NOTHING
 				""")
 			.param("id", UUID.randomUUID())
 			.param("username", username)
 			.param("hash", passwordEncoder.encode(password))
-			.param("role", role)
 			.update();
+		for (String role : roles) {
+			jdbc.sql("""
+					INSERT INTO user_role (user_id, role)
+					SELECT id, :role FROM app_user WHERE username = :username
+					ON CONFLICT DO NOTHING
+					""")
+				.param("role", role)
+				.param("username", username)
+				.update();
+		}
 	}
 
 }

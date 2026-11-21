@@ -62,8 +62,7 @@ final class SchemaFixtures {
 
 	UUID user() {
 		UUID id = UUID.randomUUID();
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, ?, '{noop}x', 'TRADER')", id,
-				"user-" + id.toString().substring(0, 8));
+		TestUsers.insert(jdbc, id, "user-" + id.toString().substring(0, 8), "{noop}x", "TRADER");
 		return id;
 	}
 

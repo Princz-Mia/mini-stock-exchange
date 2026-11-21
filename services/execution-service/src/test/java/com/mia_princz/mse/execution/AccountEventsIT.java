@@ -179,7 +179,10 @@ class AccountEventsIT {
 		jdbc.update("UPDATE spring_session SET last_access_time = 0, expiry_time = 0");
 		otherStream.endsWithin(Duration.ofSeconds(7));
 
-		// Only a trader's session opens one: not the operator, not a bot token, not without a session.
+		// Only a trader's session with an account opens one: not a login that only operates, not the operator, which
+		// trades but has no account yet, not a bot token, not without a session.
+		TestUsers.insert(jdbc, UUID.randomUUID(), "watcher", TestBrowser.passwordHash(PASSWORD), "OPERATOR");
+		assertThat(new Listener(TestBrowser.loggedIn(port, "watcher", PASSWORD)).status).isEqualTo(403);
 		assertThat(new Listener(TestBrowser.loggedIn(port, "operator", PASSWORD)).status).isEqualTo(403);
 		assertThat(new Listener(new TestBrowser(port)).status).isEqualTo(401);
 		HttpResponse<String> bot = new TestBrowser(port).get("/api/v1/account-events", "Authorization",
@@ -204,8 +207,7 @@ class AccountEventsIT {
 				issuance, simulation);
 		jdbc.update("INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, 'EVT', 10000)",
 				instrument, simulation);
-		jdbc.update("INSERT INTO app_user (id, username, password_hash, role) VALUES (?, 'other', ?, 'TRADER')",
-				UUID.randomUUID(), TestBrowser.passwordHash(PASSWORD));
+		TestUsers.insert(jdbc, UUID.randomUUID(), "other", TestBrowser.passwordHash(PASSWORD), "TRADER");
 		for (String name : new String[] { "trader", "other" }) {
 			UUID account = UUID.randomUUID();
 			jdbc.update("""
