@@ -28,7 +28,7 @@ That one database is all a restore needs. `backups/` is ignored by Git, and hold
 
 **Restore** puts Execution back exactly as it was at the backup and rebuilds everything derived from it. Anything newer would describe trades that, after the restore, never happened. It:
 1. stops the simulator, Flink, Market Data and Execution;
-2. restores `execution_db` in one transaction;
+2. restores `execution_db` into an emptied schema, in one transaction: all of it, or nothing;
 3. marks every outbox event unpublished again;
 4. empties Market Data's projections and checkpoints, and deletes Kafka's and Flink's volumes;
 5. recreates the topics, and starts again whatever was running.
@@ -38,7 +38,7 @@ Execution then republishes its whole history in order. Market Data and the candl
 After a restore:
 - **Trades and orders after the backup are gone.** So are sessions started since, so people sign in again, and trader logins added since, which the operator adds again.
 - **A bot token revoked after the backup works again.** Revoke it again from the operator screen.
-- **A backup from an older version** is migrated forward when Execution starts. A backup from a newer version holds schema changes this code doesn't know, so restore it only with code at least as new as the backup's `commit`.
+- **A backup from an older version** is restored as it was, tables added since included, and migrated forward when Execution starts. A backup from a newer version holds schema changes this code doesn't know, so restore it only with code at least as new as the backup's `commit`.
 
 ## Execution won't become healthy
 
