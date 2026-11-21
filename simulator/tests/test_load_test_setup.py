@@ -6,8 +6,10 @@ import httpx
 import pytest
 
 from mse_simulator.loadtest import __main__ as loadtest
-from mse_simulator.loadtest import stats
-from mse_simulator.loadtest.__main__ import SYMBOLS, parse, set_up
+from mse_simulator.loadtest import stack, stats
+from mse_simulator.loadtest.__main__ import parse
+from mse_simulator.loadtest.stack import SYMBOLS, set_up
+from mse_simulator.population import strategy_split
 
 
 class FakeOperator:
@@ -26,7 +28,7 @@ class FakeOperator:
 def test_bots_are_tagged_in_the_split_their_run_uses() -> None:
     operator = FakeOperator()
 
-    instruments = set_up(operator, 250, "a-trader-password")
+    instruments = set_up(operator, strategy_split(250), "a-trader-password")
 
     assert len(instruments) == len(SYMBOLS)
     batches = [
@@ -47,7 +49,12 @@ def test_further_trader_logins_are_added_before_the_market_opens() -> None:
     # The exchange adds traders only while the market is in setup.
     operator = FakeOperator()
 
-    set_up(operator, 0, "a-trader-password", [("stress-0000", "p" * 24), ("stress-0001", "q" * 24)])
+    set_up(
+        operator,
+        strategy_split(0),
+        "a-trader-password",
+        [("stress-0000", "p" * 24), ("stress-0001", "q" * 24)],
+    )
 
     paths = [path for path, _ in operator.sent]
     assert paths[-1] == "/api/v1/admin/market/open"
@@ -146,31 +153,31 @@ class RunOperator:
 
 
 def test_a_run_left_going_by_a_broken_step_is_stopped_and_confirmed(monkeypatch) -> None:
-    monkeypatch.setattr(loadtest, "time", Clock())
+    monkeypatch.setattr(stack, "time", Clock())
     operator = RunOperator([503, 503])
 
-    assert loadtest.stop_any_run(operator)
+    assert stack.stop_any_run(operator)
     assert operator.stop_requests == 3, "the stop is sent until it is taken"
     assert operator.status == "STOPPED"
 
 
 def test_a_run_that_does_not_confirm_its_stop_keeps_the_checks_from_running(monkeypatch) -> None:
-    monkeypatch.setattr(loadtest, "time", Clock())
+    monkeypatch.setattr(stack, "time", Clock())
     operator = RunOperator([], stops=False)
 
     # STOPPING is not stopped: the worker may still be trading.
-    assert not loadtest.stop_any_run(operator)
+    assert not stack.stop_any_run(operator)
 
 
 def test_the_report_is_written_when_the_environment_cannot_be_read(monkeypatch) -> None:
     def broken(stack):
         raise RuntimeError("docker exec failed")
 
-    monkeypatch.setattr(loadtest, "environment", broken)
+    monkeypatch.setattr(stack, "environment", broken)
 
-    env = loadtest.read_environment(object())
+    env = stack.read_environment(object())
 
-    lines = "\n".join(loadtest.environment_lines(env))
+    lines = "\n".join(stack.environment_lines(env))
     assert "Commit: not read." in lines
 
 
@@ -196,16 +203,16 @@ def test_the_admission_limits_are_read_as_execution_reports_them() -> None:
         "mse_outbox_pending 12.0\n"
     )
 
-    limits = loadtest.admission_limits(scrape)
+    limits = stack.admission_limits(scrape)
 
     assert limits == (500_000, 1_073_741_824)
-    assert loadtest.admission_line(limits) == (
+    assert stack.admission_line(limits) == (
         "- Publication backlog limit, beyond which new orders are refused: 500,000 events or "
         "1,024 MiB."
     )
     events_only = stats.parse_prometheus('mse_outbox_admission_limit{limit="events"} 3\n')
-    assert loadtest.admission_limits(events_only) is None
-    assert loadtest.admission_line(None) == "- Publication backlog limit: not read."
+    assert stack.admission_limits(events_only) is None
+    assert stack.admission_line(None) == "- Publication backlog limit: not read."
 
 
 def test_downstream_samples_are_timed_from_the_start_and_a_failed_one_is_skipped() -> None:
@@ -316,7 +323,5 @@ def test_each_report_names_its_own_generator() -> None:
         )
     } | {"limits": {}}
 
-    assert (
-        "Generator: the simulator container on the same host." in loadtest.environment_lines(env)[2]
-    )
-    assert "Generator: this machine." in loadtest.environment_lines(env, "this machine")[2]
+    assert "Generator: the simulator container on the same host." in stack.environment_lines(env)[2]
+    assert "Generator: this machine." in stack.environment_lines(env, "this machine")[2]

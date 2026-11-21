@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from mse_simulator.loadtest import __main__ as loadtest
+from mse_simulator.loadtest import stack
 from mse_simulator.loadtest.manifests import differences, report, revision_label
 
 COMMIT = "27a70d6c1e2f9b8a7c6d5e4f3a2b1c0d9e8f7a6b"
@@ -36,7 +37,7 @@ def test_the_revision_is_the_commit_marked_dirty_only_for_tracked_changes() -> N
 
 
 def test_the_revision_is_read_from_the_checkout(tmp_path) -> None:
-    assert loadtest.revision(tmp_path) == "", "outside a checkout the version stays unknown"
+    assert stack.revision(tmp_path) == "", "outside a checkout the version stays unknown"
 
     def git(*args: str) -> str:
         return subprocess.run(
@@ -59,12 +60,12 @@ def test_the_revision_is_read_from_the_checkout(tmp_path) -> None:
     git("commit", "-q", "-m", "first")
     commit = git("rev-parse", "--short=12", "HEAD")
 
-    assert loadtest.revision(tmp_path) == commit
+    assert stack.revision(tmp_path) == commit
     # An untracked file is not built into anything, as the compatibility gate has it.
     (tmp_path / "scratch.txt").write_text("x\n", encoding="utf-8")
-    assert loadtest.revision(tmp_path) == commit
+    assert stack.revision(tmp_path) == commit
     (tmp_path / "tracked.txt").write_text("two\n", encoding="utf-8")
-    assert loadtest.revision(tmp_path) == f"{commit}.dirty"
+    assert stack.revision(tmp_path) == f"{commit}.dirty"
 
 
 def test_who_reported_a_manifest_and_when_is_no_difference() -> None:
@@ -270,11 +271,11 @@ def test_a_manifest_is_read_by_its_run_or_why_it_could_not_be() -> None:
 
     reader = operator(answers)
 
-    assert loadtest.read_manifest(reader, "run-1") == manifest()
-    assert loadtest.read_manifest(reader, "run-2") is None
-    assert loadtest.read_manifest(reader, "run-3").startswith("KeyError")
+    assert stack.read_manifest(reader, "run-1") == manifest()
+    assert stack.read_manifest(reader, "run-2") is None
+    assert stack.read_manifest(reader, "run-3").startswith("KeyError")
     # A status error says its status, on one line, not httpx's two-line message.
-    assert loadtest.read_manifest(reader, "run-4") == "HTTP 404"
+    assert stack.read_manifest(reader, "run-4") == "HTTP 404"
 
 
 class Clock:
@@ -296,7 +297,9 @@ def test_a_step_records_its_run_before_anything_can_break_it(monkeypatch) -> Non
 
     monkeypatch.setattr(loadtest, "begin_run", lambda *args: {"runId": "run-9"})
     monkeypatch.setattr(loadtest, "activity", broken)
+    # The step sleeps through its warm-up here, and waits in the stack module.
     monkeypatch.setattr(loadtest, "time", Clock())
+    monkeypatch.setattr(stack, "time", Clock())
     runs: list[tuple[float, str]] = []
 
     with pytest.raises(RuntimeError, match="timed out waiting for the run to be RUNNING"):
