@@ -12,7 +12,7 @@ COPY services/market-data-service services/market-data-service
 RUN --mount=type=cache,target=/root/.m2,sharing=locked sh -c '\
     sh ./mvnw -B -ntp -f event-contracts/pom.xml -DskipTests install && \
     sh ./mvnw -B -ntp -f services/market-data-service/pom.xml -DskipTests package && \
-    java -Djarmode=tools -jar services/market-data-service/target/market-data-service-0.1.0.jar extract --layers --destination /out'
+    java -Djarmode=tools -jar services/market-data-service/target/market-data-service-0.2.0.jar extract --layers --destination /out'
 
 FROM container-registry.oracle.com/java/jdk-no-fee-term:25.0.5@sha256:283d01db5d749b005826ad311af50a78cc40969548abb63d4b57063a6d611960
 RUN groupadd --system --gid 10001 mse && useradd --system --uid 10001 --gid mse --no-create-home mse
@@ -26,4 +26,4 @@ ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75"
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=90s --retries=6 \
     CMD curl -fsS http://localhost:8080/actuator/health/readiness || exit 1
-ENTRYPOINT ["java", "-jar", "market-data-service-0.1.0.jar"]
+ENTRYPOINT ["java", "-jar", "market-data-service-0.2.0.jar"]

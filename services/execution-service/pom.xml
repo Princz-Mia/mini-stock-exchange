@@ -10,7 +10,7 @@
 	</parent>
 	<groupId>com.mia_princz.mse</groupId>
 	<artifactId>execution-service</artifactId>
-	<version>0.1.0</version>
+	<version>0.2.0</version>
 	<name>execution-service</name>
 	<description>Authoritative trading: risk, matching and settlement in one database transaction.</description>
 	<properties>
@@ -41,7 +41,7 @@
 		<dependency>
 			<groupId>com.mia_princz.mse</groupId>
 			<artifactId>event-contracts</artifactId>
-			<version>0.1.0</version>
+			<version>0.2.0</version>
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>

@@ -97,7 +97,7 @@ test('the operator compares two finished runs side by side', async ({ page }) =>
     ]);
     await expect(settings.getByRole('row', { name: /^Seed/ }).getByRole('cell')).toHaveText(['23', '11']);
     await expect(settings.getByRole('row', { name: /^Achieved rate/ })).not.toContainText('—');
-    await expect(settings.getByRole('row', { name: /^Simulator version/ })).toContainText('0.1.0+');
+    await expect(settings.getByRole('row', { name: /^Simulator version/ })).toContainText('0.2.0+');
 
     const strategies = page.getByRole('table', { name: 'Strategies' });
     await expect(strategies.getByRole('rowheader', { name: 'Market makers' })).toBeVisible();

@@ -10,7 +10,7 @@
 	</parent>
 	<groupId>com.mia_princz.mse</groupId>
 	<artifactId>market-data-service</artifactId>
-	<version>0.1.0</version>
+	<version>0.2.0</version>
 	<name>market-data-service</name>
 	<description>Rebuildable public market projections and candles.</description>
 	<properties>
@@ -37,7 +37,7 @@
 		<dependency>
 			<groupId>com.mia_princz.mse</groupId>
 			<artifactId>event-contracts</artifactId>
-			<version>0.1.0</version>
+			<version>0.2.0</version>
 		</dependency>
 		<dependency>
 			<groupId>org.springframework.boot</groupId>

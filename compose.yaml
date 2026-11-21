@@ -164,7 +164,7 @@ services:
     build:
       context: .
       dockerfile: analytics-job/Dockerfile
-    image: mini-stock-exchange/analytics-job:0.1.0
+    image: mini-stock-exchange/analytics-job:0.2.0
     restart: unless-stopped
     depends_on:
       kafka-init:
@@ -202,7 +202,7 @@ services:
 
   flink-taskmanager:
     profiles: [full]
-    image: mini-stock-exchange/analytics-job:0.1.0
+    image: mini-stock-exchange/analytics-job:0.2.0
     restart: unless-stopped
     depends_on:
       flink-jobmanager:
