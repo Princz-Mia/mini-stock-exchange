@@ -23,7 +23,7 @@ import {
 import { populationText } from './strategies';
 import { CommandStatus } from './CommandStatus';
 import { useCommand } from './useCommand';
-import { comparability, MAX_COMPARED, parseRunIds } from './compare';
+import { comparability, MAX_COMPARED, parseRunIds, withTick } from './compare';
 
 type Typed = Partial<Omit<RunForm, 'instrumentIds'>> & { instrumentIds?: readonly string[] };
 
@@ -70,8 +70,7 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
     setParams(
       (current) => {
         const next = new URLSearchParams(current);
-        const ids = parseRunIds(current.get('compare')).ids.filter((id) => id !== runId);
-        if (on) ids.push(runId);
+        const ids = withTick(parseRunIds(current.get('compare')).ids, runId, on);
         if (ids.length > 0) next.set('compare', ids.join(','));
         else next.delete('compare');
         return next;

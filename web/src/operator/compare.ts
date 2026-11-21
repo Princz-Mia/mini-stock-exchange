@@ -30,6 +30,12 @@ export function parseRunIds(param: string | null): { ids: string[]; dropped: str
   return { ids, dropped, overflow };
 }
 
+/** The ticked runs after one is ticked or unticked: an unticked run leaves, a ticked one goes last. */
+export function withTick(ids: readonly string[], runId: string, on: boolean): string[] {
+  const rest = ids.filter((id) => id !== runId);
+  return on ? [...rest, runId] : rest;
+}
+
 /**
  * Whether a run can be compared: finished once its window has an end; NOT_KEPT for a run recorded before windows were
  * kept, which never gets one; otherwise not finished yet. A stopped run is not necessarily finished: its window ends
