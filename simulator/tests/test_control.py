@@ -1,10 +1,11 @@
 import asyncio
+import json
 from uuid import UUID, uuid4
 
 import httpx
 import pytest
 
-from mse_simulator.control import BOTS_PER_PAGE, ControlClient
+from mse_simulator.control import BOTS_PER_PAGE, Beat, ControlClient, Totals
 
 CONTROL = "test-control-token"
 BASE = "http://execution:8080"
@@ -169,3 +170,75 @@ def test_empty_pages_that_name_another_are_refused() -> None:
     with pytest.raises(ValueError, match="no bots names another"):
         read(control)
     assert len(control.pages) == 3
+
+
+TOTALS = Totals(placed=7, canceled=2, rejected=1, errors=0)
+
+
+def beat_with(
+    answer: httpx.Response, manifest: dict | None = None
+) -> tuple[Beat | None, list[dict]]:
+    sent: list[dict] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == f"Bearer {CONTROL}"
+        assert request.url.path == "/internal/simulator/heartbeat"
+        sent.append(json.loads(request.content))
+        return answer
+
+    async def go() -> Beat | None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+            client = ControlClient(http, BASE, CONTROL)
+            return await client.heartbeat(RUN, "worker-1", TOTALS, 3, 0, manifest=manifest)
+
+    return asyncio.run(go()), sent
+
+
+RUN = UUID("00000000-0000-0000-0000-0000000000aa")
+
+HELD = httpx.Response(
+    200,
+    json={
+        "runId": str(RUN),
+        "desiredState": "RUNNING",
+        "leaseExpiresAt": "2026-11-21T09:00:00Z",
+        "stopped": False,
+    },
+)
+
+
+def test_a_heartbeat_reports_the_totals_and_carries_a_manifest_only_when_given() -> None:
+    held, sent = beat_with(HELD)
+    assert held == Beat(True, "RUNNING")
+    assert sent == [
+        {
+            "runId": str(RUN),
+            "workerId": "worker-1",
+            "placed": 7,
+            "canceled": 2,
+            "rejected": 1,
+            "errors": 0,
+            "inFlight": 3,
+            "stopFailures": 0,
+            "stopped": False,
+        }
+    ]
+    _, with_manifest = beat_with(HELD, {"version": "0.1.0+27a70d6c1e2f"})
+    assert with_manifest[0]["manifest"] == {"version": "0.1.0+27a70d6c1e2f"}
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected"),
+    [
+        (httpx.Response(409, json={"code": "LEASE_HELD"}), Beat(False, None, "LEASE_HELD")),
+        (httpx.Response(404, json={"code": "RUN_NOT_FOUND"}), Beat(False, None, "RUN_NOT_FOUND")),
+        (
+            httpx.Response(409, json={"code": "RUN_NOT_STOPPING"}),
+            Beat(True, "RUNNING", "RUN_NOT_STOPPING"),
+        ),
+        (httpx.Response(400, json={"code": "VALIDATION_FAILED"}), None),
+        (httpx.Response(503), None),
+    ],
+)
+def test_a_heartbeat_answer_says_whether_the_lease_is_held(answer, expected) -> None:
+    assert beat_with(answer)[0] == expected

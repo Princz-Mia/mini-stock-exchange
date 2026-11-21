@@ -54,6 +54,7 @@ export type BotRunStopping = Schemas['BotRunStopping'];
 export type TokenRevoked = Schemas['TokenRevoked'];
 export type BotRunList = Schemas['BotRunList'];
 export type BotRun = Schemas['BotRun'];
+export type BotRunManifest = Schemas['BotRunManifest'];
 export type BotRunDetail = Schemas['BotRunDetail'];
 export type BotRunMark = Schemas['BotRunMark'];
 export type HealthSummary = Schemas['HealthSummary'];

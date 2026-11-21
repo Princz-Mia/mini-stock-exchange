@@ -56,10 +56,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # The commit the simulator reports with each bot run, as the compatibility gate names it.
+      - id: revision
+        run: echo "short=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
+          build-args: MSE_SIMULATOR_REVISION=${{ steps.revision.outputs.short }}
           push: ${{ env.PUBLISH == 'true' }}
           tags: ${{ env.REGISTRY }}/${{ matrix.name }}:${{ github.event_name == 'push' && github.ref_name || 'dry-run' }}
           # The source label links each package to this repository.

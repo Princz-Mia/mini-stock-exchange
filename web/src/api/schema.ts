@@ -1317,6 +1317,54 @@ export interface components {
                 /** @enum {string|null} */
                 readonly endedBy: "WORKER" | "NEXT_START" | "NOT_KEPT" | null;
             };
+            /** @description What the worker reported about itself with the run; null until a worker reports one. */
+            readonly manifest: components["schemas"]["BotRunManifest"] | null;
+        };
+        /**
+         * @description The first manifest a worker reported with the run, which never changes. reports counts the different ones:
+         *     more than one means a worker with other code or settings took the run over, so the run changed midway.
+         */
+        readonly BotRunManifest: {
+            readonly version: components["schemas"]["ManifestVersion"];
+            readonly workerId: string;
+            readonly reportedAt: components["schemas"]["Timestamp"];
+            readonly runtime: components["schemas"]["ManifestRuntime"];
+            readonly strategies: components["schemas"]["ManifestStrategies"];
+            readonly defaults: components["schemas"]["ManifestSettings"];
+            readonly reports: number;
+        };
+        /**
+         * @description The worker's package version and the commit it was built from, such as 0.1.0+27a70d6c1e2f.
+         * @example 0.1.0+27a70d6c1e2f
+         * @example 0.1.0+27a70d6c1e2f.dirty
+         * @example 0.1.0+unknown
+         */
+        readonly ManifestVersion: string;
+        /** @description The versions the worker's decisions depend on, by name. */
+        readonly ManifestRuntime: {
+            readonly [key: string]: string;
+        };
+        /**
+         * @description Settings by name, each a boolean, a printable ASCII text of at most 64 characters, or a finite number of at
+         *     most 32 characters written out in full (so 1e300 is refused).
+         */
+        readonly ManifestSettings: {
+            readonly [key: string]: number | boolean | string;
+        };
+        /** @description The settings each strategy runs with. */
+        readonly ManifestStrategies: {
+            readonly [key: string]: components["schemas"]["ManifestSettings"];
+        };
+        /**
+         * @description What the worker reports about itself, sent with its heartbeats until one for the run is held; at most 8 KiB as
+         *     stored (TOO_LARGE otherwise). The first one stays the run's; a different later one is kept beside it, up to
+         *     eight in all, after which more are answered but not kept.
+         */
+        readonly SimulatorManifest: {
+            readonly version: components["schemas"]["ManifestVersion"];
+            readonly runtime: components["schemas"]["ManifestRuntime"];
+            readonly strategies: components["schemas"]["ManifestStrategies"];
+            readonly defaults: components["schemas"]["ManifestSettings"];
         };
         /** @description A price at an edge of the run, and where it came from. */
         readonly BotRunMark: {
@@ -1447,6 +1495,7 @@ export interface components {
              * @default false
              */
             readonly stopped: boolean;
+            readonly manifest?: components["schemas"]["SimulatorManifest"];
         };
         readonly SimulatorHeartbeat: {
             readonly runId: components["schemas"]["Uuid"];

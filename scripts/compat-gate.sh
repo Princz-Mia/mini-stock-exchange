@@ -25,6 +25,10 @@ operator_password=$(secret)
 # The browser test's counterparty; the Kafka outage step trades as it too.
 counterparty_password=$(secret)
 grafana_password=$(secret)
+# The commit the simulator image is built from, which its worker reports with each bot run; .dirty when tracked files
+# have uncommitted changes, so a build of them never passes for the commit.
+revision=$(git -C "$root" rev-parse --short=12 HEAD)
+[ -n "$(git -C "$root" status --porcelain --untracked-files=no)" ] && revision="$revision.dirty"
 umask 077
 cat > "$env_file" <<EOF
 POSTGRES_PASSWORD=$(secret)
@@ -37,6 +41,7 @@ DEV_OPERATOR_PASSWORD=$operator_password
 DEV_TRADER_PASSWORD=$trader_password
 MSE_EXPORT_TOKEN=$(secret)
 MSE_SIMULATOR_TOKEN=$(secret)
+MSE_SIMULATOR_REVISION=$revision
 WEB_HOST_PORT=$web_port
 POSTGRES_HOST_PORT=25432
 KAFKA_HOST_PORT=$kafka_port
@@ -431,6 +436,12 @@ bot_trading() {
     assert_equal 'the worker confirmed it, after placing orders' 't' \
       "$(psql_as execution_owner execution_db "SELECT stopped_at IS NOT NULL AND placed > 0 FROM bot_run WHERE id = '$run'" | tr -d '\r')" &&
     assert_equal 'bot orders left open' 0 "$(psql_as execution_owner execution_db "$open" | tr -d '\r')" || return 1
+  # With the run, the worker reported the commit this gate built its image from, once.
+  local listed
+  listed=$(curl -s -b "$jar" "$base/admin/bot-runs?limit=1")
+  note "listed: $listed"
+  assert_match 'the worker reports the commit built' "\"version\":\"[^\"]*\\+${revision//./\\.}\"" "$listed" &&
+    assert_match 'one manifest for the run' '"reports":1[,}]' "$listed" || return 1
   # The bots' commands were timed: Prometheus has a bucket edge at each latency budget, and the queue's size.
   local scrape
   scrape=$(compose exec -T execution-service curl -fsS http://localhost:8080/actuator/prometheus 2>&1 |

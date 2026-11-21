@@ -169,6 +169,42 @@ class BotRunSchemaIT {
 				() -> f.jdbc.update("UPDATE bot_assignment SET strategy = 'NOISE'")));
 		db.inRolledBackTransaction((f) -> assertFails(INSUFFICIENT_PRIVILEGE,
 				() -> f.jdbc.update("DELETE FROM bot_run_instrument")));
+		// A worker's manifest is added, never changed or removed.
+		db.inRolledBackTransaction((f) -> {
+			UUID run = run(f, f.simulation(), "1.00");
+			manifest(f, run, "{\"version\":\"0.1.0+27a70d6c1e2f\"}");
+			assertFails(INSUFFICIENT_PRIVILEGE,
+					() -> f.jdbc.update("UPDATE bot_run_manifest SET worker_id = 'other' WHERE run_id = ?", run));
+		});
+		db.inRolledBackTransaction((f) -> assertFails(INSUFFICIENT_PRIVILEGE,
+				() -> f.jdbc.update("DELETE FROM bot_run_manifest")));
+	}
+
+	/** A manifest must be an object with a plain version, of at most 8 KiB; the same one twice is one row. */
+	@Test
+	void aManifestIsAnObjectWithAPlainVersionAndAtMost8KiB() {
+		db.inRolledBackTransaction((f) -> {
+			UUID run = run(f, f.simulation(), "1.00");
+			manifest(f, run, "{\"version\":\"0.1.0+27a70d6c1e2f\",\"runtime\":{\"python\":\"3.14.10\"}}");
+			// The same manifest, keys in another order: one row, by its canonical digest.
+			assertFails(SchemaFixtures.UNIQUE_VIOLATION,
+					() -> manifest(f, run, "{\"runtime\":{\"python\":\"3.14.10\"},\"version\":\"0.1.0+27a70d6c1e2f\"}"));
+		});
+		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION,
+				() -> manifest(f, run(f, f.simulation(), "1.00"), "{\"version\":\"0.1.0 27a70d6\"}")));
+		// No version, or not an object at all: the version it is kept under is missing.
+		db.inRolledBackTransaction((f) -> assertFails(SchemaFixtures.NOT_NULL_VIOLATION,
+				() -> manifest(f, run(f, f.simulation(), "1.00"), "{\"runtime\":{}}")));
+		db.inRolledBackTransaction((f) -> assertFails(SchemaFixtures.NOT_NULL_VIOLATION,
+				() -> manifest(f, run(f, f.simulation(), "1.00"), "[\"0.1.0\"]")));
+		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION, () -> manifest(f, run(f, f.simulation(), "1.00"),
+				"{\"version\":\"0.1.0\",\"padding\":\"" + "x".repeat(8_200) + "\"}")));
+	}
+
+	private static void manifest(SchemaFixtures f, UUID run, String manifest) {
+		f.jdbc.update("""
+				INSERT INTO bot_run_manifest (run_id, manifest, worker_id, reported_at)
+				VALUES (?, CAST(? AS jsonb), 'worker-a', now())""", run, manifest);
 	}
 
 	private static UUID run(SchemaFixtures f, UUID simulation, String rate) {
