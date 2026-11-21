@@ -34,7 +34,7 @@ from pathlib import Path
 
 import httpx
 
-from mse_simulator.loadtest import diagnostics, ramp, stats, stress
+from mse_simulator.loadtest import diagnostics, manifests, ramp, stats, stress
 from mse_simulator.population import split_text, strategy_split
 
 logger = logging.getLogger("mse_simulator.loadtest")
@@ -141,6 +141,8 @@ class Stack:
             "POSTGRES_HOST_PORT=35432",
             "KAFKA_HOST_PORT=39092",
             "FLINK_UI_HOST_PORT=38081",
+            # The commit the simulator image is built from, which its worker reports with each run.
+            f"MSE_SIMULATOR_REVISION={revision(root)}",
         ]
         self.env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         try:
@@ -576,6 +578,7 @@ def summarize(
     phases: Phases,
     downstream: diagnostics.Downstream,
     where: list[str] | None = None,
+    simulator: list[str] | None = None,
 ) -> tuple[str, bool]:
     seconds = after.at - before.at
     histogram = stats.window(
@@ -695,6 +698,7 @@ def summarize(
         f"({len(window.outbox)} samples).",
         f"- Public feed not LIVE in {stale} of {len(window.feeds)} samples.",
         "",
+        *(simulator or []),
         *environment_lines(env),
     ]
     return "\n".join(lines), passed
@@ -778,6 +782,7 @@ def run_ramp(options: Options) -> int:
             + 3
         )
         steps: list[ramp.Step] = []
+        runs: list[tuple[float, str]] = []
         skipped: list[float] = []
         broke = None
         stopped = True
@@ -787,7 +792,7 @@ def run_ramp(options: Options) -> int:
                     max(options.step_warmup, FIRST_WARMUP) if index == 0 else options.step_warmup
                 )
                 result = ramp_step(
-                    stack, operator, trader, instruments[0], options, rate, minutes, warmup
+                    stack, operator, trader, instruments[0], options, rate, minutes, warmup, runs
                 )
             except Exception as error:  # noqa: BLE001 - the steps before it are still reported
                 # The rate most likely to break the measurement is the one that overloads the
@@ -811,6 +816,10 @@ def run_ramp(options: Options) -> int:
                 skipped = options.ramp[index + 1 :]
                 break
         env = read_environment(stack)
+        # Read once every run has ended, when each run's count of different reports is final.
+        readings = [
+            (f"{rate:,.0f}/s", run_id, read_manifest(operator, run_id)) for rate, run_id in runs
+        ]
         if stopped:
             logger.info("checking accounting and the public side")
             checks, restarted = checked(stack, instruments)
@@ -834,6 +843,7 @@ def run_ramp(options: Options) -> int:
             *[f"- {name}: {'yes' if met else 'no'}" for name, met in checks.items()],
             restart_line(restarted),
             "",
+            *manifests.report(readings, str(env["commit"])),
             *environment_lines(env),
         ]
         report = "\n".join(lines)
@@ -858,9 +868,12 @@ def ramp_step(
     rate: float,
     minutes: int,
     warmup: int,
+    runs: list[tuple[float, str]],
 ) -> ramp.Step:
-    """One step: a new run at the rate, warmed up, measured and stopped."""
+    """One step: a new run at the rate, warmed up, measured and stopped. The run goes in ``runs``
+    as soon as it starts, so a step that breaks is reported with the rest."""
     started = begin_run(operator, options, f"{rate:.2f}", minutes)
+    runs.append((rate, started["runId"]))
     logger.info("%.0f commands/s: run %s", rate, started["runId"])
     wait_for("the run to be RUNNING", lambda: activity(operator)["status"] == "RUNNING", 180)
     wait_for("the bots to trade", lambda: activity(operator)["activity"]["placed"] > 0, LOADING)
@@ -905,6 +918,37 @@ def stop_any_run(operator: Session) -> bool:
     except Exception:  # noqa: BLE001 - the report is still written
         logger.exception("could not stop the run")
         return False
+
+
+def read_manifest(operator: Session, run_id: str) -> manifests.Reading:
+    """The manifest the run's worker reported, None if none did, or why it could not be read: the
+    report is written either way."""
+    try:
+        response = operator.http.get(f"/api/v1/admin/bot-runs/{run_id}")
+        response.raise_for_status()
+        return response.json()["run"]["manifest"]
+    except httpx.HTTPStatusError as error:
+        # Its message runs over two lines with a link; the status says it.
+        return f"HTTP {error.response.status_code}"
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
+        return f"{type(error).__name__}: {error}"
+
+
+def revision(root: Path) -> str:
+    """The checkout's revision label for the simulator image, or empty without git."""
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    try:
+        return manifests.revision_label(
+            git("rev-parse", "--short=12", "HEAD"),
+            git("status", "--porcelain", "--untracked-files=no"),
+        )
+    except OSError, subprocess.CalledProcessError:
+        return ""
 
 
 def read_environment(stack: Stack) -> dict:
@@ -1243,7 +1287,13 @@ def run(options: Options) -> int:
         flow = diagnostics.downstream(
             sampled, float(options.rate), min(60.0, (after.at - before.at) / 3)
         )
-        report, passed = summarize(options, before, after, window, env, checks, phases, flow, where)
+        simulator = manifests.report(
+            [("the run", started["runId"], read_manifest(operator, started["runId"]))],
+            str(env["commit"]),
+        )
+        report, passed = summarize(
+            options, before, after, window, env, checks, phases, flow, where, simulator
+        )
         path = stack.run_dir / f"report-{datetime.now(UTC):%Y%m%d-%H%M}.md"
         path.write_text(report, encoding="utf-8")
         print(report)
