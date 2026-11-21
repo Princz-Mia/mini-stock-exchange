@@ -251,14 +251,15 @@ describe('the market over each run', () => {
       { instrumentId: ORBT, symbol: 'ORBT' },
     ],
   };
+  // The first ran into its fourth minute, though its book on NOVA last changed in its third.
   const first = run(FIRST, {
     startedAt: '2026-11-06T10:00:30Z',
     config: both,
-    window: { ...finishedRun().window, startSequence: '100', endSequence: '199' },
+    window: { ...finishedRun().window, startSequence: '100', endSequence: '199', endedAt: '2026-11-06T10:03:20Z' },
   });
   const second = run(SECOND, {
     startedAt: '2026-11-06T11:00:15Z',
-    window: { ...finishedRun().window, startSequence: '200', endSequence: '299' },
+    window: { ...finishedRun().window, startSequence: '200', endSequence: '299', endedAt: '2026-11-06T11:01:40Z' },
   });
 
   it('charts each run from its start on one scale, with the same minutes as a table', async () => {
@@ -289,7 +290,7 @@ describe('the market over each run', () => {
     const market = await screen.findByRole('region', { name: 'The market over each run' });
     const summary = await within(market).findByRole('table', { name: 'Market quality' });
     await waitFor(() => expect(row(summary, 'Average spread')).toEqual(['0.0350', '0.0100']));
-    expect(row(summary, 'Volatility')).toEqual(['0.8165%', 'Too few minutes']);
+    expect(row(summary, 'Volatility')).toEqual(['0.8165%', 'Too few price changes']);
     // NOVA, the instrument both traded, is chosen; only the first traded ORBT.
     expect(within(market).getByRole('button', { name: 'NOVA' })).toHaveAttribute('aria-pressed', 'true');
     const asked = fake.requests.filter((request) => request.url.includes('/market-quality')).map((request) => request.url);
@@ -302,7 +303,8 @@ describe('the market over each run', () => {
     // The one-sided minute breaks the first run's spread line in two.
     expect(charts[0]!.querySelector('path')?.getAttribute('d')).toMatch(/^M .* M /);
     // One scale for the row: the second run's 0.01 is the row's lowest spread, so its line runs along the bottom.
-    expect(charts[1]!.querySelector('path')?.getAttribute('d')).toMatch(/^M [\d.]+ 72\.0 L [\d.]+ 72\.0$/);
+    // One scale across too: minutes 0 to 2 over the width, so its two minutes take the left half.
+    expect(charts[1]!.querySelector('path')?.getAttribute('d')).toBe('M 0.0 72.0 L 120.0 72.0');
     expect(charts[2]).toHaveTextContent('Run 1100.00 to 101.00');
 
     fireEvent.click(within(market).getByText('Spread by minute, as a table'));
@@ -343,6 +345,90 @@ describe('the market over each run', () => {
     expect(within(market).getByRole('button', { name: 'NOVA' })).toHaveAttribute('aria-pressed', 'true');
   });
 
+  it('says a minute is past a run only past its window, not where its data stops', async () => {
+    const long = { ...second, window: { ...second.window, endedAt: '2026-11-06T11:03:40Z' } };
+    const fake = server({ [FIRST]: runDetail(first), [SECOND]: runDetail(long) });
+    fake.on(`GET /api/v1/instruments/${NOVA}/market-quality`, (request) => ({
+      status: 200,
+      json: request.url.includes('fromSequence=100')
+        ? quality(
+            '100',
+            minutes('10', [
+              ['99.98', '100.02', '100.00'],
+              ['99.98', '100.02', '100.00'],
+              ['99.98', '100.02', '100.00'],
+              ['99.98', '100.02', '100.00'],
+            ]),
+          )
+        : quality('200', minutes('11', [['100.00', '100.01', '100.00']])),
+    }));
+
+    openAt(`/operator/runs/compare?runs=${FIRST},${SECOND}`);
+
+    const market = await screen.findByRole('region', { name: 'The market over each run' });
+    await waitFor(() => expect(within(market).getAllByRole('figure')[1]).toHaveTextContent('Run 20.01 to 0.01'));
+    fireEvent.click(within(market).getByText('Spread by minute, as a table'));
+    const table = await within(market).findByRole('table', { name: 'Spread' });
+    // Its book last changed in its first minute, but it ran into its fourth.
+    expect(row(table, '\\+2 min')).toEqual(['0.04', '—']);
+    expect(row(table, '\\+3 min')).toEqual(['0.04', '—']);
+  });
+
+  it('asks only for runs it can chart, keeps the instrument in the address, and says when one is unreachable', async () => {
+    const orbtOnly = { ...second, config: { ...second.config, instruments: [{ instrumentId: ORBT, symbol: 'ORBT' }] } };
+    const fake = server({
+      [FIRST]: runDetail(first),
+      [SECOND]: runDetail(orbtOnly),
+      [THIRD]: runDetail(botRun({ runId: THIRD }), null),
+    });
+    fake
+      .on(`GET /api/v1/instruments/${NOVA}/market-quality`, {
+        status: 503,
+        problem: { status: 503, code: 'UNAVAILABLE' },
+      })
+      .on(`GET /api/v1/instruments/${ORBT}/market-quality`, { status: 200, json: quality('100', minutes('10', [])) });
+
+    openAt(`/operator/runs/compare?runs=${FIRST},${SECOND},${THIRD}&instrument=${NOVA}`);
+
+    const market = await screen.findByRole('region', { name: 'The market over each run' });
+    expect(await within(market).findByRole('button', { name: 'NOVA' })).toHaveAttribute('aria-pressed', 'true');
+    const summary = within(market).getByRole('table', { name: 'Market quality' });
+    await waitFor(
+      () =>
+        expect(row(summary, 'Average spread')).toEqual(['Market data is not reachable', 'Not in this run', 'Not finished']),
+      { timeout: 5_000 },
+    );
+    const asked = fake.requests.filter((request) => request.url.includes('/market-quality'));
+    expect(asked.every((request) => request.url.includes(`${NOVA}/market-quality?fromSequence=100&toSequence=199`))).toBe(true);
+    fireEvent.click(within(market).getByRole('button', { name: 'ORBT' }));
+    await waitFor(() => expect(new URLSearchParams(window.location.search).get('instrument')).toBe(ORBT));
+    expect(new URLSearchParams(window.location.search).get('runs')).toBe(`${FIRST},${SECOND},${THIRD}`);
+  });
+
+  it('asks again for a window that only just ended, and never for an offline feed', async () => {
+    const justEnded = { ...first, window: { ...first.window, endedAt: new Date().toISOString() } };
+    let more = false;
+    const fake = server({ [FIRST]: runDetail(justEnded), [SECOND]: runDetail(second) });
+    fake.on(`GET /api/v1/instruments/${NOVA}/market-quality`, (request) => ({
+      status: 200,
+      json: request.url.includes('fromSequence=100')
+        ? quality('100', minutes('10', [['99.98', '100.02', '100.00']]), more ? { averageSpread: '0.0300' } : {})
+        : quality('200', minutes('11', [['100.00', '100.01', '100.00']]), { feed: { state: 'DISABLED', lag: -1 } }),
+    }));
+    const asked = (from: string) => fake.requests.filter((request) => request.url.includes(`fromSequence=${from}`)).length;
+
+    openAt(`/operator/runs/compare?runs=${FIRST},${SECOND}`);
+
+    const market = await screen.findByRole('region', { name: 'The market over each run' });
+    expect(await within(market).findByText(/feed is off here/)).toBeInTheDocument();
+    more = true;
+    const summary = within(market).getByRole('table', { name: 'Market quality' });
+    // Its last snapshots may still be on their way, so it is read again though the feed says live.
+    await waitFor(() => expect(row(summary, 'Average spread')[0]).toBe('0.0300'), { timeout: 15_000 });
+    // An offline feed won't catch up: read once.
+    expect(asked('200')).toBe(1);
+  }, 25_000);
+
   it('asks again while market data is behind, until it has caught up', async () => {
     let caughtUp = false;
     const fake = server({ [FIRST]: runDetail(first), [SECOND]: runDetail(second) });
@@ -368,9 +454,14 @@ describe('the market over each run', () => {
     expect(await within(market).findByText(/Market data is catching up/)).toBeInTheDocument();
     caughtUp = true;
     const summary = within(market).getByRole('table', { name: 'Market quality' });
-    await waitFor(() => expect(row(summary, 'Average spread')[0]).toBe('0.0300'), { timeout: 12_000 });
+    await waitFor(() => expect(row(summary, 'Average spread')[0]).toBe('0.0300'), { timeout: 15_000 });
     expect(within(market).queryByText(/Market data is catching up/)).toBeNull();
-  }, 20_000);
+    // Live now, and the window ended long ago: no more asking.
+    const asked = () => fake.requests.filter((request) => request.url.includes('fromSequence=100')).length;
+    const settled = asked();
+    await new Promise((resolve) => setTimeout(resolve, 11_000));
+    expect(asked()).toBe(settled);
+  }, 35_000);
 
   it('says when market data is behind, a window is too long, or a run is not finished', async () => {
     const fake = server({

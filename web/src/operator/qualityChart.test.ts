@@ -31,19 +31,27 @@ describe('the scale and the line', () => {
     // One value across the whole domain: a flat line through the middle.
     expect(linePath([at(0, 7), at(1, 7)], 0, 1, { low: 7, high: 7 })).toBe('M 0.0 36.0 L 240.0 36.0');
     expect(linePath([at(0, null)], 0, 0, domain)).toBe('');
+    // A value alone before a gap is a dash too; one minute in all sits in the middle.
+    expect(linePath([at(0, null), at(1, 5), at(2, null), at(3, 5), at(4, 5)], 0, 4, domain)).toBe(
+      'M 60.0 36.0 h 2 M 180.0 36.0 L 240.0 36.0',
+    );
+    expect(linePath([at(0, 5)], 0, 0, domain)).toBe('M 120.0 36.0 h 2');
   });
 
   it('starts a segment for every run of consecutive values, and stays in its box', () => {
     const random = seeded(20261121);
     for (let round = 0; round < 300; round++) {
       const points: Point[] = [];
+      // Sometimes a single minute, so the first and last minute are one.
       let index = random(3);
       for (let count = 1 + random(30); count > 0; count--) {
         points.push(at(index, random(5) === 0 ? null : random(1_000)));
         index += 1 + (random(6) === 0 ? 1 + random(3) : 0);
       }
-      const first = Math.min(0, ...points.map((point) => point.index));
-      const last = Math.max(...points.map((point) => point.index));
+      const lone = random(8) === 0;
+      const first = lone ? points[0]!.index : Math.min(0, ...points.map((point) => point.index));
+      const last = lone ? first : Math.max(...points.map((point) => point.index));
+      if (lone) points.splice(1);
       const domain = yDomain([points]);
       if (domain === null) continue;
       const path = linePath([...points].reverse(), first, last, domain);
@@ -54,6 +62,8 @@ describe('the scale and the line', () => {
         previous = point.value === null ? null : point.index;
       }
       expect(path.split('M').length - 1).toBe(segments);
+      // Every coordinate a number: nothing like NaN slips through unmatched.
+      expect(path).not.toMatch(/NaN|Infinity/);
       for (const [, x, y] of path.matchAll(/[ML] (-?[\d.]+) (-?[\d.]+)/g)) {
         expect(Number(x)).toBeGreaterThanOrEqual(0);
         expect(Number(x)).toBeLessThanOrEqual(CHART_WIDTH);

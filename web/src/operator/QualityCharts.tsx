@@ -22,6 +22,31 @@ import {
 /** While Market Data is behind, a window's last minutes may be missing: asked again this often until it is live. */
 const BEHIND_POLL = 10_000;
 
+/** How long after a window ended its last snapshots may still be on their way to Market Data. */
+const FRESH_WINDOW = 60_000;
+
+/** The feed states that end by themselves, so asking again helps; an offline feed never catches up. */
+const WAITING = new Set<MarketQuality['feed']['state']>(['STARTING', 'CATCHING_UP', 'STALE', 'PAUSED']);
+
+/** The worst state first: the note says the worst of the runs' answers. */
+const FEED_ORDER: readonly MarketQuality['feed']['state'][] = [
+  'DISABLED',
+  'PAUSED',
+  'STALE',
+  'STARTING',
+  'CATCHING_UP',
+  'LIVE',
+];
+
+const BEHIND_TEXT: Record<MarketQuality['feed']['state'], string> = {
+  LIVE: '',
+  CATCHING_UP: "Market data is catching up, so a run's last minutes may be missing for now.",
+  STARTING: "Market data is connecting, so a run's last minutes may be missing for now.",
+  STALE: "Market data has gone quiet, so a run's last minutes may be missing.",
+  PAUSED: "Market data has paused on a record it can't use, so a run's last minutes may be missing until it is fixed.",
+  DISABLED: "Market data's feed is off here, so a run's minutes may be incomplete.",
+};
+
 /** A run as the comparison has it: its detail, or why it has none. */
 export type ChartedRun = { id: string; detail: BotRunDetail | undefined; missing: string | null };
 
@@ -74,12 +99,16 @@ export function QualityCharts({ runs }: { runs: readonly ChartedRun[] }) {
         queryKey: ['market-quality', instrument, window?.startSequence, window?.endSequence],
         queryFn: () => api.marketQuality(instrument!, window!.startSequence, window!.endSequence!),
         enabled: ready === true,
-        // A finished window's minutes don't change, unless Market Data was still catching up when asked.
+        // A finished window's minutes don't change once Market Data has them all: asked again while its feed is
+        // behind, and for a minute after the window ended, as its last snapshots may still be on their way.
         staleTime: Infinity,
-        refetchInterval: (query: { state: { data: MarketQuality | undefined; error: unknown } }) =>
-          !isRefusal(query.state.error) && query.state.data !== undefined && query.state.data.feed.state !== 'LIVE'
-            ? BEHIND_POLL
-            : false,
+        refetchInterval: (query: { state: { data: MarketQuality | undefined; error: unknown } }) => {
+          const data = query.state.data;
+          if (isRefusal(query.state.error) || data === undefined) return false;
+          const endedAt = window?.endedAt;
+          const fresh = endedAt !== null && endedAt !== undefined && Date.now() - Date.parse(endedAt) < FRESH_WINDOW;
+          return WAITING.has(data.feed.state) || fresh ? BEHIND_POLL : false;
+        },
       };
     }),
   });
@@ -101,7 +130,8 @@ export function QualityCharts({ runs }: { runs: readonly ChartedRun[] }) {
     }
     return { quality: null, note: 'Loading…' };
   });
-  const behind = shown.some((each) => each.quality !== null && each.quality.feed.state !== 'LIVE');
+  const feeds = shown.flatMap((each) => (each.quality === null ? [] : [each.quality.feed.state]));
+  const behind = FEED_ORDER.find((state) => state !== 'LIVE' && feeds.includes(state));
   const panel = useKeyboardScroll<HTMLElement>();
 
   return (
@@ -111,12 +141,12 @@ export function QualityCharts({ runs }: { runs: readonly ChartedRun[] }) {
         <p className="muted">No finished run to chart yet.</p>
       ) : (
         <>
-          <div className="chart-controls" role="group" aria-label="Instrument">
+          <div className="chart-choice" role="group" aria-label="Instrument">
             {choices.map(([id, symbol]) => (
               <button
                 key={id}
                 type="button"
-                className="chart-choice"
+                className="chip"
                 aria-pressed={id === instrument}
                 onClick={() => choose(id)}
               >
@@ -128,9 +158,9 @@ export function QualityCharts({ runs }: { runs: readonly ChartedRun[] }) {
             Each run's minutes are counted from the minute it started, so the charts line up. A minute's book is its
             last; a minute at either end of a window may also hold moments just outside it.
           </p>
-          {behind && (
+          {behind !== undefined && (
             <p className="chart-note" role="status">
-              Market data is catching up, so a run's last minutes may be missing for now.
+              {BEHIND_TEXT[behind]}
             </p>
           )}
           <Summary runs={runs} shown={shown} />
@@ -154,7 +184,7 @@ function Summary({ runs, shown }: { runs: readonly ChartedRun[]; shown: readonly
     {
       label: 'Volatility',
       tip: 'volatility' as const,
-      value: (quality: MarketQuality) => (quality.volatility === null ? 'Too few minutes' : percent(quality.volatility)),
+      value: (quality: MarketQuality) => (quality.volatility === null ? 'Too few price changes' : percent(quality.volatility)),
     },
     { label: 'Minutes with both sides', tip: null, value: (quality: MarketQuality) => groupInteger(quality.twoSidedMinutes) },
     { label: 'One-minute changes', tip: null, value: (quality: MarketQuality) => groupInteger(quality.returns) },
@@ -194,21 +224,29 @@ function Summary({ runs, shown }: { runs: readonly ChartedRun[]; shown: readonly
 
 type Metric = (typeof METRICS)[number];
 
+/** A run's minutes for one metric: drawn points, each minute's value as served, and the minute its window ended. */
+type Series = { points: Point[]; values: Map<number, string | null>; endIndex: number | null };
+
 /** One row of small charts for a metric, one per run, on one scale, and the same minutes as a table. */
 function Multiples({ metric, runs, shown }: { metric: Metric; runs: readonly ChartedRun[]; shown: readonly Shown[] }) {
   const [open, setOpen] = useState(false);
-  const series: Point[][] = shown.map((each, index) => {
-    const startedAt = runs[index]!.detail?.run.startedAt;
-    if (each.quality === null || startedAt === undefined) return [];
-    return each.quality.minutes.map((minute) => ({
-      index: minuteIndex(minute.minute, startedAt),
-      value: drawnCents(metric.value(minute)),
-    }));
+  // One pass over each run's minutes, so the table reads each cell directly: linear in the minutes, however many.
+  const series: Series[] = shown.map((each, index) => {
+    const run = runs[index]!.detail?.run;
+    if (each.quality === null || run === undefined) return { points: [], values: new Map(), endIndex: null };
+    const values = new Map<number, string | null>();
+    const points = each.quality.minutes.map((minute) => {
+      const at = minuteIndex(minute.minute, run.startedAt);
+      values.set(at, metric.value(minute));
+      return { index: at, value: drawnCents(metric.value(minute)) };
+    });
+    const endedAt = run.window.endedAt;
+    return { points, values, endIndex: endedAt === null ? null : minuteIndex(endedAt, run.startedAt) };
   });
-  const indices = series.flatMap((points) => points.map((point) => point.index));
+  const indices = series.flatMap((each) => each.points.map((point) => point.index));
   const first = Math.min(0, ...indices);
   const last = Math.max(first, ...indices);
-  const domain = yDomain(series);
+  const domain = yDomain(series.map((each) => each.points));
   const id = `compare-${metric.key}`;
   return (
     <>
@@ -216,10 +254,7 @@ function Multiples({ metric, runs, shown }: { metric: Metric; runs: readonly Cha
       <div className="compare-grid">
         {runs.map((run, index) => {
           const each = shown[index]!;
-          const values = each.quality?.minutes.flatMap((minute) => {
-            const value = metric.value(minute);
-            return value === null ? [] : [value];
-          });
+          const values = [...series[index]!.values.values()].filter((value) => value !== null);
           return (
             <figure key={run.id} className="quality-figure">
               <figcaption>
@@ -227,7 +262,7 @@ function Multiples({ metric, runs, shown }: { metric: Metric; runs: readonly Cha
                 <span className="muted">
                   {each.quality === null
                     ? each.note
-                    : values === undefined || values.length === 0
+                    : values.length === 0
                       ? 'No values'
                       : `${groupDigits(lowest(values))} to ${groupDigits(highest(values))}`}
                 </span>
@@ -240,8 +275,8 @@ function Multiples({ metric, runs, shown }: { metric: Metric; runs: readonly Cha
                 focusable="false"
               >
                 <line x1="0" y1={CHART_HEIGHT} x2={CHART_WIDTH} y2={CHART_HEIGHT} className="quality-axis" />
-                {domain !== null && series[index]!.length > 0 && (
-                  <path d={linePath(series[index]!, first, last, domain)} className="quality-line" />
+                {domain !== null && series[index]!.points.length > 0 && (
+                  <path d={linePath(series[index]!.points, first, last, domain)} className="quality-line" />
                 )}
               </svg>
             </figure>
@@ -265,29 +300,12 @@ function Multiples({ metric, runs, shown }: { metric: Metric; runs: readonly Cha
             <tbody>
               {Array.from({ length: last - first + 1 }, (_, offset) => first + offset).map((minute) => (
                 <tr key={minute}>
-                  <th scope="row">+{minute} min</th>
-                  {series.map((points, index) => {
-                    const point = points.find((each) => each.index === minute);
-                    const lastOfRun = points.length === 0 ? null : Math.max(...points.map((each) => each.index));
-                    const quality = shown[index]!.quality;
-                    const text =
-                      point === undefined
-                        ? lastOfRun !== null && minute > lastOfRun
-                          ? 'Ended'
-                          : '—'
-                        : (() => {
-                            const value = quality?.minutes.find(
-                              (each) => minuteIndex(each.minute, runs[index]!.detail!.run.startedAt) === minute,
-                            );
-                            const raw = value === undefined ? null : metric.value(value);
-                            return raw === null ? '—' : groupDigits(raw);
-                          })();
-                    return (
-                      <td key={runs[index]!.id} className="num">
-                        {text}
-                      </td>
-                    );
-                  })}
+                  <th scope="row">{minute < 0 ? `${minute} min` : `+${minute} min`}</th>
+                  {series.map((each, index) => (
+                    <td key={runs[index]!.id} className="num">
+                      {cell(each, minute)}
+                    </td>
+                  ))}
                 </tr>
               ))}
             </tbody>
@@ -296,6 +314,15 @@ function Multiples({ metric, runs, shown }: { metric: Metric; runs: readonly Cha
       </details>
     </>
   );
+}
+
+/** A minute's value; a dash where there is none; "Ended" only past the end of the run's window, not of its data. */
+function cell(series: Series, minute: number): string {
+  if (series.values.has(minute)) {
+    const value = series.values.get(minute);
+    return value === null || value === undefined ? '—' : groupDigits(value);
+  }
+  return series.endIndex !== null && minute > series.endIndex ? 'Ended' : '—';
 }
 
 function lowest(prices: readonly string[]): string {
