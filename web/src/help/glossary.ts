@@ -56,6 +56,18 @@ export const GLOSSARY = {
     definition:
       'The operator has paused trading. New orders are refused, but open orders can still be cancelled. Trading goes on when the operator resumes the market.',
   },
+  spread: {
+    term: 'Spread',
+    definition:
+      'The gap between the lowest price anyone asks and the highest price anyone bids. A narrow spread means trading at once costs little; ' +
+      'with only one side in the book there is no spread.',
+  },
+  volatility: {
+    term: 'Volatility',
+    definition:
+      'How much the last price moves from one minute to the next: the standard deviation of its one-minute changes, as a percentage, over ' +
+      'the time measured. It is not scaled up to a year. Higher means a jumpier market.',
+  },
 } as const;
 
 export type Term = keyof typeof GLOSSARY;

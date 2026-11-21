@@ -17,6 +17,7 @@ import {
   plannedDuration,
   refusalsText,
 } from './compare';
+import { QualityCharts } from './QualityCharts';
 import { STATUS_LABELS, strategiesText } from './runView';
 
 /** While a run is not finished, or its figures are not worked out yet, it is asked for again this often. */
@@ -110,6 +111,7 @@ export function RunComparePage() {
         <>
           <Settings columns={columns} />
           <Figures columns={columns} />
+          <QualityCharts runs={columns} />
         </>
       )}
     </div>

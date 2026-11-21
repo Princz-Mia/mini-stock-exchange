@@ -21,6 +21,7 @@ import type {
   InstrumentEditRequest,
   InstrumentRequest,
   Instruments,
+  MarketQuality,
   MarketStatus,
   MarketTransition,
   Order,
@@ -153,6 +154,13 @@ export const api = {
   },
 
   instruments: () => request<Instruments>('GET', '/api/v1/instruments'),
+
+  /** An instrument's book minute by minute over a window of command sequences, with its spread and volatility. */
+  marketQuality: (instrumentId: string, fromSequence: string, toSequence: string) =>
+    request<MarketQuality>(
+      'GET',
+      `/api/v1/instruments/${instrumentId}/market-quality${query({ fromSequence, toSequence })}`,
+    ),
 
   /** One-minute bars with from <= start < to, oldest first, and how far the analytics are behind the tape. */
   candles: (instrumentId: string, from: string, to: string) =>
