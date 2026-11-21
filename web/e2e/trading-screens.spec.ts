@@ -727,5 +727,69 @@ for (const size of SIZES) {
       await capture(down, size, 'operator-unreachable');
       await down.context().close();
     });
+
+    test('the run comparison, and each state it can be in', async ({ browser }) => {
+      // The two runs finished before this file: trading-flow.spec.ts's, then trading-runs-compare.spec.ts's.
+      const page = await at(browser, size, 'operator');
+      const listed = (await (await page.request.get('/api/v1/admin/bot-runs?limit=10')).json()) as {
+        runs: { runId: string; window: { endSequence: string | null } }[];
+      };
+      const finished = listed.runs.filter((run) => run.window.endSequence !== null).map((run) => run.runId);
+      expect(finished.length, 'finished runs to compare').toBeGreaterThanOrEqual(2);
+      const address = `/operator/runs/compare?runs=${finished[1]},${finished[0]}`;
+      const market = page.getByRole('region', { name: 'The market over each run' });
+      const counted = market.getByRole('table', { name: 'Market quality' }).getByRole('row', { name: /^Minutes with both sides/ });
+
+      await page.goto(address);
+      await expect(page.getByRole('heading', { name: 'Compare bot runs' })).toBeVisible();
+      // Market Data has read both windows; a run that ended in the minute it started may have no spread, but counts.
+      await expect(counted.getByRole('cell')).toHaveText([/^\d+$/, /^\d+$/], { timeout: 30_000 });
+      await capture(page, size, 'compare');
+      // Each chart's minutes as a table, both open.
+      await market.getByText('Spread by minute, as a table').click();
+      await market.getByText('Last price by minute, as a table').click();
+      await expect(market.getByRole('table', { name: 'Last price' })).toBeVisible();
+      await capture(page, size, 'compare-tables');
+      await page.context().close();
+
+      // A run's figures not yet worked out, and Market Data still catching up to its window.
+      const pending = await at(browser, size, 'operator');
+      await pending.route(`**/api/v1/admin/bot-runs/${finished[0]}`, async (route) => {
+        const detail = (await (await route.fetch()).json()) as Record<string, unknown>;
+        await route.fulfill({ json: { ...detail, figures: null } });
+      });
+      await pending.route('**/market-quality?*', async (route) => {
+        const quality = (await (await route.fetch()).json()) as Record<string, unknown>;
+        await route.fulfill({ json: { ...quality, feed: { state: 'CATCHING_UP', lag: 4_000 } } });
+      });
+      await pending.goto(address);
+      await expect(pending.getByText('Being worked out…').first()).toBeVisible();
+      await expect(pending.getByRole('status').filter({ hasText: 'Market data is catching up' })).toBeVisible();
+      await capture(pending, size, 'compare-pending');
+      await pending.context().close();
+
+      // Market Data not answering: the settings and figures still compare, the market section says why it is empty.
+      const down = await at(browser, size, 'operator');
+      await down.route('**/market-quality?*', problem(503, 'UNAVAILABLE'));
+      await down.goto(address);
+      const unread = down
+        .getByRole('region', { name: 'The market over each run' })
+        .getByRole('table', { name: 'Market quality' })
+        .getByRole('row', { name: /^Average spread/ });
+      await expect(unread.getByRole('cell')).toHaveText(['Market data is not reachable', 'Market data is not reachable'], {
+        timeout: 15_000,
+      });
+      await capture(down, size, 'compare-market-down');
+      await down.context().close();
+
+      // An address with something that isn't a run id, and a run the server doesn't know.
+      const odd = await at(browser, size, 'operator');
+      await odd.goto(`/operator/runs/compare?runs=not-a-run,${finished[0]},00000000-0000-4000-8000-000000000000`);
+      await expect(odd.getByText('Not run ids, so left out: not-a-run.')).toBeVisible();
+      const comparable = odd.getByRole('table', { name: 'Settings' }).getByRole('row', { name: /^Comparable/ });
+      await expect(comparable.getByRole('cell')).toHaveText(['Finished', 'No such run']);
+      await capture(odd, size, 'compare-unknown-run');
+      await odd.context().close();
+    });
   });
 }
