@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Restores Execution's database from a backup made by scripts/backup.sh, then rebuilds everything derived from it.
 #
-#   scripts/restore.sh BACKUP_DIRECTORY [--project NAME] [--env-file FILE] [--yes]
+#   scripts/restore.sh BACKUP_DIRECTORY [--project NAME] [--env-file FILE] [--yes] [--wait-timeout SECONDS]
 #
 # Execution is the only authority, so after its database goes back to the backup, anything newer elsewhere would
 # describe trades that no longer happened. In order:
@@ -13,6 +13,8 @@
 #   5. recreate the topics, and start again whatever was running before.
 # Market Data and the candles then rebuild from the republished events. This deletes data: it asks first unless
 # --yes is given. Revoking a bot's token after the backup was taken is undone by restoring it; revoke it again.
+# Execution checks the whole ledger before it trades again, which takes minutes on a large database: the last step
+# waits up to --wait-timeout seconds (default 1800) for everything to be healthy.
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -21,17 +23,20 @@ backup=
 project=()
 env_file=.env
 yes=
+wait_timeout=1800
 while [ $# -gt 0 ]; do
   case "$1" in
     --project) project=(-p "$2"); shift 2 ;;
     --env-file) env_file=$2; shift 2 ;;
     --yes) yes=1; shift ;;
+    --wait-timeout) wait_timeout=$2; shift 2 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) backup=$1; shift ;;
   esac
 done
-[ -n "$backup" ] && [ -f "$backup/execution_db.dump" ] ||
-  { echo "usage: scripts/restore.sh BACKUP_DIRECTORY [--project NAME] [--env-file FILE] [--yes]" >&2; exit 2; }
+usage="usage: scripts/restore.sh BACKUP_DIRECTORY [--project NAME] [--env-file FILE] [--yes] [--wait-timeout SECONDS]"
+[ -n "$backup" ] && [ -f "$backup/execution_db.dump" ] || { echo "$usage" >&2; exit 2; }
+case "$wait_timeout" in '' | *[!0-9]*) echo "$usage" >&2; exit 2 ;; esac
 compose() { MSYS_NO_PATHCONV=1 docker compose "${project[@]}" --env-file "$env_file" --profile full --profile observability "$@"; }
 psql_in() { compose exec -T postgres psql -U postgres -d "$1" -v ON_ERROR_STOP=1 -q -c "$2"; }
 
@@ -75,5 +80,10 @@ echo 'Recreating topics and starting again'
 compose up -d --wait kafka
 compose run --rm --no-deps kafka-init > /dev/null
 # shellcheck disable=SC2086 # the running services, one word each
-compose up -d --wait --wait-timeout 300 $running
+if ! compose up -d --wait --wait-timeout "$wait_timeout" $running; then
+  echo "Restored execution_db, but not everything was healthy within $wait_timeout s. Execution checks the whole" \
+    "ledger before it trades again, which takes minutes on a large database: wait until docker compose ps shows" \
+    "every service healthy (or pass a longer --wait-timeout next time)." >&2
+  exit 1
+fi
 echo "Restored. Execution republishes $(sed -n 's/^outbox_events=//p' "$backup/manifest.txt") events; Market Data and the candles rebuild from them."

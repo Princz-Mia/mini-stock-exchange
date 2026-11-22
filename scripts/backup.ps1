@@ -5,8 +5,8 @@
 #   scripts\backup.ps1 [-Project NAME] [-EnvFile FILE] [-To DIRECTORY]
 #
 # Without -To, the backup goes to backups\<UTC time>\. It holds execution_db.dump (pg_dump's custom format, taken
-# from one consistent snapshot, so trading can go on meanwhile) and manifest.txt. Run it against the stack Compose
-# started with the same project name and env file.
+# from one consistent snapshot, so trading can go on meanwhile) and manifest.txt, whose figures come from that same
+# snapshot. Run it against the stack Compose started with the same project name and env file.
 param([string]$Project, [string]$EnvFile = '.env', [string]$To)
 
 $ErrorActionPreference = 'Stop'
@@ -21,32 +21,21 @@ function Invoke-Compose {
     if ($LASTEXITCODE -ne 0) { throw "docker compose $($Arguments -join ' ') failed with exit $LASTEXITCODE" }
 }
 
-function Get-Value {
-    param([string]$Sql)
-    $value = & docker @($compose + @('exec', '-T', 'postgres', 'psql', '-U', 'postgres', '-d', 'execution_db', '-v', 'ON_ERROR_STOP=1', '-Atc', $Sql))
-    if ($LASTEXITCODE -ne 0) { throw "query failed: $Sql" }
-    return ($value | Out-String).Trim()
-}
-
 if (-not $To) { $To = Join-Path 'backups' ([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')) }
 New-Item -ItemType Directory -Force $To | Out-Null
 
-# Written inside the container and copied out: binary data must not pass through a PowerShell pipeline.
-Invoke-Compose @('exec', '-T', 'postgres', 'pg_dump', '-U', 'postgres', '-d', 'execution_db', '--format=custom', '--file=/tmp/execution_db.dump')
+# The dump and the manifest's figures come from one snapshot, inside the container (infra/postgres/backup-execution-db.sh);
+# the dump is written there and copied out, as binary data must not pass through a PowerShell pipeline.
+Invoke-Compose @('cp', (Join-Path 'infra' (Join-Path 'postgres' 'backup-execution-db.sh')), 'postgres:/tmp/backup-execution-db.sh') | Out-Null
+$figures = @(& docker @($compose + @('exec', '-T', 'postgres', 'sh', '/tmp/backup-execution-db.sh')) | Where-Object { $_ })
+if ($LASTEXITCODE -ne 0) { throw 'the dump inside the container failed' }
 Invoke-Compose @('cp', 'postgres:/tmp/execution_db.dump', (Join-Path $To 'execution_db.dump')) | Out-Null
-Invoke-Compose @('exec', '-T', 'postgres', 'rm', '-f', '/tmp/execution_db.dump')
+Invoke-Compose @('exec', '-T', 'postgres', 'rm', '-f', '/tmp/execution_db.dump', '/tmp/backup-execution-db.sh')
 
 $commit = (& git rev-parse --short HEAD 2>$null)
 if (-not $commit) { $commit = 'unknown' }
-$manifest = @(
-    "created_at=$([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))"
-    "commit=$commit"
-    "schema_version=$(Get-Value 'SELECT max(version::int) FROM flyway_schema_history WHERE success')"
-    "last_command_sequence=$(Get-Value 'SELECT coalesce(max(command_sequence), 0) FROM outbox')"
-    "trades=$(Get-Value 'SELECT count(*) FROM trades')"
-    "last_trade_sequence=$(Get-Value 'SELECT coalesce(max(trade_sequence), 0) FROM trades')"
-    "outbox_events=$(Get-Value 'SELECT count(*) FROM outbox')"
-)
+# The snapshot's time first, then the commit of this checkout, then the snapshot's counts.
+$manifest = @($figures[0], "commit=$commit") + @($figures | Select-Object -Skip 1)
 # Plain ASCII lines, so the bash restore reads the same manifest.
 [IO.File]::WriteAllLines((Join-Path (Resolve-Path $To) 'manifest.txt'), $manifest)
 "Backed up execution_db to $To"

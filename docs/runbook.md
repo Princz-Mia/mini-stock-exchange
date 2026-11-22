@@ -39,7 +39,7 @@ On Windows, use `.\scripts\backup.ps1` and `.\scripts\restore.ps1 backups\202611
 
 **Backup** writes `backups/<UTC time>/` with:
 - `execution_db.dump`: Execution's database, taken from one consistent snapshot, so trading can go on meanwhile;
-- `manifest.txt`: the time, commit, schema version, last command and trade sequence, and how many events the outbox holds.
+- `manifest.txt`: the snapshot's time, the commit, the schema version, the last command and trade sequence, and how many events the outbox holds. Its figures are read in the same snapshot as the dump, so they describe exactly what the dump holds, however much trading went on while it was taken.
 
 That one database is all a restore into the same stack needs; on another machine, or into a new stack, copy the bots' tokens too (see [Restoring on another machine, or into a new stack](#restoring-on-another-machine-or-into-a-new-stack)). It holds the bot runs too: their windows, their figures and the simulator manifest each run's worker reported, so a restore brings them all back. `backups/` is ignored by Git, and holds real data, so keep it private.
 
@@ -51,6 +51,8 @@ That one database is all a restore into the same stack needs; on another machine
 5. recreates the topics, and starts again whatever was running.
 
 Execution then republishes its whole history in order. Market Data and the candles rebuild from it, which takes seconds for a demo-sized history. The restore asks before deleting anything unless given `--yes` (`-Yes`).
+
+Before it trades again, Execution checks the whole ledger. On a large database that takes minutes: 14 on a ledger of 6.3 million entries. The restore's last step waits up to 30 minutes for every service to be healthy; `--wait-timeout` (`-WaitTimeout`) changes it, in seconds. If the wait runs out, the database is restored all the same and the restore says so: wait until `docker compose ps` shows every service healthy.
 
 After a restore:
 - **Trades and orders after the backup are gone.** So are sessions started since, so people sign in again, and trader logins added since, which the operator adds again.
@@ -70,10 +72,10 @@ Copy it beside the backup, from the stack the backup came from. The volume is na
 docker compose run --rm --no-deps -v mini-stock-exchange_bot-tokens:/tokens:ro -v "$PWD/backups/20261109T220342Z:/backup" --entrypoint tar postgres -czpf /backup/bot-tokens.tar.gz --numeric-owner -C /tokens .
 ```
 
-Then, on the new stack, after the restore, put the tokens in its volume and restart the simulator:
+Then, on the new stack, after the restore, replace the tokens in its volume with the archive's and restart the simulator. A new stack started with the demo seed holds its own bots' tokens, for accounts the restore removed, so the volume is emptied first:
 
 ```bash
-docker compose run --rm --no-deps -v mini-stock-exchange_bot-tokens:/tokens -v "$PWD/backups/20261109T220342Z:/backup:ro" --entrypoint tar postgres -xzpf /backup/bot-tokens.tar.gz --numeric-owner -C /tokens
+docker compose run --rm --no-deps -v mini-stock-exchange_bot-tokens:/tokens -v "$PWD/backups/20261109T220342Z:/backup:ro" --entrypoint sh postgres -c 'find /tokens -mindepth 1 -delete && tar -xzpf /backup/bot-tokens.tar.gz --numeric-owner -C /tokens'
 docker compose --profile full restart simulator
 ```
 
