@@ -5,6 +5,9 @@ COPY mvnw ./
 COPY .mvn .mvn
 # No unzip in this image, so mvnw downloads the tar.gz: verify that artifact instead of the zip.
 RUN sed -i 's/^distributionSha256Sum=.*/distributionSha256Sum=80ffca22aed9e8b9713a232f3394fd81d7f20322df75efdb2b047dbd3e3a23bb/' .mvn/wrapper/maven-wrapper.properties
+# The wrapper fetches Maven once with curl, which doesn't retry by itself, so one transient error from the repository
+# failed the build. curl takes these from ~/.curlrc; Maven's own downloads already retry.
+RUN printf '%s\n' 'retry = 5' 'retry-delay = 3' 'retry-all-errors' > /root/.curlrc
 COPY event-contracts event-contracts
 COPY services/market-data-service services/market-data-service
 # The three Java images share this cache and build in parallel: locked, so one cannot read a Maven download
