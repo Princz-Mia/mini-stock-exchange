@@ -5,6 +5,9 @@ COPY mvnw ./
 COPY .mvn .mvn
 # No unzip in this image, so mvnw downloads the tar.gz: verify that artifact instead of the zip.
 RUN sed -i 's/^distributionSha256Sum=.*/distributionSha256Sum=80ffca22aed9e8b9713a232f3394fd81d7f20322df75efdb2b047dbd3e3a23bb/' .mvn/wrapper/maven-wrapper.properties
+# The wrapper fetches Maven once with curl, which doesn't retry by itself, so one transient error from the repository
+# failed the build. curl takes these from ~/.curlrc; Maven's own downloads already retry.
+RUN printf '%s\n' 'retry = 5' 'retry-delay = 3' 'retry-all-errors' > /root/.curlrc
 COPY event-contracts event-contracts
 COPY services/market-data-service services/market-data-service
 # The three Java images share this cache and build in parallel: locked, so one cannot read a Maven download
@@ -12,7 +15,7 @@ COPY services/market-data-service services/market-data-service
 RUN --mount=type=cache,target=/root/.m2,sharing=locked sh -c '\
     sh ./mvnw -B -ntp -f event-contracts/pom.xml -DskipTests install && \
     sh ./mvnw -B -ntp -f services/market-data-service/pom.xml -DskipTests package && \
-    java -Djarmode=tools -jar services/market-data-service/target/market-data-service-0.2.0.jar extract --layers --destination /out'
+    java -Djarmode=tools -jar services/market-data-service/target/market-data-service-0.2.1.jar extract --layers --destination /out'
 
 FROM container-registry.oracle.com/java/jdk-no-fee-term:25.0.5@sha256:283d01db5d749b005826ad311af50a78cc40969548abb63d4b57063a6d611960
 RUN groupadd --system --gid 10001 mse && useradd --system --uid 10001 --gid mse --no-create-home mse
@@ -26,4 +29,4 @@ ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75"
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=5s --start-period=90s --retries=6 \
     CMD curl -fsS http://localhost:8080/actuator/health/readiness || exit 1
-ENTRYPOINT ["java", "-jar", "market-data-service-0.2.0.jar"]
+ENTRYPOINT ["java", "-jar", "market-data-service-0.2.1.jar"]

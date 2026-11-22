@@ -148,7 +148,7 @@ maven_verify() {
     class_version services/execution-service/target/classes com.mia_princz.mse.execution.ExecutionServiceApplication 69 &&
     class_version services/market-data-service/target/classes com.mia_princz.mse.marketdata.MarketDataServiceApplication 69 &&
     class_version analytics-job/target/analytics-job.jar com.mia_princz.mse.analytics.AnalyticsJob 61 &&
-    class_version event-contracts/target/event-contracts-0.2.0.jar com.mia_princz.mse.contracts.events.TradeExecuted 61
+    class_version event-contracts/target/event-contracts-0.2.1.jar com.mia_princz.mse.contracts.events.TradeExecuted 61
 }
 
 frontend() {
@@ -216,6 +216,7 @@ isolation() {
 
 proxy_routes() {
   assert_equal /healthz 200 "$(http_status /healthz)" &&
+    assert_equal 'proxy look-ups that failed at startup' 0 "$(compose logs --no-log-prefix web 2>&1 | grep -c 'could not be resolved')" &&
     assert_equal '/ (SPA)' 200 "$(http_status /)" &&
     assert_equal '/deep/link (SPA fallback)' 200 "$(http_status /deep/link)" &&
     assert_equal '/api/v1/orders (Execution, denied)' 401 "$(http_status /api/v1/orders)" &&

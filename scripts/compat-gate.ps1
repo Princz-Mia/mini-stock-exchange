@@ -374,7 +374,7 @@ try {
         Assert-ClassVersion 'services\execution-service\target\classes' 'com.mia_princz.mse.execution.ExecutionServiceApplication' 69
         Assert-ClassVersion 'services\market-data-service\target\classes' 'com.mia_princz.mse.marketdata.MarketDataServiceApplication' 69
         Assert-ClassVersion 'analytics-job\target\analytics-job.jar' 'com.mia_princz.mse.analytics.AnalyticsJob' 61
-        Assert-ClassVersion 'event-contracts\target\event-contracts-0.2.0.jar' 'com.mia_princz.mse.contracts.events.TradeExecuted' 61
+        Assert-ClassVersion 'event-contracts\target\event-contracts-0.2.1.jar' 'com.mia_princz.mse.contracts.events.TradeExecuted' 61
     }
 
     Step 'Frontend: npm ci, API contract, typecheck, lint, test, build' {
@@ -476,6 +476,8 @@ try {
 
     Step 'Proxy: routes by path to the owning service' {
         Assert-Equal '/healthz' '200' (Get-Http '/healthz')
+        # Started after both services, the proxy found them on its first look-up.
+        Assert-Equal 'proxy look-ups that failed at startup' '0' ((& docker @($compose + @('logs', '--no-log-prefix', 'web')) 2>&1 | Select-String 'could not be resolved' | Measure-Object).Count)
         Assert-Equal '/ (SPA)' '200' (Get-Http '/')
         Assert-Equal '/deep/link (SPA fallback)' '200' (Get-Http '/deep/link')
         Assert-Equal '/api/v1/orders (Execution, denied)' '401' (Get-Http '/api/v1/orders')

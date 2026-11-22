@@ -148,6 +148,14 @@ services:
     build:
       context: ./web
     restart: unless-stopped
+    # Started once both services' containers exist, so its first look-up of their addresses finds them. A failed one
+    # is retried only after about 30 s on some Docker engines, which would answer 502 that long after the stack is
+    # healthy. Only the start waits: either service can stop and start again later, and the proxy follows it.
+    depends_on:
+      execution-service:
+        condition: service_started
+      market-data-service:
+        condition: service_started
     ports:
       - 127.0.0.1:${WEB_HOST_PORT:-8080}:8080
     healthcheck:
@@ -164,7 +172,7 @@ services:
     build:
       context: .
       dockerfile: analytics-job/Dockerfile
-    image: mini-stock-exchange/analytics-job:0.2.0
+    image: mini-stock-exchange/analytics-job:0.2.1
     restart: unless-stopped
     depends_on:
       kafka-init:
@@ -202,7 +210,7 @@ services:
 
   flink-taskmanager:
     profiles: [full]
-    image: mini-stock-exchange/analytics-job:0.2.0
+    image: mini-stock-exchange/analytics-job:0.2.1
     restart: unless-stopped
     depends_on:
       flink-jobmanager:
