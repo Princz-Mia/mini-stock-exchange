@@ -19,7 +19,7 @@ public class TestcontainersConfiguration {
 
 	static final String POSTGRES_IMAGE = "postgres@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81";
 
-	static final String EXECUTION_OWNER_PASSWORD = "test-execution-owner";
+	public static final String EXECUTION_OWNER_PASSWORD = "test-execution-owner";
 
 	static final String EXECUTION_APP_PASSWORD = "test-execution-app";
 
@@ -65,7 +65,7 @@ public class TestcontainersConfiguration {
 		};
 	}
 
-	static String jdbcUrl(PostgreSQLContainer postgres, String database) {
+	public static String jdbcUrl(PostgreSQLContainer postgres, String database) {
 		return "jdbc:postgresql://" + postgres.getHost() + ":" + postgres.getMappedPort(5432) + "/" + database;
 	}
 

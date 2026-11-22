@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import org.apache.avro.SchemaNormalization;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -63,6 +64,32 @@ public final class JdbcTradingStore implements TradingStore {
 
 	/** An encoded snapshot must stay under this; a bigger one fails its command instead of being published. */
 	static final int SNAPSHOT_BUDGET_BYTES = 128 * 1024;
+
+	/** Customer balances must equal the sum of their ledger postings, in total and in the reserved bucket. */
+	static final String LEDGER_AGAINST_BALANCES = """
+			WITH ledger AS (
+			    SELECT e.account_id, coalesce(e.instrument_id, :cash) AS asset, sum(e.delta) AS total,
+			        coalesce(sum(e.delta) FILTER (WHERE e.bucket = 'RESERVED'), 0) AS reserved
+			    FROM ledger_entry e JOIN account a ON a.id = e.account_id
+			    WHERE a.simulation_id = :simulation AND a.kind <> 'ISSUANCE'
+			    GROUP BY 1, 2),
+			balances AS (
+			    SELECT b.account_id, :cash AS asset, b.total_cents AS total, b.reserved_cents AS reserved
+			    FROM cash_balance b JOIN account a ON a.id = b.account_id WHERE a.simulation_id = :simulation
+			    UNION ALL
+			    SELECT p.account_id, p.instrument_id, p.total_quantity, p.reserved_quantity
+			    FROM position p JOIN account a ON a.id = p.account_id WHERE a.simulation_id = :simulation)
+			SELECT coalesce(l.account_id, b.account_id) AS account_id, coalesce(l.asset, b.asset) AS asset,
+			    coalesce(l.total, 0) AS ledger_total, coalesce(b.total, 0) AS balance_total,
+			    coalesce(l.reserved, 0) AS ledger_reserved, coalesce(b.reserved, 0) AS balance_reserved
+			FROM ledger l FULL JOIN balances b ON l.account_id = b.account_id AND l.asset = b.asset
+			WHERE coalesce(l.total, 0) <> coalesce(b.total, 0) OR coalesce(l.reserved, 0) <> coalesce(b.reserved, 0)
+			LIMIT 20""";
+
+	/** The commit-time trigger already enforces this; checking again covers a dropped trigger. */
+	static final String UNBALANCED_BATCHES = """
+			SELECT e.batch_id FROM ledger_entry e JOIN journal_batch b ON b.id = e.batch_id
+			WHERE b.simulation_id = ? GROUP BY e.batch_id, e.instrument_id HAVING sum(e.delta) <> 0 LIMIT 20""";
 
 	private final JdbcClient jdbc;
 
@@ -135,32 +162,13 @@ public final class JdbcTradingStore implements TradingStore {
 	@Override
 	public List<String> reconciliationProblems(UUID simulationId) {
 		List<String> problems = new ArrayList<>();
-		// Customer balances must equal the sum of their ledger postings, in total and in the reserved bucket.
-		problems.addAll(jdbc.sql("""
-				WITH ledger AS (
-				    SELECT e.account_id, coalesce(e.instrument_id, :cash) AS asset, sum(e.delta) AS total,
-				        coalesce(sum(e.delta) FILTER (WHERE e.bucket = 'RESERVED'), 0) AS reserved
-				    FROM ledger_entry e JOIN account a ON a.id = e.account_id
-				    WHERE a.simulation_id = :simulation AND a.kind <> 'ISSUANCE'
-				    GROUP BY 1, 2),
-				balances AS (
-				    SELECT b.account_id, :cash AS asset, b.total_cents AS total, b.reserved_cents AS reserved
-				    FROM cash_balance b JOIN account a ON a.id = b.account_id WHERE a.simulation_id = :simulation
-				    UNION ALL
-				    SELECT p.account_id, p.instrument_id, p.total_quantity, p.reserved_quantity
-				    FROM position p JOIN account a ON a.id = p.account_id WHERE a.simulation_id = :simulation)
-				SELECT coalesce(l.account_id, b.account_id) AS account_id, coalesce(l.asset, b.asset) AS asset,
-				    coalesce(l.total, 0) AS ledger_total, coalesce(b.total, 0) AS balance_total,
-				    coalesce(l.reserved, 0) AS ledger_reserved, coalesce(b.reserved, 0) AS balance_reserved
-				FROM ledger l FULL JOIN balances b ON l.account_id = b.account_id AND l.asset = b.asset
-				WHERE coalesce(l.total, 0) <> coalesce(b.total, 0) OR coalesce(l.reserved, 0) <> coalesce(b.reserved, 0)
-				LIMIT 20""")
+		problems.addAll(readingWholeLedger(() -> jdbc.sql(LEDGER_AGAINST_BALANCES)
 			.param("simulation", simulationId)
 			.param("cash", CASH)
 			.query((row, index) -> "Balance of account " + row.getObject("account_id") + " in " + asset(row.getObject("asset", UUID.class))
 					+ " is " + row.getLong("balance_total") + " (reserved " + row.getLong("balance_reserved")
 					+ ") but the ledger says " + row.getLong("ledger_total") + " (reserved " + row.getLong("ledger_reserved") + ")")
-			.list());
+			.list()));
 		// Every reserved amount must equal exactly the holds of that account's open orders.
 		problems.addAll(jdbc.sql("""
 				WITH holds AS (
@@ -197,14 +205,35 @@ public final class JdbcTradingStore implements TradingStore {
 			.query((row, index) -> "Instrument " + row.getString("symbol") + " has last trade sequence "
 					+ row.getLong("last_trade_sequence") + " but its newest trade is " + row.getLong("newest"))
 			.list());
-		// The commit-time trigger already enforces this; checking again costs little and covers a dropped trigger.
-		problems.addAll(jdbc.sql("""
-				SELECT e.batch_id FROM ledger_entry e JOIN journal_batch b ON b.id = e.batch_id
-				WHERE b.simulation_id = ? GROUP BY e.batch_id, e.instrument_id HAVING sum(e.delta) <> 0 LIMIT 20""")
+		problems.addAll(readingWholeLedger(() -> jdbc.sql(UNBALANCED_BATCHES)
 			.param(simulationId)
 			.query((row, index) -> "Journal batch " + row.getObject("batch_id") + " does not balance")
-			.list());
+			.list()));
 		return problems;
+	}
+
+	/**
+	 * Runs a check that reads the whole ledger with index and bitmap scans turned off, then puts both back as they were.
+	 * The ledger's indexes follow random UUIDs, and the planner, which takes the tables to be cached, would rather walk
+	 * one, per batch or per account, fetching a page for each entry it finds. On a ledger larger than memory that is
+	 * close to one read per entry. Read in order, each table is read once. The settings last until the transaction
+	 * ends, so this works inside the startup transaction; outside one, it leaves the planner's choice alone.
+	 */
+	<T> T readingWholeLedger(Supplier<T> check) {
+		String[] before = jdbc.sql("SELECT current_setting('enable_indexscan'), current_setting('enable_bitmapscan')")
+			.query((row, index) -> new String[] { row.getString(1), row.getString(2) })
+			.single();
+		planWith("off", "off");
+		T found = check.get();
+		planWith(before[0], before[1]);
+		return found;
+	}
+
+	private void planWith(String indexScan, String bitmapScan) {
+		jdbc.sql("SELECT set_config('enable_indexscan', ?, true), set_config('enable_bitmapscan', ?, true)")
+			.params(indexScan, bitmapScan)
+			.query((row, index) -> row.getString(1))
+			.single();
 	}
 
 	private static String asset(UUID asset) {
