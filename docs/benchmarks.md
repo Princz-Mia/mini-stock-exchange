@@ -2,6 +2,12 @@
 
 Measured results, each with the environment it was measured in. They are results on one machine, not guarantees: rerun the command on yours before relying on a number.
 
+**Release v0.2.0** (commit `2b082a3`, 2026-11-21 and 22), each in its section below:
+- [Steady load](#release-v020-2026-11-21): 10,000 bots at 100 commands a second for ten minutes, every budget met, p99 9.7 ms from admission to committed result.
+- [Open loop](#release-v020-2026-11-22): ten minutes at 400 and then at 1,000 commands a second, every budget met; p99 18.4 ms and 444.6 ms.
+- [Highest one-minute rate](#group-commit-on-2026-11-19): 1,200 commands a second within every budget, measured on 2026-11-19 with the same writer.
+- [Market Data catch-up](#market-data-catch-up): a backlog applied a poll at once, 6,500 to 8,000 snapshots and 15,000 to 18,000 trades a second, spread minutes included.
+
 ## Matcher
 
 The order book alone, with no database (JMH, `MatcherBenchmark`). Each invocation replays the same recorded 10,000 commands from a fresh book. Each command does matching, both sides' 20-level snapshot depth, then apply or cancel. 2 forks, 20 measured iterations, Oracle JDK 25.0.5.
@@ -30,6 +36,15 @@ How fast Market Data works through a backlog (`FeedCatchUpBench`): 6,000 market 
 | Trades | 410 and 411 | 16,645 and 40,994 |
 
 One record at a time, each record is its own savepoint and its own statements in the poll's transaction. A poll at once is a few multi-row statements. Only the newest snapshot per instrument is written, since a snapshot replaces the ones before it; the others are still offered to the tables' checks in one more statement per table, so a snapshot the tables would refuse stops the poll exactly as it would one at a time. Trades are inserted together and each session's figures are summed once. The bench reaches PostgreSQL from the Windows host through Docker, where each round trip costs more than inside Compose. The first figure in each cell includes the JVM warming up.
+
+**Release v0.2.0, 2026-11-22.** The same bench on the release candidate, where each poll also writes the spread minutes that market quality reads, in one more statement:
+
+| Events a second | One record at a time | A poll at once |
+| --- | --- | --- |
+| Snapshots | 366 and 352 | 7,955 and 6,507 |
+| Trades | 409 and 562 | 17,876 and 15,027 |
+
+A poll at once is still more than ten times faster than one record at a time. Snapshots and trades at once fell within or near the range of the 2026-11-18 run; that run's 40,994 trades a second was its outlier, as two passes of the same events differed by more than double.
 
 ## Writer replay
 
@@ -125,6 +140,32 @@ It runs in its own throwaway Compose project and writes its report to `runtime/l
 | Writer queue | no sustained growth |
 | Unexpected infrastructure failures | under 0.1% of commands |
 | Accounting | no violations, no lost acknowledged trades, no duplicate financial effects |
+| Publication and the feeds | the outbox's unpublished events and every Market Data feed's lag grow by no more than two seconds of the rate (at least 200) over the window, and every feed stays live |
+
+### Release v0.2.0, 2026-11-21
+
+The release candidate, with every change since v0.1.0: runs of up to 32 commands in one transaction, the session store on its own connections, bot runs that keep their windows and figures, and Market Data's spread minutes. All budgets met.
+
+| | Result |
+| --- | --- |
+| Offered | 56,931 commands in 600 s, 94.8 a second (bots plus the probe trader) |
+| Admitted and committed | 56,913, 94.8 a second |
+| Within 150 ms and within 500 ms | 100.000% of commands |
+| Estimated p50 / p95 / p99 | 3.9 / 6.8 / 9.7 ms |
+| Client p50 / p95 / p99, through the proxy | 7.9 / 11.7 / 14.3 ms (1,200 probe commands) |
+| Writer queue depth | first minute 0.1, last minute 0.0, peak 1 |
+| Unexpected failures, business rejections, refusals | 0, 0, 0 |
+| Outbox, unpublished events at peak | 9 |
+| Market Data feed lag at peak | 15 records (candles), 4 (market), 7 (trades) |
+| Public feed not live | 0 of 120 samples |
+
+- **The writer:** 3.97 ms of service time per command at a mean run of 1.01 commands, so at this rate commands rarely shared a commit. WAL flushes took 1.61 ms on average, the disk's fast state.
+- **Starting and stopping:** provisioning the 10,000 bots took 79 s, the run's first commands came 8 s after it started, and stopping it, every bot's open orders cancelled, took 28 s. The simulator used 81 MiB of its 512 MiB.
+- **Processor, mean (peak) of one CPU:** Execution 29% (47%), PostgreSQL 38% (72%), the simulator 26% (48%), Kafka 20% (158%), Market Data 8% (27%).
+- **Accounting:** the restart's reconciliation (6 s), the public trades and the candles all checked out.
+- **The simulator** reported version `0.2.0+2b082a3d6ab9` with the run.
+
+**Environment:** Windows 11, Docker Desktop (WSL 2) with 16 CPUs and 15.2 GiB; Execution limited to 2 CPUs and 2 GiB; PostgreSQL 18.6 with `fsync` and `synchronous_commit` on, the session store's own connections committing asynchronously; Oracle JDK 25.0.5. Commit `2b082a3`.
 
 ### Where a command's time goes, 2026-11-16
 
@@ -404,3 +445,24 @@ The session store now has its own small connection pool, whose commits don't wai
 - **Accounting:** the restart's reconciliation (11 s), the public trades and the candles all checked out.
 
 **Environment:** as for the group-commit run above. The exchange code matched `main` after the session store and runs in Compose were both merged.
+
+### Release v0.2.0, 2026-11-22
+
+The same ten-minute stress run on the release candidate: ten minutes at 400 a second, then ten at 1,000, each after a 2-minute warm-up.
+
+```powershell
+uv run --project simulator python -m mse_simulator.loadtest --stress 400,1000 --stress-warmup 120 --stress-duration 600
+```
+
+| Rate | Answered | Refused or failed | p50 | p95 | p99 | Generator lag p99 | Feed lag peak | Met |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 400/s | 400.0/s | 0 | 9.4 ms | 13.8 ms | 18.4 ms | 4.6 ms | 18 | yes |
+| 1,000/s | 1,000.0/s | 0 | 18.8 ms | 33.0 ms | 444.6 ms | 9.4 ms | 70 | yes |
+
+- **Every budget met at both rates,** with no command refused or failed and the publication backlog never above zero.
+- **The p99 at 1,000 a second was 444.6 ms,** within the 500 ms budget but four times the 112.7 ms of 2026-11-20, while the median and p95 were lower than then. At 0.98 ms of service time per command one writer sustains about 1,020 a second, so at 1,000 it ran close to its limit, and short bursts queued: the mean queue time was 5.85 ms. Two runs don't say which tail is typical.
+- **The writer:** 2.47 ms of service time per command at 400 a second and 0.98 ms at 1,000, as runs grew.
+- **Processor at 1,000 a second, mean (peak):** Execution 139% (207%), PostgreSQL 147% (187%), Kafka 26% (186%), the proxy 24% (44%).
+- **Accounting:** the restart's reconciliation (11 s), the public trades and the candles all checked out.
+
+**Environment:** as for the steady run above. Commit `2b082a3`.
