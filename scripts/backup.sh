@@ -6,8 +6,8 @@
 #   scripts/backup.sh [--project NAME] [--env-file FILE] [--to DIRECTORY]
 #
 # Without --to, the backup goes to backups/<UTC time>/. It holds execution_db.dump (pg_dump's custom format, taken
-# from one consistent snapshot, so trading can go on meanwhile) and manifest.txt. Run it against the stack Compose
-# started with the same project name and env file.
+# from one consistent snapshot, so trading can go on meanwhile) and manifest.txt, whose figures come from that same
+# snapshot. Run it against the stack Compose started with the same project name and env file.
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -24,24 +24,22 @@ while [ $# -gt 0 ]; do
   esac
 done
 compose() { MSYS_NO_PATHCONV=1 docker compose "${project[@]}" --env-file "$env_file" --profile full --profile observability "$@"; }
-sql() { compose exec -T postgres psql -U postgres -d execution_db -v ON_ERROR_STOP=1 -Atc "$1"; }
 
 target=${target:-backups/$(date -u +%Y%m%dT%H%M%SZ)}
 mkdir -p "$target"
 
-# Written inside the container and copied out: piping binary data through `exec` isn't safe on every shell.
-compose exec -T postgres pg_dump -U postgres -d execution_db --format=custom --file=/tmp/execution_db.dump
+# The dump and the manifest's figures come from one snapshot, inside the container (infra/postgres/backup-execution-db.sh);
+# the dump is written there and copied out, as piping binary data through `exec` isn't safe on every shell.
+compose cp infra/postgres/backup-execution-db.sh postgres:/tmp/backup-execution-db.sh > /dev/null
+figures=$(compose exec -T postgres sh /tmp/backup-execution-db.sh)
 compose cp postgres:/tmp/execution_db.dump "$target/execution_db.dump" > /dev/null
-compose exec -T postgres rm -f /tmp/execution_db.dump
+compose exec -T postgres rm -f /tmp/execution_db.dump /tmp/backup-execution-db.sh
 
+# The snapshot's time first, then the commit of this checkout, then the snapshot's counts.
 {
-  echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '%s\n' "$figures" | head -n 1
   echo "commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-  echo "schema_version=$(sql "SELECT max(version::int) FROM flyway_schema_history WHERE success")"
-  echo "last_command_sequence=$(sql "SELECT coalesce(max(command_sequence), 0) FROM outbox")"
-  echo "trades=$(sql "SELECT count(*) FROM trades")"
-  echo "last_trade_sequence=$(sql "SELECT coalesce(max(trade_sequence), 0) FROM trades")"
-  echo "outbox_events=$(sql "SELECT count(*) FROM outbox")"
+  printf '%s\n' "$figures" | tail -n +2
 } > "$target/manifest.txt"
 
 echo "Backed up execution_db to $target"
