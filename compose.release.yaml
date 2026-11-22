@@ -1,8 +1,8 @@
 # Runs a published release instead of building: every image this repository builds comes from GitHub Container
-# Registry at the version in MSE_VERSION, such as v0.2.0. Use it from a checkout of that version's tag, so the
+# Registry at the version in MSE_VERSION, such as v0.2.1. Use it from a checkout of that version's tag, so the
 # configuration it mounts matches the images:
 #
-#   MSE_VERSION=v0.2.0 docker compose -f compose.yaml -f compose.release.yaml --profile full up -d --no-build --wait
+#   MSE_VERSION=v0.2.1 docker compose -f compose.yaml -f compose.release.yaml --profile full up -d --no-build --wait
 #
 # Everything else (ports, profiles, volumes, the demo seed) is as in compose.yaml.
 

@@ -1,6 +1,6 @@
 name: Release
 
-# A version tag (v0.2.0) builds the five images, publishes them to GitHub Container Registry, starts the published
+# A version tag (v0.2.1) builds the five images, publishes them to GitHub Container Registry, starts the published
 # images on a fresh runner exactly as a user would, and only then creates the GitHub release, with the tag's own
 # annotation as its notes. A pull request that changes this workflow builds the images without publishing anything.
 on:

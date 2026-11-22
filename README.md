@@ -97,12 +97,12 @@ Each trader's account may send ten trading commands (places and cancels) a secon
 Each version tag publishes its images to GitHub Container Registry. To run one without building, check out its tag and start it with the release override:
 
 ```bash
-git checkout v0.2.0
+git checkout v0.2.1
 ./scripts/init-env.sh
-MSE_VERSION=v0.2.0 docker compose -f compose.yaml -f compose.release.yaml --profile full up -d --no-build --wait
+MSE_VERSION=v0.2.1 docker compose -f compose.yaml -f compose.release.yaml --profile full up -d --no-build --wait
 ```
 
-In PowerShell, set the version first with `$env:MSE_VERSION = 'v0.2.0'`. The images are `ghcr.io/princz-mia/mini-stock-exchange/<image>:<version>` for `execution-service`, `market-data-service`, `web`, `simulator` and `analytics-job`.
+In PowerShell, set the version first with `$env:MSE_VERSION = 'v0.2.1'`. The images are `ghcr.io/princz-mia/mini-stock-exchange/<image>:<version>` for `execution-service`, `market-data-service`, `web`, `simulator` and `analytics-job`.
 
 ## Develop
 
