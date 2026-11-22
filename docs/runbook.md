@@ -41,7 +41,7 @@ On Windows, use `.\scripts\backup.ps1` and `.\scripts\restore.ps1 backups\202611
 - `execution_db.dump`: Execution's database, taken from one consistent snapshot, so trading can go on meanwhile;
 - `manifest.txt`: the time, commit, schema version, last command and trade sequence, and how many events the outbox holds.
 
-That one database is all a restore needs. It holds the bot runs too: their windows, their figures and the simulator manifest each run's worker reported, so a restore brings them all back. `backups/` is ignored by Git, and holds real data, so keep it private.
+That one database is all a restore into the same stack needs; on another machine, or into a new stack, copy the bots' tokens too (see [Restoring on another machine, or into a new stack](#restoring-on-another-machine-or-into-a-new-stack)). It holds the bot runs too: their windows, their figures and the simulator manifest each run's worker reported, so a restore brings them all back. `backups/` is ignored by Git, and holds real data, so keep it private.
 
 **Restore** puts Execution back exactly as it was at the backup and rebuilds everything derived from it. Anything newer would describe trades that, after the restore, never happened. It:
 1. stops the simulator, Flink, Market Data and Execution;
@@ -57,6 +57,27 @@ After a restore:
 - **A bot token revoked after the backup works again.** Revoke it again from the operator screen.
 - **Market quality over a run's window comes back in full.** Market Data's spread minutes (`spread_minute`) are emptied with the rest of its projections and rebuilt from the market snapshots Execution republishes. A rebuild of Market Data from Kafka alone can't do that: it sees only the snapshots the compacted topic still holds (see [Rebuilding Market Data](#rebuilding-market-data)).
 - **A backup from an older version** is restored as it was, tables added since included, and migrated forward when Execution starts. A backup from a newer version holds schema changes this code doesn't know, so restore it only with code at least as new as the backup's `commit`.
+
+If a restore stops partway, run it again: it starts again only what was running when it began, so then start the rest with `docker compose --profile full up -d --wait`.
+
+### Restoring on another machine, or into a new stack
+
+The bots' tokens are not in the backup. Execution's database keeps only a hash of each; the tokens themselves are files in the stack's `bot-tokens` volume, which the simulator reads. A restore into the same stack keeps that volume, so its bots trade on. A restore into a new stack, or on another machine, brings the bots back without their tokens, and the simulator's log says `without a token file`: they can't trade until the volume is copied too.
+
+Copy it beside the backup, from the stack the backup came from. The volume is named after the Compose project, `mini-stock-exchange_bot-tokens` unless the stack runs under another name, and the archive keeps the files' owner and permissions:
+
+```bash
+docker compose run --rm --no-deps -v mini-stock-exchange_bot-tokens:/tokens:ro -v "$PWD/backups/20261109T220342Z:/backup" --entrypoint tar postgres -czpf /backup/bot-tokens.tar.gz --numeric-owner -C /tokens .
+```
+
+Then, on the new stack, after the restore, put the tokens in its volume and restart the simulator:
+
+```bash
+docker compose run --rm --no-deps -v mini-stock-exchange_bot-tokens:/tokens -v "$PWD/backups/20261109T220342Z:/backup:ro" --entrypoint tar postgres -xzpf /backup/bot-tokens.tar.gz --numeric-owner -C /tokens
+docker compose --profile full restart simulator
+```
+
+In PowerShell, write the folder as `"${PWD}\backups\20261109T220342Z:/backup"`. The archive holds the bots' credentials in plain text: keep it with the backup, as private as the backup itself.
 
 ## Execution won't become healthy
 
