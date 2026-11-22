@@ -88,7 +88,10 @@ public interface TradingStore {
 	/** Open and partially filled orders of one instrument, in accepted-sequence order. */
 	List<BookOrder> activeOrders(UUID instrumentId);
 
-	/** Every disagreement between balances, the ledger and open orders. Empty means consistent. */
+	/**
+	 * Every disagreement between balances, the ledger and open orders. Empty means consistent. Reads the whole ledger,
+	 * which it does in one pass only inside a transaction.
+	 */
 	List<String> reconciliationProblems(UUID simulationId);
 
 	/** Moves the market to {@code state}; the first move to OPEN also records when the market opened. */
