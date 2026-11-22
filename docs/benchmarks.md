@@ -120,6 +120,21 @@ The largest step so far, and the tail most of all: commands with fills now cost 
 
 **A cancel of an order resting in the book, without reading it first, 2026-11-17.** One statement fewer for each successful cancel. On this bench, no measurable change (182 commands a second before and after, same digest): many of its cancels target orders already filled, which are answered as before, and the read saved is cheap here.
 
+## Startup reconciliation
+
+Before it takes commands, Execution checks every customer balance against the sum of its ledger postings, and every journal batch for balance per asset. Both checks read the whole ledger.
+
+**A restored development database, 2026-11-22.** With 2.47 million journal batches and 6.3 million ledger entries (903 MB), Execution took about 14 minutes to become ready, nearly all of it in the batch check. PostgreSQL ran it as a nested loop over every batch, looking up each batch's entries through an index, because the check stops after 20 failures and it expected some soon. In a balanced ledger there are none, so it read every entry by a random lookup: about 96 GB read from disk for a 1 GB table. The two checks now run with index and bitmap scans turned off, so each reads the ledger in one pass. Their SQL and what they find are unchanged.
+
+`LedgerReconciliationBench` generates a ledger of that size from a fixed seed: 10,000 accounts, 3.1 million batches, 6.3 million entries (`ledger_entry` 1,025 MB with its indexes). Each check is timed twice, alternating between the plan PostgreSQL chooses on its own and the one pass, in Testcontainers (128 MB of shared buffers) on 2026-11-22:
+
+| Check | Planner's own choice | One pass |
+| --- | --- | --- |
+| Balances against the ledger | 14.9 s and 9.2 s | 1.1 s and 1.0 s |
+| Unbalanced batches | 21.0 s and 21.0 s | 2.7 s and 2.5 s |
+
+The whole reconciliation then took 3.7 s. Here the ledger fits in the operating system's cache, so the planner's own plan costs seconds, not minutes; on the restored database it had to read from disk. The one pass reads each table once, so its time grows with the ledger's size, not with how much of it is cached.
+
 ## Steady load
 
 **Scenario:** five instruments and 10,000 bots (2,000 market makers, 2,000 momentum, 6,000 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. Until 2026-11-15 the scenario was 1,000 bots; its last result is kept below. Neither is a limit: the exchange limits neither the bot population nor the bots in one run, and `--bots` sets the number.
