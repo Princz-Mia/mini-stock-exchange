@@ -47,6 +47,8 @@ import com.mia_princz.mse.execution.trading.adapter.WriterOwnership;
 import com.mia_princz.mse.execution.trading.application.AccountChanges;
 import com.mia_princz.mse.execution.trading.application.AddInstrument;
 import com.mia_princz.mse.execution.trading.application.BotCredentials;
+import com.mia_princz.mse.execution.trading.application.CancelOrder;
+import com.mia_princz.mse.execution.trading.application.CancelResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.CommandWriter;
 import com.mia_princz.mse.execution.trading.application.InstrumentResult;
@@ -297,7 +299,8 @@ class MarketCloseSweepIT {
 	 * A transaction of the close that fails before its commit rolls back whole, and the books, which change only after
 	 * a commit, still hold what the database holds. So the same key can be sent again: after the close's own
 	 * transaction failed, it closes the market as if for the first time; after a later part failed, it finds its stored
-	 * answer and cancels the orders that still rest.
+	 * answer and cancels the orders that still rest. Until then the market is closed with orders resting, and an owner
+	 * can still cancel one of them.
 	 */
 	@Test
 	void aPartThatFailsLeavesTheBooksAsTheDatabaseAndTheSameKeyFinishesTheClose() throws Exception {
@@ -339,12 +342,26 @@ class MarketCloseSweepIT {
 		assertThat(engine.simulationIdUnlessClosed()).isNull();
 		assertThat(discarded).isEmpty();
 
+		// The close has not got to the bid at 90.00 yet, and its owner cancels it: an ordinary cancel, in a closed
+		// market.
+		CancelResult own = engine
+			.cancel(new CommandKey(a, UUID.randomUUID(), "POST /api/v1/orders/{id}/cancel", new byte[32]),
+					new CancelOrder(orders.getFirst(), a))
+			.get(5, TimeUnit.SECONDS);
+		assertThat(own.status()).isEqualTo(CancelResult.Status.CANCELED);
+		assertThat(own.canceledQuantity()).isEqualTo(1);
+		assertThat(place(engine, a, first, Side.BUY, "90.00", 1).rejection()).isEqualTo(RejectionCode.MARKET_CLOSED);
+
 		// The same key again: the stored answer, once nothing rests any more.
 		MarketClosing closed = engine.close(closeKey, close).get(5, TimeUnit.SECONDS);
 		assertThat(closed).isEqualTo(new MarketClosing(MarketClosing.Status.CLOSED, "CLOSED", open + 1, 5, 0));
-		assertThat(sequence()).as("two more parts").isEqualTo(open + 3);
-		assertThat(states().values()).containsOnly("CANCELED MARKET_CLOSED");
-		assertThat(states().keySet()).containsExactlyInAnyOrderElementsOf(orders);
+		assertThat(sequence()).as("the cancel, the rejected order, and one more part for the two orders left")
+			.isEqualTo(open + 4);
+		Map<UUID, String> ended = states();
+		ended.values().removeIf("REJECTED MARKET_CLOSED"::equals);
+		assertThat(ended.keySet()).containsExactlyInAnyOrderElementsOf(orders);
+		assertThat(ended.remove(orders.getFirst())).isEqualTo("CANCELED CANCELED_BY_OWNER");
+		assertThat(ended.values()).hasSize(4).containsOnly("CANCELED MARKET_CLOSED");
 		assertThat(reserved()).isZero();
 		assertThat(reconciliationProblems()).isEmpty();
 		assertThat(engine.depth(first, Side.SELL).get(5, TimeUnit.SECONDS)).isEmpty();

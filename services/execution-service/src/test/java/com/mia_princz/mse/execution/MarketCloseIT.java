@@ -392,6 +392,12 @@ class MarketCloseIT {
 		finally {
 			jdbc.update("UPDATE api_token SET revoked_at = now() WHERE token_hash = ?", late.hash());
 		}
+		// The operator's own revoke still answers, and finds nothing left to revoke.
+		HttpResponse<String> revoked = operator.post(
+				"/api/v1/admin/bots/" + story.accounts().values().stream().toList().getLast() + "/revoke-token", "",
+				"Idempotency-Key", UUID.randomUUID().toString());
+		assertThat(revoked.statusCode()).as(revoked.body()).isEqualTo(200);
+		assertThat(JSON.readTree(revoked.body()).get("revoked").asInt()).isZero();
 	}
 
 	/**
