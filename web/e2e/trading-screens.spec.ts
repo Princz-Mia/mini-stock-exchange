@@ -100,7 +100,7 @@ async function closedMarket(route: Route): Promise<void> {
 
 /**
  * The one request no browser test may send: the tests share one market, and a closed market stays closed for every
- * spec after it. Anything that would send it is refused in the browser and recorded.
+ * test after it. Anything that would send it is refused in the browser and recorded.
  */
 async function refuseCloses(page: Page, sent: string[]): Promise<void> {
   await page.route(/\/api\/v1\/admin\/market\/close$/, (route) => {

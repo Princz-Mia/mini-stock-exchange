@@ -10,6 +10,7 @@ import { listedSimulation, useInstruments, useRefreshOnMarketChange } from './ma
 
 const FIRST = '10000000-0000-0000-0000-000000000001';
 const SECOND = '10000000-0000-0000-0000-000000000002';
+const THIRD = '10000000-0000-0000-0000-000000000003';
 
 function status(simulationId: string | null, state: MarketStatus['state'] = 'OPEN'): MarketStatus {
   return {
@@ -194,6 +195,10 @@ describe('reading again when the market changes', () => {
 
     rerender({ market: status(SECOND, 'SETUP') });
     await waitFor(() => expect(reads).toEqual({ orders: 3, portfolio: 3, other: 1 }));
+
+    // Another simulation with nothing else different: one closed and the next set up between two reads of the status.
+    rerender({ market: status(THIRD, 'SETUP') });
+    await waitFor(() => expect(reads).toEqual({ orders: 4, portfolio: 4, other: 1 }));
   });
 
   it('reads nothing again for a page that opens on a market already closed', async () => {
