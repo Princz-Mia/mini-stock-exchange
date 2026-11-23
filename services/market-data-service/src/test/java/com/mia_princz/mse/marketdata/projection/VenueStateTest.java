@@ -20,7 +20,7 @@ class VenueStateTest {
 		}
 
 		assertThat(stored).containsExactlyInAnyOrderEntriesOf(Map.of(VenueState.SETUP, "SETUP", VenueState.OPEN, "OPEN",
-				VenueState.HALTED, "HALTED", VenueState.UNKNOWN, "UNKNOWN", VenueState.CLOSED, "UNKNOWN"));
+				VenueState.HALTED, "HALTED", VenueState.UNKNOWN, "UNKNOWN", VenueState.CLOSED, "CLOSED"));
 	}
 
 }

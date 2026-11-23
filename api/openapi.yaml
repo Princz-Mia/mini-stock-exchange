@@ -2578,7 +2578,10 @@ components:
         price: { $ref: '#/components/schemas/Price' }
     VenueState:
       type: string
-      enum: [SETUP, OPEN, HALTED, UNKNOWN]
+      description: |
+        The trading phase as of the instrument's latest snapshot. CLOSED is final: the simulation has ended, and the
+        last price stays as the instrument's final price. UNKNOWN is a phase this service does not know.
+      enum: [SETUP, OPEN, HALTED, CLOSED, UNKNOWN]
     Instruments:
       type: object
       additionalProperties: false

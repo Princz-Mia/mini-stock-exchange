@@ -1619,8 +1619,12 @@ export interface components {
             readonly minute: components["schemas"]["Timestamp"];
             readonly price: components["schemas"]["Price"];
         };
-        /** @enum {string} */
-        readonly VenueState: "SETUP" | "OPEN" | "HALTED" | "UNKNOWN";
+        /**
+         * @description The trading phase as of the instrument's latest snapshot. CLOSED is final: the simulation has ended, and the
+         *     last price stays as the instrument's final price. UNKNOWN is a phase this service does not know.
+         * @enum {string}
+         */
+        readonly VenueState: "SETUP" | "OPEN" | "HALTED" | "CLOSED" | "UNKNOWN";
         readonly Instruments: {
             readonly instruments: readonly components["schemas"]["Instrument"][];
             readonly feed: components["schemas"]["Feed"];

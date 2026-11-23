@@ -135,6 +135,24 @@ class MarketApiIT {
 		assertThat(json(get("/api/v1/instruments/" + plain + "/book"), 200).get("displayName").isNull()).isTrue();
 	}
 
+	/** A venue that has closed is served as CLOSED, with its last trade still its price. */
+	@Test
+	void aClosedVenueIsServedAsClosed() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		snapshots.apply(Snapshots.snapshot(instrument, 7, 2));
+		assertThat(find(json(get("/api/v1/instruments"), 200).get("instruments"), instrument).get("venueState").asString())
+			.isEqualTo("OPEN");
+
+		snapshots.apply(Snapshots.closed(instrument, 8));
+
+		JsonNode entry = find(json(get("/api/v1/instruments"), 200).get("instruments"), instrument);
+		assertThat(entry.get("venueState").asString()).isEqualTo("CLOSED");
+		assertThat(entry.get("lastPrice").asString()).isEqualTo("100.00");
+		assertThat(entry.get("sourceCommandSequence").asString()).isEqualTo("8");
+		assertThat(json(get("/api/v1/instruments/" + instrument + "/book"), 200).get("venueState").asString())
+			.isEqualTo("CLOSED");
+	}
+
 	/** An instrument deleted during setup leaves the list, and every read of it says it does not exist. */
 	@Test
 	void aRemovedInstrumentIsNoLongerServed() throws Exception {
