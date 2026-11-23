@@ -1483,10 +1483,14 @@ describe('bot runs on the operator screen', () => {
     const form = await screen.findByRole('form', { name: 'Start a bot run' });
     await waitFor(() => expect(within(form).getByLabelText('Noise')).toHaveValue('1'));
     const untilStopped = within(form).getByRole('radio', { name: 'Until I stop it' });
+    const timed = within(form).getByRole('radio', { name: 'For a set time' });
     const minutes = within(form).getByLabelText('Duration in minutes');
+    // One group of two, so the arrow keys move between them.
+    expect(untilStopped).toHaveAttribute('name', 'run-length');
+    expect(timed).toHaveAttribute('name', 'run-length');
     fireEvent.click(untilStopped);
     expect(untilStopped).toBeChecked();
-    expect(within(form).getByRole('radio', { name: 'For a set time' })).not.toBeChecked();
+    expect(timed).not.toBeChecked();
     expect(untilStopped).toHaveAccessibleDescription(
       'Keeps trading until someone selects Stop run, and takes up again after every restart.',
     );
@@ -1507,11 +1511,45 @@ describe('bot runs on the operator screen', () => {
     });
     expect(await within(form).findByText('Started a run of 2 bots.')).toBeInTheDocument();
 
-    fireEvent.click(within(form).getByRole('radio', { name: 'For a set time' }));
+    fireEvent.click(timed);
     expect(minutes).toBeEnabled();
     fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
     await waitFor(() => expect(posted()).toHaveLength(2));
     expect(posted()[1]?.body).toMatchObject({ durationMinutes: 60 });
+  });
+
+  it('keeps the minutes typed through a change of mind about the run length', async () => {
+    const { server, state } = exchange('OPEN');
+    state.tagged = { marketMakers: 1, noise: 1, momentum: 0 };
+    server.on('POST /api/v1/admin/bot-runs', {
+      status: 201,
+      json: { runId: botRun().runId, bots: 2, commandSequence: '9' },
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    await waitFor(() => expect(within(form).getByLabelText('Noise')).toHaveValue('1'));
+    const minutes = within(form).getByLabelText('Duration in minutes');
+    fireEvent.change(minutes, { target: { value: '15' } });
+    fireEvent.click(within(form).getByRole('radio', { name: 'Until I stop it' }));
+    expect(minutes).toBeDisabled();
+    expect(minutes).toHaveValue('15');
+    fireEvent.click(within(form).getByRole('radio', { name: 'For a set time' }));
+    expect(minutes).toBeEnabled();
+    expect(minutes).toHaveValue('15');
+
+    const posted = () => server.requests.filter((request) => request.method === 'POST' && request.url.endsWith('/bot-runs'));
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    await waitFor(() => expect(posted()).toHaveLength(1));
+    expect(posted()[0]?.body).toEqual({
+      marketMakers: 1,
+      noise: 1,
+      momentum: 0,
+      commandsPerSecond: '4.00',
+      maxOrderQuantity: 10,
+      maxPosition: 100,
+      durationMinutes: 15,
+    });
   });
 
   it('starts on the chosen instruments only, and never sends an empty choice', async () => {

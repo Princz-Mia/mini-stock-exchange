@@ -259,6 +259,16 @@ test.describe.serial('trading through the browser', () => {
     await expect(form.getByRole('radio', { name: 'For a set time' })).toBeChecked();
     await expect(form.getByRole('radio', { name: 'Until I stop it' })).not.toBeChecked();
     await expect(form.getByLabel('Duration in minutes')).toHaveValue('60');
+    // A run with no end has to be chosen, and sets the minutes aside without losing them. The two choices are one
+    // group, so an arrow key goes back to the set time, which this run keeps.
+    await form.getByRole('radio', { name: 'Until I stop it' }).check();
+    await expect(form.getByLabel('Duration in minutes')).toBeDisabled();
+    await expect(form.getByLabel('Duration in minutes')).toHaveValue('60');
+    await form.getByRole('radio', { name: 'Until I stop it' }).press('ArrowUp');
+    await expect(form.getByRole('radio', { name: 'For a set time' })).toBeChecked();
+    await expect(form.getByRole('radio', { name: 'For a set time' })).toBeFocused();
+    await expect(form.getByLabel('Duration in minutes')).toBeEnabled();
+    await expect(form.getByLabel('Duration in minutes')).toHaveValue('60');
     await form.getByLabel('Seed').fill('11');
     await form.getByRole('button', { name: 'Start run' }).click();
 
