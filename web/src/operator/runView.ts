@@ -1,6 +1,6 @@
 import type { BotPopulation, BotRun, BotRunRequest, Instrument, MarketStatus } from '../api/types';
 import { groupInteger, utcTime } from '../format';
-import { actualDuration, durationText, runSeconds } from './compare';
+import { durationText, runSeconds } from './compare';
 
 export const STATUS_LABELS: Record<BotRun['status'], string> = {
   STARTING: 'Starting',
@@ -87,16 +87,31 @@ export function leftRunning(run: BotRun, now: number): boolean {
 }
 
 /**
- * How long a run lasted, for the history: a stopped run's length as the comparison gives it, and the time so far of
- * one that is not over.
+ * How long a stopped run lasted, for the history. A stop its worker confirmed ends it exactly, when the confirmation
+ * came. Without one the length is approximate: up to the worker's last report, and never past the stop asked for or
+ * the run's end time. The end of its window can't stand in here as it does in the comparison: that is the next run's
+ * start, however much later it came. Null when no worker ever reported.
  */
+function stoppedLength(run: BotRun): { seconds: number; approximate: boolean } | null {
+  if (run.window.endedBy === 'WORKER') return runSeconds(run);
+  if (run.worker.heartbeatAt === null) return null;
+  const ends = [run.worker.heartbeatAt, run.stopRequestedAt ?? run.endsAt, run.window.endedAt]
+    .filter((end) => end !== null)
+    .map((end) => Date.parse(end));
+  const seconds = (Math.min(...ends) - Date.parse(run.startedAt)) / 1000;
+  return seconds <= 0 ? null : { seconds, approximate: true };
+}
+
+/** How long a run lasted, for the history: a stopped run's length, and the time so far of one that is not over. */
 export function ranForText(run: BotRun, now: number): string {
-  return run.status === 'STOPPED' ? actualDuration(run) : `${durationText(elapsedSeconds(run, now))} so far`;
+  if (run.status !== 'STOPPED') return `${durationText(elapsedSeconds(run, now))} so far`;
+  const length = stoppedLength(run);
+  return length === null ? 'Unknown' : `${length.approximate ? 'About ' : ''}${durationText(length.seconds)}`;
 }
 
 /** The seconds behind ranForText, to sort by; a run of unknown length sorts first. */
 export function ranForSeconds(run: BotRun, now: number): number {
-  return run.status === 'STOPPED' ? (runSeconds(run)?.seconds ?? -1) : elapsedSeconds(run, now);
+  return run.status === 'STOPPED' ? (stoppedLength(run)?.seconds ?? -1) : elapsedSeconds(run, now);
 }
 
 /** Why a run can't start right now, or null when it can. */

@@ -1862,6 +1862,75 @@ describe('bot runs on the operator screen', () => {
     expect(ranFor()).toEqual(['13 d 5 h so far', '10 min', 'Unknown']);
   }, 15_000);
 
+  it('keeps an unconfirmed run at its own length in the history once the next run has started', async () => {
+    const { state } = exchange('OPEN');
+    // Each window ended when the run after it started, three days and two days after the run's own start.
+    const nextStart = (endedAt: string) => ({
+      startSequence: '41',
+      stopSequence: null,
+      endSequence: '900',
+      endedBy: 'NEXT_START' as const,
+      endedAt,
+    });
+    state.runs = [
+      finishedRun({
+        runId: 'd',
+        startedAt: '2026-11-09T10:00:00Z',
+        stoppedAt: '2026-11-09T10:10:00Z',
+        window: { ...finishedRun().window, endedAt: '2026-11-09T10:10:00Z' },
+      }),
+      // No end; its worker last reported 80 seconds in, and it was stopped half an hour in with none to confirm.
+      botRun({
+        runId: 'c',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        startedAt: '2026-11-07T10:00:00Z',
+        stopRequestedAt: '2026-11-07T10:30:00Z',
+        worker: { workerId: 'sim-1', heartbeatAt: '2026-11-07T10:01:20Z', leaseExpiresAt: '2026-11-07T10:01:35Z' },
+        window: nextStart('2026-11-09T10:00:00Z'),
+      }),
+      // For 60 minutes, its worker gone two seconds before the end.
+      botRun({
+        runId: 'b',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        startedAt: '2026-11-06T12:00:00Z',
+        endsAt: '2026-11-06T13:00:00Z',
+        stopRequestedAt: '2026-11-06T13:00:00Z',
+        worker: { workerId: 'sim-1', heartbeatAt: '2026-11-06T12:59:58Z', leaseExpiresAt: '2026-11-06T13:00:13Z' },
+        window: nextStart('2026-11-07T10:00:00Z'),
+      }),
+      // For 60 minutes, and no worker ever took it.
+      botRun({
+        runId: 'a',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        endsAt: '2026-11-06T11:00:00Z',
+        stopRequestedAt: '2026-11-06T11:00:00Z',
+        worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null },
+        window: nextStart('2026-11-06T12:00:00Z'),
+      }),
+    ];
+    clockAt('2026-11-23T14:30:00Z');
+    renderPage();
+
+    const history = await within(await runs()).findByRole('table', { name: 'Recent runs' });
+    const cells = within(history)
+      .getAllByRole('row')
+      .slice(1)
+      .map((row) => {
+        const all = within(row).getAllByRole('cell');
+        return [all[1]?.textContent, all[all.length - 1]?.textContent];
+      });
+    // Not the two days and the day until the next start: what each run's own stop, end and last report allow.
+    expect(cells).toEqual([
+      ['10 min', '10:10:00 UTC'],
+      ['About 1 min 20 s', 'Not confirmed'],
+      ['About 59 min 58 s', 'Not confirmed'],
+      ['Unknown', 'Not confirmed'],
+    ]);
+  });
+
   it('pages the run history and the accounts with the cursor, size and order they were given', async () => {
     const { server, state } = exchange('OPEN');
     state.bots = 3;
