@@ -1,5 +1,6 @@
 import type { BotPopulation, BotRun, BotRunRequest, Instrument, MarketStatus } from '../api/types';
 import { groupInteger, utcTime } from '../format';
+import { durationText, runSeconds } from './compare';
 
 export const STATUS_LABELS: Record<BotRun['status'], string> = {
   STARTING: 'Starting',
@@ -47,6 +48,72 @@ export function averageRate(run: BotRun): string | null {
 export function activeRun(runs: readonly BotRun[]): BotRun | undefined {
   const newest = runs[0];
   return newest === undefined || newest.status === 'STOPPED' ? undefined : newest;
+}
+
+/**
+ * Whole seconds from the run's start to now, a time in epoch milliseconds on the exchange's clock, as its last answer
+ * gave it. Never negative: that clock is read to the whole second, so an answer may seem to come before the start.
+ */
+export function elapsedSeconds(run: BotRun, now: number): number {
+  return Math.max(0, Math.floor((now - Date.parse(run.startedAt)) / 1000));
+}
+
+/** Whole seconds until a timed run's end, 0 once it is due; null for a run that lasts until it is stopped. */
+export function remainingSeconds(run: BotRun, now: number): number | null {
+  return run.endsAt === null ? null : Math.max(0, Math.ceil((Date.parse(run.endsAt) - now) / 1000));
+}
+
+/**
+ * A timed run's time left, in words; null for a run with no end, and once a stop has been asked for, as its end time
+ * no longer decides anything. Whether the end has come is the exchange's to say: from then until the worker confirms,
+ * it shows the run as stopping. Before that at least a second is left, whatever the clock makes of it, so the words
+ * never contradict the status beside them.
+ */
+export function timeLeftText(run: BotRun, now: number): string | null {
+  const seconds = remainingSeconds(run, now);
+  if (seconds === null || run.desiredState === 'STOPPED' || run.status === 'STOPPED') return null;
+  return run.status === 'STOPPING' ? 'Ending now' : durationText(Math.max(1, seconds));
+}
+
+/** A run with no end time is warned about once it has gone on for longer than this: a day. */
+export const LEFT_RUNNING_AFTER_SECONDS = 24 * 60 * 60;
+
+/**
+ * Whether the run looks forgotten: it has no end time, nobody has asked it to stop, and it started more than a day
+ * ago. A timed run ends by itself, so it is never one.
+ */
+export function leftRunning(run: BotRun, now: number): boolean {
+  return (
+    run.endsAt === null && run.desiredState === 'RUNNING' && elapsedSeconds(run, now) > LEFT_RUNNING_AFTER_SECONDS
+  );
+}
+
+/**
+ * How long a stopped run lasted, for the history. A stop its worker confirmed ends it exactly, when the confirmation
+ * came. Without one the length is approximate: up to the worker's last report, and never past the stop asked for or
+ * the run's end time. The end of its window can't stand in here as it does in the comparison: that is the next run's
+ * start, however much later it came. Null when no worker ever reported.
+ */
+function stoppedLength(run: BotRun): { seconds: number; approximate: boolean } | null {
+  if (run.window.endedBy === 'WORKER') return runSeconds(run);
+  if (run.worker.heartbeatAt === null) return null;
+  const ends = [run.worker.heartbeatAt, run.stopRequestedAt ?? run.endsAt, run.window.endedAt]
+    .filter((end) => end !== null)
+    .map((end) => Date.parse(end));
+  const seconds = (Math.min(...ends) - Date.parse(run.startedAt)) / 1000;
+  return seconds <= 0 ? null : { seconds, approximate: true };
+}
+
+/** How long a run lasted, for the history: a stopped run's length, and the time so far of one that is not over. */
+export function ranForText(run: BotRun, now: number): string {
+  if (run.status !== 'STOPPED') return `${durationText(elapsedSeconds(run, now))} so far`;
+  const length = stoppedLength(run);
+  return length === null ? 'Unknown' : `${length.approximate ? 'About ' : ''}${durationText(length.seconds)}`;
+}
+
+/** The seconds behind ranForText, to sort by; a run of unknown length sorts first. */
+export function ranForSeconds(run: BotRun, now: number): number {
+  return run.status === 'STOPPED' ? (stoppedLength(run)?.seconds ?? -1) : elapsedSeconds(run, now);
 }
 
 /** Why a run can't start right now, or null when it can. */
@@ -118,7 +185,7 @@ export function workerText(run: BotRun): string {
   }
 }
 
-/** The start form's text fields, as typed. Blank optional fields fall back to the exchange's defaults. */
+/** The start form's fields, as typed. Blank optional fields fall back to the exchange's defaults. */
 export interface RunForm {
   marketMakers: string;
   noise: string;
@@ -128,6 +195,8 @@ export interface RunForm {
   maxOrderQuantity: string;
   maxPosition: string;
   durationMinutes: string;
+  /** A run with no end is chosen outright, never what a blank duration means; the duration typed is then left out. */
+  untilStopped: boolean;
   /** Ticked instruments; every listed one by default. */
   instrumentIds: readonly string[];
 }
@@ -136,7 +205,8 @@ const WHOLE = /^\d{1,9}$/;
 
 /**
  * The request to send, or what is wrong with the form. Only shapes are checked here; the exchange checks ranges and
- * answers in its own words. Ticking every instrument sends none, which the exchange reads as all of them.
+ * answers in its own words. Ticking every instrument sends none, which the exchange reads as all of them. A duration
+ * is always sent unless the run was chosen to last until stopped: the exchange reads none as no end.
  */
 export function runRequest(
   form: RunForm,
@@ -149,8 +219,8 @@ export function runRequest(
     ['seed', 'Seed', false],
     ['maxOrderQuantity', 'Largest order', true],
     ['maxPosition', 'Position limit', true],
-    ['durationMinutes', 'Duration', false],
   ];
+  if (!form.untilStopped) whole.push(['durationMinutes', 'Duration', true]);
   const numbers: Partial<Record<keyof RunForm, number>> = {};
   for (const [field, label, required] of whole) {
     const text = (form[field] as string).trim();

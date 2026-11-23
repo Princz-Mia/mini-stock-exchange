@@ -110,7 +110,9 @@ export const TOURS: Record<TourRole, TourScript> = {
       {
         anchor: 'section[aria-labelledby="runs-title"]',
         title: 'Bot runs',
-        body: 'Start a run once the market is open, choosing how many bots of each kind trade and how fast, and stop it.',
+        body:
+          'Start a run once the market is open, choosing how many bots of each kind trade, how fast and for how ' +
+          'long, and stop it.',
       },
       {
         anchor: 'section[aria-labelledby="health-title"]',

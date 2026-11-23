@@ -17,14 +17,14 @@ The passwords for `operator` and `trader` are `DEV_OPERATOR_PASSWORD` and `DEV_T
 
 On each user's first sign-in a short tour of their screen opens. Select **Skip tour** to go straight on; **Help** in the top bar has it again, with a page on how the exchange works.
 
-Then make one short bot run, so a finished run is there to compare with later. Sign in as `operator`, set **Commands per second** to 10.00 and **Duration in minutes** to 2, and select **Start run**. It stops by itself after two minutes: wait until its row in **Recent runs** has an end time and the form offers **Start run** again.
+Then make one short bot run, so a finished run is there to compare with later. Sign in as `operator`, set **Commands per second** to 10.00 and, under **Run length**, **Duration in minutes** to 2, and select **Start run**. It stops by itself after two minutes: wait until its row in **Recent runs** has an end time and the form offers **Start run** again.
 
 ## 0:00 The operator starts the bots
 
 In the operator window, the operator screen is open. The demo operator also trades, so the top bar has a **Trading** and **Operating** switch; this demo stays on **Operating**.
 
 1. Point out the **Market** panel: the market is open, with the time it opened and the last command's sequence number.
-2. In **Bot runs**, the counts start at every bot on its strategy: **Market makers** 4, **Noise** 12 and **Momentum** 4. Set **Commands per second** to 20.00 and leave **Duration in minutes** empty, so the run goes on until stopped.
+2. In **Bot runs**, the counts start at every bot on its strategy: **Market makers** 4, **Noise** 12 and **Momentum** 4. Set **Commands per second** to 20.00 and leave **Run length** at **For a set time**, 60 minutes: the demo stops the run itself, and one left behind ends within the hour.
 3. Select **Start run**. The run turns **Running** once the simulator picks it up, and its placed and cancelled counts start to climb.
 
 Say: each bot is an ordinary client with its own token, and the run's seed makes its decisions repeatable.
