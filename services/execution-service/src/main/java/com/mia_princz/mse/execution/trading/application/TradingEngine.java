@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
@@ -132,7 +133,10 @@ public final class TradingEngine {
 	/** Each instrument's newest trades for its snapshots, kept like the books: changed only after a commit. */
 	private final Map<UUID, Tape> tapes = new HashMap<>();
 
-	/** Accounts known to trade in this market: all of them at startup, later ones as they are found. */
+	/**
+	 * Accounts known to trade in this market: all of them at startup, then each one a setup command creates, once
+	 * that has committed; any other is looked up the first time it sends an order.
+	 */
 	private final Set<UUID> accounts = new HashSet<>();
 
 	/**
@@ -241,6 +245,9 @@ public final class TradingEngine {
 	 * by it, as closed. A closed market that still has resting orders was closed by a process that stopped before it
 	 * had cancelled them all; they are cancelled here, before any command is admitted. That process may also have
 	 * stopped after its last order and before it removed the bot token files, so those are removed here too.
+	 * <p>
+	 * Whatever this engine held before is replaced, not added to: started again in place after the current simulation
+	 * has changed, it keeps no book, instrument or tape of the one it held.
 	 */
 	public void start() {
 		transactions.inTransaction(() -> {
@@ -271,14 +278,18 @@ public final class TradingEngine {
 			if (!problems.isEmpty()) {
 				throw new ReconciliationException(problems);
 			}
+			Set<UUID> trading = store.tradingAccounts(simulation);
 			simulationId = simulation;
 			writerEpoch = epoch;
 			closed = "CLOSED".equals(market.state());
+			books.clear();
 			books.putAll(rebuilt);
+			catalogue.clear();
 			catalogue.putAll(rebuiltCatalogue);
+			tapes.clear();
 			tapes.putAll(rebuiltTapes);
 			accounts.clear();
-			accounts.addAll(store.tradingAccounts(simulation));
+			accounts.addAll(trading);
 			return null;
 		});
 		if (closed) {
@@ -938,8 +949,9 @@ public final class TradingEngine {
 	/**
 	 * Whether the account trades in this market. An account of another simulation, a closed one, has balances and may
 	 * still hold a credential, but an order from it would be written into this market's books under the wrong owner, so
-	 * it is refused before any transaction. Startup reads the market's accounts, so an order costs nothing more; only
-	 * an account made since then is looked up, once, since accounts never leave a simulation.
+	 * it is refused before any transaction. Startup reads the market's accounts and every setup command adds the ones
+	 * it creates, so an order costs nothing more; an account that came any other way is looked up, once, since accounts
+	 * never leave a simulation.
 	 */
 	private boolean tradesHere(UUID accountId) {
 		if (accounts.contains(accountId)) {
@@ -1209,13 +1221,27 @@ public final class TradingEngine {
 	}
 
 	private AccountResult processProvision(CommandKey key, ProvisionAccount command) {
+		AccountResult result;
 		try {
 			ensureMarket();
-			return timed("other", () -> provisionInTransaction(key, command));
+			result = timed("other", () -> provisionInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
+		if (result.accountId() != null) {
+			knownToTrade(List.of(result.accountId()));
+		}
+		return result;
+	}
+
+	/**
+	 * Adds accounts a setup command has just committed to the ones known to trade here, so that their first orders
+	 * are not looked up on the writer thread. Only after the commit: an account of a transaction that rolled back
+	 * does not exist.
+	 */
+	private void knownToTrade(Collection<UUID> created) {
+		accounts.addAll(created);
 	}
 
 	private AccountResult provisionInTransaction(CommandKey key, ProvisionAccount command) {
@@ -1252,13 +1278,18 @@ public final class TradingEngine {
 	}
 
 	private TraderResult processAddTrader(CommandKey key, AddTrader command) {
+		TraderResult result;
 		try {
 			ensureMarket();
-			return timed("other", () -> addTraderInTransaction(key, command));
+			result = timed("other", () -> addTraderInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
+		if (result.accountId() != null) {
+			knownToTrade(List.of(result.accountId()));
+		}
+		return result;
 	}
 
 	/**
@@ -1301,14 +1332,21 @@ public final class TradingEngine {
 				command.accountId(), cash, command.holdings(), sequence));
 	}
 
+	/** The answer and, when this transaction made the bots, their accounts; none for a refusal or a stored answer. */
+	private record ProvisionedBots(BotsResult result, List<UUID> accounts) {
+	}
+
 	private BotsResult processBots(CommandKey key, ProvisionBots command) {
+		ProvisionedBots provisioned;
 		try {
 			ensureMarket();
-			return timed("other", () -> botsInTransaction(key, command));
+			provisioned = timed("other", () -> botsInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
+		knownToTrade(provisioned.accounts());
+		return provisioned.result();
 	}
 
 	/**
@@ -1328,11 +1366,11 @@ public final class TradingEngine {
 	 * Each bot gets its own genesis batch and token. Tokens are handed over before commit; if the transaction then
 	 * fails, the stray tokens belong to accounts that never existed, so they authenticate nothing.
 	 */
-	private BotsResult botsInTransaction(CommandKey key, ProvisionBots command) {
+	private ProvisionedBots botsInTransaction(CommandKey key, ProvisionBots command) {
 		TradingStore.Opening<BotsResult> opening = open(key, BotsResult.class);
 		Market market = opening.market();
 		if (opening.prior().isPresent()) {
-			return replay(key, opening.prior().get());
+			return new ProvisionedBots(replay(key, opening.prior().get()), List.of());
 		}
 		long sequence = opening.sequence();
 		int population = store.botCount(simulationId);
@@ -1347,19 +1385,22 @@ public final class TradingEngine {
 			store.insertAudit(simulationId, command.actorUserId(), "BOT_PROVISION", "NOT_ALLOWED", key.idempotencyKey(),
 					sequence);
 			int status = refusal == BotsResult.Status.UNKNOWN_INSTRUMENT ? 422 : 409;
-			return remember(key, status, new BotsResult(refusal, 0, null, null, population, command.strategy().name(), sequence));
+			return new ProvisionedBots(remember(key, status,
+					new BotsResult(refusal, 0, null, null, population, command.strategy().name(), sequence)), List.of());
 		}
+		List<UUID> created = new ArrayList<>(command.count());
 		for (int number = population + 1; number <= population + command.count(); number++) {
 			UUID account = UUID.randomUUID();
+			created.add(account);
 			store.insertBotAccount(simulationId, account, ProvisionBots.name(number), command.strategy());
 			store.insertGenesis(simulationId, account, "BOT", sequence, command.cashCents(), command.holdings());
 			store.insertApiToken(UUID.randomUUID(), account, botCredentials.issue(account));
 		}
 		store.insertAudit(simulationId, command.actorUserId(), "BOT_PROVISION", "APPLIED", key.idempotencyKey(),
 				sequence);
-		return remember(key, 201, new BotsResult(BotsResult.Status.CREATED, command.count(),
+		return new ProvisionedBots(remember(key, 201, new BotsResult(BotsResult.Status.CREATED, command.count(),
 				ProvisionBots.name(population + 1), ProvisionBots.name(population + command.count()),
-				population + command.count(), command.strategy().name(), sequence));
+				population + command.count(), command.strategy().name(), sequence)), created);
 	}
 
 	private TokenRevocation processRevoke(CommandKey key, RevokeBotToken command) {

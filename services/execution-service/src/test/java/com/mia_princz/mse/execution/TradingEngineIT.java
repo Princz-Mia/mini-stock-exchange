@@ -58,6 +58,15 @@ import com.mia_princz.mse.execution.trading.application.EditInstrument;
 import com.mia_princz.mse.execution.trading.application.MarketControl;
 import com.mia_princz.mse.execution.trading.application.MarketTransition;
 import com.mia_princz.mse.execution.trading.application.InstrumentResult;
+import com.mia_princz.mse.execution.trading.application.AccountResult;
+import com.mia_princz.mse.execution.trading.application.AddTrader;
+import com.mia_princz.mse.execution.trading.application.BotCredentials;
+import com.mia_princz.mse.execution.trading.application.BotStrategy;
+import com.mia_princz.mse.execution.trading.application.BotsResult;
+import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
+import com.mia_princz.mse.execution.trading.application.ProvisionBots;
+import com.mia_princz.mse.execution.trading.application.TraderResult;
+import com.mia_princz.mse.execution.identity.ApiTokens;
 import com.mia_princz.mse.execution.trading.application.WriteSet;
 import com.mia_princz.mse.execution.trading.application.WriterTimings;
 import com.mia_princz.mse.execution.trading.application.AccountChanges;
@@ -426,20 +435,88 @@ class TradingEngineIT {
 		}
 	}
 
+	/**
+	 * An account a setup command creates joins the writer's accounts once the command has committed. So in a market
+	 * set up since the last restart, which every market is until one, the first order of a trader the operator
+	 * funded, of a trader added with an account, and of each bot sends what any resting order sends: none of them is
+	 * looked up. Before, each of them paid the one read of {@link #anAccountMadeAfterStartupIsLookedUpOnce}.
+	 */
+	@Test
+	void anAccountASetupCommandCreatesIsNotLookedUpAtAll() throws Exception {
+		Statements statements = new Statements(dataSource);
+		countingEngine(statements, 1, (account) -> ApiTokens.issue().hash());
+		try {
+			UUID operator = UUID.randomUUID();
+			TestUsers.insert(jdbc, operator, "op-" + operator.toString().substring(0, 8), "unused", "OPERATOR");
+			UUID owner = UUID.randomUUID();
+			TestUsers.insert(jdbc, owner, "tr-" + owner.toString().substring(0, 8), "unused", "TRADER");
+			List<ProvisionAccount.Holding> holdings = List.of(new ProvisionAccount.Holding(instrument, 10));
+			UUID provisioned = UUID.randomUUID();
+			UUID added = UUID.randomUUID();
+			Set<UUID> before = Set.copyOf(jdbc.queryForList("SELECT id FROM account WHERE kind = 'BOT'", UUID.class));
+			jdbc.update("UPDATE simulation SET state = 'SETUP', opened_at = NULL");
+			try {
+				assertThat(engine
+					.provisionAccount(key(), new ProvisionAccount(provisioned, owner, "funded", 100_000, holdings, operator))
+					.get()
+					.status()).isEqualTo(AccountResult.Status.CREATED);
+				assertThat(engine
+					.addTrader(key(), new AddTrader(UUID.randomUUID(), added, "ad-" + added.toString().substring(0, 8),
+							"unused", 100_000, holdings, operator))
+					.get()
+					.status()).isEqualTo(TraderResult.Status.CREATED);
+				assertThat(engine
+					.provisionBots(key(), new ProvisionBots(2, 100_000, holdings, BotStrategy.NOISE, operator))
+					.get()
+					.status()).isEqualTo(BotsResult.Status.CREATED);
+			}
+			finally {
+				jdbc.update("UPDATE simulation SET state = 'OPEN', opened_at = now()");
+			}
+			List<UUID> bots = jdbc.queryForList("SELECT id FROM account WHERE kind = 'BOT' ORDER BY created_at, id",
+					UUID.class);
+			bots.removeIf(before::contains);
+			assertThat(bots).hasSize(2);
+
+			Map<String, String> counts = new java.util.LinkedHashMap<>();
+			statements.count(counts, "a funded trader's first order",
+					() -> place(provisioned, Side.SELL, OrderType.LIMIT, "100.00", 1));
+			statements.count(counts, "an added trader's first order",
+					() -> place(added, Side.SELL, OrderType.LIMIT, "100.10", 1));
+			statements.count(counts, "a bot's first order",
+					() -> place(bots.get(0), Side.SELL, OrderType.LIMIT, "100.20", 1));
+			statements.count(counts, "the next bot's first order",
+					() -> place(bots.get(1), Side.SELL, OrderType.LIMIT, "100.30", 1));
+			// What "resting order" sends in eachOutcomeSendsAKnownNumberOfStatements, and not one more.
+			assertThat(counts).containsExactly(Map.entry("a funded trader's first order", "8 statements, 1 commit"),
+					Map.entry("an added trader's first order", "8 statements, 1 commit"),
+					Map.entry("a bot's first order", "8 statements, 1 commit"),
+					Map.entry("the next bot's first order", "8 statements, 1 commit"));
+		}
+		finally {
+			restartEngine();
+		}
+	}
+
 	/** Replaces the engine with one whose connections count what they send. */
 	private void countingEngine(Statements statements) throws InterruptedException {
 		countingEngine(statements, 1);
 	}
 
 	private void countingEngine(Statements statements, int maxRun) throws InterruptedException {
+		countingEngine(statements, maxRun, (account) -> {
+			throw new UnsupportedOperationException("no bots in these tests");
+		});
+	}
+
+	private void countingEngine(Statements statements, int maxRun, BotCredentials credentials)
+			throws InterruptedException {
 		writer.close(Duration.ofSeconds(5));
 		writer = new CommandWriter("counted-writer", 1_000, maxRun);
 		DataSource counted = statements.dataSource();
 		engine = new TradingEngine(new JdbcTradingStore(JdbcClient.create(counted), JsonMapper.builder().build()),
 				new SpringTransactionRunner(new org.springframework.jdbc.support.JdbcTransactionManager(counted)), writer,
-				Clock.systemUTC(), (account) -> {
-					throw new UnsupportedOperationException("no bots in these tests");
-				});
+				Clock.systemUTC(), credentials);
 		engine.start();
 	}
 

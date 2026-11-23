@@ -921,6 +921,48 @@ class MarketCloseSweepIT {
 	}
 
 	/**
+	 * One engine object started again after the current simulation has changed under it, which a test does and a
+	 * process never: it must hold the new market only. The market before had two orders resting. Kept, their books
+	 * would still answer for instruments this market does not have, and their two orders would count against this
+	 * market's limit of two resting orders in all, so that its second order were refused.
+	 */
+	@Test
+	void anEngineStartedAgainAfterTheSimulationChangedKeepsNoBookOfTheOneBefore() throws Exception {
+		UUID earlier = funded();
+		TradingEngine engine = engine();
+		engine.start();
+		UUID earlierFirst = first;
+		place(engine, earlier, first, Side.BUY, "90.00", 1);
+		place(engine, earlier, second, Side.SELL, "60.00", 1);
+		assertThat(engine.depth(earlierFirst, Side.BUY).get(5, TimeUnit.SECONDS)).hasSize(1);
+
+		newSimulation(2);
+		UUID trader = funded();
+		engine.start();
+
+		assertThat(engine.simulationId()).isEqualTo(simulation);
+		assertThatThrownBy(() -> engine.depth(earlierFirst, Side.BUY).get(5, TimeUnit.SECONDS))
+			.as("the earlier market's book is gone")
+			.isInstanceOf(ExecutionException.class);
+		assertThatThrownBy(() -> place(engine, trader, earlierFirst, Side.BUY, "90.00", 1))
+			.hasCauseInstanceOf(TradingEngine.UnknownInstrumentException.class);
+		assertThat(place(engine, trader, first, Side.BUY, "90.00", 1).state()).isEqualTo(PlacementResult.OrderState.OPEN);
+		assertThat(place(engine, trader, first, Side.BUY, "91.00", 1).state())
+			.as("the second of the two orders this market lets rest")
+			.isEqualTo(PlacementResult.OrderState.OPEN);
+		assertThat(place(engine, trader, first, Side.BUY, "92.00", 1).rejection())
+			.as("the limit counts this market's own orders")
+			.isEqualTo(RejectionCode.ORDER_LIMIT_EXCEEDED);
+		// Opening or halting writes a snapshot for each instrument the engine knows: this market's two.
+		long halted = sequence() + 1;
+		engine.control(key("POST /api/v1/admin/market/halt"), new MarketControl(MarketControl.Action.HALT, operator))
+			.get(5, TimeUnit.SECONDS);
+		assertThat(jdbc.queryForObject("""
+				SELECT count(*) FROM outbox WHERE topic = 'mse.market.v1' AND command_sequence = ? AND event_key LIKE ?""",
+				Long.class, halted, simulation + "|%")).isEqualTo(2);
+	}
+
+	/**
 	 * A process that starts on a database whose only market is closed, through the startup the application itself
 	 * runs. It loads that market, as closed. So a setup command is refused by it, as by any market past SETUP; it does
 	 * not find "no market" and quietly create a second one, and a transition is not answered as if nothing were set up.
@@ -957,6 +999,11 @@ class MarketCloseSweepIT {
 
 	/** A new market beside the closed ones: open, with two instruments. Whatever was not closed before it is, first. */
 	private void newSimulation() {
+		newSimulation(50_000);
+	}
+
+	/** The same, with at most this many orders resting in the whole market. */
+	private void newSimulation(int maxOpenOrdersTotal) {
 		jdbc.update("""
 				UPDATE simulation SET state = 'CLOSED', opened_at = coalesce(opened_at, now()), closed_at = now()
 				WHERE state <> 'CLOSED'""");
@@ -964,7 +1011,8 @@ class MarketCloseSweepIT {
 		issuance = UUID.randomUUID();
 		first = UUID.randomUUID();
 		second = UUID.randomUUID();
-		jdbc.update("INSERT INTO simulation (id, state, opened_at) VALUES (?, 'OPEN', now())", simulation);
+		jdbc.update("INSERT INTO simulation (id, state, opened_at, max_open_orders_total) VALUES (?, 'OPEN', now(), ?)",
+				simulation, maxOpenOrdersTotal);
 		jdbc.update("INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'ISSUANCE', 'Issuance')",
 				issuance, simulation);
 		jdbc.update("INSERT INTO instrument (id, simulation_id, symbol, reference_price_cents) VALUES (?, ?, 'AAA', 10000)",
