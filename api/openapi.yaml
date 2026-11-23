@@ -1563,6 +1563,12 @@ components:
         commandSequence: { $ref: '#/components/schemas/Sequence' }
         commandKey: { $ref: '#/components/schemas/Uuid' }
         reason: { type: string }
+        state:
+          type: string
+          enum: [SETUP, OPEN, HALTED, CLOSED]
+          description: |
+            With MARKET_TRANSITION_NOT_ALLOWED, the state the market was in, from which the transition is not allowed.
+            With MARKET_CLOSE_UNFINISHED, CLOSED.
         restingOrders:
           type: integer
           minimum: 0
