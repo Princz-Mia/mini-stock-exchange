@@ -102,6 +102,8 @@ Find what changed the database outside Execution. If it can't be explained, rest
 
 **Another instance owns the market.** `refusing to start` means one Execution is already running against the database; only one may.
 
+**It stopped while the market was closing.** Nothing to do. A close cancels resting orders 5,000 to a transaction, and the market is closed from the first one. If Execution stops before the last, the next start cancels the rest before it takes commands, and logs `Finished the market's close at startup` with how many. A close that answered `504 COMMAND_OUTCOME_UNKNOWN` is still going on: send the same key again for its answer.
+
 ## A command's outcome is unknown
 
 An order or cancel answered `504 COMMAND_OUTCOME_UNKNOWN` was admitted but not answered in time. It may still have committed. The terminal resolves this by itself. By hand, look the key up:
