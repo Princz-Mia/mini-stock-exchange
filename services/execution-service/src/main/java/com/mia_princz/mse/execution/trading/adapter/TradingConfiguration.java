@@ -2,6 +2,7 @@ package com.mia_princz.mse.execution.trading.adapter;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.List;
 
 import javax.sql.DataSource;
 
@@ -22,6 +23,7 @@ import tools.jackson.databind.json.JsonMapper;
 import com.mia_princz.mse.execution.trading.application.AccountChanges;
 import com.mia_princz.mse.execution.trading.application.BotCredentials;
 import com.mia_princz.mse.execution.trading.application.CommandWriter;
+import com.mia_princz.mse.execution.trading.application.SimulationChanges;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
 import com.mia_princz.mse.execution.trading.application.TradingStore;
 import com.mia_princz.mse.execution.trading.domain.RestingOrders;
@@ -87,15 +89,35 @@ class TradingConfiguration {
 		return new FileBotCredentials(directory);
 	}
 
+	/**
+	 * {@code simulationChanges} is everything that keeps something per account of a simulation. Each is told when the
+	 * engine has moved to another simulation, and each on its own, so that one failing does not keep the rest from
+	 * forgetting.
+	 */
 	@Bean
 	TradingEngine tradingEngine(TradingStore store, WriterConnections connections, CommandWriter writer, Clock clock,
-			BotCredentials botCredentials, AccountChanges accountChanges, MeterRegistry meters,
+			BotCredentials botCredentials, AccountChanges accountChanges, List<SimulationChanges> simulationChanges,
+			MeterRegistry meters,
 			@Value("${mse.market.close-chunk-orders:" + TradingEngine.CLOSE_CHUNK_ORDERS + "}") int closeChunkOrders) {
+		SimulationChanges all = (previous, simulation) -> {
+			RuntimeException failed = null;
+			for (SimulationChanges each : simulationChanges) {
+				try {
+					each.started(previous, simulation);
+				}
+				catch (RuntimeException ex) {
+					failed = failed == null ? ex : failed;
+				}
+			}
+			if (failed != null) {
+				throw failed;
+			}
+		};
 		// The store and the transactions share the writer's data source, so a command's statements join its transaction.
 		return new TradingEngine(store,
 				new SpringTransactionRunner(new JdbcTransactionManager(connections.dataSource())), writer, clock,
 				botCredentials, accountChanges, new MicrometerWriterTimings(meters), System::nanoTime,
-				new RestingOrders(), closeChunkOrders);
+				new RestingOrders(), closeChunkOrders, Thread::sleep, all);
 	}
 
 	@Bean(destroyMethod = "close")

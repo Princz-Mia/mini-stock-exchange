@@ -199,6 +199,20 @@ class ApiContractIT {
 				"POST", place, 422);
 		check(anonymous.get("/api/v1/market"), "GET", "/api/v1/market", 200);
 
+		// A new simulation follows a close: the refusals, the start, one more while it is in SETUP, and the status
+		// with its name.
+		String simulations = "/api/v1/admin/simulations";
+		String named = "{\"name\":\"After the close\"}";
+		check(operator.post(simulations, named), "POST", simulations, 400);
+		check(operator.post(simulations, "{\"name\":\" \"}", "Idempotency-Key", UUID.randomUUID().toString()), "POST",
+				simulations, 400);
+		check(trader.post(simulations, named, "Idempotency-Key", UUID.randomUUID().toString()), "POST", simulations, 403);
+		check(operator.post(simulations, named, "Idempotency-Key", UUID.randomUUID().toString()), "POST", simulations,
+				201);
+		check(operator.post(simulations, "{\"name\":\"One more\"}", "Idempotency-Key", UUID.randomUUID().toString()),
+				"POST", simulations, 409);
+		check(anonymous.get("/api/v1/market"), "GET", "/api/v1/market", 200);
+
 		trader.csrfToken = null;
 		check(trader.post("/api/v1/auth/logout", ""), "POST", "/api/v1/auth/logout", 403);
 		trader.fetchCsrfToken();

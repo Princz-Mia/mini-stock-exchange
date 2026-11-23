@@ -52,8 +52,11 @@ class MarketController {
 		this.closeTimeout = closeTimeout;
 	}
 
-	/** {@code state} is NOT_SET_UP, with the other fields null, until a market exists. */
-	record MarketResponse(String state, String simulationId, Instant openedAt, Instant closedAt,
+	/**
+	 * {@code state} is NOT_SET_UP, with the other fields null, until a market exists. {@code name} is also null for a
+	 * simulation nobody named: one that the first setup command created.
+	 */
+	record MarketResponse(String state, String simulationId, String name, Instant openedAt, Instant closedAt,
 			String commandSequence) {
 	}
 
@@ -66,9 +69,9 @@ class MarketController {
 	@GetMapping("/market")
 	MarketResponse market() {
 		return queries.market()
-			.map((market) -> new MarketResponse(market.state(), market.simulationId().toString(), market.openedAt(),
-					market.closedAt(), Long.toString(market.commandSequence())))
-			.orElse(new MarketResponse("NOT_SET_UP", null, null, null, null));
+			.map((market) -> new MarketResponse(market.state(), market.simulationId().toString(), market.name(),
+					market.openedAt(), market.closedAt(), Long.toString(market.commandSequence())))
+			.orElse(new MarketResponse("NOT_SET_UP", null, null, null, null, null));
 	}
 
 	@PostMapping("/admin/market/open")

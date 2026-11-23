@@ -130,14 +130,75 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public void startMarket(UUID simulationId, UUID issuanceAccountId, String name, long writerEpoch) {
+		expectOne(jdbc.sql("""
+				INSERT INTO simulation (id, state, writer_epoch, name, last_command_sequence)
+				VALUES (?, 'SETUP', ?, ?, 1)""")
+			.params(simulationId, writerEpoch, name)
+			.update(), "insert simulation");
+		expectOne(jdbc.sql("""
+				INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'ISSUANCE', 'Issuance')""")
+			.params(issuanceAccountId, simulationId)
+			.update(), "insert issuance account");
+	}
+
+	@Override
 	public Market lockMarket() {
 		return jdbc.sql("""
 				SELECT id, state, writer_epoch, max_open_orders_per_account, max_open_orders_total, max_fills_per_command
 				FROM simulation %s FOR UPDATE""".formatted(CurrentSimulation.FIRST))
-			.query((row, index) -> new Market(row.getObject("id", UUID.class), row.getString("state"),
-					row.getLong("writer_epoch"), row.getInt("max_open_orders_per_account"),
-					row.getInt("max_open_orders_total"), row.getInt("max_fills_per_command")))
+			.query((row, index) -> market(row))
 			.single();
+	}
+
+	@Override
+	public Optional<Market> lockOwnedMarket(UUID simulationId, long writerEpoch) {
+		return jdbc.sql("""
+				SELECT id, state, writer_epoch, max_open_orders_per_account, max_open_orders_total, max_fills_per_command
+				FROM simulation WHERE id = ? AND writer_epoch = ? FOR UPDATE""")
+			.params(simulationId, writerEpoch)
+			.query((row, index) -> market(row))
+			.optional();
+	}
+
+	private static Market market(java.sql.ResultSet row) throws java.sql.SQLException {
+		return new Market(row.getObject("id", UUID.class), row.getString("state"), row.getLong("writer_epoch"),
+				row.getInt("max_open_orders_per_account"), row.getInt("max_open_orders_total"),
+				row.getInt("max_fills_per_command"));
+	}
+
+	@Override
+	public void retireMarket(UUID simulationId, long writerEpoch) {
+		expectOne(jdbc.sql("""
+				UPDATE simulation SET writer_epoch = 0 WHERE id = ? AND writer_epoch = ? AND state = 'CLOSED'""")
+			.params(simulationId, writerEpoch)
+			.update(), "retire the closed simulation");
+	}
+
+	@Override
+	public boolean simulationNameTaken(String name) {
+		return jdbc.sql("SELECT EXISTS (SELECT 1 FROM simulation WHERE lower(name) = lower(?))")
+			.param(name)
+			.query(Boolean.class)
+			.single();
+	}
+
+	/** By each simulation's own key index: one probe for each simulation, however many answers it has stored. */
+	@Override
+	public <T> List<StoredResult<T>> storedInAnySimulation(CommandKey key, Class<T> type) {
+		return jdbc.sql("""
+				SELECT r.route, r.request_hash, r.response_body::text AS body
+				FROM simulation s JOIN command_result r
+				    ON r.simulation_id = s.id AND r.principal_id = ? AND r.idempotency_key = ?
+				ORDER BY s.created_at, s.id""")
+			.params(key.principalId(), key.idempotencyKey())
+			.query((row, index) -> {
+				String route = row.getString("route");
+				byte[] hash = row.getBytes("request_hash");
+				return new StoredResult<>(route, hash,
+						key.sameRequest(route, hash) ? json.readValue(row.getString("body"), type) : null);
+			})
+			.list();
 	}
 
 	@Override

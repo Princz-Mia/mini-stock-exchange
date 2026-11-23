@@ -39,10 +39,11 @@ const LIST = `/api/v1/instruments?simulationId=${SIMULATION}`;
 
 function market(state: MarketStatus['state']): MarketStatus {
   return state === 'NOT_SET_UP'
-    ? { state, simulationId: null, openedAt: null, closedAt: null, commandSequence: null }
+    ? { state, simulationId: null, name: null, openedAt: null, closedAt: null, commandSequence: null }
     : {
         state,
         simulationId: SIMULATION,
+        name: null,
         openedAt: state === 'SETUP' ? null : '2026-11-05T09:30:00Z',
         closedAt: state === 'CLOSED' ? '2026-11-05T16:00:00Z' : null,
         commandSequence: '7',

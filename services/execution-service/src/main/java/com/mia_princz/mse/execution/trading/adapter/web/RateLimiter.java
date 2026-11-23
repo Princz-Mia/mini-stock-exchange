@@ -24,7 +24,8 @@ final class RateLimiter {
 
 	/**
 	 * One small entry per account that has sent a command. Only the operator creates accounts, during setup, so this is
-	 * bounded by the accounts the market has; tens of thousands of entries are a few megabytes.
+	 * bounded by the accounts the market has; tens of thousands of entries are a few megabytes. The accounts of a
+	 * simulation that has ended are dropped when the next one starts.
 	 */
 	private final ConcurrentHashMap<UUID, Long> due = new ConcurrentHashMap<>();
 
@@ -51,6 +52,16 @@ final class RateLimiter {
 			return start + interval;
 		});
 		return wait[0];
+	}
+
+	/** Forgets every key: each one's next command goes at once, as its first did. */
+	void clear() {
+		due.clear();
+	}
+
+	/** How many keys have a schedule kept. */
+	int size() {
+		return due.size();
 	}
 
 }

@@ -5,6 +5,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -26,6 +28,7 @@ import org.springframework.http.MediaType;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import com.mia_princz.mse.execution.trading.application.AccountChanges;
+import com.mia_princz.mse.execution.trading.application.SimulationChanges;
 
 /**
  * Private server-sent events: each trader's streams hear that their account changed, and nothing more. A frame
@@ -40,9 +43,13 @@ import com.mia_princz.mse.execution.trading.application.AccountChanges;
  * <li>A ticker, once per heartbeat interval, closes every stream whose session has ended (logged out, or expired),
  * disconnects one whose send has been stuck past the slow limit, and sends a heartbeat to the rest that were sent
  * nothing in that time. Logging out also closes the session's streams at once.</li>
+ * <li>{@link #started} runs on the writer thread once another simulation has started. Every stream and every version
+ * kept here belongs to an account of the simulation before, which changes no more: the streams are closed, so that a
+ * client asks again and is given its account in the new simulation, or told it has none, and the versions are
+ * forgotten.</li>
  * </ul>
  */
-final class AccountStream implements AccountChanges, AutoCloseable {
+final class AccountStream implements AccountChanges, SimulationChanges, AutoCloseable {
 
 	private static final Logger log = LoggerFactory.getLogger(AccountStream.class);
 
@@ -143,6 +150,23 @@ final class AccountStream implements AccountChanges, AutoCloseable {
 				own.forEach((stream) -> stream.offer(event));
 			}
 		}
+	}
+
+	@Override
+	public void started(UUID previousSimulationId, UUID simulationId) {
+		for (Set<Stream> own : streams.values()) {
+			List.copyOf(own).forEach(Stream::disconnect);
+		}
+		// A stream opened for an old account at this very moment keeps its entry, and ends with its session.
+		streams.values().removeIf(Set::isEmpty);
+		versions.clear();
+	}
+
+	/** How many accounts have a version or a set of streams kept. */
+	int accountsKept() {
+		Set<UUID> kept = new HashSet<>(versions.keySet());
+		kept.addAll(streams.keySet());
+		return kept.size();
 	}
 
 	/** Closes every stream the session opened; called when it logs out. */

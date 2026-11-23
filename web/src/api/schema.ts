@@ -267,7 +267,7 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         /**
-         * Add an instrument while the market is in SETUP. The first one creates the market.
+         * Add an instrument while the market is in SETUP. With no simulation at all, the first one creates the market.
          * @description Operator only. Sequenced on the writer and audited, with an idempotency key: a retry with the same key and
          *     body returns the first answer, even a refusal. Publishes the instrument's first market snapshot.
          */
@@ -603,6 +603,46 @@ export interface paths {
         readonly patch?: never;
         readonly trace?: never;
     };
+    readonly "/api/v1/admin/simulations": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Start a new simulation, in SETUP, once the one before it has closed.
+         * @description Operator only. Sequenced on the writer and audited, and needs an idempotency key. Allowed when the current
+         *     simulation is CLOSED, and when no simulation exists at all, where it is the explicit way to the first one
+         *     (the first setup command still creates an unnamed one by itself).
+         *
+         *     The new simulation starts in SETUP with its own issuance account and its own command sequence: this
+         *     command is its first, with sequence 1. Nothing is copied from the simulation before, and nothing of that
+         *     one is deleted or changed again: its accounts, orders, trades, ledger, runs and audit rows stay as they
+         *     closed. From this command on, everything that answers for the current simulation answers for the new one:
+         *     the market status, every list, and each trader's own reads. Logins are kept, accounts are not: a trader has
+         *     no trading account (403 NO_TRADING_ACCOUNT) until funded in the new simulation's setup with
+         *     POST /api/v1/admin/accounts, instruments are added again (a symbol the closed simulation used is free), and
+         *     bots are provisioned again, with new accounts and new tokens. The closed simulation's bot tokens stay
+         *     revoked and its runs stay ended.
+         *
+         *     The name is kept without the white space around it, and differs from every other simulation's name,
+         *     whatever its case.
+         *
+         *     A retry with the same key and name returns the first answer, even a refusal, whichever simulation is
+         *     current by then: this command looks its key up in every simulation. So a key that was refused is spent,
+         *     and a start after the market has closed needs a new key. No lookup by key serves this command, since
+         *     /api/v1/commands/{key} answers for orders and cancels only: send the same key again.
+         */
+        readonly post: operations["startSimulation"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
     readonly "/internal/exports/trades": {
         readonly parameters: {
             readonly query?: never;
@@ -902,7 +942,8 @@ export interface components {
             readonly reason?: string;
             /**
              * @description With MARKET_TRANSITION_NOT_ALLOWED, the state the market was in, from which the transition is not allowed.
-             *     With MARKET_CLOSE_UNFINISHED, CLOSED.
+             *     With MARKET_CLOSE_UNFINISHED, CLOSED. With SIMULATION_NOT_CLOSED, the state of the simulation that has
+             *     not closed.
              * @enum {string}
              */
             readonly state?: "SETUP" | "OPEN" | "HALTED" | "CLOSED";
@@ -1607,7 +1648,7 @@ export interface components {
         };
         /**
          * @description The current simulation's phase: the one that is not closed or, after a close, the one closed last, until
-         *     another is set up.
+         *     another is started.
          */
         readonly MarketStatus: {
             /**
@@ -1616,6 +1657,11 @@ export interface components {
              */
             readonly state: "NOT_SET_UP" | "SETUP" | "OPEN" | "HALTED" | "CLOSED";
             readonly simulationId: components["schemas"]["Uuid"] | null;
+            /**
+             * @description The name the simulation was started with. Null for one nobody named, which the first setup command
+             *     created, and before any exists.
+             */
+            readonly name: components["schemas"]["SimulationName"] | null;
             /** @description When the market first opened; null in SETUP. */
             readonly openedAt: components["schemas"]["Timestamp"] | null;
             /** @description When the market closed; null unless the state is CLOSED. */
@@ -1626,6 +1672,28 @@ export interface components {
         readonly MarketTransition: {
             /** @enum {string} */
             readonly state: "OPEN" | "HALTED";
+            readonly commandSequence: components["schemas"]["Sequence"];
+        };
+        /**
+         * @description What an operator calls a simulation: printable characters in any language, with plain spaces between
+         *     words. White space around it is dropped before it is counted and kept. Control and invisible formatting
+         *     characters are refused (VALIDATION_FAILED, INVALID_NAME).
+         * @example Thursday seminar
+         */
+        readonly SimulationName: string;
+        readonly SimulationRequest: {
+            /**
+             * @description A SimulationName, 1 to 80 characters once the white space around it is dropped; it may be longer as
+             *     sent.
+             */
+            readonly name: string;
+        };
+        readonly SimulationStarted: {
+            readonly simulationId: components["schemas"]["Uuid"];
+            readonly name: components["schemas"]["SimulationName"];
+            /** @enum {string} */
+            readonly state: "SETUP";
+            /** @description Always 1. The start is the new simulation's first command. */
             readonly commandSequence: components["schemas"]["Sequence"];
         };
         readonly MarketClosed: {
@@ -3575,6 +3643,75 @@ export interface operations {
              * @description COMMAND_OUTCOME_UNKNOWN. The close did not answer in time and may still be going on. Not to be looked
              *     up by commandKey, which no route does for a close: send the same key again. It returns the close's
              *     answer once the close is done, or 503 MARKET_CLOSE_UNFINISHED if trading stopped for it.
+             */
+            readonly 504: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    readonly startSimulation: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /** @description A client-chosen UUID, kept for retries of the same request. */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["SimulationRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Started. The new simulation is the current one, in SETUP. */
+            readonly 201: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["SimulationStarted"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /**
+             * @description SIMULATION_NOT_CLOSED (a simulation that has not closed exists; with its state: SETUP, OPEN or HALTED),
+             *     SIMULATION_NAME_TAKEN (both committed and audited in the current simulation, with its
+             *     commandSequence), or IDEMPOTENCY_CONFLICT: the key was used for another request, in this simulation or
+             *     an earlier one.
+             */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            /**
+             * @description COMMAND_OUTCOME_UNKNOWN. The start did not answer in time and may still commit. Not to be looked up by
+             *     commandKey, which no route does for a start: send the same key again.
              */
             readonly 504: {
                 headers: {
