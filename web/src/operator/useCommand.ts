@@ -22,7 +22,7 @@ export type CommandOutcome<T> =
 const randomKey = () => crypto.randomUUID();
 
 /** The server's own words: its detail, plus each field's message for an invalid request. */
-function describe(error: ApiError): string {
+export function describe(error: ApiError): string {
   const fields = error.problem?.errors ?? [];
   return fields.length === 0 ? error.message : fields.map((field) => field.message).join('; ');
 }

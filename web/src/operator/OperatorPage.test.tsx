@@ -2367,6 +2367,15 @@ describe('closing the market on the operator screen', () => {
   /** What the market panel says of the last command, when it is a warning; other panels have alerts of their own. */
   const said = () => within(screen.getByRole('region', { name: 'Market' })).findByRole('alert');
   const closedAnswer = { state: 'CLOSED', commandSequence: '8', canceledOrders: 1234, endedRuns: 1 };
+  /** An answer the test gives when it chooses to: the request stays on its way until then. */
+  const answerLater = () => {
+    type Reply = { status: number; json?: unknown; problem?: unknown };
+    let answer: (reply: Reply) => void = () => {};
+    const reply = new Promise<Reply>((resolve) => {
+      answer = resolve;
+    });
+    return { reply, answer: (given: Reply) => answer(given) };
+  };
 
   it('offers a close only for a market that has opened, and says why not before', async () => {
     exchange('SETUP');
@@ -2637,6 +2646,138 @@ describe('closing the market on the operator screen', () => {
     ).toBeInTheDocument();
     expect(new Set(keys(server)).size).toBe(1);
     expect(keys(server)).toHaveLength(3);
+  });
+
+  it('finds a close with no answer as it was on coming back to the page, and sends the same key', async () => {
+    const { server, state } = exchange('OPEN');
+    server.on(`POST ${CLOSE}`, () => {
+      if (closes(server).length === 1) {
+        return {
+          status: 504,
+          problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN', detail: 'The outcome is not known yet', commandKey: 'k' },
+        };
+      }
+      state.market = market('CLOSED');
+      return { status: 200, json: closedAnswer };
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const before = renderWith(client);
+    await confirmClose();
+    expect(await said()).toHaveTextContent('The close is taking longer than the exchange waits before it answers');
+
+    // To the terminal and back, to a comparison, to Help: each takes this page down and builds it anew.
+    before.unmount();
+    renderWith(client);
+
+    const unknown = await said();
+    expect(unknown).toHaveTextContent('The close is taking longer than the exchange waits before it answers');
+    // Not a market that could be closed afresh, under a new key.
+    expect(await button('Close the market')).toBeDisabled();
+    expect(await button('Halt trading')).toBeDisabled();
+    // Coming back is not an answer arriving: focus is left where the page put it.
+    expect(screen.getByRole('heading', { name: 'Market' })).not.toHaveFocus();
+
+    fireEvent.click(within(unknown).getByRole('button', { name: 'Ask again' }));
+    expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
+    expect(keys(server)).toHaveLength(2);
+    expect(keys(server)[1]).toBe(keys(server)[0]);
+  });
+
+  it('keeps an unfinished close and its count through leaving the page', async () => {
+    const { server, state } = exchange('OPEN');
+    server.on(`POST ${CLOSE}`, () => {
+      state.market = market('CLOSED');
+      return closes(server).length === 1
+        ? { status: 503, problem: { status: 503, code: 'MARKET_CLOSE_UNFINISHED', detail: 'unfinished', restingOrders: 4200 } }
+        : { status: 200, json: closedAnswer };
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const before = renderWith(client);
+    await confirmClose();
+    expect(await said()).toHaveTextContent('The market is closed, but 4,200 orders still rest.');
+    before.unmount();
+    renderWith(client);
+
+    expect(await said()).toHaveTextContent('The market is closed, but 4,200 orders still rest.');
+    expect(await screen.findByRole('region', { name: 'This market has ended' })).toBeInTheDocument();
+    fireEvent.click(await button("Ask for the close's answer"));
+    expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
+    expect(new Set(keys(server)).size).toBe(1);
+  });
+
+  it('goes on with a close that was on its way when the page was left, and shows its answer on coming back', async () => {
+    const { server, state } = exchange('OPEN');
+    const later = answerLater();
+    server.on(`POST ${CLOSE}`, () => later.reply);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const before = renderWith(client);
+    await confirmClose();
+    await waitFor(() => expect(closes(server)).toHaveLength(1));
+    before.unmount();
+
+    // Back while it is still on its way: said so, and no second close on offer.
+    const during = renderWith(client);
+    expect(await screen.findByText(/^Closing the market…/)).toBeInTheDocument();
+    for (const name of ['Close the market', 'Halt trading']) {
+      expect(await button(name)).toBeDisabled();
+    }
+    during.unmount();
+
+    // Answered with no page there to show it.
+    state.market = market('CLOSED');
+    later.answer({ status: 200, json: closedAnswer });
+    await waitFor(() => expect(client.getQueryState(['market'])?.isInvalidated).toBe(true));
+    renderWith(client);
+    expect(await screen.findByText('The market is closed. 1,234 resting orders were cancelled, and 1 bot run ended.')).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'This market has ended' })).toBeInTheDocument();
+    expect(closes(server)).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: 'Market' })).not.toHaveFocus();
+  });
+
+  it("keeps a close to the session and the market it was sent in", async () => {
+    const NEXT = '10000000-0000-0000-0000-000000000002';
+    const { server, state } = exchange('OPEN');
+    server.on(`POST ${CLOSE}`, { status: 503, problem: { status: 503, code: 'TRADING_UNAVAILABLE', detail: 'Trading is unavailable' } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const before = renderWith(client);
+    await confirmClose();
+    expect(await said()).toHaveTextContent('Trading is unavailable');
+    before.unmount();
+
+    // Another session's page, as after signing out and in, starts with nothing: the cache went with the session.
+    const other = renderPage();
+    expect(await button('Close the market')).toBeEnabled();
+    expect(within(screen.getByRole('region', { name: 'Market' })).queryByRole('alert')).toBeNull();
+    other.unmount();
+
+    // And another market is not the one that close was sent to.
+    state.market = { ...market('OPEN'), simulationId: NEXT };
+    await client.invalidateQueries({ queryKey: ['market'] });
+    renderWith(client);
+    await waitFor(async () => expect(await button('Close the market')).toBeEnabled());
+    expect(within(screen.getByRole('region', { name: 'Market' })).queryByRole('alert')).toBeNull();
+  });
+
+  it('lets the next command take the place of a refused close, also after leaving the page', async () => {
+    const { server, state } = exchange('OPEN');
+    server
+      .on(`POST ${CLOSE}`, { status: 409, problem: { status: 409, code: 'IDEMPOTENCY_CONFLICT', detail: 'The key was used for another command' } })
+      .on('POST /api/v1/admin/market/halt', () => {
+        state.market = market('HALTED');
+        return { status: 200, json: { state: 'HALTED', commandSequence: '9' } };
+      });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const before = renderWith(client);
+    await confirmClose();
+    expect(await screen.findByText('The key was used for another command')).toBeInTheDocument();
+
+    fireEvent.click(await button('Halt trading'));
+    expect(await screen.findByText('Trading is halted. Cancels still work.')).toBeInTheDocument();
+    expect(screen.queryByText('The key was used for another command')).toBeNull();
+    before.unmount();
+    renderWith(client);
+    await button('Resume trading');
+    expect(screen.queryByText('The key was used for another command')).toBeNull();
   });
 
   it('says a close left unfinished without a count still rests some orders', async () => {

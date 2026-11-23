@@ -1,19 +1,22 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { ApiError, api } from '../api/client';
+import { api } from '../api/client';
 import type { MarketClosed, MarketStatus, MarketTransition } from '../api/types';
 import { groupInteger, utcDateTime, utcTime } from '../format';
 import { TermTip } from '../help/TermTip';
+import { useCloseCommand } from './closeCommand';
 import { CloseMarketDialog } from './CloseMarketDialog';
 import { CommandStatus } from './CommandStatus';
 import { type CommandOutcome, useCommand } from './useCommand';
 
-type Action = 'open' | 'halt' | 'resume' | 'close';
+type Transition = 'open' | 'halt' | 'resume';
+type Action = Transition | 'close';
 
-type Done =
-  | { action: Exclude<Action, 'close'>; transition: MarketTransition }
-  | { action: 'close'; closed: MarketClosed };
+interface Done {
+  action: Transition;
+  transition: MarketTransition;
+}
 
 const STATE_LABELS: Record<MarketStatus['state'], string> = {
   NOT_SET_UP: 'Not set up',
@@ -23,7 +26,7 @@ const STATE_LABELS: Record<MarketStatus['state'], string> = {
   CLOSED: 'Closed',
 };
 
-const DONE: Record<Exclude<Action, 'close'>, string> = {
+const DONE: Record<Transition, string> = {
   open: 'The market is open.',
   halt: 'Trading is halted. Cancels still work.',
   resume: 'Trading has resumed.',
@@ -73,7 +76,7 @@ const ACTIONS: readonly { action: Action; label: string }[] = [
  * A refused close, in words. The exchange says which state the market was in: a close that found it closed already
  * changed nothing, which is not a failure to report as one.
  */
-function closeRefusal(outcome: Extract<CommandOutcome<Done>, { kind: 'refused' }>): string {
+function closeRefusal(outcome: Extract<CommandOutcome<MarketClosed>, { kind: 'refused' }>): string {
   if (outcome.code !== 'MARKET_TRANSITION_NOT_ALLOWED') {
     return outcome.message;
   }
@@ -97,7 +100,7 @@ function CloseStatus({
   stillResting,
   onRetry,
 }: {
-  outcome: CommandOutcome<Done>;
+  outcome: CommandOutcome<MarketClosed>;
   /** Set once the exchange has said the close is unfinished: how many orders still rested, if it said. */
   stillResting: number | null | undefined;
   onRetry: () => void;
@@ -115,7 +118,7 @@ function CloseStatus({
     case 'done':
       return (
         <p role="status" className="outcome outcome-ok">
-          {outcome.result.action === 'close' ? closedText(outcome.result.closed) : DONE[outcome.result.action]}
+          {closedText(outcome.result)}
         </p>
       );
     case 'refused':
@@ -182,23 +185,10 @@ function CloseStatus({
  */
 export function MarketControl({ market, instruments }: { market: MarketStatus; instruments: number | undefined }) {
   const client = useQueryClient();
-  // Unset until the exchange says a close is unfinished; from then on the market is known to be closed, whatever a
-  // later answer under the same key says while the exchange is still stopped.
-  const [stillResting, setStillResting] = useState<number | null | undefined>(undefined);
   const send = useCallback(
-    async (action: Action, key: string): Promise<Done> => {
+    async (action: Transition, key: string): Promise<Done> => {
       try {
-        if (action === 'close') {
-          const closed = await api.closeMarket(key);
-          setStillResting(undefined);
-          return { action, closed };
-        }
         return { action, transition: await api.controlMarket(action, key) };
-      } catch (error) {
-        if (action === 'close' && error instanceof ApiError && error.code === 'MARKET_CLOSE_UNFINISHED') {
-          setStillResting(error.problem?.restingOrders ?? null);
-        }
-        throw error;
       } finally {
         void client.invalidateQueries({ queryKey: ['market'] });
       }
@@ -206,13 +196,17 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
     [client],
   );
   const command = useCommand(send);
-  const busy = command.outcome.kind === 'sending';
-  const [last, setLast] = useState<Action | null>(null);
+  // The close is kept outside this panel, so leaving the page and coming back finds it as it was, key and all.
+  const close = useCloseCommand(market.simulationId);
+  const closing = close.outcome.kind !== 'idle';
+  const busy = command.outcome.kind === 'sending' || close.outcome.kind === 'sending';
+  const unresolved = command.unresolved || close.outcome.kind === 'unresolved';
   const [confirming, setConfirming] = useState(false);
   const closeButton = useRef<HTMLButtonElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
-  const run = (action: Action) => {
-    setLast(action);
+  const run = (action: Transition) => {
+    // Its answer takes the place of a close that was refused.
+    close.forget();
     void command.run(action);
   };
 
@@ -226,14 +220,23 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
     }
   }, [confirming]);
   // Sending disables the button the close was started from, and focus is lost to the page with it. Once the close is
-  // answered, focus goes to this panel's heading, beside the answer, unless the user has moved it meanwhile.
-  const answered = last === 'close' && command.outcome.kind !== 'idle' && command.outcome.kind !== 'sending';
+  // answered, focus goes to this panel's heading, beside the answer, unless the user has moved it meanwhile. Only for
+  // a close this panel saw on its way: one found answered on coming back to the page takes no focus.
+  const closeKind = close.outcome.kind;
+  const sawSending = useRef(false);
   useEffect(() => {
-    const lost = document.activeElement === null || document.activeElement === document.body;
-    if (answered && lost) {
-      heading.current?.focus();
+    if (closeKind === 'sending') {
+      sawSending.current = true;
+      return;
     }
-  }, [answered]);
+    const lost = document.activeElement === null || document.activeElement === document.body;
+    if (sawSending.current && closeKind !== 'idle') {
+      sawSending.current = false;
+      if (lost) {
+        heading.current?.focus();
+      }
+    }
+  }, [closeKind]);
 
   const closed = market.state === 'CLOSED';
   // A closed market may be read days later, so its times carry their dates.
@@ -279,7 +282,7 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
                   ref={action === 'close' ? closeButton : undefined}
                   type="button"
                   className={action === 'halt' || action === 'close' ? 'primary danger' : 'primary'}
-                  disabled={reason !== null || busy || command.unresolved}
+                  disabled={reason !== null || busy || unresolved}
                   aria-describedby={note === null ? undefined : hint}
                   aria-haspopup={action === 'close' ? 'dialog' : undefined}
                   onClick={() => (action === 'close' ? setConfirming(true) : run(action))}
@@ -307,18 +310,18 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
           }}
           onClose={() => {
             setConfirming(false);
-            run('close');
+            close.run();
           }}
         />
       )}
-      {last === 'close' ? (
-        <CloseStatus outcome={command.outcome} stillResting={stillResting} onRetry={() => void command.retry()} />
-      ) : (
-        <CommandStatus
-          outcome={command.outcome}
-          done={(result) => (result.action === 'close' ? closedText(result.closed) : DONE[result.action])}
-          onRetry={() => void command.retry()}
+      {closing ? (
+        <CloseStatus
+          outcome={close.outcome}
+          stillResting={close.stillResting}
+          onRetry={close.run}
         />
+      ) : (
+        <CommandStatus outcome={command.outcome} done={(result) => DONE[result.action]} onRetry={() => void command.retry()} />
       )}
     </section>
   );
