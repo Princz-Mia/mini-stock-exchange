@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import threading
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -11,10 +12,10 @@ from mse_simulator import runner as runner_module
 from mse_simulator.control import Assignment
 from mse_simulator.credentials import load_token
 from mse_simulator.manifest import manifest
-from mse_simulator.market import fetch
+from mse_simulator.market import UNSEEN, fetch
 from mse_simulator.market_maker import MarketMaker
 from mse_simulator.pacing import Pacer
-from mse_simulator.runner import Runner
+from mse_simulator.runner import Activity, Runner
 from mse_simulator.settings import Settings
 from mse_simulator.strategy import Holdings
 
@@ -105,7 +106,7 @@ class Exchange:
     """A fake exchange: an open, live market with two instruments, every bot well funded, and the
     control plane. Heartbeats answer with ``desired`` until ``refuse`` names a refusal code. With
     ``rest``, placed orders stay active; with ``trend``, the last price moves that many cents per
-    poll."""
+    poll. ``state`` is the market's phase; with ``revoked``, every bot token is refused."""
 
     def __init__(self) -> None:
         self.run: dict | None = None
@@ -125,6 +126,28 @@ class Exchange:
         self.pages = 0
         # When set, every market poll after the first waits until released.
         self.market_stall: asyncio.Event | None = None
+        self.state = "OPEN"
+        self.revoked = False
+        # Refuses only a heartbeat that confirms a stop.
+        self.refuse_stop: str | None = None
+        # Seconds the phase takes to answer, and whether orders and Market Data are reachable.
+        self.phase_delay = 0.0
+        self.orders_down = False
+        self.listing_down = False
+        self.assignments = 0
+        self.phases = 0
+        # Every request made with a bot's token, and those refused for it: (token, path).
+        self.bot_calls = 0
+        self.refused: list[tuple[str, str]] = []
+        self.order_attempts = 0
+
+    def close(self) -> None:
+        """Closes the market as Execution does: for good, every bot token revoked, the run ended
+        and no longer assigned."""
+        self.state = "CLOSED"
+        self.revoked = True
+        self.refuse = "RUN_FINISHED"
+        self.run = None
 
     def open_order(
         self, bot_token: str, instrument: str = INSTRUMENT, side: str = "BUY", limit="99.00"
@@ -160,6 +183,7 @@ class Exchange:
         if path.startswith("/internal/"):
             assert bearer == CONTROL, "control routes take only the control token"
             if path == "/internal/simulator/assignment":
+                self.assignments += 1
                 return httpx.Response(
                     200, json={"run": None if self.run is None else served_run(self.run)}
                 )
@@ -167,8 +191,9 @@ class Exchange:
                 return self.bot_page(request)
             beat = json.loads(request.content)
             self.beats.append(beat)
-            if self.refuse is not None:
-                return httpx.Response(409, json={"code": self.refuse})
+            refusal = self.refuse or (self.refuse_stop if beat["stopped"] else None)
+            if refusal is not None:
+                return httpx.Response(409, json={"code": refusal})
             return httpx.Response(
                 200,
                 json={
@@ -180,8 +205,12 @@ class Exchange:
             )
         assert bearer != CONTROL, "the control token never trades"
         if path == "/api/v1/market":
-            return httpx.Response(200, json={"state": "OPEN"})
+            self.phases += 1
+            await asyncio.sleep(self.phase_delay)
+            return httpx.Response(200, json={"state": self.state})
         if path == "/api/v1/instruments":
+            if self.listing_down:
+                return httpx.Response(503)
             self.polls += 1
             if self.market_stall is not None and self.polls > 1:
                 await self.market_stall.wait()
@@ -196,6 +225,10 @@ class Exchange:
                     "instruments": [quote(INSTRUMENT, last), quote(OTHER, last)],
                 },
             )
+        self.bot_calls += 1
+        if self.revoked:
+            self.refused.append((bearer, path))
+            return httpx.Response(401)
         if path == "/api/v1/portfolio":
             return httpx.Response(
                 200,
@@ -212,6 +245,9 @@ class Exchange:
                 200, json={"orders": self.active.get(bearer, []), "nextCursor": None}
             )
         if path == "/api/v1/orders":
+            self.order_attempts += 1
+            if self.orders_down:
+                raise httpx.ConnectError("refused", request=request)
             self.placed.append(request)
             await self.release.wait()
             if self.rest:
@@ -244,6 +280,23 @@ def settings(directory, **overrides) -> Settings:
 
 def placed_instruments(exchange: Exchange) -> set[str]:
     return {json.loads(request.content)["instrumentId"] for request in exchange.placed}
+
+
+async def until(condition) -> None:
+    for _ in range(300):
+        if condition():
+            break
+        await asyncio.sleep(0.01)
+    assert condition(), "the condition never held"
+
+
+def closed_lines(caplog) -> list[str]:
+    """The lines that say a run ended because the market closed."""
+    return [r.getMessage() for r in caplog.records if "the market closed" in r.getMessage()]
+
+
+def warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 async def follow_until(runner: Runner, exchange: Exchange, condition, then=None) -> None:
@@ -895,3 +948,361 @@ def test_every_strategy_is_seeded_by_the_run(tmp_path, strategy) -> None:
     assert asyncio.run(decisions("7")) == first, "the same seed repeats every decision"
     others = [asyncio.run(decisions(str(seed))) for seed in range(8, 14)]
     assert any(other != first for other in others), "another seed changes them"
+
+
+def test_a_close_ends_the_run_with_no_cancel_and_the_worker_takes_the_next_run(
+    tmp_path, caplog
+) -> None:
+    caplog.set_level(logging.INFO, logger="mse_simulator")
+    accounts = write_tokens(tmp_path / "tokens", 3)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["NOISE"] * 3)
+    for value in accounts.values():
+        exchange.open_order(value)
+
+    async def scenario() -> Activity:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            stop = asyncio.Event()
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            worker = asyncio.create_task(runner.run(stop))
+            await until(lambda: len(exchange.placed) >= 3 and len(exchange.beats) >= 2)
+            beats, asked = len(exchange.beats), exchange.assignments
+            exchange.close()
+            await until(lambda: exchange.assignments >= asked + 3)
+            assert len(exchange.beats) <= beats + 1, "one last beat at most, refused or not"
+            # Idle from here on: nothing but the question for the next run.
+            quiet = (len(exchange.beats), exchange.bot_calls, exchange.phases)
+            await until(lambda: exchange.assignments >= asked + 6)
+            assert (len(exchange.beats), exchange.bot_calls, exchange.phases) == quiet
+            ended = runner.activity
+            # A new market and a new run: the closed one is not remembered against it.
+            exchange.state, exchange.revoked, exchange.refuse = "OPEN", False, None
+            placed = len(exchange.placed)
+            exchange.run = run_body(accounts, ["NOISE"] * 3)
+            await until(lambda: len(exchange.placed) >= placed + 3)
+            stop.set()
+            await asyncio.wait_for(worker, 5)
+            return ended
+
+    ended = asyncio.run(scenario())
+    assert exchange.canceled == []
+    assert not any(path.endswith("/cancel") for _, path in exchange.refused), "nothing to settle"
+    bots = [bearer for bearer, _ in exchange.refused]
+    assert len(bots) == len(set(bots)) <= 3, "a refused token is not tried again"
+    assert ended.errors + ended.rejected <= 3 and ended.stop_failures == 0
+    assert len(closed_lines(caplog)) == 1
+    assert warnings(caplog) == [], "a market that closed is not a fault"
+
+
+def test_a_closed_market_seen_on_the_poll_ends_the_run_and_leaves_its_orders_alone(
+    tmp_path, caplog
+) -> None:
+    """The worst case for a worker that would settle: the tokens still work and orders rest."""
+    caplog.set_level(logging.INFO, logger="mse_simulator")
+    accounts = write_tokens(tmp_path / "tokens", 2)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["NOISE", "NOISE"])
+    for value in accounts.values():
+        exchange.open_order(value)
+    seen: list[int] = []
+
+    def close() -> None:
+        exchange.state = "CLOSED"
+        seen.extend([exchange.bot_calls, len(exchange.beats), exchange.polls])
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens", market_poll_seconds=0.02), http)
+            await follow_until(runner, exchange, lambda: len(exchange.placed) >= 2, close)
+            done = exchange.bot_calls
+            await asyncio.sleep(0.1)
+            assert exchange.bot_calls == done, "nothing goes on after the run ended"
+
+    asyncio.run(scenario())
+    calls, beats, polls = seen
+    assert exchange.canceled == [], "the exchange cancels at a close; the worker sends no cancel"
+    assert exchange.bot_calls - calls <= 3 * len(accounts), "only the steps already started"
+    assert exchange.polls == polls, "a closed market is not asked for quotes"
+    assert [beat["stopped"] for beat in exchange.beats[beats:]].count(True) == 1
+    assert exchange.beats[-1]["stopped"] is True and exchange.beats[-1]["inFlight"] == 0
+    assert len(closed_lines(caplog)) == 1 and warnings(caplog) == []
+
+
+def test_refused_tokens_are_not_tried_again_while_the_market_still_reads_open(tmp_path) -> None:
+    """The time between a close and the worker noticing it, stretched: every token is dead, and
+    nothing else says so yet."""
+    accounts = write_tokens(tmp_path / "tokens", 3)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["NOISE"] * 3)
+
+    async def scenario() -> Runner:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens", market_poll_seconds=0.1), http)
+            task = asyncio.create_task(runner.follow(assigned(exchange.run)))
+            await until(lambda: len(exchange.placed) >= 3)
+            await runner.drain()
+            failed = runner.activity.errors + runner.activity.rejected
+            asked = exchange.phases - exchange.polls
+            exchange.revoked = True
+            # Fifteen turns at the run's rate.
+            await asyncio.sleep(0.3)
+            assert not task.done(), "refused tokens alone do not end a run"
+            assert runner.activity.errors + runner.activity.rejected - failed <= 3
+            assert runner.activity.unauthorized == len(exchange.refused)
+            assert exchange.phases - exchange.polls - asked <= 3, "asked once per refusal at most"
+            exchange.state = "CLOSED"
+            await asyncio.wait_for(task, 5)
+            return runner
+
+    asyncio.run(scenario())
+    bots = [bearer for bearer, _ in exchange.refused]
+    assert 1 <= len(bots) <= 3 and len(bots) == len(set(bots)), "each bot is refused once"
+    assert exchange.canceled == []
+
+
+def test_a_refused_token_has_the_market_asked_at_once_not_at_the_next_poll(tmp_path) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 3)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["NOISE"] * 3)
+
+    def close_unheard_by_the_heartbeat() -> None:
+        exchange.state, exchange.revoked = "CLOSED", True
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            # The next poll is a minute away, and the heartbeats still answer.
+            runner = Runner(settings(tmp_path / "tokens", market_poll_seconds=60.0), http)
+            await follow_until(
+                runner, exchange, lambda: len(exchange.placed) >= 3, close_unheard_by_the_heartbeat
+            )
+
+    asyncio.run(scenario())
+    assert 1 <= len(exchange.refused) <= 3
+    assert exchange.beats[-1]["stopped"] is True
+    assert exchange.canceled == []
+
+
+@pytest.mark.parametrize(("state", "closed"), [("CLOSED", True), ("OPEN", False)])
+def test_a_heartbeat_refused_for_a_finished_run_is_a_lost_lease_only_in_a_market_not_closed(
+    tmp_path, caplog, state, closed
+) -> None:
+    caplog.set_level(logging.INFO, logger="mse_simulator")
+    accounts = write_tokens(tmp_path / "tokens", 1)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["NOISE"])
+    quote_id = exchange.open_order(next(iter(accounts.values())))
+    # The answer about the market takes longer than the trading loop takes to stop.
+    exchange.phase_delay = 0.1
+    seen: list[int] = []
+
+    def finish() -> None:
+        exchange.state, exchange.refuse = state, "RUN_FINISHED"
+        seen.append(len(exchange.beats))
+
+    async def scenario() -> Runner:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens", market_poll_seconds=60.0), http)
+            await follow_until(
+                runner,
+                exchange,
+                lambda: len(exchange.placed) >= 2 and len(exchange.beats) >= 2,
+                finish,
+            )
+            return runner
+
+    runner = asyncio.run(scenario())
+    assert len(exchange.beats) == seen[0] + 1, "the refusal is heard once and not asked again"
+    assert quote_id not in exchange.canceled
+    assert runner.activity.errors == 0 and runner.activity.stop_failures == 0
+    assert len(closed_lines(caplog)) == (1 if closed else 0)
+    assert len(warnings(caplog)) == (0 if closed else 1)
+    assert all("lease lost (RUN_FINISHED)" in line for line in warnings(caplog))
+
+
+def test_a_stopping_run_taken_up_in_a_closed_market_is_ended_without_settling(
+    tmp_path, caplog
+) -> None:
+    caplog.set_level(logging.INFO, logger="mse_simulator")
+    accounts = write_tokens(tmp_path / "tokens", 2)
+    exchange = Exchange()
+    exchange.desired = "STOPPED"
+    exchange.run = run_body(accounts, ["NOISE", "NOISE"], desiredState="STOPPED")
+    exchange.state, exchange.revoked, exchange.refuse_stop = "CLOSED", True, "RUN_FINISHED"
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            await asyncio.wait_for(runner.follow(assigned(exchange.run)), 5)
+
+    asyncio.run(scenario())
+    assert exchange.bot_calls == 0, "not even a look at the bots' orders"
+    assert exchange.phases == 1, "known to be closed, so the refused beat asks nothing more"
+    assert [beat["stopped"] for beat in exchange.beats] == [False, True]
+    assert len(closed_lines(caplog)) == 1 and warnings(caplog) == []
+
+
+def test_a_close_while_a_stop_is_settled_costs_one_refused_read_per_bot(tmp_path, caplog) -> None:
+    caplog.set_level(logging.INFO, logger="mse_simulator")
+    accounts = write_tokens(tmp_path / "tokens", 2)
+    exchange = Exchange()
+    exchange.desired = "STOPPED"
+    exchange.run = run_body(accounts, ["NOISE", "NOISE"], desiredState="STOPPED")
+    exchange.revoked, exchange.refuse_stop = True, "RUN_FINISHED"
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/orders":
+            # The close lands after the worker's last look at the market, as it starts to settle.
+            exchange.state = "CLOSED"
+        return await exchange.handle(request)
+
+    async def scenario() -> Runner:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            await asyncio.wait_for(runner.follow(assigned(exchange.run)), 5)
+            return runner
+
+    runner = asyncio.run(scenario())
+    assert sorted(exchange.refused) == sorted(
+        (value, "/api/v1/orders") for value in accounts.values()
+    )
+    assert runner.activity.stop_failures == 2, "what could not be read is still reported"
+    assert [beat["stopped"] for beat in exchange.beats] == [False, True], "confirmed once"
+    assert len(closed_lines(caplog)) == 1 and warnings(caplog) == []
+
+
+def test_commands_unanswered_at_a_close_are_given_up_after_a_limit(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(runner_module, "CLOSED_DRAIN_SECONDS", 0.1)
+    accounts = write_tokens(tmp_path / "tokens", 2)
+    exchange = Exchange()
+    exchange.orders_down = True
+    exchange.run = run_body(accounts, ["NOISE", "NOISE"])
+
+    async def soon(seconds: float) -> None:
+        # Retries wait up to five seconds; here they come round at once.
+        await asyncio.sleep(min(seconds, 0.01))
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(
+                settings(tmp_path / "tokens", market_poll_seconds=0.02), http, sleep=soon
+            )
+            await follow_until(
+                runner,
+                exchange,
+                # Both bots are sending the same order again and again.
+                lambda: exchange.order_attempts >= 6,
+                lambda: setattr(exchange, "state", "CLOSED"),
+            )
+            assert not runner._tasks and not any(bot.busy for bot in runner._bots.values())
+            attempts = exchange.order_attempts
+            await asyncio.sleep(0.1)
+            assert exchange.order_attempts == attempts, "no retry outlives the run"
+
+    asyncio.run(scenario())
+    assert exchange.placed == []
+    assert exchange.beats[-1]["stopped"] is True
+
+
+def test_with_no_run_and_a_closed_market_the_worker_only_asks_for_its_assignment(
+    tmp_path, caplog
+) -> None:
+    caplog.set_level(logging.INFO, logger="mse_simulator")
+    write_tokens(tmp_path / "tokens", 1)
+    exchange = Exchange()
+    exchange.close()
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            stop = asyncio.Event()
+            worker = asyncio.create_task(Runner(settings(tmp_path / "tokens"), http).run(stop))
+            await until(lambda: exchange.assignments >= 5)
+            stop.set()
+            await asyncio.wait_for(worker, 2)
+
+    asyncio.run(scenario())
+    assert (exchange.phases, exchange.polls, exchange.bot_calls, exchange.beats) == (0, 0, 0, [])
+    assert caplog.records == []
+
+
+def test_a_finished_run_still_assigned_in_a_closed_market_is_left_without_a_word(
+    tmp_path, caplog, monkeypatch
+) -> None:
+    caplog.set_level(logging.INFO, logger="mse_simulator")
+    read: list[str] = []
+    monkeypatch.setattr(runner_module, "load_token", lambda directory, ref: read.append(ref))
+    accounts = write_tokens(tmp_path / "tokens", 1)
+    exchange = Exchange()
+    run = run_body(accounts, ["NOISE"])
+    exchange.close()
+    exchange.run = run
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            await asyncio.wait_for(runner.follow(assigned(run)), 5)
+
+    asyncio.run(scenario())
+    assert (len(exchange.beats), exchange.phases, exchange.bot_calls) == (1, 1, 0)
+    assert read == [] and caplog.records == []
+
+
+def test_a_halt_pauses_new_orders_until_the_resume_and_the_run_goes_on(tmp_path) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 2)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["NOISE", "NOISE"])
+    quote_id = exchange.open_order(next(iter(accounts.values())))
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens", market_poll_seconds=0.02), http)
+            task = asyncio.create_task(runner.follow(assigned(exchange.run)))
+            await until(lambda: len(exchange.placed) >= 2)
+            exchange.state = "HALTED"
+            polls = exchange.polls
+            await until(lambda: exchange.polls >= polls + 2)
+            await runner.drain()
+            placed, steps, beats = len(exchange.placed), runner.activity.steps, len(exchange.beats)
+            await until(lambda: runner.activity.steps >= steps + 5 and len(exchange.beats) > beats)
+            assert len(exchange.placed) == placed, "no new order while halted"
+            assert not task.done(), "a halt does not end the run"
+            assert exchange.canceled == []
+            exchange.state = "OPEN"
+            await until(lambda: len(exchange.placed) > placed)
+            exchange.desired = "STOPPED"
+            await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+    assert quote_id in exchange.canceled, "a stop after a halt settles as ever"
+    assert exchange.beats[-1]["stopped"] is True
+
+
+@pytest.mark.parametrize(
+    ("state", "open", "closed"),
+    [("OPEN", True, False), ("HALTED", False, False), ("SETUP", False, False)],
+)
+def test_the_view_keeps_the_markets_phase(state, open, closed) -> None:
+    exchange = Exchange()
+    exchange.state = state
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            return await fetch(http, "http://execution", "http://market", 0.0)
+
+    market = asyncio.run(scenario())
+    assert (market.state, market.open, market.closed) == (state, open, closed)
+    assert market.tradable(1.0, 2.0) is open
+    assert not UNSEEN.open and not UNSEEN.closed, "before the first poll nothing is known"
+
+
+def test_a_closed_market_is_known_without_market_data() -> None:
+    exchange = Exchange()
+    exchange.state = "CLOSED"
+    exchange.listing_down = True
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            return await fetch(http, "http://execution", "http://market", 5.0)
+
+    market = asyncio.run(scenario())
+    assert market.closed and not market.open
+    assert not market.tradable(5.0, 2.0)

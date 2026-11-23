@@ -28,7 +28,8 @@ def instrument(reference: int = 10_000, bid=None, ask=None, last=None, tick: int
 
 
 def view(*instruments: Instrument, open: bool = True, live: bool = True) -> MarketView:
-    return MarketView(open=open, live=live, instruments=instruments, fetched_at=0.0)
+    state = "OPEN" if open else "HALTED"
+    return MarketView(state=state, live=live, instruments=instruments, fetched_at=0.0)
 
 
 def rich(*instruments: Instrument, position: int = 0) -> Holdings:

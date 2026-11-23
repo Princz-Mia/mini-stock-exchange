@@ -90,7 +90,7 @@ class ToyMarket:
 
     def _snapshot(self) -> MarketView:
         return MarketView(
-            open=True,
+            state="OPEN",
             live=True,
             instruments=tuple(
                 Instrument(

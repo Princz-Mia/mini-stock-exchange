@@ -41,12 +41,27 @@ class Instrument:
         return float(self.reference)
 
 
+OPEN = "OPEN"
+CLOSED = "CLOSED"
+
+
 @dataclass(frozen=True)
 class MarketView:
-    open: bool
+    # The phase as Execution names it. Only OPEN trades; every other phase pauses new orders, and
+    # only CLOSED is final.
+    state: str
     live: bool
     instruments: tuple[Instrument, ...]
     fetched_at: float
+
+    @property
+    def open(self) -> bool:
+        return self.state == OPEN
+
+    @property
+    def closed(self) -> bool:
+        """Closed for good: unlike a halt, no resume follows."""
+        return self.state == CLOSED
 
     def tradable(self, now: float, max_age: float) -> bool:
         """New exposure only while the market is open and the data is live and recent."""
@@ -64,15 +79,25 @@ class MarketView:
         )
 
 
-CLOSED = MarketView(open=False, live=False, instruments=(), fetched_at=float("-inf"))
+# Before the first poll: no phase yet, and too old to trade on.
+UNSEEN = MarketView(state="UNKNOWN", live=False, instruments=(), fetched_at=float("-inf"))
+
+
+async def phase(http: httpx.AsyncClient, execution_url: str) -> str:
+    """The market's phase, which only Execution decides."""
+    answer = await http.get(f"{execution_url}/api/v1/market")
+    answer.raise_for_status()
+    return answer.json()["state"]
 
 
 async def fetch(
     http: httpx.AsyncClient, execution_url: str, market_data_url: str, now: float
 ) -> MarketView:
     """The authoritative phase from Execution, quotes from Market Data. Public, no credentials."""
-    phase = await http.get(f"{execution_url}/api/v1/market")
-    phase.raise_for_status()
+    state = await phase(http, execution_url)
+    if state == CLOSED:
+        # Nothing is quoted any more, and the end of the market must not wait for Market Data.
+        return MarketView(state=state, live=False, instruments=(), fetched_at=now)
     listing = await http.get(f"{market_data_url}/api/v1/instruments")
     listing.raise_for_status()
     body = listing.json()
@@ -96,7 +121,7 @@ async def fetch(
         for item in body["instruments"]
     )
     return MarketView(
-        open=phase.json()["state"] == "OPEN",
+        state=state,
         live=body["feed"]["state"] == "LIVE",
         instruments=instruments,
         fetched_at=now,

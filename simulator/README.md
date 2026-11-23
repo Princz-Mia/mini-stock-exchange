@@ -39,6 +39,16 @@ same public and authenticated API as people use.
 - **Stop:** once the run is stopped or out of time, no new orders; every command in flight gets its final
   answer, every open order of the run's bots is cancelled (each one that can't be is reported), and the
   worker confirms the stop. A worker that stops without that leaves the run to the next one.
+- **Market close:** a market that closes ends the run at once, with nothing for the worker to settle: the
+  exchange itself cancels every order, revokes the bots' tokens and ends the run. The worker starts no new step
+  and sends no cancel. It gives the commands already sent up to 15 seconds to be answered, reports its totals in
+  one last heartbeat, which the exchange is expected to refuse and which is not sent again, logs one line, and
+  goes back to asking for its next run. It learns of the close from its market poll, from the first refused
+  token or from a heartbeat refused because the run is finished, whichever comes first. A halt is not a close:
+  the run goes on, and new orders wait for the resume.
+- **Refused tokens:** a bot whose token the exchange refuses takes no more steps in that run, since a token is
+  never renewed, and the worker asks at once whether the market closed. So a close costs at most one refused
+  call per bot, and a single revoked bot does not fail at every turn. The worker's log counts such bots.
 - **Safety:** a command keeps its idempotency key until the exchange answers it finally, so a retry after a busy,
   timed-out, rate-limited or lost answer can't apply twice. New orders pause while the market isn't open or market data
   isn't live and recent.

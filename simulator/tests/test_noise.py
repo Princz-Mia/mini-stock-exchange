@@ -33,7 +33,7 @@ def instrument(reference: int = 10_000, bid=None, ask=None, last=None) -> Instru
 
 
 def view(*instruments: Instrument) -> MarketView:
-    return MarketView(open=True, live=True, instruments=instruments, fetched_at=0.0)
+    return MarketView(state="OPEN", live=True, instruments=instruments, fetched_at=0.0)
 
 
 def bot(seed: int) -> NoiseBot:
