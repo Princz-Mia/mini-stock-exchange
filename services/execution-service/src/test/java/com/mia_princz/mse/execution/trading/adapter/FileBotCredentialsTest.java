@@ -9,6 +9,7 @@ import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.util.List;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -44,6 +45,32 @@ class FileBotCredentialsTest {
 				.isEqualTo("rw-------");
 			assertThat(PosixFilePermissions.toString(Files.getPosixFilePermissions(directory))).isEqualTo("rwx------");
 		}
+	}
+
+	/** Only the accounts named lose their files; one that has none, or whose file can't be deleted, stops nothing. */
+	@Test
+	void discardingDeletesTheAccountsFilesAndNeverFails() throws Exception {
+		Path directory = temporary.resolve("secrets");
+		FileBotCredentials credentials = new FileBotCredentials(directory);
+		UUID first = UUID.randomUUID();
+		UUID second = UUID.randomUUID();
+		UUID kept = UUID.randomUUID();
+		UUID stuck = UUID.randomUUID();
+		for (UUID account : List.of(first, second, kept)) {
+			credentials.issue(account);
+		}
+		// A directory with something in it, where a token file would be: it can't be deleted as a file.
+		Files.createDirectories(directory.resolve(stuck + ".token").resolve("inside"));
+
+		credentials.discard(List.of(first, UUID.randomUUID(), stuck, second));
+
+		try (Stream<Path> files = Files.list(directory)) {
+			assertThat(files.map((file) -> file.getFileName().toString()))
+				.containsExactlyInAnyOrder(kept + ".token", stuck + ".token");
+		}
+		// Nothing was ever written: there is no directory to look in, and that is not a failure either.
+		new FileBotCredentials(temporary.resolve("never-made")).discard(List.of(first));
+		assertThat(temporary.resolve("never-made")).doesNotExist();
 	}
 
 	@Test
