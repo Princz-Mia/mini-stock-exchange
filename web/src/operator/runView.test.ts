@@ -246,6 +246,11 @@ describe('the bot run view', () => {
     expect(reads(timedEnded)).toEqual(['About 59 min 58 s', 3_598]);
     // One whose worker reported once more past the end, settling: the run's limit bounds it.
     expect(reads({ ...timedEnded, worker: reported(3_603) })).toEqual(['About 1 h 0 min', 3_600]);
+    // An hour's run stopped ten minutes in, its worker reporting once more five seconds later and never confirming:
+    // the stop asked for bounds it, not the end time it would have had.
+    const cutShort: BotRun = { ...timed, desiredState: 'STOPPED', stopRequestedAt: at(600), worker: reported(605) };
+    expect(reads(cutShort)).toEqual(['About 10 min', 600]);
+    expect(reads({ ...cutShort, window: endedByNextStart(86_400) })).toEqual(['About 10 min', 600]);
 
     // A confirmed stop is exact, to the confirmation.
     expect(reads(finishedRun())).toEqual(['10 min', 600]);
@@ -257,11 +262,12 @@ describe('the bot run view', () => {
       const own = 1 + draw(100_000);
       const report = 1 + draw(200_000);
       const next = own + draw(10 * 86_400);
+      // A timed run is stopped at its end time, or by the operator up to two hours before it.
       const timed = draw(2) === 1;
       const run = botRun({
         status: 'STOPPED',
         desiredState: 'STOPPED',
-        endsAt: timed ? at(own) : null,
+        endsAt: timed ? at(own + draw(2) * draw(7_200)) : null,
         stopRequestedAt: at(own),
         worker: { workerId: 'sim-1', heartbeatAt: at(report), leaseExpiresAt: at(report + 15) },
       });
