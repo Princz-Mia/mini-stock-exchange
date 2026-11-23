@@ -147,8 +147,8 @@ describe('How this exchange works', () => {
     for (const said of [
       'ended the market for good',
       'No order is taken any more',
-      'every order that was still open was cancelled',
-      'what it had reserved was released',
+      // What a close does, not that it is done: a market reads as closed before its last order is cancelled.
+      'The close cancels every order that was still open and releases what it had reserved.',
       'Portfolios, orders and trades stay readable',
       'A closed market never opens again.',
     ]) {

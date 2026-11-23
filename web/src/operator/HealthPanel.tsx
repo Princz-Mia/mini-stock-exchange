@@ -141,12 +141,17 @@ export function healthFigures(summary: HealthSummary, feed: FeedReading, analyti
   return figures;
 }
 
+/** Execution's own figures, read again every two seconds. One reading, whoever on the page shows it. */
+export function useHealthSummary() {
+  return useQuery({ queryKey: ['admin-health'], queryFn: api.health, refetchInterval: pollEvery(2_000) });
+}
+
 /**
  * How trading is keeping up, beside the market controls. Execution's figures refresh every two seconds; the analytics'
  * freshness, read from one minute of each instrument's candles, every ten.
  */
 export function HealthPanel({ instruments, feed }: { instruments: readonly Instrument[]; feed: FeedReading }) {
-  const summary = useQuery({ queryKey: ['admin-health'], queryFn: api.health, refetchInterval: pollEvery(2_000) });
+  const summary = useHealthSummary();
   const candles = useQueries({
     queries: instruments.map((instrument) => ({
       queryKey: ['health-candles', instrument.instrumentId],

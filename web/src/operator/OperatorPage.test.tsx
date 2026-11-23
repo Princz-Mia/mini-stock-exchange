@@ -11,7 +11,7 @@ import { signedIn } from '../test/fakeServer';
 import { noTrades } from '../test/fakeStream';
 import { inUseMessage } from './InstrumentSetup';
 import { closedText } from './MarketControl';
-import { OperatorPage } from './OperatorPage';
+import { OperatorPage, restingOrdersText } from './OperatorPage';
 
 const NOVA = {
   instrumentId: '00000000-0000-0000-0000-000000000001',
@@ -204,7 +204,13 @@ describe('the operator screen', () => {
     // First on the page: that it ended, when, and what is still here.
     const ended = screen.getByRole('region', { name: 'This market has ended' });
     expect(ended).toHaveTextContent('It closed on 5 Nov 2026, 16:00:00 UTC.');
-    expect(ended).toHaveTextContent('every order that still rested was cancelled and its hold released');
+    // The runs and the tokens end with the close itself. The orders are cancelled after it, and the status does not
+    // say how far that is: the page says what a close does, not that it is done.
+    expect(ended).toHaveTextContent("Trading is over for good: every bot run ended, and every bot's token stopped working.");
+    expect(ended).toHaveTextContent(
+      'A close cancels every order that still rested and releases its hold, which on a full market takes up to about half a minute.',
+    );
+    expect(ended).not.toHaveTextContent('was cancelled');
     expect(ended).toHaveTextContent('Nothing was deleted.');
     const order = screen.getAllByRole('region').map((region) => region.getAttribute('aria-labelledby'));
     expect(order.indexOf('ended-title')).toBeLessThan(order.indexOf('runs-title'));
@@ -254,6 +260,33 @@ describe('the operator screen', () => {
 
     const health = await screen.findByRole('region', { name: 'Health' });
     expect(await within(health).findByText('Trading stopped until Execution restarts')).toBeInTheDocument();
+    // A reload, or another operator's page, knows nothing of the close's answer. A stopped exchange is what it can
+    // see, and with it that the close may not have got to every order.
+    expect(screen.getByRole('region', { name: 'This market has ended' })).toHaveTextContent(
+      'The exchange has stopped taking commands: any order the close had not cancelled by then rests, with its hold, until the exchange is restarted.',
+    );
+  });
+
+  it('says of the orders of a closed market only what is known of them', () => {
+    const text = (close: Parameters<typeof restingOrdersText>[0]['close'], stillResting?: number | null, writerHalted = false) =>
+      restingOrdersText({ close, stillResting, writerHalted });
+    expect(text('done')).toBe('Every order that still rested was cancelled and its hold released.');
+    expect(text('sending')).toMatch(/^The orders that still rested are being cancelled .* until the close answers, some still rest\.$/);
+    expect(text('unresolved')).toBe('The close has not answered yet, so some orders may still rest with their holds.');
+    // Left unfinished: said with the count whatever came after it under the same key, and whatever the writer says.
+    for (const close of ['unresolved', 'sending'] as const) {
+      expect(text(close, 4200, true)).toBe(
+        '4,200 orders still rest, with their holds: the close was left unfinished. The exchange has stopped, and cancels them when it is restarted.',
+      );
+    }
+    expect(text('unresolved', 1)).toMatch(/^1 order still rests, with its hold: /);
+    expect(text('unresolved', null)).toMatch(/^Some orders still rest, with their holds: /);
+    // Nothing known of the close: what a close does, and a stopped exchange if there is one. Never that it is done.
+    for (const close of ['idle', 'refused'] as const) {
+      expect(text(close)).toMatch(/^A close cancels every order that still rested and releases its hold, which/);
+      expect(text(close, undefined, true)).toMatch(/The exchange has stopped taking commands: any order the close had not cancelled/);
+      expect(text(close, undefined, true)).not.toMatch(/was cancelled|were cancelled/);
+    }
   });
 
   it('opens the market with a key and shows the committed state', async () => {
@@ -2629,8 +2662,12 @@ describe('closing the market on the operator screen', () => {
     );
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
     expect(screen.queryByText(/Not confirmed/)).toBeNull();
-    // The market is closed, and the page shows it so.
-    expect(await screen.findByRole('region', { name: 'This market has ended' })).toBeInTheDocument();
+    // The market is closed, and the page shows it so: with the orders that still rest, not as if all were cancelled.
+    const ended = await screen.findByRole('region', { name: 'This market has ended' });
+    expect(ended).toHaveTextContent(
+      '4,200 orders still rest, with their holds: the close was left unfinished. The exchange has stopped, and cancels them when it is restarted.',
+    );
+    expect(ended).not.toHaveTextContent(/was cancelled|A close cancels/);
     expect(screen.queryByRole('button', { name: 'Close the market' })).toBeNull();
 
     // What is left to ask for is the close's answer, after the restart, under the same key. Asked too early, the
@@ -2639,6 +2676,7 @@ describe('closing the market on the operator screen', () => {
     await waitFor(() => expect(closes(server)).toHaveLength(2));
     expect(await said()).toHaveTextContent('The market is closed, but 4,200 orders still rest.');
     expect(screen.queryByText(/whether the market closed is not known/)).toBeNull();
+    expect(ended).toHaveTextContent('4,200 orders still rest, with their holds');
 
     fireEvent.click(await button("Ask for the close's answer"));
     expect(
@@ -2646,6 +2684,9 @@ describe('closing the market on the operator screen', () => {
     ).toBeInTheDocument();
     expect(new Set(keys(server)).size).toBe(1);
     expect(keys(server)).toHaveLength(3);
+    // Only now, with the close's own answer, does the page say they were all cancelled.
+    expect(ended).toHaveTextContent('Every order that still rested was cancelled and its hold released.');
+    expect(ended).not.toHaveTextContent('still rest,');
   });
 
   it('asks for the answer of an unfinished close without saying anything is being cancelled', async () => {
@@ -2665,8 +2706,37 @@ describe('closing the market on the operator screen', () => {
     // The exchange is stopped, or just back: nothing is being cancelled by this request, which only asks.
     expect(await screen.findByText("Asking for the close's answer…")).toHaveAttribute('role', 'status');
     expect(screen.queryByText(/Closing the market…/)).toBeNull();
+    expect(screen.getByRole('region', { name: 'This market has ended' })).toHaveTextContent('7 orders still rest, with their holds');
     later.answer({ status: 200, json: closedAnswer });
     expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
+  });
+
+  it('does not say every order was cancelled while the close is still cancelling them', async () => {
+    const { server, state } = exchange('OPEN');
+    const later = answerLater();
+    server.on(`POST ${CLOSE}`, () => {
+      // Closed from the close's first transaction; the answer comes once the last order is cancelled.
+      state.market = market('CLOSED');
+      return later.reply;
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+
+    await confirmClose();
+    await waitFor(() => expect(closes(server)).toHaveLength(1));
+    // The status is polled meanwhile, and says CLOSED well before the close answers.
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    const ended = await screen.findByRole('region', { name: 'This market has ended' });
+    expect(ended).toHaveTextContent(
+      'The orders that still rested are being cancelled and their holds released; until the close answers, some still rest.',
+    );
+    expect(ended).not.toHaveTextContent(/was cancelled|A close cancels/);
+    expect(screen.getByText(/^Closing the market… Every resting order is being cancelled/)).toBeInTheDocument();
+
+    later.answer({ status: 200, json: closedAnswer });
+    expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
+    expect(ended).toHaveTextContent('Every order that still rested was cancelled and its hold released.');
   });
 
   it('says the market is closed once the status says so, whatever the close was answered or was not', async () => {
@@ -2702,6 +2772,9 @@ describe('closing the market on the operator screen', () => {
       expect(screen.getByText('Closed', { selector: '.state-badge' })).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
       expect(screen.queryByRole('button', { name: 'Ask again' })).toBeNull();
+      expect(screen.getByRole('region', { name: 'This market has ended' })).toHaveTextContent(
+        'The close has not answered yet, so some orders may still rest with their holds.',
+      );
       fireEvent.click(within(note).getByRole('button', { name: "Ask for the close's answer" }));
     }
 
@@ -2765,7 +2838,9 @@ describe('closing the market on the operator screen', () => {
     renderWith(client);
 
     expect(await said()).toHaveTextContent('The market is closed, but 4,200 orders still rest.');
-    expect(await screen.findByRole('region', { name: 'This market has ended' })).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'This market has ended' })).toHaveTextContent(
+      '4,200 orders still rest, with their holds',
+    );
     fireEvent.click(await button("Ask for the close's answer"));
     expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
     expect(new Set(keys(server)).size).toBe(1);
@@ -2795,7 +2870,9 @@ describe('closing the market on the operator screen', () => {
     await waitFor(() => expect(client.getQueryState(['market'])?.isInvalidated).toBe(true));
     renderWith(client);
     expect(await screen.findByText('The market is closed. 1,234 resting orders were cancelled, and 1 bot run ended.')).toBeInTheDocument();
-    expect(await screen.findByRole('region', { name: 'This market has ended' })).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'This market has ended' })).toHaveTextContent(
+      'Every order that still rested was cancelled and its hold released.',
+    );
     expect(closes(server)).toHaveLength(1);
     expect(screen.getByRole('heading', { name: 'Market' })).not.toHaveFocus();
   });

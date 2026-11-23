@@ -59,8 +59,8 @@ export const GLOSSARY = {
   closed: {
     term: 'Closed',
     definition:
-      'The operator has ended the market for good. No order is taken any more, every order that was still open was cancelled ' +
-      'and what it had reserved was released, and the bots have stopped. Portfolios, orders and trades stay readable. A closed market never opens again.',
+      'The operator has ended the market for good. No order is taken any more, and the bots have stopped. The close cancels every order that was still open ' +
+      'and releases what it had reserved. Portfolios, orders and trades stay readable. A closed market never opens again.',
   },
   spread: {
     term: 'Spread',
