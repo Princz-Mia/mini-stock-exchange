@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import com.mia_princz.mse.execution.trading.domain.BookOrder;
@@ -73,13 +74,16 @@ public interface TradingStore {
 	record ExistingOrder(UUID id, UUID accountId, UUID instrumentId, String state, long working) {
 	}
 
-	/** Whether a market has been set up yet. Before that there is nothing to trade or rebuild. */
-	boolean hasSimulation();
+	/**
+	 * Whether there is a simulation that is not closed. Without one there is nothing to trade or rebuild: none has been
+	 * set up yet, or every one has been closed.
+	 */
+	boolean hasActiveSimulation();
 
 	/** Creates the market in SETUP with its issuance account, already claimed by this writer. Returns the epoch. */
 	long createMarket(UUID simulationId, UUID issuanceAccountId);
 
-	/** Locks the market row for the rest of the transaction; every trading command starts here. */
+	/** Locks the active simulation's row for the rest of the transaction; taking over the market starts here. */
 	Market lockMarket();
 
 	/** Takes over the market: increments the writer epoch, so a previous writer's next transaction is refused. */
@@ -200,6 +204,12 @@ public interface TradingStore {
 	/** Whether the account is a bot in this market. */
 	boolean isBotAccount(UUID simulationId, UUID accountId);
 
+	/** Every account that trades in this simulation: its traders' and its bots'. */
+	Set<UUID> tradingAccounts(UUID simulationId);
+
+	/** Whether the account trades in this simulation: a trader's or a bot's account of it. */
+	boolean tradesIn(UUID simulationId, UUID accountId);
+
 	/** Revokes the account's active tokens; how many there were. A revoked token stays revoked. */
 	int revokeApiTokens(UUID accountId, Instant at);
 
@@ -224,8 +234,11 @@ public interface TradingStore {
 	/** Each account with open or partially filled orders, and how many, to check the writer's own count. */
 	Map<UUID, Integer> restingOrdersByAccount(UUID simulationId);
 
-	/** Reads the order without a lock: only the writer changes orders. */
-	Optional<ExistingOrder> findOrder(UUID orderId);
+	/**
+	 * Reads the simulation's order without a lock: only the writer changes orders. An order of another simulation is
+	 * not found, whatever its state: the writer's books say nothing about it.
+	 */
+	Optional<ExistingOrder> findOrder(UUID simulationId, UUID orderId);
 
 	/**
 	 * Writes a transaction's collected rows, one statement per kind (more only if a kind has more rows than one

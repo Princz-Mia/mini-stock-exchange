@@ -99,6 +99,9 @@ public final class TradingEngine {
 	/** Each instrument's newest trades for its snapshots, kept like the books: changed only after a commit. */
 	private final Map<UUID, Tape> tapes = new HashMap<>();
 
+	/** Accounts known to trade in this market: all of them at startup, later ones as they are found. */
+	private final Set<UUID> accounts = new HashSet<>();
+
 	/**
 	 * Runs runs of trading commands for the writer. One object for the engine's life: the writer joins queued commands
 	 * into a run only when they go to the same processor.
@@ -120,7 +123,8 @@ public final class TradingEngine {
 	record QueuedCancel(CommandKey key, CancelOrder command, long admitted) implements Trading {
 	}
 
-	private UUID simulationId;
+	/** Written by the writer only; volatile so that {@link #simulationId()} can answer on any thread. */
+	private volatile UUID simulationId;
 
 	private long writerEpoch;
 
@@ -203,6 +207,8 @@ public final class TradingEngine {
 			books.putAll(rebuilt);
 			catalogue.putAll(rebuiltCatalogue);
 			tapes.putAll(rebuiltTapes);
+			accounts.clear();
+			accounts.addAll(store.tradingAccounts(simulation));
 			return null;
 		});
 		started = true;
@@ -211,6 +217,14 @@ public final class TradingEngine {
 	/** Starts with no market to rebuild: commands are admitted, and the first setup command creates the market. */
 	public void startEmpty() {
 		started = true;
+	}
+
+	/**
+	 * The simulation this engine writes for, from memory and on any thread: the active one, since only the writer
+	 * sets a market up. Null while there is none, and until startup has taken the market over.
+	 */
+	public UUID simulationId() {
+		return simulationId;
 	}
 
 	/** Places an order. A repeat of the same key and request returns the first committed result unchanged. */
@@ -581,6 +595,10 @@ public final class TradingEngine {
 				outcomes[i] = CommandWriter.RunOutcome.failed(new UnknownInstrumentException(place.command().instrumentId()));
 				continue;
 			}
+			if (command instanceof QueuedPlace place && !tradesHere(place.command().accountId())) {
+				outcomes[i] = CommandWriter.RunOutcome.failed(new UnknownAccountException(place.command().accountId()));
+				continue;
+			}
 			entering.add(i);
 			keys.add(new TradingStore.RunKey(command.key(),
 					command instanceof QueuedPlace ? PlacementResult.class : CancelResult.class));
@@ -751,6 +769,23 @@ public final class TradingEngine {
 			}
 			throw ex;
 		}
+	}
+
+	/**
+	 * Whether the account trades in this market. An account of another simulation, a closed one, has balances and may
+	 * still hold a credential, but an order from it would be written into this market's books under the wrong owner, so
+	 * it is refused before any transaction. Startup reads the market's accounts, so an order costs nothing more; only
+	 * an account made since then is looked up, once, since accounts never leave a simulation.
+	 */
+	private boolean tradesHere(UUID accountId) {
+		if (accounts.contains(accountId)) {
+			return true;
+		}
+		boolean trades = store.tradesIn(simulationId, accountId);
+		if (trades) {
+			accounts.add(accountId);
+		}
+		return trades;
 	}
 
 	/** Applies a committed command to its book, tape and instrument; anything that fails leaves them out of step. */
@@ -1364,7 +1399,7 @@ public final class TradingEngine {
 		// rows are written only at the end; any other is read, without a lock, only to answer.
 		RunOrder known = run.orders.get(command.orderId());
 		String state = known != null ? (known.accountId().equals(command.accountId()) ? known.state() : null)
-				: store.findOrder(command.orderId())
+				: store.findOrder(simulationId, command.orderId())
 					.filter((existing) -> existing.accountId().equals(command.accountId()))
 					.map(TradingStore.ExistingOrder::state)
 					.orElse(null);
@@ -1619,6 +1654,17 @@ public final class TradingEngine {
 
 		public UnknownInstrumentException(UUID instrumentId) {
 			super("Unknown instrument " + instrumentId);
+		}
+
+	}
+
+	/** An order from an account that doesn't trade in this market. Raised before any transaction, as above. */
+	public static final class UnknownAccountException extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+
+		public UnknownAccountException(UUID accountId) {
+			super("Account " + accountId + " does not trade in this market");
 		}
 
 	}

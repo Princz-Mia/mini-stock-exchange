@@ -404,6 +404,28 @@ class TradingEngineIT {
 		}
 	}
 
+	/**
+	 * The writer reads its market's accounts when it starts, so an account made after that (every account of a market
+	 * set up since the last restart) is not among them. Its first order looks it up, one statement outside the
+	 * transaction; it is then remembered, and its next order sends what any resting order sends.
+	 */
+	@Test
+	void anAccountMadeAfterStartupIsLookedUpOnce() throws Exception {
+		Statements statements = new Statements(dataSource);
+		countingEngine(statements);
+		try {
+			UUID late = funded();
+			Map<String, String> counts = new java.util.LinkedHashMap<>();
+			statements.count(counts, "its first order", () -> place(late, Side.SELL, OrderType.LIMIT, "100.00", 1));
+			statements.count(counts, "its second order", () -> place(late, Side.SELL, OrderType.LIMIT, "100.10", 1));
+			assertThat(counts).containsExactly(Map.entry("its first order", "9 statements, 1 commit"),
+					Map.entry("its second order", "8 statements, 1 commit"));
+		}
+		finally {
+			restartEngine();
+		}
+	}
+
 	/** Replaces the engine with one whose connections count what they send. */
 	private void countingEngine(Statements statements) throws InterruptedException {
 		countingEngine(statements, 1);
