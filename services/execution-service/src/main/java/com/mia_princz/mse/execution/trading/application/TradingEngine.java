@@ -1544,6 +1544,10 @@ public final class TradingEngine {
 			times.add(nanoTime.getAsLong() - start);
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
+			// Logged here and not only by whoever awaits the answer: a close can outlast its request's wait.
+			LOG.error("The market's close halted the writer in its own transaction, so whether the market closed is "
+					+ "known only to the database; resting orders in the books: {}. Trading is stopped until a restart",
+					restingOrders(), ex);
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 		MarketClosing result = closing.result();
@@ -1556,8 +1560,14 @@ public final class TradingEngine {
 			}
 			catch (RuntimeException | Error ex) {
 				// Not an answer of "failed, nothing applied", and not a writer that goes on with a market half closed.
+				CloseUnfinishedException unfinished = new CloseUnfinishedException(result.commandSequence(),
+						restingOrders(), ex);
+				// On record here, whoever is still waiting for the answer: a close can outlast its request's wait.
+				LOG.error("The market's close at sequence {} halted the writer before it finished; resting orders left: "
+						+ "at most {}. Trading is stopped until a restart, which finishes the close",
+						unfinished.commandSequence(), unfinished.restingOrders(), ex);
 				throw new WriterHaltException("The market closed, but its resting orders were not all cancelled",
-						new CloseUnfinishedException(result.commandSequence(), restingOrders(), ex));
+						unfinished);
 			}
 			LOG.info("The market closed at sequence {}: {} resting orders cancelled in {} transactions in {} ms, the "
 					+ "longest {} ms; {} bot runs ended", result.commandSequence(), result.canceledOrders(),
@@ -1638,6 +1648,8 @@ public final class TradingEngine {
 			}
 			catch (RuntimeException ex) {
 				if (attempt == SWEEP_ATTEMPTS) {
+					LOG.error("A part of the market's close failed and rolled back; giving the close up (attempt {} "
+							+ "of {})", attempt, SWEEP_ATTEMPTS, ex);
 					throw ex;
 				}
 				LOG.warn("A part of the market's close failed and rolled back; trying it again (attempt {} of {})",

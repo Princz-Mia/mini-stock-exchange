@@ -30,9 +30,12 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.health.contributor.Status;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.simple.JdbcClient;
@@ -89,6 +92,7 @@ import com.mia_princz.mse.execution.trading.domain.Side;
  */
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest(properties = "mse.test.database=market-close-sweep")
+@ExtendWith(OutputCaptureExtension.class)
 class MarketCloseSweepIT {
 
 	private static final Instant NOW = Instant.parse("2031-03-04T05:06:07.123456Z");
@@ -261,7 +265,7 @@ class MarketCloseSweepIT {
 	 * while it starts, in two more parts, before it takes a command.
 	 */
 	@Test
-	void aCloseWhileHaltedThatStopsBetweenPartsIsFinishedAtStartup() throws Exception {
+	void aCloseWhileHaltedThatStopsBetweenPartsIsFinishedAtStartup(CapturedOutput output) throws Exception {
 		UUID a = funded();
 		UUID b = funded();
 		UUID c = funded();
@@ -292,6 +296,10 @@ class MarketCloseSweepIT {
 		assertThat(unfinished(engine.close(closeKey, closeCommand()), close, 3)).isInstanceOf(ProcessStopped.class);
 		assertThat(transactions.asked.get() - asked).as("the close, then the next part tried three times").isEqualTo(4);
 		assertThat(writer.isAvailable()).as("no writer goes on with a market half closed").isFalse();
+		// The halt is on record where it was decided, whoever still waits for the answer, with the last attempt.
+		assertThat(errors(output)).anyMatch((line) -> line.contains("giving the close up (attempt 3 of 3)"))
+			.anyMatch((line) -> line.contains("The market's close at sequence " + close
+					+ " halted the writer before it finished; resting orders left: at most 3."));
 
 		// Between two parts: closed for good, with what the first transaction cancelled and nothing more.
 		assertThat(sequence()).isEqualTo(close);
@@ -467,7 +475,7 @@ class MarketCloseSweepIT {
 	 * with three orders resting and cancels them, and the key has the close's answer.
 	 */
 	@Test
-	void aCloseWhoseOwnCommitIsUnknownHaltsTheWriterAndTheNextStartFinishes() throws Exception {
+	void aCloseWhoseOwnCommitIsUnknownHaltsTheWriterAndTheNextStartFinishes(CapturedOutput output) throws Exception {
 		UUID a = funded();
 		UUID b = funded();
 		TradingEngine engine = engine();
@@ -481,6 +489,9 @@ class MarketCloseSweepIT {
 		assertThat(haltCause(engine.close(closeKey, closeCommand()))).isInstanceOf(CommitOutcomeUnknownException.class);
 		assertThat(transactions.asked.get() - asked).isEqualTo(1);
 		assertThat(writer.isAvailable()).isFalse();
+		assertThat(errors(output)).as("on record, with what the books still hold")
+			.anyMatch((line) -> line.contains("The market's close halted the writer in its own transaction")
+					&& line.contains("resting orders in the books: 5."));
 		assertThat(jdbc.queryForObject("SELECT state FROM simulation WHERE id = ?", String.class, simulation))
 			.isEqualTo("CLOSED");
 		assertThat(sequence()).isEqualTo(open + 1);
@@ -819,6 +830,11 @@ class MarketCloseSweepIT {
 		};
 		return new TradingEngine(store, transactions, writer, CLOCK, credentials, changes, WriterTimings.NONE,
 				System::nanoTime, new RestingOrders(), 2);
+	}
+
+	/** The lines the log holds at ERROR since the test began. */
+	private static List<String> errors(CapturedOutput output) {
+		return output.getAll().lines().filter((line) -> line.contains("ERROR")).toList();
 	}
 
 	private MarketControl closeCommand() {
