@@ -331,6 +331,71 @@ describe('terminal', () => {
     expect(streams.latest()?.url).toContain(ORBIT);
   });
 
+  it('shows the instrument the address names when this market lists it', async () => {
+    market();
+    const streams = renderTerminal(`/terminal?instrument=${ORBIT}`);
+
+    await screen.findByRole('heading', { name: 'ORBIT', level: 1 });
+    expect(streams.latest()?.url).toContain(ORBIT);
+    expect(screen.getByRole('button', { name: /^ORBIT/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.queryByText(/is not part of this market/)).toBeNull();
+  });
+
+  it('falls back to the first listed instrument when the address names one this market does not list', async () => {
+    // A bookmark from a simulation that has closed, or a tab left open over a change of simulation.
+    const GONE = '00000000-0000-0000-0000-0000000000ee';
+    market();
+    const streams = renderTerminal(`/terminal?instrument=${GONE}&chart=line`);
+
+    await screen.findByRole('heading', { name: 'NOVA', level: 1 });
+    expect(
+      screen.getByText('The instrument in this address is not part of this market. Showing NOVA instead.'),
+    ).toHaveAttribute('role', 'status');
+    // The whole terminal is NOVA's: the stream, the ticket, and the one pressed in the watchlist.
+    expect(streams.opened.map((stream) => stream.url).every((url) => url.includes(NOVA))).toBe(true);
+    expect(streams.opened.length).toBeGreaterThan(0);
+    expect(await screen.findByRole('region', { name: 'Order · NOVA' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^NOVA/ })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /^ORBIT/ })).toHaveAttribute('aria-pressed', 'false');
+
+    // Choosing one puts it in the address, and the note goes.
+    fireEvent.click(screen.getByRole('button', { name: /^ORBIT/ }));
+    await screen.findByRole('heading', { name: 'ORBIT', level: 1 });
+    expect(screen.queryByText(/is not part of this market/)).toBeNull();
+  });
+
+  it('says there is nothing to trade when the market lists no instrument, instead of showing nothing', async () => {
+    signedIn()
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    const streams = renderTerminal();
+
+    expect(await screen.findByText('This market has no instruments yet, so there is nothing to trade.')).toHaveAttribute(
+      'role',
+      'status',
+    );
+    expect(screen.queryByRole('heading', { level: 1 })).toBeNull();
+    expect(screen.queryByRole('region', { name: /^Order/ })).toBeNull();
+    expect(streams.opened).toHaveLength(0);
+    // The orders stay, whatever the market lists.
+    expect(screen.getByRole('tab', { name: 'Open orders (0)' })).toBeInTheDocument();
+  });
+
+  it('says so when the address names an instrument and the market lists none', async () => {
+    signedIn()
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    renderTerminal(`/terminal?instrument=${NOVA}`);
+
+    expect(
+      await screen.findByText(
+        'The instrument in this address is not part of this market, and the market has no instruments yet.',
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('keeps the chart settings and asks for the new instrument bars when another instrument is chosen', async () => {
     const server = market();
     renderTerminal('/terminal?chart=line&range=30m&bars=5m');

@@ -57,8 +57,13 @@ export function TerminalPage() {
   const operator = isOperator(useSession().data);
 
   const list = instruments.instruments;
-  const selectedId = params.get('instrument') ?? list[0]?.instrumentId ?? null;
-  const selected = list.find((instrument) => instrument.instrumentId === selectedId) ?? null;
+  // The instrument the address names, if this market lists it. A bookmark from a simulation that has closed, or a tab
+  // left open over a change of simulation, names one it does not: the first listed instrument is shown then, as with
+  // no instrument in the address, and the page says so.
+  const asked = params.get('instrument');
+  const selected = list.find((instrument) => instrument.instrumentId === asked) ?? list[0] ?? null;
+  const selectedId = selected?.instrumentId ?? null;
+  const notListed = asked !== null && selected !== null && selected.instrumentId !== asked;
   const stream = useMarketStream(selected?.instrumentId ?? null, create === undefined ? {} : { create });
   const frame = stream.frame;
   const feed = stream.feed ?? instruments.feed;
@@ -104,7 +109,11 @@ export function TerminalPage() {
         }
       />
       {selected === null ? (
-        <p className="muted terminal-empty">Choose an instrument to trade.</p>
+        <p className="muted terminal-empty" role="status">
+          {asked === null
+            ? 'This market has no instruments yet, so there is nothing to trade.'
+            : 'The instrument in this address is not part of this market, and the market has no instruments yet.'}
+        </p>
       ) : (
         <>
           <div className="terminal-market">
@@ -124,6 +133,11 @@ export function TerminalPage() {
                 {TRANSPORT_LABELS[stream.transport]}
               </span>
             </div>
+            {notListed && (
+              <p className="chart-note" role="status">
+                The instrument in this address is not part of this market. Showing {selected.symbol} instead.
+              </p>
+            )}
             {latest !== null && (
               <InstrumentFigures session={latest.session} bid={latest.bid ?? null} ask={latest.ask ?? null} />
             )}
