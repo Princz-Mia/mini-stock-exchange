@@ -19,6 +19,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
+import org.springframework.core.MethodParameter;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
 import com.mia_princz.mse.contracts.events.MarketSnapshot;
@@ -66,6 +68,30 @@ class ApiContractIT {
 				.forEach((method) -> served.add(method.name() + " " + OpenApiContract.blankVariables(path)))));
 
 		assertThat(served).isEqualTo(CONTRACT.operations("market-data"));
+	}
+
+	/** Every query parameter a route reads is in the contract under its operation, and the other way round. */
+	@Test
+	void servedQueryParametersAndTheContractsAreTheSame() {
+		Set<String> served = new TreeSet<>();
+		mappings.getHandlerMethods().forEach((info, handler) -> {
+			for (MethodParameter parameter : handler.getMethodParameters()) {
+				RequestParam query = parameter.getParameterAnnotation(RequestParam.class);
+				if (query == null) {
+					continue;
+				}
+				String name = query.name().isEmpty() ? parameter.getParameter().getName() : query.name();
+				info.getPathPatternsCondition().getPatterns()
+					.stream()
+					.map((pattern) -> pattern.getPatternString())
+					.filter((path) -> path.startsWith("/api/") || path.startsWith("/internal/"))
+					.forEach((path) -> info.getMethodsCondition().getMethods()
+						.forEach((method) -> served
+							.add(method.name() + " " + OpenApiContract.blankVariables(path) + "?" + name)));
+			}
+		});
+
+		assertThat(served).isEqualTo(CONTRACT.queryParameters("market-data"));
 	}
 
 	@Test
