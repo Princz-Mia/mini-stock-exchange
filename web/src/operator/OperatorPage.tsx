@@ -73,11 +73,11 @@ export function OperatorPage() {
           </p>
         )}
         {closed && <Ended closedAt={market.data.closedAt} />}
-        {!editable && <BotRuns market={market.data.state} instruments={listed} />}
+        {!editable && <BotRuns market={market.data.state} closedAt={market.data.closedAt} instruments={listed} />}
         <InstrumentSetup instruments={listed} editable={editable} closed={closed} />
         <BotSetup instruments={listed} editable={editable} closed={closed} />
         <AccountSetup instruments={listed} editable={editable} closed={closed} />
-        {editable && <BotRuns market={market.data.state} instruments={listed} />}
+        {editable && <BotRuns market={market.data.state} closedAt={null} instruments={listed} />}
       </div>
     </div>
   );

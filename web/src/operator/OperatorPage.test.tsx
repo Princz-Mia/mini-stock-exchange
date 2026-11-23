@@ -2084,6 +2084,48 @@ describe('bot runs on the operator screen', () => {
     expect(within(recent).getByRole('row', { name: /10:00:00 UTC/ })).toHaveTextContent('10:05:00 UTC · Market close');
   });
 
+  it("keeps a run that ended before the close as not confirmed, though the close left its time on it", async () => {
+    const { state } = exchange('CLOSED');
+    const closedAt = '2026-11-06T12:00:00Z';
+    state.market = { ...market('CLOSED'), closedAt };
+    state.bots = 3;
+    // What the close records on every run no worker had confirmed: a stop, at the time it closed.
+    const recorded = { status: 'STOPPED', desiredState: 'STOPPED', stopRequestedAt: closedAt, stoppedAt: closedAt } as const;
+    const window = (endedBy: BotRun['window']['endedBy'], endedAt: string | null): BotRun['window'] => ({
+      startSequence: '41',
+      stopSequence: null,
+      endSequence: endedAt === null ? null : '90',
+      endedBy,
+      endedAt,
+    });
+    state.runs = [
+      // Still going when the market closed: the close ended it.
+      botRun({ runId: 'd', startedAt: '2026-11-06T11:00:00Z', ...recorded, window: window('MARKET_CLOSE', closedAt) }),
+      // Ended by the next run's start, its worker never heard from again.
+      botRun({ runId: 'c', startedAt: '2026-11-06T10:00:00Z', ...recorded, window: window('NEXT_START', '2026-11-06T11:00:00Z') }),
+      // Confirmed by its worker long before.
+      finishedRun({ runId: 'b', startedAt: '2026-11-06T09:00:00Z', stoppedAt: '2026-11-06T09:10:00Z' }),
+      // From before windows were kept, never confirmed; the exchange writes the same moment with its fraction.
+      botRun({
+        runId: 'a',
+        startedAt: '2026-11-06T08:00:00Z',
+        ...recorded,
+        stoppedAt: '2026-11-06T12:00:00.000Z',
+        window: window('NOT_KEPT', null),
+        activity: { ...botRun().activity, stopFailures: 1 },
+      }),
+    ];
+    renderPage();
+
+    const recent = await screen.findByRole('table', { name: 'Recent runs' });
+    const endedCell = (started: RegExp) => within(recent).getByRole('row', { name: started }).lastElementChild;
+    expect(endedCell(/11:00:00 UTC/)).toHaveTextContent(/^12:00:00 UTC · Market close$/);
+    // No worker confirmed a stop at noon: that is when the market closed, and says nothing of these runs.
+    expect(endedCell(/10:00:00 UTC/)).toHaveTextContent(/^Not confirmed$/);
+    expect(endedCell(/08:00:00 UTC/)).toHaveTextContent(/^Not confirmed · 1 not canceled$/);
+    expect(endedCell(/09:00:00 UTC/)).toHaveTextContent(/^09:10:00 UTC$/);
+  });
+
   it('says how long each run lasted in the history, and how long the one still going has been', async () => {
     const { state } = exchange('OPEN');
     state.runs = [

@@ -89,15 +89,32 @@ export function leftRunning(run: BotRun, now: number): boolean {
 }
 
 /**
+ * Whether a run's stop time is the market close's own record and not a stop of that run. The close records a stop,
+ * at the time it closed, on every run no worker had confirmed: on the runs it ends, and also on runs that had ended
+ * before it, by the next run's start or with no window kept. For those the time says when the market closed and
+ * nothing about the run, so it is not shown as the run's end.
+ */
+export function stopRecordedByClose(run: BotRun, closedAt: string | null): boolean {
+  const endedBy = run.window.endedBy;
+  return (
+    closedAt !== null &&
+    run.stoppedAt !== null &&
+    (endedBy === 'NEXT_START' || endedBy === 'NOT_KEPT') &&
+    Date.parse(run.stoppedAt) === Date.parse(closedAt)
+  );
+}
+
+/**
  * How long a stopped run lasted, for the history. A stop its worker confirmed ends it exactly, when the confirmation
  * came. Without one the length is approximate: up to the worker's last report, and never past the stop asked for or
- * the run's end time. The end of its window can't stand in here as it does in the comparison: that is the next run's
- * start, however much later it came. Null when no worker ever reported.
+ * the run's end time, whichever came first. Both bound it, because a market's close records a stop asked for, at its
+ * own time, on a run that never had one. The end of its window can't stand in here as it does in the comparison:
+ * that is the next run's start, however much later it came. Null when no worker ever reported.
  */
 function stoppedLength(run: BotRun): { seconds: number; approximate: boolean } | null {
   if (run.window.endedBy === 'WORKER') return runSeconds(run);
   if (run.worker.heartbeatAt === null) return null;
-  const ends = [run.worker.heartbeatAt, run.stopRequestedAt ?? run.endsAt, run.window.endedAt]
+  const ends = [run.worker.heartbeatAt, run.stopRequestedAt, run.endsAt, run.window.endedAt]
     .filter((end) => end !== null)
     .map((end) => Date.parse(end));
   const seconds = (Math.min(...ends) - Date.parse(run.startedAt)) / 1000;
