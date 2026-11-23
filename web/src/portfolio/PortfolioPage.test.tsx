@@ -388,6 +388,29 @@ describe('portfolio page', () => {
     }
   });
 
+  it('tells a user who had no account in a closed market that it closed, not how to get one', async () => {
+    const noAccount = { status: 403, problem: { status: 403, code: 'NO_TRADING_ACCOUNT' } };
+    signedIn()
+      .on('GET /api/v1/portfolio', noAccount)
+      .on('GET /api/v1/portfolio/trades', noAccount)
+      .on('GET /api/v1/orders', noAccount)
+      .on('GET /api/v1/market', { status: 200, json: CLOSED_MARKET })
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } });
+    window.history.pushState({}, '', '/portfolio');
+    render(<App />);
+
+    expect(
+      await screen.findByText(
+        'The market closed on 4 Nov 2026, 17:00:00 UTC. You had no trading account in it, so there is no portfolio to show.',
+        {},
+        { timeout: 5000 },
+      ),
+    ).toHaveAttribute('role', 'status');
+    // No account will ever be created in this market: nothing sends the user to an operator for one.
+    expect(screen.queryByText(/An operator creates accounts/)).toBeNull();
+    expect(screen.queryByText(/no trading account yet/)).toBeNull();
+  });
+
   it('says nothing of a close while the market is open, and words only the close among the reasons', async () => {
     signedIn()
       .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })

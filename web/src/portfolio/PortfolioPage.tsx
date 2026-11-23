@@ -200,6 +200,15 @@ export function PortfolioPage() {
   }
   if (portfolio.isError) {
     const noAccount = portfolio.error instanceof ApiError && portfolio.error.code === 'NO_TRADING_ACCOUNT';
+    // How to get an account is setup advice, and a closed market is past setting up: none is ever created in it.
+    if (noAccount && market.data?.state === 'CLOSED') {
+      return (
+        <p role="status" className="page-status">
+          The market closed{market.data.closedAt === null ? '' : ` on ${utcDateTime(market.data.closedAt)}`}. You had no
+          trading account in it, so there is no portfolio to show.
+        </p>
+      );
+    }
     return (
       <p role="alert" className="page-status">
         {noAccount
