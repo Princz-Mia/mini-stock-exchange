@@ -26,8 +26,10 @@ from mse_simulator.market_maker import MarketMaker, MarketMakerConfig
 from mse_simulator.momentum import MomentumBot, MomentumConfig, PriceSignal
 from mse_simulator.noise import NoiseBot, NoiseConfig
 from mse_simulator.pacing import Pacer
+from mse_simulator.prices import BASIS_POINT
 from mse_simulator.settings import Settings
 from mse_simulator.strategy import Cancel, Holdings, OpenOrder, Place, Strategy
+from mse_simulator.values import FairValues, View
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +104,9 @@ class Runner:
         self._next = 0
         self._market: MarketView = CLOSED
         self._signal = self._new_signal()
+        self._values = self._new_values(0)
+        # How many market makers the current run has built: each takes the next instrument.
+        self._makers = 0
         self._tasks: set[asyncio.Task[None]] = set()
         self._stopping = False
         self._lost = False
@@ -121,6 +126,19 @@ class Runner:
     def _new_signal(self) -> PriceSignal:
         return PriceSignal(self._settings.momentum_short_polls, self._settings.momentum_long_polls)
 
+    def _new_values(self, seed: int) -> FairValues:
+        return FairValues(
+            seed,
+            self._settings.fair_value_half_life_hours,
+            self._settings.fair_value_volatility,
+            self._settings.market_poll_seconds,
+        )
+
+    def _view(self, rng: np.random.Generator) -> View:
+        """A bot's own idea of the values: the run's, off by a fraction drawn once from its seed."""
+        spread = self._settings.view_spread_bp * BASIS_POINT
+        return View(self._values, float(rng.uniform(-spread, spread)))
+
     def _strategy(self, name: str, rng: np.random.Generator, run: Assignment) -> Strategy | None:
         settings = self._settings
         if name == "NOISE":
@@ -128,11 +146,13 @@ class Runner:
                 rng,
                 NoiseConfig(
                     max_quantity=run.max_order_quantity,
-                    spread_ticks=settings.spread_ticks,
+                    spread_bp=settings.noise_spread_bp,
                     max_open_orders=settings.max_open_orders,
                     quote_lifetime=settings.quote_lifetime_seconds,
                     max_position=run.max_position,
+                    value_pull=settings.noise_value_pull,
                 ),
+                self._view(rng),
             )
         if name == "MOMENTUM":
             return MomentumBot(
@@ -143,20 +163,27 @@ class Runner:
                     threshold=settings.momentum_threshold,
                     cooldown=settings.momentum_cooldown_seconds,
                     order_lifetime=settings.quote_lifetime_seconds,
+                    min_ticks=settings.momentum_min_ticks,
+                    follow=settings.momentum_follow,
+                    reach_bp=settings.momentum_reach_bp,
                 ),
                 self._signal,
             )
         if name == "MARKET_MAKER":
+            place = self._makers
+            self._makers += 1
             return MarketMaker(
                 rng,
                 MarketMakerConfig(
                     quote_size=run.max_order_quantity,
                     max_position=run.max_position,
-                    half_spread_ticks=settings.maker_half_spread_ticks,
-                    skew_ticks=settings.maker_skew_ticks,
-                    requote_ticks=settings.maker_requote_ticks,
+                    half_spread_bp=settings.maker_half_spread_bp,
+                    skew_bp=settings.maker_skew_bp,
+                    requote_bp=settings.maker_requote_bp,
                     quote_lifetime=settings.maker_quote_lifetime_seconds,
                 ),
+                self._view(rng),
+                place,
             )
         return None
 
@@ -171,6 +198,8 @@ class Runner:
         self._lease_until = float("-inf")
         self.activity = Activity(**asdict(run.totals))
         self._signal = self._new_signal()
+        self._values = self._new_values(run.seed)
+        self._makers = 0
         self._manifest_heard = False
 
     async def load_bots(self) -> None:
@@ -230,8 +259,10 @@ class Runner:
             logger.info("market data unavailable: %s", type(error).__name__)
             return
         if self._run is not None:
-            # One sample per poll for every momentum bot, not one per bot.
-            self._signal.observe(self._market.only(self._run.instrument_ids))
+            # One sample and one step per poll for every bot of the run, not one per bot.
+            view = self._market.only(self._run.instrument_ids)
+            self._signal.observe(view)
+            self._values.observe(view)
 
     def tick(self) -> bool:
         """Starts one step for the next idle bot with a strategy, round robin. False if there is

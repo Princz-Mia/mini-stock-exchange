@@ -21,6 +21,13 @@ def test_a_buy_rounds_down_and_a_sell_up_onto_the_grid_and_into_the_band() -> No
             assert buy <= value <= sell, "never more aggressive than asked"
             assert sell - buy == (0 if value % tick == 0 else tick)
     edge = instrument()
+    # Floating-point noise around a grid price is that price, for either side.
+    for noisy in (10_010.000000000004, 10_009.999999999996):
+        assert limit_price(noisy, "BUY", edge) == 10_010 == limit_price(noisy, "SELL", edge)
+    assert (
+        limit_price(10_010.001, "SELL", edge) == 10_011
+        and limit_price(10_009.999, "BUY", edge) == 10_009
+    )
     assert limit_price(0.4, "BUY", edge) == 1 and limit_price(-3.0, "SELL", edge) == 1
     assert limit_price(1e12, "BUY", edge) == edge.max_price == limit_price(1e12, "SELL", edge)
 
