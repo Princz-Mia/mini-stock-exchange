@@ -136,6 +136,30 @@ Every close sent before the restart gets this answer again; other commands get `
 
 A close can also halt the writer in its very first transaction, when the outcome of that commit is unknown. Then nobody knows yet whether the market closed: the log line says `halted the writer in its own transaction`, and every command, a close too, answers `503 TRADING_UNAVAILABLE`. Restart Execution and send the close's key again. It returns the close's answer if the market had closed, and closes it if not.
 
+## Starting again: a new simulation, or wiping the stack
+
+Two ways lead to a market that can trade again, and they keep very different things.
+
+**A new simulation** keeps everything. Close the market, then, signed in as the operator, send `POST /api/v1/admin/simulations` with a name, `{"name": "Thursday seminar"}`, and an `Idempotency-Key`, as for the other operator commands. The operator screen has no form for it yet.
+
+The closed simulation stays in the database as it closed, and nothing can write into it again. The new one is empty and in setup. What the operator does next, on the operator screen or through the API, in this order:
+1. add the instruments (the symbols the closed simulation used are free again);
+2. fund each trader, with the **Fund a trader** form or `POST /api/v1/admin/accounts`: logins are kept, accounts are not, and until then a trader who signs in is told they have no trading account. Adding a login that exists is refused with `USERNAME_TAKEN`;
+3. provision the bots. They are new accounts with new tokens; the closed simulation's tokens stay revoked and its token files are gone;
+4. open the market, and start a bot run.
+
+The demo seed does none of this for a simulation an operator started: it logs one line saying so and stops. It sets up only a market with no name, which is how it makes its own on a fresh stack.
+
+The start's answers:
+- **`409 SIMULATION_NOT_CLOSED`**, with the state: a simulation that has not closed exists. In `SETUP` it is set up further instead; `OPEN` or `HALTED`, close it first. The refusal is that key's answer for good, so start again with a new key.
+- **`409 SIMULATION_NAME_TAKEN`:** names differ, whatever their case. Choose another, with a new key.
+- **`504 COMMAND_OUTCOME_UNKNOWN`:** send the same key again. No lookup by key serves a start; the same key returns its first answer, even after later starts.
+- **`503 TRADING_UNAVAILABLE`** after a start: Execution could not learn whether the start committed, and stopped. Restart it; it loads whichever simulation is current, and the same key then returns the start's answer or starts the simulation.
+
+**Wiping the stack** (`docker compose down -v`) deletes every simulation, every login but the configured ones, and all history. It is for a development stack that should be empty again, not for running the next session.
+
+A backup taken with several simulations in the database holds them all, and a restore brings them all back; see the manifest under [Back up and restore](#back-up-and-restore).
+
 ## A command's outcome is unknown
 
 An order or cancel answered `504 COMMAND_OUTCOME_UNKNOWN` was admitted but not answered in time. It may still have committed. The terminal resolves this by itself. By hand, look the key up:
