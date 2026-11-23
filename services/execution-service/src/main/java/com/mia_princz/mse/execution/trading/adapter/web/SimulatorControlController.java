@@ -27,6 +27,8 @@ import org.springframework.web.bind.annotation.RestController;
 
 import tools.jackson.databind.JsonNode;
 
+import com.mia_princz.mse.execution.trading.adapter.ActiveSimulation;
+
 /**
  * The simulator's control plane: which run to work on, its bots, and its heartbeat. Internal, by the simulator's own
  * token, which can't trade. A run's bots are read in pages, since a run has no size limit; they never change once the
@@ -106,18 +108,20 @@ class SimulatorControlController {
 
 	/**
 	 * A run a worker left without confirming its stop comes first, so its quotes are cancelled before new trading;
-	 * then the run that should be running. A run that never had a worker has nothing to settle.
+	 * then the run that should be running. A run that never had a worker has nothing to settle. Only the active
+	 * simulation's runs are work: a closed simulation's bots can no longer trade.
 	 */
 	@GetMapping("/assignment")
 	Assignment assignment() {
 		Timestamp now = Timestamp.from(clock.instant());
-		Optional<Run> run = jdbc.sql(select("""
-				WHERE stopped_at IS NULL AND worker_id IS NOT NULL AND (desired_state = 'STOPPED' OR ends_at <= ?)
+		String active = "WHERE simulation_id = " + ActiveSimulation.ID + " AND ";
+		Optional<Run> run = jdbc.sql(select(active + """
+				stopped_at IS NULL AND worker_id IS NOT NULL AND (desired_state = 'STOPPED' OR ends_at <= ?)
 				ORDER BY started_at, id LIMIT 1"""))
 			.param(now)
 			.query(SimulatorControlController::run)
 			.optional()
-			.or(() -> jdbc.sql(select("WHERE desired_state = 'RUNNING' AND (ends_at IS NULL OR ends_at > ?)"))
+			.or(() -> jdbc.sql(select(active + "desired_state = 'RUNNING' AND (ends_at IS NULL OR ends_at > ?)"))
 				.param(now)
 				.query(SimulatorControlController::run)
 				.optional());

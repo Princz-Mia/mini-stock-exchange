@@ -30,6 +30,7 @@ import org.springframework.web.bind.annotation.RestController;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
+import com.mia_princz.mse.execution.trading.adapter.ActiveSimulation;
 import com.mia_princz.mse.execution.trading.application.BotRunResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.StartBotRun;
@@ -254,7 +255,10 @@ class BotRunController {
 		return new RunDetail(view, figures(runId));
 	}
 
-	/** Runs in the given order, at most {@code limit}: one if {@code only} is given, else a page after the cursor. */
+	/**
+	 * The active simulation's runs in the given order, at most {@code limit}: one if {@code only} is given, else a page
+	 * after the cursor.
+	 */
 	private List<RunView> views(UUID only, Cursors.RunPosition after, PageOrder direction, int limit) {
 		Instant now = clock.instant();
 		record Row(UUID id, String desired, Instant startedAt, Instant endsAt, Instant stopRequestedAt,
@@ -266,11 +270,11 @@ class BotRunController {
 				    max_order_quantity, max_position, worker_id, heartbeat_at, lease_expires_at, placed, canceled,
 				    rejected, errors, in_flight, stop_failures, start_sequence, stop_sequence, end_sequence, ended_by,
 				    ended_at
-				FROM bot_run%1$s
+				FROM bot_run WHERE simulation_id = %3$s%1$s
 				ORDER BY started_at %2$s, id %2$s LIMIT :limit""".formatted(
-				only != null ? " WHERE id = :only"
-						: after == null ? "" : " WHERE (started_at, id) " + direction.after() + " (:afterAt, :afterId)",
-				direction.direction()))
+				only != null ? " AND id = :only"
+						: after == null ? "" : " AND (started_at, id) " + direction.after() + " (:afterAt, :afterId)",
+				direction.direction(), ActiveSimulation.ID))
 			.param("only", only)
 			.param("afterAt", after == null ? null : Timestamp.from(after.startedAt()))
 			.param("afterId", after == null ? null : after.id())

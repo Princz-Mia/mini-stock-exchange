@@ -21,10 +21,12 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import com.mia_princz.mse.execution.identity.ApiTokens;
 import com.mia_princz.mse.execution.identity.BotPrincipal;
+import com.mia_princz.mse.execution.trading.adapter.ActiveSimulation;
 
 /**
  * Authenticates a request by its bot token, for the stateless bot chain only. A malformed, unknown or revoked token is
- * answered with 401 here, so the request never falls back to a session cookie. The token is never logged.
+ * answered with 401 here, so the request never falls back to a session cookie; so is the token of an account in a
+ * closed simulation, revoked or not. The token is never logged.
  */
 public final class BotTokenFilter extends OncePerRequestFilter {
 
@@ -67,8 +69,9 @@ public final class BotTokenFilter extends OncePerRequestFilter {
 			return Optional.empty();
 		}
 		return jdbc.sql("""
-				SELECT id, account_id FROM api_token
-				WHERE token_hash = ? AND scope = 'TRADE' AND revoked_at IS NULL""")
+				SELECT t.id, t.account_id FROM api_token t JOIN account a ON a.id = t.account_id
+				WHERE t.token_hash = ? AND t.scope = 'TRADE' AND t.revoked_at IS NULL
+				    AND a.simulation_id = %s""".formatted(ActiveSimulation.ID))
 			.param(ApiTokens.hash(token))
 			.query((row, index) -> new BotPrincipal(row.getObject("id", UUID.class),
 					row.getObject("account_id", UUID.class)))

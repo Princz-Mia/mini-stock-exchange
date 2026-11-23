@@ -19,10 +19,14 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import com.mia_princz.mse.execution.trading.adapter.ActiveSimulation;
 import com.mia_princz.mse.execution.trading.domain.CostBasis;
 import com.mia_princz.mse.execution.trading.domain.Price;
 
-/** Read-only queries for the trading API. They never go through the writer and never change anything. */
+/**
+ * Read-only queries for the trading API. They never go through the writer and never change anything. Each answers for
+ * the active simulation ({@link ActiveSimulation}), directly or through an account found in it.
+ */
 @Component
 class TradingQueries {
 
@@ -79,12 +83,16 @@ class TradingQueries {
 		this.snapshot.setReadOnly(true);
 	}
 
-	/** The trading phase as the writer last committed it. Empty before a market has been set up. */
+	/**
+	 * The trading phase as the writer last committed it: the active simulation's or, once every one is closed, the
+	 * newest one's. Empty before a market has been set up.
+	 */
 	record MarketStatus(UUID simulationId, String state, Instant openedAt, long commandSequence) {
 	}
 
 	Optional<MarketStatus> market() {
-		return jdbc.sql("SELECT id, state, opened_at, last_command_sequence FROM simulation")
+		return jdbc
+			.sql("SELECT id, state, opened_at, last_command_sequence FROM simulation " + ActiveSimulation.OR_ELSE_NEWEST)
 			.query((row, index) -> {
 				Timestamp openedAt = row.getTimestamp("opened_at");
 				return new MarketStatus(row.getObject("id", UUID.class), row.getString("state"),
@@ -121,7 +129,8 @@ class TradingQueries {
 	 * only those that have, or have not, an account in the market.
 	 */
 	List<TraderLogin> traders(Boolean funded, AccountPosition after, int limit, PageOrder order) {
-		String hasAccount = "EXISTS (SELECT 1 FROM account a WHERE a.owner_user_id = u.id)";
+		String hasAccount = "EXISTS (SELECT 1 FROM account a WHERE a.owner_user_id = u.id AND a.simulation_id = "
+				+ ActiveSimulation.ID + ")";
 		return jdbc.sql("""
 				SELECT u.id, u.username, u.created_at, %1$s AS funded
 				FROM app_user u
@@ -148,10 +157,10 @@ class TradingQueries {
 				         WHEN EXISTS (SELECT 1 FROM api_token t WHERE t.account_id = account.id AND t.revoked_at IS NULL)
 				         THEN 'ACTIVE' ELSE 'REVOKED' END AS token
 				FROM account
-				WHERE kind <> 'ISSUANCE'%1$s
+				WHERE simulation_id = %3$s AND kind <> 'ISSUANCE'%1$s
 				ORDER BY created_at %2$s, id %2$s LIMIT :limit""".formatted(
 				after == null ? "" : " AND (created_at, id) " + order.after() + " (:afterAt, :afterId)",
-				order.direction()))
+				order.direction(), ActiveSimulation.ID))
 			.param("afterAt", after == null ? null : Timestamp.from(after.createdAt()))
 			.param("afterId", after == null ? null : after.id())
 			.param("limit", limit)
@@ -201,7 +210,7 @@ class TradingQueries {
 				    count(*) FILTER (WHERE bot_strategy = 'NOISE') AS noise,
 				    count(*) FILTER (WHERE bot_strategy = 'MOMENTUM') AS momentum,
 				    count(*) FILTER (WHERE bot_strategy IS NULL) AS untagged
-				FROM account WHERE kind = 'BOT'""")
+				FROM account WHERE simulation_id = %s AND kind = 'BOT'""".formatted(ActiveSimulation.ID))
 			.query((row, index) -> new BotsByStrategy(row.getInt("market_makers"), row.getInt("noise"),
 					row.getInt("momentum"), row.getInt("untagged")))
 			.single();
@@ -217,10 +226,12 @@ class TradingQueries {
 			.optional();
 	}
 
+	/** The user's account in the active simulation; one they had in a closed simulation is not theirs to trade with. */
 	Optional<Trader> trader(String username) {
 		return jdbc.sql("""
 				SELECT u.id AS user_id, a.id AS account_id FROM app_user u
-				JOIN account a ON a.owner_user_id = u.id WHERE u.username = ?""")
+				JOIN account a ON a.owner_user_id = u.id AND a.simulation_id = %s
+				WHERE u.username = ?""".formatted(ActiveSimulation.ID))
 			.param(username)
 			.query((row, index) -> new Trader(row.getObject("user_id", UUID.class),
 					row.getObject("account_id", UUID.class)))
@@ -320,10 +331,11 @@ class TradingQueries {
 				ORDER BY o.updated_at DESC, o.id DESC LIMIT :limit""".formatted(conditions);
 	}
 
+	/** A key is per simulation: the same one may have another answer in a closed simulation. */
 	Optional<StoredCommand> command(UUID principalId, UUID idempotencyKey) {
 		return jdbc.sql("""
 				SELECT route, response_body::text AS body FROM command_result
-				WHERE principal_id = ? AND idempotency_key = ?""")
+				WHERE simulation_id = %s AND principal_id = ? AND idempotency_key = ?""".formatted(ActiveSimulation.ID))
 			.params(principalId, idempotencyKey)
 			.query((row, index) -> new StoredCommand(row.getString("route"), row.getString("body")))
 			.optional();
