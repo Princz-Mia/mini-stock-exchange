@@ -49,11 +49,14 @@ type Tab = 'open' | 'recent';
 export function OwnOrders({
   orders,
   instrument,
+  closed = false,
 }: {
   /** The open orders, all of them: at most the per-account limit, so they come whole. */
   orders: readonly OrderDetail[];
   /** The instrument on screen, to narrow the lists to. */
   instrument: { instrumentId: string; symbol: string } | null;
+  /** The market has closed: no order is open any more, and the empty list says where the cancelled ones are. */
+  closed?: boolean;
 }) {
   const client = useQueryClient();
   const id = useId();
@@ -165,7 +168,11 @@ export function OwnOrders({
           </p>
         )}
         {open.length === 0 ? (
-          <p className="muted">{narrowTo === null ? 'No open orders.' : `No open orders in ${narrowTo.symbol}.`}</p>
+          <p className="muted">
+            {narrowTo === null ? 'No open orders.' : `No open orders in ${narrowTo.symbol}.`}
+            {closed &&
+              ' The market has closed: any order that was still open was cancelled by the close, and is listed under Recent orders.'}
+          </p>
         ) : (
           <table aria-label="Open orders">
             <thead>

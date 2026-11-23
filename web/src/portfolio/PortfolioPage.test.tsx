@@ -5,6 +5,7 @@ import { App } from '../App';
 import { resetSession } from '../api/client';
 import { GLOSSARY } from '../help/glossary';
 import { signedIn } from '../test/fakeServer';
+import { orderReason } from './PortfolioPage';
 
 const PORTFOLIO = {
   cash: { total: '10404.00', available: '10224.00', reserved: '180.00' },
@@ -297,6 +298,85 @@ describe('portfolio page', () => {
     expect(server.requests.some((request) => request.url.includes('state=FILLED') && request.url.includes('status=all'))).toBe(
       true,
     );
+  });
+
+  it('says the market has closed above the final balances, and what the close did to an order', async () => {
+    const order = {
+      orderId: '00000000-0000-0000-0000-0000000000cc',
+      instrumentId: '00000000-0000-0000-0000-000000000001',
+      symbol: 'NOVA',
+      side: 'SELL',
+      type: 'LIMIT',
+      timeInForce: 'GTC',
+      limitPrice: '105.00',
+      protectionPrice: null,
+      requestedQuantity: 10,
+      filledQuantity: 0,
+      workingQuantity: 0,
+      canceledQuantity: 10,
+      state: 'CANCELED',
+      reason: 'MARKET_CLOSED',
+      version: '2',
+      createdAt: '2026-11-04T12:00:00Z',
+      updatedAt: '2026-11-04T17:00:00Z',
+    };
+    signedIn()
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/market', {
+        status: 200,
+        json: {
+          state: 'CLOSED',
+          simulationId: 's',
+          openedAt: '2026-11-04T09:00:00Z',
+          closedAt: '2026-11-04T17:00:00Z',
+          commandSequence: '12',
+        },
+      })
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [trade(1)], nextCursor: null } })
+      .on('GET /api/v1/orders', {
+        status: 200,
+        json: { orders: [order, { ...order, orderId: 'x', state: 'CANCELED', reason: 'CANCELED_BY_OWNER' }], nextCursor: null },
+      });
+    window.history.pushState({}, '', '/portfolio');
+    render(<App />);
+
+    const closed = await screen.findByRole('region', { name: 'Market closed' });
+    expect(within(closed).getByRole('status')).toHaveTextContent(
+      'The market closed on 4 Nov 2026, 17:00:00 UTC. Nothing trades any more, so this is where your account ended',
+    );
+    // What the account ended with, and its history, stay.
+    expect(screen.getByRole('region', { name: 'Summary' })).toHaveTextContent('22,100.00');
+    expect(await screen.findByRole('table', { name: 'Executions' })).toBeInTheDocument();
+    const orders = await screen.findByRole('table', { name: 'Orders' });
+    const states = within(orders)
+      .getAllByRole('row')
+      .slice(1)
+      .map((row) => row.lastElementChild?.textContent);
+    expect(states).toEqual(['canceled · the market closed', 'canceled · CANCELED_BY_OWNER']);
+  });
+
+  it('says nothing of a close while the market is open, and words only the close among the reasons', async () => {
+    signedIn()
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/market', {
+        status: 200,
+        json: { state: 'HALTED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
+      })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    window.history.pushState({}, '', '/portfolio');
+    render(<App />);
+
+    await screen.findByRole('region', { name: 'Summary' });
+    await screen.findByText('No orders yet.');
+    expect(screen.queryByRole('region', { name: 'Market closed' })).toBeNull();
+
+    expect(orderReason({ state: 'CANCELED', reason: 'MARKET_CLOSED' })).toBe('the market closed');
+    // An order refused because the market had closed was not cancelled by the close.
+    expect(orderReason({ state: 'REJECTED', reason: 'MARKET_CLOSED' })).toBe('MARKET_CLOSED');
+    expect(orderReason({ state: 'CANCELED', reason: 'IOC_REMAINDER_CANCELED' })).toBe('IOC_REMAINDER_CANCELED');
+    expect(orderReason({ state: 'FILLED', reason: null })).toBeNull();
   });
 
   it('explains a missing trading account instead of calling it an outage', async () => {

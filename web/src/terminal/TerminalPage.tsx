@@ -5,13 +5,14 @@ import { Link, useSearchParams } from 'react-router';
 import { ApiError, api, pollEvery } from '../api/client';
 import type { MarketStatus } from '../api/types';
 import { FeedStatus } from '../app/FeedStatus';
-import { useInstruments, useMarketStatus } from '../app/market';
+import { useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
+import { PRIVATE_QUERIES } from '../app/useAccountEvents';
 import { isOperator, useSession } from '../auth/session';
 import { groupDigits } from '../format';
 import { TermTip } from '../help/TermTip';
 import { InstrumentFigures } from './InstrumentFigures';
 import { OrderBook } from './OrderBook';
-import { OrderTicket } from './OrderTicket';
+import { ClosedTicket, OrderTicket } from './OrderTicket';
 import { OwnOrders } from './OwnOrders';
 import { PriceChart } from './PriceChart';
 import { Tape } from './Tape';
@@ -46,6 +47,11 @@ export function TerminalPage() {
   // The current simulation's instruments, as that status names it: never the list of a simulation before it.
   const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
   const paused = market.data === undefined || market.data.state === 'OPEN' ? null : PAUSED[market.data.state];
+  // Final, unlike a halt: the ticket gives way to a statement, and nothing here says trading will come back.
+  const closed = market.data?.state === 'CLOSED' ? { closedAt: market.data.closedAt } : null;
+  // A close cancels every open order and releases what it reserved. The trader's own lists are read again when the
+  // status says so, without waiting for their next poll or for the account's own notification.
+  useRefreshOnMarketChange(market.data, PRIVATE_QUERIES);
   const orders = useQuery({
     queryKey: ['orders', 'active'],
     queryFn: () => api.orders('active'),
@@ -126,6 +132,7 @@ export function TerminalPage() {
                 <>
                   <span className="state-badge state-halted">{paused.badge}</span>
                   {market.data?.state === 'HALTED' && <TermTip terms={['halted']} />}
+                  {closed !== null && <TermTip terms={['closed']} />}
                 </>
               )}
               {feed !== undefined && <FeedStatus feed={feed} />}
@@ -148,13 +155,19 @@ export function TerminalPage() {
             </div>
           </div>
           {noAccount ? (
-            <NoAccount operator={operator} />
+            // Getting an account is setup advice, and a closed market is past setting up.
+            closed !== null ? (
+              <ClosedTicket closedAt={closed.closedAt} account={false} />
+            ) : (
+              <NoAccount operator={operator} />
+            )
           ) : (
             <OrderTicket
               key={selected.instrumentId}
               instrument={selected}
               portfolio={portfolio.data}
               paused={paused?.reason ?? null}
+              closed={closed}
             />
           )}
         </>
@@ -163,6 +176,7 @@ export function TerminalPage() {
         <OwnOrders
           orders={orders.data?.orders ?? []}
           instrument={selected === null ? null : { instrumentId: selected.instrumentId, symbol: selected.symbol }}
+          closed={closed !== null}
         />
       </div>
     </div>

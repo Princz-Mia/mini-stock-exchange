@@ -90,9 +90,12 @@ function market() {
     .on('GET /api/v1/orders', { status: 200, json: { orders: [OPEN_ORDER], nextCursor: null } });
 }
 
-function renderTerminal(at = '/terminal', watch: ((order: { orderId: string; filledQuantity: number }) => void) | null = null) {
+function renderTerminal(
+  at = '/terminal',
+  watch: ((order: { orderId: string; filledQuantity: number }) => void) | null = null,
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+) {
   const streams = fakeStreams();
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[at]}>
@@ -152,28 +155,174 @@ describe('terminal', () => {
     expect(screen.queryByRole('button', { name: 'What is halted?' })).toBeNull();
   });
 
-  it('shows a closed market as closed and takes no new orders', async () => {
-    const server = market().on('GET /api/v1/market', {
-      status: 200,
-      json: {
-        state: 'CLOSED',
-        simulationId: 's',
-        openedAt: '2026-11-04T09:00:00Z',
-        closedAt: '2026-11-04T17:00:00Z',
-        commandSequence: '12',
-      },
-    });
+  const CLOSED = {
+    state: 'CLOSED',
+    simulationId: 's',
+    openedAt: '2026-11-04T09:00:00Z',
+    closedAt: '2026-11-04T17:00:00Z',
+    commandSequence: '12',
+  };
+  const OPEN = { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' };
+  const CANCELED_BY_CLOSE = {
+    ...OPEN_ORDER,
+    state: 'CANCELED',
+    reason: 'MARKET_CLOSED',
+    workingQuantity: 0,
+    canceledQuantity: 10,
+    updatedAt: '2026-11-04T17:00:00Z',
+  };
+  /** The trader's orders as the exchange lists them once a close has cancelled the open one. */
+  const afterClose = (request: { url: string }) => ({
+    status: 200,
+    json: { orders: request.url.includes('status=active') ? [] : [CANCELED_BY_CLOSE], nextCursor: null },
+  });
+
+  it("gives the ticket's place to a statement that the market has closed, and takes no order", async () => {
+    const server = market().on('GET /api/v1/market', { status: 200, json: CLOSED }).on('GET /api/v1/orders', afterClose);
     renderTerminal();
 
-    const ticket = await screen.findByRole('region', { name: 'Order · NOVA' });
-    const buy = within(ticket).getByRole('button', { name: 'Buy NOVA' });
-    await waitFor(() => expect(buy).toBeDisabled());
-    expect(buy).toHaveAccessibleDescription('The market has closed and takes no more orders.');
-    expect(screen.getByText('Market closed')).toHaveClass('state-badge');
+    const closed = await screen.findByRole('region', { name: 'Market closed' });
+    expect(within(closed).getByRole('status')).toHaveTextContent(
+      'The market closed on 4 Nov 2026, 17:00:00 UTC and takes no more orders.',
+    );
+    expect(closed).toHaveTextContent(
+      'Any order of yours that was still open was cancelled, and what it had reserved was released.',
+    );
+    expect(within(closed).getByRole('link', { name: 'portfolio' })).toHaveAttribute('href', '/portfolio');
+    // No ticket at all: nothing to type into, nothing to press.
+    expect(screen.queryByRole('region', { name: /^Order ·/ })).toBeNull();
+    expect(screen.queryByLabelText('Shares')).toBeNull();
+    expect(screen.queryByRole('button', { name: /^(Buy|Sell)/ })).toBeNull();
+    // It stands where the ticket stood, which is where the tour points.
+    expect(document.querySelector('section.ticket')).toBe(closed);
+
+    expect(screen.getByText('Market closed', { selector: '.state-badge' })).toBeInTheDocument();
     // A close is not a halt: the tip that explains halts stays away, and nothing says trading will come back.
     expect(screen.queryByText('Trading halted')).toBeNull();
     expect(screen.queryByRole('button', { name: 'What is halted?' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'What is closed?' })).toBeInTheDocument();
+    // The market itself stays to read.
+    expect(screen.getByRole('heading', { name: 'NOVA', level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Watchlist' })).toBeInTheDocument();
     expect(server.requests.some((request) => request.method === 'POST')).toBe(false);
+  });
+
+  it('says the close cancelled what was open, and lists those orders as cancelled by it', async () => {
+    market().on('GET /api/v1/market', { status: 200, json: CLOSED }).on('GET /api/v1/orders', afterClose);
+    renderTerminal();
+
+    expect(await screen.findByRole('tab', { name: 'Open orders (0)' })).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        'No open orders. The market has closed: any order that was still open was cancelled by the close, and is listed under Recent orders.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Cancel / })).toBeNull();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Recent orders' }));
+    const recent = await screen.findByRole('table', { name: 'Recent orders' });
+    expect(within(recent).getByRole('row', { name: /NOVA/ })).toHaveTextContent('Canceled · the market closed');
+  });
+
+  it('says nothing of a close under an empty list of open orders while the market is open', async () => {
+    signedIn()
+      .on('GET /api/v1/market', { status: 200, json: OPEN })
+      .on('GET /api/v1/instruments', {
+        status: 200,
+        json: { instruments: [instrument(NOVA, 'NOVA', null)], feed: { state: 'LIVE', lag: 0 } },
+      })
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    renderTerminal();
+
+    await screen.findByRole('region', { name: 'Order · NOVA' });
+    expect(await screen.findByText('No open orders.')).toBeInTheDocument();
+    expect(screen.queryByText(/The market has closed/)).toBeNull();
+  });
+
+  it("reads the trader's orders and balances again as soon as the market is seen to have closed", async () => {
+    let status = OPEN as typeof OPEN | typeof CLOSED;
+    const server = market()
+      .on('GET /api/v1/market', () => ({ status: 200, json: status }))
+      .on('GET /api/v1/orders', (request) =>
+        status === CLOSED ? afterClose(request) : { status: 200, json: { orders: [OPEN_ORDER], nextCursor: null } },
+      );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderTerminal('/terminal', null, client);
+    expect(await screen.findByRole('button', { name: 'Cancel sell NOVA at 105.00' })).toBeEnabled();
+    await screen.findByRole('region', { name: 'Order · NOVA' });
+    const reads = (path: string) => server.requests.filter((request) => request.url.split('?')[0] === path).length;
+    const before = { orders: reads('/api/v1/orders'), portfolio: reads('/api/v1/portfolio') };
+
+    status = CLOSED;
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    expect(await screen.findByRole('region', { name: 'Market closed' })).toBeInTheDocument();
+    // At once, not at the next poll five seconds on: the order the close cancelled is no longer offered for cancelling.
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Cancel sell NOVA at 105.00' })).toBeNull(), {
+      timeout: 900,
+    });
+    expect(reads('/api/v1/orders')).toBeGreaterThan(before.orders);
+    await waitFor(() => expect(reads('/api/v1/portfolio')).toBeGreaterThan(before.portfolio), { timeout: 900 });
+  });
+
+  it('keeps an order whose outcome is not known retryable through the close, then says what became of it', async () => {
+    let status = OPEN as typeof OPEN | typeof CLOSED;
+    let busy = true;
+    const server = market()
+      .on('GET /api/v1/market', () => ({ status: 200, json: status }))
+      .on('POST /api/v1/orders', () =>
+        busy
+          ? { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY' } }
+          : {
+              status: 422,
+              problem: { status: 422, code: 'MARKET_CLOSED', orderId: '00000000-0000-0000-0000-0000000000ad', commandSequence: '13' },
+            },
+      );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderTerminal('/terminal', null, client);
+    const ticket = await screen.findByRole('region', { name: 'Order · NOVA' });
+    await waitFor(() => expect(within(ticket).getByRole('button', { name: 'Buy NOVA' })).toBeEnabled());
+    fireEvent.click(within(ticket).getByRole('button', { name: 'Buy NOVA' }));
+    const retry = await screen.findByRole('button', { name: 'Retry the same order' });
+
+    // The market closes while the order's fate is open: the ticket stays, for that one order only.
+    status = CLOSED;
+    busy = false;
+    await client.invalidateQueries({ queryKey: ['market'] });
+    expect(await screen.findByText('Market closed', { selector: '.state-badge' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Order · NOVA' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Market closed' })).toBeNull();
+    expect(screen.getByLabelText('Shares')).toBeDisabled();
+
+    fireEvent.click(retry);
+    const closed = await screen.findByRole('region', { name: 'Market closed' });
+    expect(within(closed).getByRole('alert')).toHaveTextContent('Rejected: The market has closed and takes no more orders.');
+    expect(screen.queryByRole('region', { name: 'Order · NOVA' })).toBeNull();
+    const keys = server.requests
+      .filter((request) => request.method === 'POST' && request.url === '/api/v1/orders')
+      .map((request) => request.headers['Idempotency-Key']);
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it('tells a user who never had an account that the market closed, not how to get one', async () => {
+    const noAccount = { status: 403, problem: { status: 403, code: 'NO_TRADING_ACCOUNT' } };
+    signedIn()
+      .on('GET /api/v1/market', { status: 200, json: CLOSED })
+      .on('GET /api/v1/instruments', {
+        status: 200,
+        json: { instruments: [instrument(NOVA, 'NOVA', null)], feed: { state: 'LIVE', lag: 0 } },
+      })
+      .on('GET /api/v1/portfolio', noAccount)
+      .on('GET /api/v1/orders', noAccount);
+    renderTerminal();
+
+    const closed = await screen.findByRole('region', { name: 'Market closed' });
+    expect(closed).toHaveTextContent('The market closed on 4 Nov 2026, 17:00:00 UTC and takes no more orders.');
+    expect(closed).toHaveTextContent('You had no trading account in it.');
+    expect(closed).not.toHaveTextContent('Any order of yours');
+    expect(screen.queryByRole('region', { name: 'No trading account' })).toBeNull();
   });
 
   it('takes orders once the market is open', async () => {

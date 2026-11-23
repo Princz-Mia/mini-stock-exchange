@@ -1,12 +1,13 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect } from 'react';
+import { type ReactNode, useCallback, useEffect } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
+import { Link } from 'react-router';
 import { z } from 'zod';
 
 import type { Instrument, Order, OrderRequest, Portfolio } from '../api/types';
 import { useFillWatch } from '../app/FillNotice';
-import { groupDigits, groupInteger } from '../format';
+import { groupDigits, groupInteger, utcDateTime } from '../format';
 import { TermTip } from '../help/TermTip';
 import { isPrice, maximumSpend } from './money';
 import { isUnresolved, type Outcome, useOrderIntent } from './orderIntent';
@@ -107,15 +108,54 @@ function OutcomeMessage({ outcome }: { outcome: Outcome }) {
   }
 }
 
+/**
+ * In the ticket's place once the market has closed: that it closed and when, and what became of the trader's orders
+ * and balances. No form, since no order will ever be taken again; a halt, which ends, keeps the ticket.
+ */
+export function ClosedTicket({
+  closedAt,
+  account = true,
+  children,
+}: {
+  closedAt: string | null;
+  /** Whether the user traded in this market; one who never had an account has no orders or balances to hear of. */
+  account?: boolean;
+  children?: ReactNode;
+}) {
+  return (
+    <section className="panel ticket ended" aria-labelledby="ticket-closed-title">
+      <h2 id="ticket-closed-title">Market closed</h2>
+      <p role="status">
+        The market closed{closedAt === null ? '' : ` on ${utcDateTime(closedAt)}`} and takes no more orders.
+      </p>
+      {account ? (
+        <p className="muted">
+          Any order of yours that was still open was cancelled, and what it had reserved was released. Your{' '}
+          <Link to="/portfolio">portfolio</Link> and your history of orders and trades stay as the market left them.
+        </p>
+      ) : (
+        <p className="muted">You had no trading account in it.</p>
+      )}
+      {children}
+    </section>
+  );
+}
+
 export function OrderTicket({
   instrument,
   portfolio,
   paused = null,
+  closed = null,
 }: {
   instrument: Instrument;
   portfolio: Portfolio | undefined;
   /** Why new orders cannot be placed now, or null while the market is open. An unresolved order can still be retried. */
   paused?: string | null;
+  /**
+   * Set once the market has closed, with when. The ticket then gives way to a statement of that, unless an order sent
+   * before is still unresolved: that one keeps its Retry, which finds out what became of it.
+   */
+  closed?: { closedAt: string | null } | null;
 }) {
   const client = useQueryClient();
   const watch = useFillWatch();
@@ -164,6 +204,15 @@ export function OrderTicket({
       void intent.submit(request);
     }
   };
+
+  if (closed !== null && !unresolved && !sending) {
+    return (
+      <ClosedTicket closedAt={closed.closedAt}>
+        {/* What became of the last order sent, if the close came right behind it. */}
+        <OutcomeMessage outcome={intent.outcome} />
+      </ClosedTicket>
+    );
+  }
 
   return (
     <section className="panel ticket" aria-labelledby="ticket-title">
