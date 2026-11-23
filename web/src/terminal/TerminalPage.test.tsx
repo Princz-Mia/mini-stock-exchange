@@ -402,6 +402,18 @@ describe('terminal', () => {
     expect(screen.getByLabelText('Shares')).toHaveValue('500');
   });
 
+  it('says the market has closed when an order reaches it just after the close', async () => {
+    // The page still shows the market open: the close came after its last poll.
+    market().on('POST /api/v1/orders', {
+      status: 422,
+      problem: { status: 422, code: 'MARKET_CLOSED', orderId: '00000000-0000-0000-0000-0000000000ac', commandSequence: '9' },
+    });
+    renderTerminal();
+    fireEvent.click(await screen.findByRole('button', { name: 'Buy NOVA' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The market has closed and takes no more orders.');
+  });
+
   it('offers to retry the very same order when the exchange is busy, and locks the fields', async () => {
     market().on('POST /api/v1/orders', { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY' } });
     renderTerminal();

@@ -73,6 +73,12 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
       <dl className="balances">
         <dt>Opened</dt>
         <dd>{market.openedAt === null ? 'Not yet' : utcTime(market.openedAt)}</dd>
+        {market.closedAt !== null && (
+          <>
+            <dt>Closed</dt>
+            <dd>{utcTime(market.closedAt)}</dd>
+          </>
+        )}
         <dt>Last command</dt>
         <dd className="num">{market.commandSequence ?? '—'}</dd>
       </dl>

@@ -11,7 +11,8 @@ export const RECENT_ORDERS = 20;
 
 /**
  * How an order ended, in words: filled, canceled with what had filled, or rejected and why. A cancel the trader made
- * reads as a cancel; the exchange canceling what a protected market order could not fill says so.
+ * reads as a cancel; the exchange canceling what a protected market order could not fill says so, and so does the
+ * market's close canceling what still rested.
  */
 export function outcome(order: OrderDetail): string {
   const filled = `${groupInteger(order.filledQuantity)} of ${groupInteger(order.requestedQuantity)}`;
@@ -22,6 +23,9 @@ export function outcome(order: OrderDetail): string {
       const how = order.filledQuantity > 0 ? `Canceled · ${filled} filled` : 'Canceled';
       if (order.reason === 'IOC_REMAINDER_CANCELED') {
         return `${how} · the rest found no match`;
+      }
+      if (order.reason === 'MARKET_CLOSED') {
+        return `${how} · the market closed`;
       }
       return order.reason === null || order.reason === 'CANCELED_BY_OWNER' ? how : `${how} · ${order.reason}`;
     }

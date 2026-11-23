@@ -24,6 +24,7 @@ const REJECTIONS: Record<string, string> = {
   INSUFFICIENT_CASH: 'Not enough available cash for this order at its price limit.',
   INSUFFICIENT_SHARES: 'Not enough available shares to sell.',
   MARKET_NOT_OPEN: 'The market is not open.',
+  MARKET_CLOSED: 'The market has closed and takes no more orders.',
   ORDER_LIMIT_EXCEEDED: 'You already have the maximum number of open orders.',
   EXECUTION_LIMIT_EXCEEDED: 'This order would trade against too many orders at once.',
 };

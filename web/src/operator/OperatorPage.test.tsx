@@ -133,6 +133,7 @@ describe('the operator screen', () => {
     renderPage();
 
     expect(await screen.findByText('Closed', { selector: '.state-badge' })).toHaveClass('state-closed');
+    expect(screen.getByText('Closed', { selector: 'dt' }).nextElementSibling).toHaveTextContent('16:00:00 UTC');
     for (const name of ['Open market', 'Halt trading', 'Resume trading']) {
       expect(await button(name)).toBeDisabled();
       expect(await button(name)).toHaveAccessibleDescription('The market has closed.');
@@ -1649,6 +1650,32 @@ describe('bot runs on the operator screen', () => {
     expect(within(recent).getByRole('row', { name: /09:00:00 UTC/ })).toHaveTextContent(
       'Not confirmed · 1 not canceled',
     );
+    expect(recent).not.toHaveTextContent('Market close');
+  });
+
+  it('says which run the market close ended, since no worker confirmed that stop', async () => {
+    const { state } = exchange('CLOSED');
+    state.bots = 3;
+    state.runs = [
+      botRun({
+        runId: 'b',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        stopRequestedAt: '2026-11-06T10:05:00Z',
+        stoppedAt: '2026-11-06T10:05:00Z',
+        window: {
+          startSequence: '41',
+          stopSequence: '90',
+          endSequence: '90',
+          endedBy: 'MARKET_CLOSE',
+          endedAt: '2026-11-06T10:05:00Z',
+        },
+      }),
+    ];
+    renderPage();
+
+    const recent = await screen.findByRole('table', { name: 'Recent runs' });
+    expect(within(recent).getByRole('row', { name: /10:00:00 UTC/ })).toHaveTextContent('10:05:00 UTC · Market close');
   });
 
   it('pages the run history and the accounts with the cursor, size and order they were given', async () => {
