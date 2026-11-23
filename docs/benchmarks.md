@@ -135,6 +135,21 @@ Before it takes commands, Execution checks every customer balance against the su
 
 The whole reconciliation then took 3.7 s. Here the ledger fits in the operating system's cache, so the planner's own plan costs seconds, not minutes; on the restored database it had to read from disk. The one pass reads each table once, so its time grows with the ledger's size, not with how much of it is cached.
 
+## Closing a full market
+
+A close cancels every resting order and releases its hold, 5,000 orders to a transaction. `MarketCloseBench` times it at the most a market can hold: 200,000 resting orders, twenty for each of 10,000 accounts on five instruments. The market is built by SQL, each order with its hold and its ledger batch; Execution's own startup rebuilds the books from it and reconciles it, and the close then runs through the real engine against PostgreSQL in Testcontainers. On 2026-11-23, each row on a market of its own:
+
+| Orders per transaction | Transactions | Whole close | Longest transaction | Median |
+| --- | --- | --- | --- | --- |
+| 1,000 | 200 | 38.4 s | 0.29 s | 0.19 s |
+| 5,000 | 40 | 24.8 s and 30.1 s | 0.76 s and 0.89 s | 0.62 s and 0.74 s |
+| 20,000 | 10 | 27.5 s | 3.01 s | 2.83 s |
+| 5,000, with fsync on | 40 | 26.1 s and 30.6 s | 0.82 s and 0.94 s | 0.64 s and 0.76 s |
+
+That is about 0.13 to 0.15 ms an order, nearly all of it in the statements: of the longest transaction at 5,000, the commit took 0.07 to 0.09 s. Applying all 200,000 cancels to the books took 0.05 s, startup on the full market (books rebuilt and reconciled) about 1 s, and reconciliation after the close 0.7 to 1.0 s. Durable commits change little, since a close commits 40 times.
+
+So 5,000 it is: larger transactions make the whole close no faster and hold the writer for seconds at a time, and smaller ones make it slower. The second close in each pair was the slower one; it ran beside the first market's rows, and other work shared the machine during these runs, so the figures are a range, not a limit. The close's request waits 45 seconds for the answer (`mse.market.close-timeout`); a close that takes longer answers `504` and goes on.
+
 ## Steady load
 
 **Scenario:** five instruments and 10,000 bots (2,000 market makers, 2,000 momentum, 6,000 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. Until 2026-11-15 the scenario was 1,000 bots; its last result is kept below. Neither is a limit: the exchange limits neither the bot population nor the bots in one run, and `--bots` sets the number.
