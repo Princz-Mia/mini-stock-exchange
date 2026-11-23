@@ -627,6 +627,52 @@ describe('terminal', () => {
     expect(screen.queryByText(/is not part of this market/)).toBeNull();
   });
 
+  it('keeps the ticket and its unresolved order when the status is read after the list, for the same simulation', async () => {
+    // The exchange is flapping: its status cannot be read at first, so the page starts from Market Data's own list.
+    let reachable = false;
+    const lists: string[] = [];
+    const server = signedIn()
+      .on('GET /api/v1/market', () =>
+        reachable ? { status: 200, json: OPEN } : { status: 503, problem: { status: 503, code: 'TRADING_UNAVAILABLE' } },
+      )
+      .on('GET /api/v1/instruments', (request) => {
+        lists.push(request.url);
+        return {
+          status: 200,
+          json: { simulationId: 's', instruments: [instrument(NOVA, 'NOVA', null)], feed: { state: 'LIVE', lag: 0 } },
+        };
+      })
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } })
+      .on('POST /api/v1/orders', { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY' } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderTerminal('/terminal', null, client);
+    const ticket = await screen.findByRole('region', { name: 'Order · NOVA' });
+    fireEvent.change(within(ticket).getByLabelText('Shares'), { target: { value: '7' } });
+    fireEvent.click(within(ticket).getByRole('button', { name: 'Buy NOVA' }));
+    const retry = await screen.findByRole('button', { name: 'Retry the same order' });
+    expect(lists).toEqual(['/api/v1/instruments']);
+
+    // The next read of the status succeeds, and names the simulation the list was of.
+    reachable = true;
+    await client.invalidateQueries({ queryKey: ['market'] });
+    await waitFor(() => expect(lists).toContain('/api/v1/instruments?simulationId=s'));
+
+    // Nothing was taken down to wait for the list by id: the very same ticket, with what was typed and the order's key.
+    expect(screen.queryByText('Loading markets…')).toBeNull();
+    expect(screen.getByRole('region', { name: 'Order · NOVA' })).toBe(ticket);
+    expect(screen.getByRole('button', { name: 'Retry the same order' })).toBe(retry);
+    expect(screen.getByLabelText('Shares')).toHaveValue('7');
+    fireEvent.click(retry);
+    await waitFor(() =>
+      expect(server.requests.filter((request) => request.method === 'POST' && request.url === '/api/v1/orders')).toHaveLength(2),
+    );
+    const keys = server.requests
+      .filter((request) => request.method === 'POST' && request.url === '/api/v1/orders')
+      .map((request) => request.headers['Idempotency-Key']);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
   it('says there is nothing to trade when the market lists no instrument, instead of showing nothing', async () => {
     signedIn()
       .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })

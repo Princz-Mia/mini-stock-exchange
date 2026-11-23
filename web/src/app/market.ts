@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef } from 'react';
 
 import { api, pollEvery } from '../api/client';
-import type { Feed, Instrument, MarketStatus } from '../api/types';
+import type { Feed, Instrument, Instruments, MarketStatus } from '../api/types';
 
 /** The exchange's own word on the market: its phase and which simulation it is, read again every five seconds. */
 export function useMarketStatus() {
@@ -24,8 +24,8 @@ const MARKET_DATA_CURRENT = 'current';
  *   for a moment and then replaced;
  * - null when the exchange has no simulation at all: nothing is asked, as there is nothing to list;
  * - the simulation's id once the exchange has named it;
- * - Market Data's own current simulation when the status could not be read at all. The exchange is down then and
- *   nothing can be traded, but public data stays readable, and the list is asked again by id once the status is read.
+ * - Market Data's own current simulation when the status could not be read at all. The exchange is down then, but
+ *   public data stays readable, and the list is asked again by id once the status is read.
  */
 export function listedSimulation(market: StatusRead): string | null | undefined {
   if (market.data !== undefined) {
@@ -49,11 +49,21 @@ export interface InstrumentList {
  * change of simulation reads the list again and never shows the one before under the new market's name.
  */
 export function useInstruments(market: StatusRead, options: { refetchInterval?: ReturnType<typeof pollEvery> } = {}): InstrumentList {
+  const client = useQueryClient();
   const simulation = listedSimulation(market);
   const list = useQuery({
     queryKey: ['instruments', simulation ?? null],
     queryFn: () => api.instruments(simulation === MARKET_DATA_CURRENT ? undefined : (simulation ?? undefined)),
     enabled: simulation !== undefined && simulation !== null,
+    // A page that had to start from Market Data's own current simulation, the status being unreadable, goes on from
+    // that list when the status then names the very same simulation: the list is asked again by id, but nothing on
+    // screen is taken down to wait for it, such as a ticket holding an order whose outcome is not known. A list of
+    // another simulation is never carried over.
+    initialData: () => {
+      const fallback = client.getQueryData<Instruments>(['instruments', MARKET_DATA_CURRENT]);
+      return typeof simulation === 'string' && fallback?.simulationId === simulation ? fallback : undefined;
+    },
+    initialDataUpdatedAt: () => client.getQueryState(['instruments', MARKET_DATA_CURRENT])?.dataUpdatedAt,
     ...options,
   });
   if (simulation === undefined) {

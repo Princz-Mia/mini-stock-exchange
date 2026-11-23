@@ -149,6 +149,53 @@ describe('the instrument list', () => {
     expect(server.requests.at(-1)?.url).toBe(`/api/v1/instruments?simulationId=${FIRST}`);
   });
 
+  it("goes on from Market Data's own list when the status then names the same simulation, and from no other's", async () => {
+    // Market Data says which simulation its own current list is of.
+    const server = fakeServer().on('GET /api/v1/instruments', (request) => {
+      const asked = new URLSearchParams(request.url.split('?')[1] ?? '').get('simulationId');
+      return {
+        status: 200,
+        json: {
+          simulationId: asked ?? FIRST,
+          instruments: [{ instrumentId: `i-${asked ?? 'own'}`, symbol: asked === null ? 'OWN' : `OF-${asked}` }],
+          feed: { state: 'LIVE', lag: 0 },
+        },
+      };
+    });
+    for (const named of [FIRST, SECOND]) {
+      server.requests.length = 0;
+      const { wrapper } = withClient();
+      const seen: { pending: boolean; symbols: string[] }[] = [];
+      const { result, rerender, unmount } = renderHook(
+        ({ market }) => {
+          const list = useInstruments(market);
+          seen.push({ pending: list.isPending, symbols: symbols(list) });
+          return list;
+        },
+        { wrapper, initialProps: { market: FAILED as Parameters<typeof useInstruments>[0] } },
+      );
+      await waitFor(() => expect(symbols(result.current)).toEqual(['OWN']));
+
+      seen.length = 0;
+      rerender({ market: read(status(named)) });
+      await waitFor(() => expect(symbols(result.current)).toEqual([`OF-${named}`]));
+      expect(server.requests.map((request) => request.url)).toEqual([
+        '/api/v1/instruments',
+        `/api/v1/instruments?simulationId=${named}`,
+      ]);
+      if (named === FIRST) {
+        // The same simulation: its list stays on screen while it is asked for again by id, and nothing waits.
+        expect(seen.every((each) => !each.pending)).toBe(true);
+        expect(seen[0]?.symbols).toEqual(['OWN']);
+      } else {
+        // Another simulation: nothing of Market Data's own list is shown under its name.
+        expect(seen[0]).toEqual({ pending: true, symbols: [] });
+        expect(seen.some((each) => each.symbols.includes('OWN'))).toBe(false);
+      }
+      unmount();
+    }
+  });
+
   it('says when the list could not be read', async () => {
     fakeServer().on('GET /api/v1/instruments', { status: 503, problem: { status: 503, code: 'UNAVAILABLE' } });
     const { wrapper } = withClient();
