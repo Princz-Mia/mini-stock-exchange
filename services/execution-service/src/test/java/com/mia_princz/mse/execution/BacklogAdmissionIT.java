@@ -22,14 +22,16 @@ import tools.jackson.databind.json.JsonMapper;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
 
 /**
- * New orders stop while the publication backlog is over its limit, and cancels go on. The relay is off, so the
- * backlog stays exactly where the test puts it, and the limit is three events, read on every request.
+ * New orders stop while the publication backlog is over its limit, and cancels go on, and so does the operator's
+ * close. The relay is off, so the backlog stays exactly where the test puts it, and the limit is three events, read on
+ * every request.
  */
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT,
 		properties = { "mse.test.database=backlog-admission", "mse.outbox.relay.enabled=false",
 				"mse.outbox.admission.max-events=3", "mse.outbox.admission.refresh=0s",
-				"mse.dev-users.trader-password=" + BacklogAdmissionIT.PASSWORD })
+				"mse.dev-users.trader-password=" + BacklogAdmissionIT.PASSWORD,
+				"mse.dev-users.operator-password=" + BacklogAdmissionIT.PASSWORD })
 class BacklogAdmissionIT {
 
 	static final String PASSWORD = "test-trader-password";
@@ -51,8 +53,13 @@ class BacklogAdmissionIT {
 	@Autowired
 	MeterRegistry meters;
 
+	/**
+	 * The close comes last, since it ends the market. It is not an order: it cancels, and writes a snapshot for each
+	 * instrument where the cancels it stands for would each have written one. Refusing it would leave the operator
+	 * unable to end a market exactly when publication is stuck.
+	 */
 	@Test
-	void ordersStopAtTheLimitWhileCancelsContinue() throws Exception {
+	void ordersStopAtTheLimitWhileCancelsAndTheCloseGoOn() throws Exception {
 		UUID instrument = new TransactionTemplate(transactionManager).execute((status) -> market());
 		engine.start();
 		TestBrowser trader = TestBrowser.loggedIn(port, "trader", PASSWORD);
@@ -79,6 +86,18 @@ class BacklogAdmissionIT {
 
 		jdbc.update("UPDATE outbox SET published_at = now() WHERE published_at IS NULL");
 		assertThat(place(trader, instrument).statusCode()).as("admission reopens").isEqualTo(201);
+
+		unpublishedEvents(3);
+		long pending = pending();
+		assertThat(place(trader, instrument).statusCode()).as("over the limit again").isEqualTo(503);
+		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
+		HttpResponse<String> closed = operator.post("/api/v1/admin/market/close", "", "Idempotency-Key",
+				UUID.randomUUID().toString());
+		assertThat(closed.statusCode()).as(closed.body()).isEqualTo(200);
+		assertThat(JSON.readTree(closed.body()).get("canceledOrders").asInt()).isEqualTo(1);
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM orders WHERE state IN ('OPEN', 'PARTIALLY_FILLED')",
+				Long.class)).isZero();
+		assertThat(pending()).as("the instrument's last snapshot joins the backlog").isEqualTo(pending + 1);
 	}
 
 	/** The limits in force are measured, so a load test can report what it ran with. */
