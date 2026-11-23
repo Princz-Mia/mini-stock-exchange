@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
@@ -88,7 +89,8 @@ import com.mia_princz.mse.execution.trading.domain.Side;
  * <p>
  * The rule under test throughout: once a close's own transaction has committed, the writer either cancels every
  * resting order or halts, and the next start finishes before it takes a command. No writer goes on taking commands
- * for a closed market with orders resting.
+ * for a closed market with orders resting. The wait before a failed part is tried again is the test's own, which
+ * notes how long it was asked to be and does not sleep.
  */
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest(properties = "mse.test.database=market-close-sweep")
@@ -145,6 +147,12 @@ class MarketCloseSweepIT {
 
 	/** Telling the account streams fails that many tellings from now; never while negative. */
 	private final AtomicInteger failTellingIn = new AtomicInteger(-1);
+
+	/** How long each wait before another attempt at a part was asked to be, in milliseconds. */
+	private final List<Long> pauses = new CopyOnWriteArrayList<>();
+
+	/** What such a wait does, once it is noted; nothing while null. */
+	private volatile TradingEngine.RetryPause pause;
 
 	/** A process that stopped: nothing after it runs. Not a failure the engine knows, as a real stop is none. */
 	private static final class ProcessStopped extends RuntimeException {
@@ -238,14 +246,7 @@ class MarketCloseSweepIT {
 	void market() {
 		store = new JdbcTradingStore(JdbcClient.create(dataSource), JsonMapper.builder().build());
 		transactions = new StoppableTransactions();
-		operator = jdbc.queryForList("SELECT id FROM app_user WHERE username = 'sweep.operator'", UUID.class)
-			.stream()
-			.findFirst()
-			.orElseGet(() -> {
-				UUID id = UUID.randomUUID();
-				TestUsers.insert(jdbc, id, "sweep.operator", TestBrowser.passwordHash("test-sweep-password"), "OPERATOR");
-				return id;
-			});
+		operator = user("sweep.operator");
 		newSimulation();
 	}
 
@@ -282,8 +283,10 @@ class MarketCloseSweepIT {
 		assertThat(place(engine, a, first, Side.BUY, "100.00", 2).state()).isEqualTo(PlacementResult.OrderState.FILLED);
 		UUID offer = place(engine, bot, second, Side.SELL, "55.00", 4).orderId();
 		UUID bid = place(engine, b, second, Side.BUY, "45.00", 2).orderId();
-		engine.control(key("POST /api/v1/admin/market/halt"),
-				new MarketControl(MarketControl.Action.HALT, operator)).get(5, TimeUnit.SECONDS);
+		// Halted by another operator, whose command is the market's first audited one: not who closes it.
+		UUID halter = user("sweep.halter");
+		engine.control(new CommandKey(halter, UUID.randomUUID(), "POST /api/v1/admin/market/halt", new byte[32]),
+				new MarketControl(MarketControl.Action.HALT, halter)).get(5, TimeUnit.SECONDS);
 		Map<UUID, List<Long>> before = totals();
 		Map<UUID, Long> versions = versions(a, b, c, bot);
 		long halted = sequence();
@@ -295,6 +298,7 @@ class MarketCloseSweepIT {
 		transactions.stopAfter(1);
 		assertThat(unfinished(engine.close(closeKey, closeCommand()), close, 3)).isInstanceOf(ProcessStopped.class);
 		assertThat(transactions.asked.get() - asked).as("the close, then the next part tried three times").isEqualTo(4);
+		assertThat(pauses).as("a longer wait before each further attempt").containsExactly(200L, 400L);
 		assertThat(writer.isAvailable()).as("no writer goes on with a market half closed").isFalse();
 		// The halt is on record where it was decided, whoever still waits for the answer, with the last attempt.
 		assertThat(errors(output)).anyMatch((line) -> line.contains("giving the close up (attempt 3 of 3)"))
@@ -364,8 +368,9 @@ class MarketCloseSweepIT {
 		assertThat(jdbc.queryForList("""
 				SELECT command_sequence || ' ' || action || ' ' || outcome || ' ' || (actor_user_id = ?) FROM audit_log
 				WHERE simulation_id = ? AND command_sequence >= ? ORDER BY command_sequence""", String.class, operator,
-				simulation, close)).containsExactly(close + " MARKET_CLOSE APPLIED true",
-						(close + 1) + " MARKET_CLOSE_SWEEP APPLIED true", (close + 2) + " MARKET_CLOSE_SWEEP APPLIED true");
+				simulation, halted)).as("the parts a start cancels are the closer's, not the first operator's on record")
+			.containsExactly(halted + " MARKET_HALT APPLIED false", close + " MARKET_CLOSE APPLIED true",
+					(close + 1) + " MARKET_CLOSE_SWEEP APPLIED true", (close + 2) + " MARKET_CLOSE_SWEEP APPLIED true");
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM command_result WHERE simulation_id = ?", Long.class,
 				simulation)).as("one stored answer for each sequence").isEqualTo(close + 2);
 		for (UUID instrument : List.of(first, second)) {
@@ -402,6 +407,7 @@ class MarketCloseSweepIT {
 		engine.start();
 		List<UUID> orders = fiveResting(engine, a, b);
 		long open = sequence();
+		Map<UUID, Long> versions = versions(a, b);
 		List<DepthLevel> bids = engine.depth(first, Side.BUY).get(5, TimeUnit.SECONDS);
 		CommandKey closeKey = key(CLOSE_ROUTE);
 
@@ -416,6 +422,7 @@ class MarketCloseSweepIT {
 		assertThat(engine.depth(first, Side.BUY).get(5, TimeUnit.SECONDS)).isEqualTo(bids).hasSize(3);
 		assertThat(engine.simulationIdUnlessClosed()).isEqualTo(simulation);
 		assertThat(writer.isAvailable()).isTrue();
+		assertThat(pauses).as("the close's own transaction is not tried again").isEmpty();
 
 		// Now the close commits and its second transaction fails, once. The close tries that part again and answers.
 		int asked = transactions.asked.get();
@@ -426,8 +433,12 @@ class MarketCloseSweepIT {
 		assertThat(transactions.asked.get() - asked)
 			.as("the close, the part that failed, the two parts, and the read of whose token files to remove")
 			.isEqualTo(5);
+		assertThat(pauses).as("one wait, before the second attempt").containsExactly(200L);
 		assertThat(sequence()).as("the close and two parts: the attempt that failed took no sequence")
 			.isEqualTo(open + 3);
+		// The first part cancels two orders of the first account, and each account has orders in two parts.
+		assertThat(risen(versions)).as("one version for each part, however many of the account's orders it cancels")
+			.isEqualTo(Map.of(a, 2L, b, 2L));
 		assertThat(states().keySet()).containsExactlyInAnyOrderElementsOf(orders);
 		assertThat(states().values()).containsOnly("CANCELED MARKET_CLOSED");
 		assertNothingRests();
@@ -462,6 +473,7 @@ class MarketCloseSweepIT {
 			.as("the books were not changed for a commit nobody heard of")
 			.isInstanceOf(CommitOutcomeUnknownException.class);
 		assertThat(transactions.asked.get() - asked).as("not tried again").isEqualTo(2);
+		assertThat(pauses).isEmpty();
 		assertThat(writer.isAvailable()).isFalse();
 		assertThat(sequence()).isEqualTo(open + 2);
 		assertThat(resting()).isEqualTo(1);
@@ -524,12 +536,41 @@ class MarketCloseSweepIT {
 		assertThat(unfinished(engine.close(closeKey, closeCommand()), open + 1, 3))
 			.hasMessageContaining("writer epoch changed");
 		assertThat(transactions.asked.get() - asked).as("not tried again").isEqualTo(2);
+		assertThat(pauses).isEmpty();
 		assertThat(writer.isAvailable()).isFalse();
 		assertThat(sequence()).isEqualTo(open + 1);
 		assertThat(resting()).isEqualTo(3);
 		assertThat(reconciliationProblems()).isEmpty();
 
 		theNextStartFinishesTheClose(closeKey, open + 1, open + 3);
+	}
+
+	/**
+	 * A part finds a row that is not as the books have it: here an order ended behind the exchange's back. What the
+	 * books hold can no longer be trusted, and trying again would find the same row, so the part is sent once and
+	 * the writer halts.
+	 */
+	@Test
+	void aPartThatFindsARowOutOfStepHaltsTheWriterWithoutTryingAgain() throws Exception {
+		UUID a = funded();
+		UUID b = funded();
+		TradingEngine engine = engine();
+		engine.start();
+		List<UUID> orders = fiveResting(engine, a, b);
+		long open = sequence();
+		// The lowest bid, which the close comes to in its second transaction.
+		jdbc.update("""
+				UPDATE orders SET state = 'CANCELED', reason = 'OUTSIDE', canceled_quantity = working_quantity,
+				    working_quantity = 0
+				WHERE id = ?""", orders.getFirst());
+
+		int asked = transactions.asked.get();
+		assertThat(unfinished(engine.close(key(CLOSE_ROUTE), closeCommand()), open + 1, 3))
+			.isInstanceOf(TradingStore.OutOfStepException.class);
+		assertThat(transactions.asked.get() - asked).as("the close and the part, once").isEqualTo(2);
+		assertThat(pauses).isEmpty();
+		assertThat(writer.isAvailable()).isFalse();
+		assertThat(sequence()).as("the part rolled back").isEqualTo(open + 1);
 	}
 
 	/**
@@ -634,6 +675,46 @@ class MarketCloseSweepIT {
 	}
 
 	/**
+	 * The writer is shut down while a part that failed waits to be tried again, and the time it is given runs out.
+	 * The wait ends there and the close with it, instead of holding the shutdown for every attempt that is left. The
+	 * next start finishes.
+	 */
+	@Test
+	void aWriterShutDownWhileAFailedPartWaitsStopsTheCloseAndTheNextStartFinishes() throws Exception {
+		UUID a = funded();
+		UUID b = funded();
+		TradingEngine engine = engine();
+		engine.start();
+		fiveResting(engine, a, b);
+		long open = sequence();
+		CommandKey closeKey = key(CLOSE_ROUTE);
+
+		// The close commits and nothing after it can. The first wait lasts until the shutdown interrupts the writer;
+		// a wait after that, which a close that went on regardless would ask for, returns at once.
+		CountDownLatch waiting = new CountDownLatch(1);
+		pause = (millis) -> {
+			if (waiting.getCount() > 0) {
+				waiting.countDown();
+				new CountDownLatch(1).await();
+			}
+		};
+		int asked = transactions.asked.get();
+		transactions.stopAfter(1);
+		CompletableFuture<MarketClosing> closing = engine.close(closeKey, closeCommand());
+		assertThat(waiting.await(20, TimeUnit.SECONDS)).isTrue();
+		writer.close(Duration.ofMillis(100));
+
+		assertThat(unfinished(closing, open + 1, 3)).isInstanceOf(WriterStoppedException.class);
+		assertThat(transactions.asked.get() - asked).as("the close and one attempt at the next part, not all three")
+			.isEqualTo(2);
+		assertThat(pauses).containsExactly(200L);
+		assertThat(sequence()).isEqualTo(open + 1);
+		assertThat(resting()).isEqualTo(3);
+
+		theNextStartFinishesTheClose(closeKey, open + 1, open + 3);
+	}
+
+	/**
 	 * A process that starts on a market closed half-way and cannot finish the close does not start: it fails, its
 	 * health stays down, and it takes no command. A close sent to it while it stops is told the close is unfinished,
 	 * as by the writer that halted. The process after it finishes.
@@ -659,6 +740,7 @@ class MarketCloseSweepIT {
 			.hasCauseInstanceOf(ProcessStopped.class);
 
 		assertThat(transactions.asked.get()).as("the part was tried three times").isEqualTo(5);
+		assertThat(pauses).containsExactly(200L, 400L);
 		assertThat(startup.health().getStatus()).isEqualTo(Status.DOWN);
 		assertThatThrownBy(() -> place(next, a, first, Side.BUY, "90.00", 1)).isInstanceOf(WriterStoppedException.class)
 			.hasMessage("Trading has not started");
@@ -909,8 +991,27 @@ class MarketCloseSweepIT {
 			}
 			told.add(Map.entry(sequence, Set.copyOf(accounts)));
 		};
+		TradingEngine.RetryPause noted = (millis) -> {
+			pauses.add(millis);
+			TradingEngine.RetryPause then = pause;
+			if (then != null) {
+				then.pause(millis);
+			}
+		};
 		return new TradingEngine(store, transactions, writer, CLOCK, credentials, changes, WriterTimings.NONE,
-				System::nanoTime, new RestingOrders(), 2);
+				System::nanoTime, new RestingOrders(), 2, noted);
+	}
+
+	/** A user who may operate the market, made the first time a test asks for it. */
+	private UUID user(String username) {
+		return jdbc.queryForList("SELECT id FROM app_user WHERE username = ?", UUID.class, username)
+			.stream()
+			.findFirst()
+			.orElseGet(() -> {
+				UUID id = UUID.randomUUID();
+				TestUsers.insert(jdbc, id, username, TestBrowser.passwordHash("test-sweep-password"), "OPERATOR");
+				return id;
+			});
 	}
 
 	/** The lines the log holds at ERROR since the test began. */
@@ -1020,6 +1121,7 @@ class MarketCloseSweepIT {
 	private TradingEngine restarted() throws InterruptedException {
 		writer.close(Duration.ofSeconds(5));
 		transactions = new StoppableTransactions();
+		pauses.clear();
 		return engine();
 	}
 

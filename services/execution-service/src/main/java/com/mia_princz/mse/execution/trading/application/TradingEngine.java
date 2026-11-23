@@ -81,6 +81,14 @@ public final class TradingEngine {
 	/** The wait before a part that failed is tried again, once for each attempt made so far. */
 	private static final long SWEEP_RETRY_PAUSE_MILLIS = 200;
 
+	/** How the writer waits before it tries a failed part of a close again. */
+	@FunctionalInterface
+	public interface RetryPause {
+
+		void pause(long millis) throws InterruptedException;
+
+	}
+
 	private static final Logger LOG = LoggerFactory.getLogger(TradingEngine.class);
 
 	private static final long FALLBACK_LOG_INTERVAL_NANOS = 10_000_000_000L;
@@ -107,6 +115,8 @@ public final class TradingEngine {
 	private final LongSupplier nanoTime;
 
 	private final int closeChunkOrders;
+
+	private final RetryPause retryPause;
 
 	private final Map<UUID, OrderBook> books = new HashMap<>();
 
@@ -198,11 +208,20 @@ public final class TradingEngine {
 	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
 			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings, LongSupplier nanoTime,
 			RestingOrders resting, int closeChunkOrders) {
+		this(store, transactions, writer, clock, botCredentials, accountChanges, timings, nanoTime, resting,
+				closeChunkOrders, Thread::sleep);
+	}
+
+	/** {@code retryPause} is the wait before a failed part of a close is tried again, replaceable in tests. */
+	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
+			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings, LongSupplier nanoTime,
+			RestingOrders resting, int closeChunkOrders, RetryPause retryPause) {
 		if (closeChunkOrders < 1) {
 			throw new IllegalArgumentException(
 					"A close cancels at least one order per transaction: " + closeChunkOrders);
 		}
 		this.closeChunkOrders = closeChunkOrders;
+		this.retryPause = retryPause;
 		this.resting = resting;
 		this.store = store;
 		this.transactions = transactions;
@@ -1700,7 +1719,7 @@ public final class TradingEngine {
 				LOG.warn("A part of the market's close failed and rolled back; trying it again (attempt {} of {})",
 						attempt, SWEEP_ATTEMPTS, ex);
 				try {
-					Thread.sleep(SWEEP_RETRY_PAUSE_MILLIS * attempt);
+					retryPause.pause(SWEEP_RETRY_PAUSE_MILLIS * attempt);
 				}
 				catch (InterruptedException interrupted) {
 					Thread.currentThread().interrupt();
