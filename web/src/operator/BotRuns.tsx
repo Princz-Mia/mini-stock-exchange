@@ -49,13 +49,15 @@ const DEFAULTS = {
  * Bot runs: the one that is running with its worker and activity, a form to start the next, and every run a page at a
  * time. Everything shown is what Execution committed and what the worker last reported. The current run is refetched
  * every two seconds; the history every five, and at once whenever the newest run changes, so the two agree. How long
- * the run has been going is counted up to the last answer, so it moves with each refetch and needs no timer of its own.
+ * the run has been going is counted up to the last answer, on the exchange's clock as that answer gave it: it moves
+ * with each refetch, needs no timer of its own, and does not depend on the browser's clock.
  */
 export function BotRuns({ market, instruments }: { market: MarketStatus['state']; instruments: readonly Instrument[] }) {
   const runs = useQuery({ queryKey: ['bot-runs'], queryFn: api.botRuns, refetchInterval: pollEvery(2_000) });
   const population = useQuery({ queryKey: ['bots'], queryFn: api.botPopulation });
   const list = runs.data?.runs ?? [];
   const active = activeRun(list);
+  const now = runs.data?.answeredAt ?? runs.dataUpdatedAt;
   const history = usePagedList({
     table: 'runs',
     queryKey: ['bot-runs', 'history'],
@@ -97,7 +99,7 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
       },
       { replace: true },
     );
-  const columns = [compareColumn(picked, pick), STARTED_COLUMN, ranForColumn(runs.dataUpdatedAt), ...RUN_COLUMNS];
+  const columns = [compareColumn(picked, pick), STARTED_COLUMN, ranForColumn(now), ...RUN_COLUMNS];
   // The screen's own address goes along, so coming back keeps the table's page size and order.
   const from = useLocation().search;
 
@@ -112,7 +114,7 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
       {runs.isPending ? (
         <p className="muted">Loading…</p>
       ) : active !== undefined ? (
-        <ActiveRun run={active} now={runs.dataUpdatedAt} />
+        <ActiveRun run={active} now={now} />
       ) : (
         <StartForm
           market={market}

@@ -129,10 +129,30 @@ describe('the bot run view', () => {
     expect(remainingSeconds(botRun(), after(750))).toBeNull();
 
     expect(timeLeftText(timed, after(750))).toBe('47 min 30 s');
-    expect(timeLeftText(timed, after(3_600))).toBe('Ending now');
+    expect(timeLeftText(timed, after(3_599.5))).toBe('1 s');
     expect(timeLeftText(botRun(), after(750))).toBeNull();
-    // Once a stop is asked for, by the operator or at its end, the end time decides nothing.
+    // Once the operator has asked for a stop, the end time decides nothing.
     expect(timeLeftText({ ...timed, status: 'STOPPING', desiredState: 'STOPPED' }, after(750))).toBeNull();
+    expect(timeLeftText({ ...timed, status: 'STOPPED' }, after(3_700))).toBeNull();
+  });
+
+  it('leaves it to the exchange to say a timed run has reached its end, whatever the clock reads', () => {
+    const timed = botRun({ endsAt: '2026-11-06T11:00:00Z' });
+    // Past its end the exchange shows the run as stopping, and as still wanting to run until its worker confirms.
+    const overdue: BotRun = { ...timed, status: 'STOPPING' };
+    expect(overdue.desiredState).toBe('RUNNING');
+    expect(timeLeftText(overdue, after(3_604))).toBe('Ending now');
+    // A clock half a minute behind the exchange's would still count 30 seconds.
+    expect(timeLeftText(overdue, after(3_570))).toBe('Ending now');
+    // A clock ahead of the exchange's is past the end while the run is running: it has not ended, so a second is left.
+    for (const status of ['STARTING', 'RUNNING', 'STALE'] as const) {
+      expect(timeLeftText({ ...timed, status }, after(3_600))).toBe('1 s');
+      expect(timeLeftText({ ...timed, status }, after(3_600 + 360))).toBe('1 s');
+    }
+    // Six minutes ahead on a two-minute run that has just started: not over from its first second.
+    const short = botRun({ endsAt: '2026-11-06T10:02:00Z' });
+    expect(remainingSeconds(short, after(362))).toBe(0);
+    expect(timeLeftText(short, after(362))).toBe('1 s');
   });
 
   it('takes a run for forgotten only with no end, no stop asked for, and more than a day behind it', () => {

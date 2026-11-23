@@ -51,8 +51,8 @@ export function activeRun(runs: readonly BotRun[]): BotRun | undefined {
 }
 
 /**
- * Whole seconds from the run's start to now, a time in epoch milliseconds. Never negative: the start is on the
- * exchange's clock and now on the browser's, and the two may disagree a little.
+ * Whole seconds from the run's start to now, a time in epoch milliseconds on the exchange's clock, as its last answer
+ * gave it. Never negative: that clock is read to the whole second, so an answer may seem to come before the start.
  */
 export function elapsedSeconds(run: BotRun, now: number): number {
   return Math.max(0, Math.floor((now - Date.parse(run.startedAt)) / 1000));
@@ -65,12 +65,14 @@ export function remainingSeconds(run: BotRun, now: number): number | null {
 
 /**
  * A timed run's time left, in words; null for a run with no end, and once a stop has been asked for, as its end time
- * no longer decides anything.
+ * no longer decides anything. Whether the end has come is the exchange's to say: from then until the worker confirms,
+ * it shows the run as stopping. Before that at least a second is left, whatever the clock makes of it, so the words
+ * never contradict the status beside them.
  */
 export function timeLeftText(run: BotRun, now: number): string | null {
   const seconds = remainingSeconds(run, now);
-  if (seconds === null || run.desiredState === 'STOPPED') return null;
-  return seconds === 0 ? 'Ending now' : durationText(seconds);
+  if (seconds === null || run.desiredState === 'STOPPED' || run.status === 'STOPPED') return null;
+  return run.status === 'STOPPING' ? 'Ending now' : durationText(Math.max(1, seconds));
 }
 
 /** A run with no end time is warned about once it has gone on for longer than this: a day. */

@@ -266,10 +266,10 @@ test.describe.serial('trading through the browser', () => {
     await expect(runs.getByRole('status', { name: 'Run status: Running' })).toBeVisible({ timeout: 30_000 });
     const current = runs.getByRole('group', { name: 'Current run' });
     await expect(current).toContainText('1 market maker, 1 noise');
-    // It says how long it has been going, and how much of its hour is left: the whole hour for a moment, should the
-    // browser's clock be a little behind the exchange's.
+    // It says how long it has been going, and how much of its hour is left. Both are counted on the exchange's clock;
+    // only their shape is checked, so nothing here depends on this machine's clock agreeing with the stack's.
     await expect(current).toContainText(/Elapsed\d+ (s|min)/);
-    await expect(current).toContainText(/Time left(5\d min|1 h 0 min)/);
+    await expect(current).toContainText(/Time left(\d+ min|1 h \d+ min)/);
     await expect(current).toContainText(/Placed[1-9]/, { timeout: 30_000 });
     // The worker reported its simulator with the run: the package version and the commit its image was built from.
     await expect(current).toContainText(/Simulator\d+\.\d+\.\d+\+[0-9a-f]{12}(\.dirty)?/);

@@ -7,7 +7,7 @@ export interface Recorded {
   body: unknown;
 }
 
-type Reply = { status: number; json?: unknown; problem?: unknown };
+type Reply = { status: number; json?: unknown; problem?: unknown; headers?: Record<string, string> };
 type Handler = (request: Recorded) => Reply;
 
 /**
@@ -36,7 +36,7 @@ export function fakeServer() {
     if (reply.json !== undefined) {
       return new Response(JSON.stringify(reply.json), {
         status: reply.status,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...reply.headers },
       });
     }
     return new Response(null, { status: reply.status });
