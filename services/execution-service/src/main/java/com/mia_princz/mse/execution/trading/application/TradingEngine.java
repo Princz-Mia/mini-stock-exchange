@@ -220,7 +220,8 @@ public final class TradingEngine {
 	 * open orders. Any disagreement fails startup instead of trading on state that cannot be trusted. The market is
 	 * the current simulation's, closed or not: a closed one is loaded the same way, so that every command is answered
 	 * by it, as closed. A closed market that still has resting orders was closed by a process that stopped before it
-	 * had cancelled them all; they are cancelled here, before any command is admitted.
+	 * had cancelled them all; they are cancelled here, before any command is admitted. That process may also have
+	 * stopped after its last order and before it removed the bot token files, so those are removed here too.
 	 */
 	public void start() {
 		transactions.inTransaction(() -> {
@@ -261,8 +262,13 @@ public final class TradingEngine {
 			accounts.addAll(store.tradingAccounts(simulation));
 			return null;
 		});
-		if (closed && restingOrders() > 0) {
-			finishInterruptedClose();
+		if (closed) {
+			if (restingOrders() > 0) {
+				finishInterruptedClose();
+			}
+			// Also with nothing left to cancel: a close can halt once every order is cancelled, and its key, which
+			// would tidy up, is then not sent again. One read and a delete for each file, most of them gone already.
+			discardBotTokens();
 		}
 		started = true;
 	}
@@ -288,7 +294,6 @@ public final class TradingEngine {
 		}
 		LOG.info("Finished the market's close at startup: {} resting orders cancelled in {} transactions in {} ms, "
 				+ "the longest {} ms", resting, times.transactions, times.total / 1_000_000, times.longest / 1_000_000);
-		discardBotTokens();
 	}
 
 	/** Starts with no market to rebuild: commands are admitted, and the first setup command creates the market. */

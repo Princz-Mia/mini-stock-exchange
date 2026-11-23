@@ -385,6 +385,7 @@ class MarketCloseSweepIT {
 		long after = sequence();
 		restarted().start();
 		assertThat(sequence()).as("a later start finds nothing to finish").isEqualTo(after);
+		assertThat(discarded).as("and tidies the token files all the same").hasSize(3);
 	}
 
 	/**
@@ -691,6 +692,43 @@ class MarketCloseSweepIT {
 		assertThat(engine.close(closeKey, closeCommand()).get(20, TimeUnit.SECONDS)).isEqualTo(expected);
 		assertThat(discarded).as("this time it could not find out whose").hasSize(1);
 		assertThat(writer.isAvailable()).isTrue();
+	}
+
+	/**
+	 * A close can halt with every order cancelled already: here its own transaction cancels both resting orders and
+	 * commits, and the answer to the commit is lost. The next start has nothing to cancel, and the close's key, which
+	 * would remove the token files, is not sent again after a halt. So the start removes them, as every start on a
+	 * closed market does. That is tidying, and no start fails for it: not when the files cannot be removed, and not
+	 * when the accounts they belong to cannot be read.
+	 */
+	@Test
+	void aStartOnAClosedMarketWithNothingRestingStillTidiesTheTokenFiles() throws Exception {
+		UUID trader = funded();
+		TradingEngine engine = engine();
+		engine.start();
+		place(engine, trader, first, Side.BUY, "90.00", 5);
+		place(engine, trader, first, Side.BUY, "91.00", 5);
+		long open = sequence();
+		transactions.loseAnswerIn(0);
+		assertThat(haltCause(engine.close(key(CLOSE_ROUTE), closeCommand())))
+			.isInstanceOf(CommitOutcomeUnknownException.class);
+		assertThat(resting()).isZero();
+		assertThat(discarded).as("the close halted before it tidied up").isEmpty();
+
+		restarted().start();
+		assertThat(sequence()).as("nothing was left to cancel").isEqualTo(open + 1);
+		assertThat(discarded).containsExactly(List.of(trader));
+
+		discardFails = true;
+		restarted().start();
+		assertThat(discarded).as("it was asked to").hasSize(2);
+
+		// The rebuild is the start's first transaction; the read of whose files to remove would be its second.
+		TradingEngine last = restarted();
+		transactions.stopAfter(1);
+		last.start();
+		assertThat(discarded).as("this time it could not find out whose").hasSize(2);
+		assertThat(last.simulationId()).isEqualTo(simulation);
 	}
 
 	/**

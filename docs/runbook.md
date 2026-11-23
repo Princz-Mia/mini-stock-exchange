@@ -103,7 +103,7 @@ Find what changed the database outside Execution. If it can't be explained, rest
 
 **Another instance owns the market.** `refusing to start` means one Execution is already running against the database; only one may.
 
-**It stopped while the market was closing.** Nothing to do. A close cancels resting orders 5,000 to a transaction, and the market is closed from the first one. If Execution stops before the last, the next start cancels the rest before it takes commands, and logs `Finished the market's close at startup` with how many. A start that finds none left to cancel logs no such line.
+**It stopped while the market was closing.** Nothing to do. A close cancels resting orders 5,000 to a transaction, and the market is closed from the first one. If Execution stops before the last, the next start cancels the rest before it takes commands, and logs `Finished the market's close at startup` with how many. A start that finds none left to cancel logs no such line. Every start on a closed market also removes its bots' token files, in case the close stopped before it had.
 
 **A close answered `504 COMMAND_OUTCOME_UNKNOWN`.** The request waited 45 seconds and the close had not answered. No lookup by key serves a close, so send the same key again:
 - **`200`:** the close is done, and this is its answer.
