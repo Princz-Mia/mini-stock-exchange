@@ -68,7 +68,13 @@ def test_orders_stay_near_the_anchor_and_within_what_the_bot_holds() -> None:
         if intent is None:
             continue
         assert isinstance(intent, Place)
-        assert abs(intent.limit - quoted.anchor()) <= CONFIG.spread_ticks * quoted.tick
+        # Within the spread of the anchor, rounded less than a tick away from the other side.
+        away = intent.limit - quoted.anchor()
+        reach = CONFIG.spread_ticks * quoted.tick
+        if intent.side == "BUY":
+            assert -reach - quoted.tick < away <= reach
+        else:
+            assert -reach <= away < reach + quoted.tick
         assert 1 <= intent.quantity <= CONFIG.max_quantity
         if intent.side == "BUY":
             assert intent.quantity * intent.limit <= holdings.cash
@@ -80,6 +86,24 @@ def test_the_anchor_is_the_mid_then_the_last_trade_then_the_reference() -> None:
     assert instrument(bid=9_900, ask=10_100, last=5_000).anchor() == 10_000
     assert instrument(bid=9_900, last=5_000).anchor() == 5_000
     assert instrument(reference=7_000).anchor() == 7_000
+    assert instrument(bid=10_000, ask=10_003).anchor() == 10_001.5, "exact, not rounded down"
+
+
+def test_buys_and_sells_reach_equally_far_across_an_odd_spread() -> None:
+    """With the mid half a tick off the grid, as many buy prices reach the ask as sell prices
+    reach the bid. A mid rounded down gave sells one more, and prices fell."""
+    quoted = instrument(bid=10_000, ask=10_003)
+    holdings = Holdings(cash=10**9, shares={quoted.instrument_id: 10**6})
+    limits: dict[str, set[int]] = {"BUY": set(), "SELL": set()}
+    for seed in range(1_000):
+        intent = bot(seed).decide(view(quoted), True, holdings, [], 0.0)
+        assert isinstance(intent, Place)
+        limits[intent.side].add(intent.limit)
+    assert limits["BUY"] == set(range(9_996, 10_007))
+    assert limits["SELL"] == set(range(9_997, 10_008))
+    crossing_buys = {limit for limit in limits["BUY"] if limit >= quoted.ask}
+    crossing_sells = {limit for limit in limits["SELL"] if limit <= quoted.bid}
+    assert len(crossing_buys) == len(crossing_sells) == 4
 
 
 def test_stale_quotes_are_cancelled_first_even_while_exposure_is_paused() -> None:

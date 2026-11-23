@@ -255,6 +255,8 @@ def test_inventory_leans_both_quotes_against_the_position() -> None:
     bot.quotes(item, rich(item, position=500), (item,))  # the start: 500 shares
     assert bot.quotes(item, rich(item, position=530), (item,)) == (9_995, 9_999), "long: lower"
     assert bot.quotes(item, rich(item, position=480), (item,)) == (10_000, 10_004), "short: up"
+    odd = instrument(bid=10_000, ask=10_003)
+    assert maker(1).quotes(odd, rich(odd), (odd,)) == (9_999, 10_004), "centred on the exact mid"
     draws = np.random.default_rng(2026)
     for _ in range(300):
         tick = int(draws.choice([1, 5, 25]))
@@ -271,7 +273,13 @@ def test_inventory_leans_both_quotes_against_the_position() -> None:
         previous = None
         for position in sorted(int(p) for p in draws.integers(900, 1_100, 8)):
             bid, ask = bot.quotes(item, rich(item, position=position), (item,))
-            assert ask - bid == 2 * config.half_spread_ticks * tick
+            lean = config.skew_ticks * (position - 1_000) / config.quote_size
+            reservation = anchor - lean * tick
+            # Each quote at least the half spread from the reservation price, and less than a tick
+            # further: rounded away from it, never toward.
+            half = config.half_spread_ticks * tick
+            assert half <= reservation - bid < half + tick
+            assert half <= ask - reservation < half + tick
             assert bid % tick == 0 and ask % tick == 0, "on the tick grid"
             if previous is not None:
                 assert bid <= previous, "more inventory never raises the quotes"

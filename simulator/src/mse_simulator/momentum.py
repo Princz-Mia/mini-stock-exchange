@@ -8,6 +8,7 @@ from uuid import UUID
 import numpy as np
 
 from mse_simulator.market import Instrument, MarketView
+from mse_simulator.prices import limit_price
 from mse_simulator.strategy import (
     Holdings,
     Intent,
@@ -15,7 +16,6 @@ from mse_simulator.strategy import (
     Place,
     Positions,
     affordable,
-    clamp,
     oldest_stale,
 )
 
@@ -29,7 +29,7 @@ class PriceSignal:
             raise ValueError("the short window must be shorter than the long one")
         self._short = short
         self._long = long
-        self._prices: dict[UUID, deque[int]] = {}
+        self._prices: dict[UUID, deque[float]] = {}
 
     def observe(self, market: MarketView) -> None:
         """Samples only open, live data: a frozen feed would read as a flat market."""
@@ -120,4 +120,6 @@ class MomentumBot:
             quote, step = instrument.ask, instrument.tick
         else:
             quote, step = instrument.bid, -instrument.tick
-        return clamp(quote if quote is not None else instrument.anchor() + step, instrument)
+        if quote is not None:
+            return quote
+        return limit_price(instrument.anchor() + step, side, instrument)
