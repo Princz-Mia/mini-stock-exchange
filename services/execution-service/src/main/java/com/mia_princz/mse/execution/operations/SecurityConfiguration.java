@@ -105,7 +105,7 @@ class SecurityConfiguration {
 				.hasRole("BOT")
 				.anyRequest()
 				.denyAll())
-			.addFilterAt(new BotTokenFilter(jdbc, engine::simulationId), BasicAuthenticationFilter.class)
+			.addFilterAt(new BotTokenFilter(jdbc, engine::simulationIdUnlessClosed), BasicAuthenticationFilter.class)
 			.csrf(AbstractHttpConfigurer::disable)
 			.sessionManagement((sessions) -> sessions.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 			.securityContext((context) -> context.securityContextRepository(new RequestAttributeSecurityContextRepository()))

@@ -256,7 +256,7 @@ class BotRunController {
 	}
 
 	/**
-	 * The active simulation's runs in the given order, at most {@code limit}: one if {@code only} is given, else a page
+	 * The current simulation's runs in the given order, at most {@code limit}: one if {@code only} is given, else a page
 	 * after the cursor.
 	 */
 	private List<RunView> views(UUID only, Cursors.RunPosition after, PageOrder direction, int limit) {

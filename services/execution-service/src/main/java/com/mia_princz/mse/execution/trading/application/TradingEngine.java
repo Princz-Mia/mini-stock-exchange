@@ -126,6 +126,9 @@ public final class TradingEngine {
 	/** Written by the writer only; volatile so that {@link #simulationId()} can answer on any thread. */
 	private volatile UUID simulationId;
 
+	/** Whether the market this engine holds has closed, as last committed; written by the writer only. */
+	private volatile boolean closed;
+
 	private long writerEpoch;
 
 	/**
@@ -171,7 +174,9 @@ public final class TradingEngine {
 	/**
 	 * Takes over the market and rebuilds every book from the database: claims a new writer epoch, which fences any
 	 * previous writer, restores resting orders in their original priority, then reconciles balances, the ledger and
-	 * open orders. Any disagreement fails startup instead of trading on state that cannot be trusted.
+	 * open orders. Any disagreement fails startup instead of trading on state that cannot be trusted. The market is
+	 * the current simulation's, closed or not: a closed one is loaded the same way, so that every command is answered
+	 * by it, as closed.
 	 */
 	public void start() {
 		transactions.inTransaction(() -> {
@@ -204,6 +209,7 @@ public final class TradingEngine {
 			}
 			simulationId = simulation;
 			writerEpoch = epoch;
+			closed = "CLOSED".equals(market.state());
 			books.putAll(rebuilt);
 			catalogue.putAll(rebuiltCatalogue);
 			tapes.putAll(rebuiltTapes);
@@ -220,11 +226,19 @@ public final class TradingEngine {
 	}
 
 	/**
-	 * The simulation this engine writes for, from memory and on any thread: the active one, since only the writer
+	 * The simulation this engine writes for, from memory and on any thread: the current one, since only the writer
 	 * sets a market up. Null while there is none, and until startup has taken the market over.
 	 */
 	public UUID simulationId() {
 		return simulationId;
+	}
+
+	/**
+	 * The same, but null once the market has closed: for a check that must pass only while the simulation is not
+	 * closed, made without reading its row.
+	 */
+	public UUID simulationIdUnlessClosed() {
+		return closed ? null : simulationId;
 	}
 
 	/** Places an order. A repeat of the same key and request returns the first committed result unchanged. */
@@ -879,7 +893,9 @@ public final class TradingEngine {
 
 	/**
 	 * Creates the market, in SETUP with its issuance account, the first time something is set up. This commits on
-	 * its own: an empty market in SETUP is a valid state, and the command that needed it then runs normally.
+	 * its own: an empty market in SETUP is a valid state, and the command that needed it then runs normally. Only
+	 * while no simulation exists at all: startup loads the current one even if it is closed, and a setup command is
+	 * then refused by it, as for any market not in SETUP, instead of quietly starting another.
 	 */
 	private void ensureMarket() {
 		if (simulationId != null) {

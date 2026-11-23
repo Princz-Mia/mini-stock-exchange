@@ -74,16 +74,16 @@ public interface TradingStore {
 	record ExistingOrder(UUID id, UUID accountId, UUID instrumentId, String state, long working) {
 	}
 
-	/**
-	 * Whether there is a simulation that is not closed. Without one there is nothing to trade or rebuild: none has been
-	 * set up yet, or every one has been closed.
-	 */
-	boolean hasActiveSimulation();
+	/** Whether any market has been set up yet, closed or not. Before that there is nothing to load or rebuild. */
+	boolean hasSimulation();
 
 	/** Creates the market in SETUP with its issuance account, already claimed by this writer. Returns the epoch. */
 	long createMarket(UUID simulationId, UUID issuanceAccountId);
 
-	/** Locks the active simulation's row for the rest of the transaction; taking over the market starts here. */
+	/**
+	 * Locks the current simulation's row for the rest of the transaction: the one not closed or, once every one is
+	 * closed, the newest. Taking over the market starts here.
+	 */
 	Market lockMarket();
 
 	/** Takes over the market: increments the writer epoch, so a previous writer's next transaction is refused. */

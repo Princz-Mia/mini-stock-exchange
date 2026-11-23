@@ -25,7 +25,8 @@ import com.mia_princz.mse.execution.trading.domain.Price;
 
 /**
  * Read-only queries for the trading API. They never go through the writer and never change anything. Each answers for
- * the active simulation ({@link CurrentSimulation}), directly or through an account found in it.
+ * the current simulation ({@link CurrentSimulation}), directly or through an account found in it: the one not closed
+ * or, after a close, the one closed last, whose final state stays readable.
  */
 @Component
 class TradingQueries {
@@ -84,15 +85,14 @@ class TradingQueries {
 	}
 
 	/**
-	 * The trading phase as the writer last committed it: the active simulation's or, once every one is closed, the
-	 * newest one's. Empty before a market has been set up.
+	 * The trading phase as the writer last committed it, for the current simulation. Empty before a market has been
+	 * set up.
 	 */
 	record MarketStatus(UUID simulationId, String state, Instant openedAt, long commandSequence) {
 	}
 
 	Optional<MarketStatus> market() {
-		return jdbc
-			.sql("SELECT id, state, opened_at, last_command_sequence FROM simulation " + CurrentSimulation.OR_ELSE_NEWEST)
+		return jdbc.sql("SELECT id, state, opened_at, last_command_sequence FROM simulation " + CurrentSimulation.FIRST)
 			.query((row, index) -> {
 				Timestamp openedAt = row.getTimestamp("opened_at");
 				return new MarketStatus(row.getObject("id", UUID.class), row.getString("state"),
@@ -226,7 +226,10 @@ class TradingQueries {
 			.optional();
 	}
 
-	/** The user's account in the active simulation; one they had in a closed simulation is not theirs to trade with. */
+	/**
+	 * The user's account in the current simulation. One they had in an older, closed simulation is not theirs to read
+	 * or trade with here.
+	 */
 	Optional<Trader> trader(String username) {
 		return jdbc.sql("""
 				SELECT u.id AS user_id, a.id AS account_id FROM app_user u
@@ -331,7 +334,7 @@ class TradingQueries {
 				ORDER BY o.updated_at DESC, o.id DESC LIMIT :limit""".formatted(conditions);
 	}
 
-	/** A key is per simulation: the same one may have another answer in a closed simulation. */
+	/** A key is per simulation: the same one may have another answer in an older, closed simulation. */
 	Optional<StoredCommand> command(UUID principalId, UUID idempotencyKey) {
 		return jdbc.sql("""
 				SELECT route, response_body::text AS body FROM command_result
