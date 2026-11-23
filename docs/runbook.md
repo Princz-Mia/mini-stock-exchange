@@ -39,7 +39,22 @@ On Windows, use `.\scripts\backup.ps1` and `.\scripts\restore.ps1 backups\202611
 
 **Backup** writes `backups/<UTC time>/` with:
 - `execution_db.dump`: Execution's database, taken from one consistent snapshot, so trading can go on meanwhile;
-- `manifest.txt`: the snapshot's time, the commit, the schema version, the last command and trade sequence, and how many events the outbox holds. Its figures are read in the same snapshot as the dump, so they describe exactly what the dump holds, however much trading went on while it was taken.
+- `manifest.txt`: the snapshot's time, the commit, the schema version, how many simulations the database holds, the current simulation's figures, and how many events the outbox holds. Its figures are read in the same snapshot as the dump, so they describe exactly what the dump holds, however much trading went on while it was taken.
+
+Command and trade sequences start again from 1 in every simulation, so the manifest gives them for one simulation and says which: the current one, which is the one that has not closed or, once every one has, the one created last. Its lines are named `current_simulation_*`:
+
+| Line | What it is |
+| --- | --- |
+| `simulations` | How many simulations the database holds, closed ones included |
+| `current_simulation` | The current simulation's ID; nothing after the `=` on a database with no market yet |
+| `current_simulation_name` | Its name, with any character outside ASCII shown as `?`; nothing for one nobody named |
+| `current_simulation_state` | `SETUP`, `OPEN`, `HALTED` or `CLOSED` |
+| `current_simulation_last_command_sequence` | Its last committed command, as `GET /api/v1/market` reports it |
+| `current_simulation_trades` | How many trades it has |
+| `current_simulation_last_trade_sequence` | The highest trade sequence any of its instruments has reached |
+| `outbox_events` | Every simulation's events: the whole outbox, which a restore republishes |
+
+A manifest written before simulations could follow each other has `last_command_sequence`, `trades` and `last_trade_sequence` instead, taken over the whole database, which then held one simulation. Such a backup restores as before: a restore reads only `outbox_events` from the manifest.
 
 That one database is all a restore into the same stack needs; on another machine, or into a new stack, copy the bots' tokens too (see [Restoring on another machine, or into a new stack](#restoring-on-another-machine-or-into-a-new-stack)). It holds the bot runs too: their windows, their figures and the simulator manifest each run's worker reported, so a restore brings them all back. `backups/` is ignored by Git, and holds real data, so keep it private.
 

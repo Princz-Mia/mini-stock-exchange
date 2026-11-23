@@ -32,6 +32,9 @@ import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.testcontainers.containers.Container.ExecResult;
+import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.utility.MountableFile;
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -46,6 +49,8 @@ import com.mia_princz.mse.execution.trading.domain.Side;
  * close, and the second is set up with the same symbols and the same traders as the first, with other amounts, so
  * that anything read from the wrong simulation shows. The story is told once, and every test reads what it left: the
  * answers and the reads taken on the way, and each simulation's rows, which a closed simulation never changes again.
+ * <p>
+ * The backup manifest is read on the way too, by running the script the backup runs, inside this PostgreSQL.
  * <p>
  * What a start does when it does not go through in one piece, and what the engine holds afterwards, are in
  * {@link SimulationStartEngineIT}.
@@ -103,6 +108,8 @@ class SimulationStartIT {
 
 		UUID operatorId;
 
+		Map<String, String> manifestEmpty;
+
 		Answer statusBefore;
 
 		Map<String, Answer> badRequests = new LinkedHashMap<>();
@@ -148,6 +155,8 @@ class SimulationStartIT {
 		long alphaSequenceClosed;
 
 		Map<UUID, Balances> alphaBalances;
+
+		Map<String, String> manifestAlphaClosed;
 
 		UUID takenKey;
 
@@ -223,6 +232,10 @@ class SimulationStartIT {
 
 		Answer statusBetaOpen;
 
+		Map<String, String> manifestBetaOpen;
+
+		long outboxAtBetaOpen;
+
 		Answer betaClosed;
 
 		long betaSequence;
@@ -236,6 +249,8 @@ class SimulationStartIT {
 		Answer statusGamma;
 
 		Map<String, Long> epochs;
+
+		Map<String, String> manifestGamma;
 
 		int gammaAccounts;
 
@@ -257,6 +272,9 @@ class SimulationStartIT {
 
 	@Autowired
 	TradingStore store;
+
+	@Autowired
+	PostgreSQLContainer postgres;
 
 	@Value("${mse.bots.token-directory}")
 	Path tokenDirectory;
@@ -662,6 +680,60 @@ class SimulationStartIT {
 	}
 
 	/**
+	 * The backup manifest's figures are the current simulation's, and named so. With two simulations they are not the
+	 * largest of each: Alpha has more commands, more trades and a higher trade sequence than Béta, and while Béta is
+	 * the current one the manifest gives Béta's. Only the count of simulations and of outbox events, which a restore
+	 * republishes whole, are the database's.
+	 */
+	@Test
+	void theBackupManifestGivesTheCurrentSimulationsFigures() {
+		assertThat(story.manifestEmpty).containsEntry("simulations", "0")
+			.containsEntry("current_simulation", "")
+			.containsEntry("current_simulation_name", "")
+			.containsEntry("current_simulation_state", "")
+			.containsEntry("current_simulation_last_command_sequence", "0")
+			.containsEntry("current_simulation_trades", "0")
+			.containsEntry("current_simulation_last_trade_sequence", "0")
+			.containsEntry("outbox_events", "0");
+		assertThat(story.manifestEmpty.get("created_at")).matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z");
+		assertThat(Integer.parseInt(story.manifestEmpty.get("schema_version"))).isGreaterThanOrEqualTo(37);
+		assertThat(story.manifestEmpty.keySet()).as("no figure under a name that reads as the whole database's")
+			.containsExactly("created_at", "schema_version", "simulations", "current_simulation",
+					"current_simulation_name", "current_simulation_state", "current_simulation_last_command_sequence",
+					"current_simulation_trades", "current_simulation_last_trade_sequence", "outbox_events");
+
+		// A closed simulation with none after it is still the current one.
+		assertThat(story.manifestAlphaClosed).containsEntry("simulations", "1")
+			.containsEntry("current_simulation", story.alpha.simulation().toString())
+			.containsEntry("current_simulation_name", "Alpha")
+			.containsEntry("current_simulation_state", "CLOSED")
+			.containsEntry("current_simulation_last_command_sequence", Long.toString(story.alphaSequenceClosed))
+			.containsEntry("current_simulation_trades", "2")
+			.containsEntry("current_simulation_last_trade_sequence", "2");
+
+		assertThat(story.betaSequence).as("Alpha took more commands than Béta").isLessThan(story.alphaSequence);
+		long betaAtManifest = Long.parseLong(story.manifestBetaOpen.get("current_simulation_last_command_sequence"));
+		assertThat(betaAtManifest).isLessThan(story.alphaSequence).isLessThan(story.betaSequence).isPositive();
+		assertThat(story.manifestBetaOpen).containsEntry("simulations", "2")
+			.containsEntry("current_simulation", story.beta.simulation().toString())
+			// Plain text for both scripts: a character outside ASCII is shown as a question mark.
+			.containsEntry("current_simulation_name", "B?ta run")
+			.containsEntry("current_simulation_state", "OPEN")
+			.containsEntry("current_simulation_trades", "1")
+			.containsEntry("current_simulation_last_trade_sequence", "1")
+			.containsEntry("outbox_events", Long.toString(story.outboxAtBetaOpen));
+		assertThat(story.outboxAtBetaOpen).as("every simulation's events")
+			.isGreaterThan(Long.parseLong(story.manifestAlphaClosed.get("outbox_events")));
+
+		assertThat(story.manifestGamma).containsEntry("simulations", "3")
+			.containsEntry("current_simulation_name", "Gamma")
+			.containsEntry("current_simulation_state", "SETUP")
+			.containsEntry("current_simulation_last_command_sequence", "1")
+			.containsEntry("current_simulation_trades", "0")
+			.containsEntry("current_simulation_last_trade_sequence", "0");
+	}
+
+	/**
 	 * A process that starts with two closed simulations and a newer one in SETUP loads the newer one only: it takes
 	 * that one's epoch and leaves the closed ones at 0, takes no command, and goes on setting the new one up.
 	 */
@@ -696,6 +768,7 @@ class SimulationStartIT {
 	private void tell(Story s) throws Exception {
 		TestBrowser anonymous = new TestBrowser(port);
 		s.operatorId = jdbc.queryForObject("SELECT id FROM app_user WHERE username = 'operator'", UUID.class);
+		s.manifestEmpty = manifest();
 		s.statusBefore = answer(anonymous.get("/api/v1/market"));
 
 		// Before any market: what a start refuses without committing anything.
@@ -757,6 +830,7 @@ class SimulationStartIT {
 		assertThat(s.alphaEpoch).isEqualTo(alphaFirstEpoch + 1);
 		s.alphaSequenceClosed = sequence(alpha);
 		s.alphaBalances = balances(alpha);
+		s.manifestAlphaClosed = manifest();
 		s.takenKey = UUID.randomUUID();
 		s.nameTaken = answer(start(operator, "{\"name\":\"ALPHA\"}", s.takenKey));
 		s.alphaSequence = sequence(alpha);
@@ -838,6 +912,8 @@ class SimulationStartIT {
 		placed(new TestBrowser(port), limit(betaNova, "BUY", 2, "95.00"), bearer(s.beta.botTokens().get("MARKET_MAKER")));
 		s.oldTokenWhileOpen = oldBot.get("/api/v1/portfolio", maker).statusCode();
 		s.statusBetaOpen = answer(anonymous.get("/api/v1/market"));
+		s.manifestBetaOpen = manifest();
+		s.outboxAtBetaOpen = jdbc.queryForObject("SELECT count(*) FROM outbox", Long.class);
 
 		s.betaClosed = answer(operator.post(CLOSE, "", "Idempotency-Key", UUID.randomUUID().toString()));
 		s.betaSequence = sequence(beta);
@@ -851,6 +927,7 @@ class SimulationStartIT {
 		jdbc.query("SELECT name, writer_epoch FROM simulation", (row) -> {
 			s.epochs.put(row.getString(1), row.getLong(2));
 		});
+		s.manifestGamma = manifest();
 		s.gammaAccounts = JSON.readTree(operator.get("/api/v1/admin/accounts?limit=200").body()).get("accounts").size();
 	}
 
@@ -903,6 +980,33 @@ class SimulationStartIT {
 					String.class, run, bot), Files.readString(file).strip());
 		}
 		return new Setup(simulation, instruments, firstInstrument, accounts, run, botTokens, tokenFiles);
+	}
+
+	/**
+	 * The backup manifest's figures as the backup reads them: the script the backup scripts run inside the PostgreSQL
+	 * container, run inside this one, which takes its dump and prints its figures from one snapshot.
+	 */
+	private Map<String, String> manifest() throws Exception {
+		Path script = Path.of("../../infra/postgres/backup-execution-db.sh").toAbsolutePath().normalize();
+		postgres.copyFileToContainer(MountableFile.forHostPath(script), "/tmp/backup-execution-db.sh");
+		// The script signs in as postgres, the stack's superuser; this container names its own otherwise.
+		ExecResult role = postgres.execInContainer("psql", "-U", postgres.getUsername(), "-d", "postgres", "-c", """
+				DO $$ BEGIN
+				    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'postgres') THEN
+				        CREATE ROLE postgres SUPERUSER LOGIN;
+				    END IF;
+				END $$""");
+		assertThat(role.getExitCode()).as(role.getStderr()).isZero();
+		ExecResult ran = postgres.execInContainer("sh", "/tmp/backup-execution-db.sh");
+		assertThat(ran.getExitCode()).as(ran.getStderr()).isZero();
+		Map<String, String> figures = new LinkedHashMap<>();
+		for (String line : ran.getStdout().lines().toList()) {
+			int equals = line.indexOf('=');
+			assertThat(equals).as("a figure and its value: '%s'", line).isPositive();
+			assertThat(figures.put(line.substring(0, equals), line.substring(equals + 1))).as(line).isNull();
+		}
+		assertThat(postgres.execInContainer("test", "-s", "/tmp/execution_db.dump").getExitCode()).as("the dump").isZero();
+		return figures;
 	}
 
 	/** The trader's private stream, opened now; completes when the server ends it. */
