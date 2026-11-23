@@ -585,12 +585,16 @@ export interface paths {
          *     orders, trades, accounts and runs stay readable.
          *
          *     The answer comes once no order rests. A close with very many resting orders can take longer than the
-         *     request waits; it then answers 504 and goes on, and the same key returns its answer.
+         *     request waits; it then answers 504 and goes on. No lookup by key serves a close, since
+         *     /api/v1/commands/{key} answers for orders and cancels only: send the same key again, which waits for the
+         *     close and returns its answer.
          *
          *     A close is never left half done by a running exchange. If one of the later transactions fails, it is tried
-         *     again; if the orders still cannot all be canceled, the answer is 503 MARKET_CLOSE_UNFINISHED and trading
-         *     stops. The market is CLOSED by then, so nothing is to be sent again: the exchange cancels the orders that
-         *     still rest when it restarts, before it takes any command, and the same key then returns the close's answer.
+         *     again; if the orders still cannot all be canceled, trading stops and the answer is 503
+         *     MARKET_CLOSE_UNFINISHED. The request gets that answer if it is still waiting, and so does every close sent
+         *     from then until the exchange restarts, so a key that was answered 504 finds out as well. The market is
+         *     CLOSED by then, so nothing is to be sent again: the exchange cancels the orders that still rest when it
+         *     restarts, before it takes any command, and the key that closed the market then returns the close's answer.
          */
         readonly post: operations["closeMarket"];
         readonly delete?: never;
@@ -887,7 +891,10 @@ export interface components {
             readonly commandSequence?: components["schemas"]["Sequence"];
             readonly commandKey?: components["schemas"]["Uuid"];
             readonly reason?: string;
-            /** @description With MARKET_CLOSE_UNFINISHED, the orders a closed market still had resting when trading stopped. */
+            /**
+             * @description With MARKET_CLOSE_UNFINISHED, at most how many orders a closed market still had resting when trading
+             *     stopped. The exchange's own count; fewer may rest, by up to one transaction of the close.
+             */
             readonly restingOrders?: number;
             readonly usage?: components["schemas"]["InstrumentUsage"];
             readonly shortfall?: components["schemas"]["BotShortfall"];
@@ -3529,8 +3536,11 @@ export interface operations {
              * @description EXCHANGE_BUSY (not queued; retry with the same key), TRADING_UNAVAILABLE, or MARKET_CLOSE_UNFINISHED:
              *     the close committed, so the market is CLOSED, its bot runs have ended and its bot tokens are revoked,
              *     but not every resting order could be canceled, and trading has stopped. The problem carries state
-             *     (CLOSED), the close's commandSequence, restingOrders (how many orders still rested when trading
-             *     stopped) and commandKey. The exchange finishes the close when it restarts. Has Retry-After.
+             *     (CLOSED), the close's commandSequence, restingOrders and this request's commandKey. restingOrders is
+             *     an upper bound: the exchange's own count when trading stopped, and a transaction whose outcome it
+             *     could not learn may have canceled some of them already. Every close is answered this way until the
+             *     exchange restarts, which finishes the close. EXCHANGE_BUSY and TRADING_UNAVAILABLE have Retry-After;
+             *     MARKET_CLOSE_UNFINISHED has none, since nothing is to be sent again.
              */
             readonly 503: {
                 headers: {
@@ -3541,7 +3551,19 @@ export interface operations {
                     readonly "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            readonly 504: components["responses"]["OutcomeUnknown"];
+            /**
+             * @description COMMAND_OUTCOME_UNKNOWN. The close did not answer in time and may still be going on. Not to be looked
+             *     up by commandKey, which no route does for a close: send the same key again. It returns the close's
+             *     answer once the close is done, or 503 MARKET_CLOSE_UNFINISHED if trading stopped for it.
+             */
+            readonly 504: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
         };
     };
     readonly exportTrades: {

@@ -107,8 +107,12 @@ public interface TradingStore {
 	 */
 	void closeMarket(UUID simulationId, Instant closedAt);
 
-	/** Who closed the market: the actor of its applied close. Empty if it was never closed by a command. */
-	Optional<UUID> closedBy(UUID simulationId);
+	/** The close that closed a market, as its audit row has it: who sent it, and its sequence. */
+	record AppliedClose(UUID actorUserId, long commandSequence) {
+	}
+
+	/** The market's applied close. Empty if it was never closed by a command. */
+	Optional<AppliedClose> appliedClose(UUID simulationId);
 
 	/** Records an operator action and its outcome. The correlation ID is the command's idempotency key. */
 	void insertAudit(UUID simulationId, UUID actorUserId, String action, String outcome, UUID correlationId,

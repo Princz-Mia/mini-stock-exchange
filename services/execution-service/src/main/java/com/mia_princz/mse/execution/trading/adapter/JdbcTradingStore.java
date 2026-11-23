@@ -256,12 +256,12 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public Optional<UUID> closedBy(UUID simulationId) {
+	public Optional<AppliedClose> appliedClose(UUID simulationId) {
 		return jdbc.sql("""
-				SELECT actor_user_id FROM audit_log
+				SELECT actor_user_id, command_sequence FROM audit_log
 				WHERE simulation_id = ? AND action = 'MARKET_CLOSE' AND outcome = 'APPLIED'""")
 			.param(simulationId)
-			.query(UUID.class)
+			.query((row, index) -> new AppliedClose(row.getObject(1, UUID.class), row.getLong(2)))
 			.optional();
 	}
 

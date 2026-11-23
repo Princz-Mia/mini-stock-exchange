@@ -91,8 +91,10 @@ class MarketController {
 
 	/**
 	 * Closes the market for good. A close with many orders resting takes several transactions, so it waits longer for
-	 * its answer than other commands do; past that, the close goes on and the same key returns its answer. A close that
-	 * committed and could not cancel every order is answered by {@link CommandCalls} as unfinished, not as failed.
+	 * its answer than other commands do; past that, the close goes on and the same key returns its answer. No lookup
+	 * by key serves a close, so the timeout says to send the key again. A close that committed and could not cancel
+	 * every order is answered by {@link CommandCalls} as unfinished, not as failed, to the request that sent it and
+	 * to any close sent before the restart.
 	 */
 	@PostMapping("/admin/market/close")
 	CloseResponse close(@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader,
@@ -101,6 +103,7 @@ class MarketController {
 		UUID operator = queries.userId(authentication.getName()).orElseThrow();
 		CommandKey commandKey = new CommandKey(operator, key, CLOSE_ROUTE, CommandCalls.sha256(CLOSE_ROUTE));
 		MarketClosing result = CommandCalls.await(key, closeTimeout,
+				"The close may still be going on; send the same key again for its answer",
 				() -> engine.close(commandKey, new MarketControl(MarketControl.Action.CLOSE, operator)));
 		return switch (result.status()) {
 			case CLOSED -> new CloseResponse(result.state(), Long.toString(result.commandSequence()),

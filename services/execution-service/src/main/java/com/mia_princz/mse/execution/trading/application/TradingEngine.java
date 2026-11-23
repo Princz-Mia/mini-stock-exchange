@@ -152,6 +152,13 @@ public final class TradingEngine {
 	/** Whether the market this engine holds has closed, as last committed; written by the writer only. */
 	private volatile boolean closed;
 
+	/**
+	 * The close this engine could not finish, once there is one: set where the writer halts for it, or where startup
+	 * gives it up, and never cleared, since only another start finishes it. Volatile, because a close sent meanwhile
+	 * is answered from it on the caller's thread.
+	 */
+	private volatile CloseUnfinishedException unfinishedClose;
+
 	private long writerEpoch;
 
 	/**
@@ -263,18 +270,20 @@ public final class TradingEngine {
 	/**
 	 * Finishes the order sweep of a close that a stopped process left unfinished, on the thread that starts the engine:
 	 * the books are rebuilt and reconciled, and no command runs yet. The sweep's parts are recorded under the operator
-	 * who closed the market, as they would have been. Anything that fails here fails startup.
+	 * who closed the market, as they would have been. Anything that fails here fails startup, and a close sent to
+	 * the process while it stops is told the close is unfinished.
 	 */
 	private void finishInterruptedClose() {
-		UUID actor = transactions.inTransaction(() -> store.closedBy(simulationId))
+		TradingStore.AppliedClose close = transactions.inTransaction(() -> store.appliedClose(simulationId))
 			.orElseThrow(() -> new IllegalStateException("Simulation " + simulationId + " is closed with "
 					+ restingOrders() + " orders still resting, and no close of it is on record"));
 		int resting = restingOrders();
 		SweepTimes times = new SweepTimes();
 		try {
-			finishSweep(actor, times);
+			finishSweep(close.actorUserId(), times);
 		}
 		catch (RuntimeException | Error ex) {
+			unfinishedClose = new CloseUnfinishedException(close.commandSequence(), restingOrders(), ex);
 			throw new IllegalStateException("The market's close could not be finished", ex);
 		}
 		LOG.info("Finished the market's close at startup: {} resting orders cancelled in {} transactions in {} ms, "
@@ -339,12 +348,41 @@ public final class TradingEngine {
 	 * and rolls back is tried again a few times; if it still fails, or anything else stops the sweep, the writer halts
 	 * with a {@link CloseUnfinishedException} as the cause, and startup cancels what still rests before it takes a
 	 * command. So a writer that takes commands for a closed market has no order resting.
+	 * <p>
+	 * A close sent to an engine that has stopped for an unfinished close fails with that
+	 * {@link CloseUnfinishedException} itself, whether it was queued behind the close that halted or is refused now:
+	 * the caller of the first may have stopped waiting before the halt, and its key must still find out what happened.
 	 */
 	public CompletableFuture<MarketClosing> close(CommandKey key, MarketControl command) {
 		if (command.action() != MarketControl.Action.CLOSE) {
 			throw new IllegalArgumentException("Not a close: " + command.action());
 		}
-		return submit("close", () -> processClose(key, command));
+		CompletableFuture<MarketClosing> submitted;
+		try {
+			submitted = submit("close", () -> processClose(key, command));
+		}
+		catch (CommandWriter.WriterStoppedException ex) {
+			// Read after the refusal: an unfinished close is kept before its writer stops admitting.
+			CloseUnfinishedException unfinished = unfinishedClose;
+			if (unfinished == null) {
+				throw ex;
+			}
+			return CompletableFuture.failedFuture(unfinished);
+		}
+		CompletableFuture<MarketClosing> answer = new CompletableFuture<>();
+		submitted.whenComplete((result, failure) -> {
+			CloseUnfinishedException unfinished = unfinishedClose;
+			if (failure == null) {
+				answer.complete(result);
+			}
+			else if (failure instanceof CommandWriter.WriterStoppedException && unfinished != null) {
+				answer.completeExceptionally(unfinished);
+			}
+			else {
+				answer.completeExceptionally(failure);
+			}
+		});
+		return answer;
 	}
 
 	/**
@@ -1562,6 +1600,8 @@ public final class TradingEngine {
 				// Not an answer of "failed, nothing applied", and not a writer that goes on with a market half closed.
 				CloseUnfinishedException unfinished = new CloseUnfinishedException(result.commandSequence(),
 						restingOrders(), ex);
+				// Kept before the writer stops admitting, so a close sent from now on is told this and not less.
+				unfinishedClose = unfinished;
 				// On record here, whoever is still waiting for the answer: a close can outlast its request's wait.
 				LOG.error("The market's close at sequence {} halted the writer before it finished; resting orders left: "
 						+ "at most {}. Trading is stopped until a restart, which finishes the close",
@@ -2032,7 +2072,8 @@ public final class TradingEngine {
 	/**
 	 * The market closed, and this writer could not finish cancelling the orders that rested. The close itself
 	 * committed, so nothing of it is undone and nothing is to be sent again: the writer halts with this as the cause,
-	 * and the next start cancels what still rests before it takes a command.
+	 * and the next start cancels what still rests before it takes a command. A close sent to the engine meanwhile
+	 * fails with this itself.
 	 */
 	public static final class CloseUnfinishedException extends RuntimeException {
 
@@ -2043,8 +2084,8 @@ public final class TradingEngine {
 		private final int restingOrders;
 
 		public CloseUnfinishedException(long commandSequence, int restingOrders, Throwable cause) {
-			super("The market closed at sequence " + commandSequence + ", and " + restingOrders
-					+ " orders still rest; the next start cancels them", cause);
+			super("The market closed at sequence " + commandSequence + " and its close did not finish; resting orders "
+					+ "left: at most " + restingOrders + ". The next start finishes it", cause);
 			this.commandSequence = commandSequence;
 			this.restingOrders = restingOrders;
 		}
@@ -2054,7 +2095,11 @@ public final class TradingEngine {
 			return commandSequence;
 		}
 
-		/** The orders still in the books when the writer stopped. */
+		/**
+		 * The orders still in the books when the writer stopped. An upper bound on what rests in the database: a part
+		 * that committed without the books hearing of it, or without their applying all of it, cancelled up to one
+		 * part more.
+		 */
 		public int restingOrders() {
 			return restingOrders;
 		}

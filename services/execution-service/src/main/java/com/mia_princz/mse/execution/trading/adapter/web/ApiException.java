@@ -47,6 +47,12 @@ final class ApiException extends RuntimeException {
 		return this;
 	}
 
+	/** For a 503 that no retry gets past: it is sent without {@code Retry-After}. */
+	ApiException withoutRetryAfter() {
+		this.retryAfterSeconds = 0;
+		return this;
+	}
+
 	static ApiException invalid(String field, String code, String message) {
 		return new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "The request is invalid",
 				List.of(new FieldError(field, code, message)));
@@ -56,6 +62,7 @@ final class ApiException extends RuntimeException {
 		return status;
 	}
 
+	/** Zero when the answer is to carry no {@code Retry-After}. */
 	int retryAfterSeconds() {
 		return retryAfterSeconds;
 	}

@@ -27,7 +27,7 @@ import com.mia_princz.mse.execution.trading.application.TradingEngine;
  * <p>
  * A close here cancels one order per transaction. What stops it is an order ended behind the exchange's back, which
  * the books still hold; {@link MarketCloseSweepIT} has the other ways a close can be stopped, and the start that
- * finishes it.
+ * finishes it. {@link MarketCloseUnansweredIT} has the close whose request stops waiting before the halt.
  */
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT,
@@ -59,7 +59,7 @@ class MarketCloseUnfinishedIT {
 
 	@Test
 	void aCloseThatCannotCancelEveryOrderSaysTheMarketIsClosedAndTradingStops() throws Exception {
-		UUID instrument = new TransactionTemplate(transactionManager).execute((status) -> market());
+		UUID instrument = new TransactionTemplate(transactionManager).execute((status) -> market(jdbc));
 		engine.start();
 		TestBrowser trader = TestBrowser.loggedIn(port, "trader", PASSWORD);
 		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
@@ -69,27 +69,12 @@ class MarketCloseUnfinishedIT {
 		long before = sequence();
 		assertThat(new TestBrowser(port).get("/actuator/health/readiness").statusCode()).isEqualTo(200);
 		// The close takes the best bid first, so this is the order of its third transaction.
-		jdbc.update("""
-				UPDATE orders SET state = 'CANCELED', reason = 'OUTSIDE', canceled_quantity = working_quantity,
-				    working_quantity = 0
-				WHERE id = ?::uuid""", low);
+		jdbc.update(END_OUTSIDE, low);
 
 		UUID key = UUID.randomUUID();
 		HttpResponse<String> closed = operator.post(CLOSE, "", "Idempotency-Key", key.toString());
 
-		assertThat(closed.statusCode()).as(closed.body()).isEqualTo(503);
-		assertThat(closed.headers().firstValue("Retry-After")).isPresent();
-		CONTRACT.assertResponse("POST", CLOSE, 503, closed.headers().firstValue("Content-Type").orElse(null),
-				closed.body());
-		JsonNode problem = JSON.readTree(closed.body());
-		assertThat(problem.get("code").asString()).isEqualTo("MARKET_CLOSE_UNFINISHED");
-		assertThat(problem.get("state").asString()).isEqualTo("CLOSED");
-		assertThat(problem.get("commandSequence").asString()).as("the close's own")
-			.isEqualTo(Long.toString(before + 1));
-		assertThat(problem.get("restingOrders").asInt()).isEqualTo(1);
-		assertThat(problem.get("commandKey").asString()).isEqualTo(key.toString());
-		assertThat(problem.get("detail").asString()).contains("The market is closed", "1 orders still rest", "restarts")
-			.doesNotContain("nothing was applied");
+		assertUnfinished(closed, key, before + 1);
 
 		// What it says is so: closed, with the first two orders cancelled by the close and its second transaction.
 		JsonNode market = JSON.readTree(new TestBrowser(port).get("/api/v1/market").body());
@@ -102,18 +87,48 @@ class MarketCloseUnfinishedIT {
 		assertThat(jdbc.queryForObject("SELECT action || ' ' || outcome FROM audit_log WHERE correlation_id = ?",
 				String.class, key)).isEqualTo("MARKET_CLOSE APPLIED");
 
-		// Trading has stopped, and the application says so until it is restarted.
+		// Trading has stopped, and the application says so until it is restarted. A close is told why again, under
+		// the same key or another; an order only that trading is unavailable, to be tried again later.
 		assertThat(new TestBrowser(port).get("/actuator/health/readiness").statusCode()).isEqualTo(503);
-		HttpResponse<String> again = operator.post(CLOSE, "", "Idempotency-Key", key.toString());
-		assertThat(again.statusCode()).isEqualTo(503);
-		assertThat(JSON.readTree(again.body()).get("code").asString()).isEqualTo("TRADING_UNAVAILABLE");
+		assertUnfinished(operator.post(CLOSE, "", "Idempotency-Key", key.toString()), key, before + 1);
+		UUID other = UUID.randomUUID();
+		assertUnfinished(operator.post(CLOSE, "", "Idempotency-Key", other.toString()), other, before + 1);
 		HttpResponse<String> order = trader.post("/api/v1/orders", order(instrument, "90.00"), "Idempotency-Key",
 				UUID.randomUUID().toString());
 		assertThat(order.statusCode()).isEqualTo(503);
+		assertThat(JSON.readTree(order.body()).get("code").asString()).isEqualTo("TRADING_UNAVAILABLE");
+		assertThat(order.headers().firstValue("Retry-After")).isPresent();
 		assertThat(sequence()).isEqualTo(before + 2);
 	}
 
-	private UUID market() {
+	/** Ends an order behind the exchange's back, so that its books still hold it. */
+	static final String END_OUTSIDE = """
+			UPDATE orders SET state = 'CANCELED', reason = 'OUTSIDE', canceled_quantity = working_quantity,
+			    working_quantity = 0
+			WHERE id = ?::uuid""";
+
+	/**
+	 * The answer for a close of this class's market that left its last order: the market is closed, by the close at
+	 * {@code sequence}, with at most one order resting. It says nothing is to be sent again, so it has no Retry-After.
+	 */
+	static void assertUnfinished(HttpResponse<String> answer, UUID key, long sequence) {
+		assertThat(answer.statusCode()).as(answer.body()).isEqualTo(503);
+		assertThat(answer.headers().firstValue("Retry-After")).as("nothing is to be sent again").isEmpty();
+		CONTRACT.assertResponse("POST", CLOSE, 503, answer.headers().firstValue("Content-Type").orElse(null),
+				answer.body());
+		JsonNode problem = JSON.readTree(answer.body());
+		assertThat(problem.get("code").asString()).isEqualTo("MARKET_CLOSE_UNFINISHED");
+		assertThat(problem.get("state").asString()).isEqualTo("CLOSED");
+		assertThat(problem.get("commandSequence").asString()).as("the close's own").isEqualTo(Long.toString(sequence));
+		assertThat(problem.get("restingOrders").asInt()).isEqualTo(1);
+		assertThat(problem.get("commandKey").asString()).isEqualTo(key.toString());
+		assertThat(problem.get("detail").asString())
+			.contains("The market is closed", "at most 1 order still rests.", "nothing is to be sent again", "restarts")
+			.doesNotContain("nothing was applied");
+	}
+
+	/** An open market with one instrument and the development trader funded with cash; returns the instrument. */
+	static UUID market(JdbcTemplate jdbc) {
 		UUID simulation = UUID.randomUUID();
 		UUID issuance = UUID.randomUUID();
 		UUID instrument = UUID.randomUUID();
@@ -139,14 +154,14 @@ class MarketCloseUnfinishedIT {
 	}
 
 	/** Places a resting bid and returns its ID. */
-	private static String place(TestBrowser trader, UUID instrument, String price) throws Exception {
+	static String place(TestBrowser trader, UUID instrument, String price) throws Exception {
 		HttpResponse<String> placed = trader.post("/api/v1/orders", order(instrument, price), "Idempotency-Key",
 				UUID.randomUUID().toString());
 		assertThat(placed.statusCode()).as(placed.body()).isEqualTo(201);
 		return JSON.readTree(placed.body()).get("orderId").asString();
 	}
 
-	private static String order(UUID instrument, String price) {
+	static String order(UUID instrument, String price) {
 		return """
 				{"instrumentId":"%s","side":"BUY","type":"LIMIT","timeInForce":"GTC","quantity":1,"limitPrice":"%s"}"""
 			.formatted(instrument, price);

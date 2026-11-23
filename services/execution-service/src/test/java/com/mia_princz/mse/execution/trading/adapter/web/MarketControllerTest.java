@@ -73,4 +73,41 @@ class MarketControllerTest {
 		}
 	}
 
+	/**
+	 * No lookup by key serves a close, so a close that is not answered in time does not send its caller to one: it
+	 * says to send the same key again, which is what returns the answer.
+	 */
+	@Test
+	void aCloseNotAnsweredInTimeSaysToSendTheSameKeyAgain() throws Exception {
+		TradingQueries queries = mock(TradingQueries.class);
+		when(queries.userId("operator")).thenReturn(Optional.of(UUID.randomUUID()));
+		Authentication operator = new TestingAuthenticationToken("operator", "n/a");
+		CountDownLatch release = new CountDownLatch(1);
+		try (CommandWriter writer = new CommandWriter("market-controller-test", 8)) {
+			TradingEngine engine = new TradingEngine(mock(TradingStore.class), mock(TransactionRunner.class), writer,
+					Clock.systemUTC(), (account) -> new byte[0]);
+			engine.startEmpty();
+			MarketController controller = new MarketController(engine, queries, Duration.ofMillis(100),
+					Duration.ofMillis(100));
+			CountDownLatch running = new CountDownLatch(1);
+			writer.submit(() -> {
+				running.countDown();
+				return release.await(30, TimeUnit.SECONDS);
+			});
+			running.await();
+			UUID key = UUID.randomUUID();
+
+			ApiException close = catchThrowableOfType(ApiException.class,
+					() -> controller.close(key.toString(), operator));
+
+			assertThat(close.status()).isEqualTo(HttpStatus.GATEWAY_TIMEOUT);
+			assertThat(close.toProblem().getProperties()).containsEntry("code", "COMMAND_OUTCOME_UNKNOWN")
+				.containsEntry("commandKey", key.toString());
+			assertThat(close.getMessage()).contains("send the same key again").doesNotContain("look it up");
+		}
+		finally {
+			release.countDown();
+		}
+	}
+
 }

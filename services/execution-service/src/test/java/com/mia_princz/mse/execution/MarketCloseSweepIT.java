@@ -492,6 +492,8 @@ class MarketCloseSweepIT {
 		assertThat(errors(output)).as("on record, with what the books still hold")
 			.anyMatch((line) -> line.contains("The market's close halted the writer in its own transaction")
 					&& line.contains("resting orders in the books: 5."));
+		// Not an unfinished close as far as this writer knows, so a close sent to it is told no more than that.
+		assertThatThrownBy(() -> engine.close(closeKey, closeCommand())).isInstanceOf(WriterStoppedException.class);
 		assertThat(jdbc.queryForObject("SELECT state FROM simulation WHERE id = ?", String.class, simulation))
 			.isEqualTo("CLOSED");
 		assertThat(sequence()).isEqualTo(open + 1);
@@ -525,6 +527,45 @@ class MarketCloseSweepIT {
 		assertThat(sequence()).isEqualTo(open + 1);
 		assertThat(resting()).isEqualTo(3);
 		assertThat(reconciliationProblems()).isEmpty();
+
+		theNextStartFinishesTheClose(closeKey, open + 1, open + 3);
+	}
+
+	/**
+	 * What a writer that halted for an unfinished close tells whoever sends it a close from then on: the same, with
+	 * the close's sequence and what was left, whether the close was queued behind the one that halted or comes
+	 * later, under the same key or another. The request that sent the first close may have stopped waiting before the
+	 * halt, and this is how its key finds out. Any other command is told only that the writer has stopped.
+	 */
+	@Test
+	void aCloseSentToAWriterThatHaltedForAnUnfinishedCloseIsToldTheSame() throws Exception {
+		UUID a = funded();
+		UUID b = funded();
+		TradingEngine engine = engine();
+		engine.start();
+		fiveResting(engine, a, b);
+		long open = sequence();
+		CommandKey closeKey = key(CLOSE_ROUTE);
+
+		// Before the second transaction, on the writer's thread: another close joins the queue behind this one, and
+		// then the market is taken over, which the part is not tried again for.
+		List<CompletableFuture<MarketClosing>> queued = new ArrayList<>();
+		transactions.before(1, () -> {
+			queued.add(engine.close(key(CLOSE_ROUTE), closeCommand()));
+			jdbc.update("UPDATE simulation SET writer_epoch = writer_epoch + 1 WHERE id = ?", simulation);
+		});
+		unfinished(engine.close(closeKey, closeCommand()), open + 1, 3);
+
+		assertThat(queued).hasSize(1);
+		assertToldUnfinished(queued.getFirst(), open + 1, 3);
+		assertToldUnfinished(engine.close(closeKey, closeCommand()), open + 1, 3);
+		assertToldUnfinished(engine.close(key(CLOSE_ROUTE), closeCommand()), open + 1, 3);
+		assertThatThrownBy(() -> place(engine, a, first, Side.BUY, "90.00", 1))
+			.isInstanceOf(WriterStoppedException.class);
+		assertThatThrownBy(() -> engine.control(key("POST /api/v1/admin/market/halt"),
+				new MarketControl(MarketControl.Action.HALT, operator)))
+			.isInstanceOf(WriterStoppedException.class);
+		assertThat(sequence()).as("none of them ran").isEqualTo(open + 1);
 
 		theNextStartFinishesTheClose(closeKey, open + 1, open + 3);
 	}
@@ -593,7 +634,8 @@ class MarketCloseSweepIT {
 
 	/**
 	 * A process that starts on a market closed half-way and cannot finish the close does not start: it fails, its
-	 * health stays down, and it takes no command. The process after it finishes.
+	 * health stays down, and it takes no command. A close sent to it while it stops is told the close is unfinished,
+	 * as by the writer that halted. The process after it finishes.
 	 */
 	@Test
 	void aStartThatCannotFinishTheCloseFailsAndTakesNoCommand() throws Exception {
@@ -619,6 +661,7 @@ class MarketCloseSweepIT {
 		assertThat(startup.health().getStatus()).isEqualTo(Status.DOWN);
 		assertThatThrownBy(() -> place(next, a, first, Side.BUY, "90.00", 1)).isInstanceOf(WriterStoppedException.class)
 			.hasMessage("Trading has not started");
+		assertToldUnfinished(next.close(closeKey, closeCommand()), open + 1, 3);
 		assertThat(sequence()).isEqualTo(open + 1);
 		assertThat(resting()).isEqualTo(3);
 
@@ -873,6 +916,19 @@ class MarketCloseSweepIT {
 			assertThat(unfinished.restingOrders()).isEqualTo(resting);
 		});
 		return cause.getCause();
+	}
+
+	/**
+	 * A close sent to a writer that had halted for an unfinished close, or to a start that could not finish one,
+	 * fails with that close itself: its sequence and what the books still held.
+	 */
+	private static void assertToldUnfinished(CompletableFuture<?> close, long sequence, int resting) {
+		Throwable failure = catchThrowable(() -> close.get(20, TimeUnit.SECONDS));
+		assertThat(failure).isInstanceOf(ExecutionException.class);
+		assertThat(failure.getCause()).isInstanceOfSatisfying(CloseUnfinishedException.class, (unfinished) -> {
+			assertThat(unfinished.commandSequence()).isEqualTo(sequence);
+			assertThat(unfinished.restingOrders()).isEqualTo(resting);
+		});
 	}
 
 	/**
