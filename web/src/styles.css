@@ -1549,6 +1549,11 @@ dialog.tour p {
   margin: 0;
 }
 
+/* The market panel's heading takes focus when a close is answered, so that a screen reader is beside the answer. */
+.market-control h2:focus {
+  outline: none;
+}
+
 /*
  * A confirmation of something that cannot be undone: a card in the middle of the screen over a dimmed page, what it
  * does as a short list, and the button that changes nothing first.
