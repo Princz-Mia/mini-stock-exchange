@@ -93,23 +93,35 @@ function closeRefusal(outcome: Extract<CommandOutcome<MarketClosed>, { kind: 're
 /**
  * What became of a close, which has more answers than the other transitions: it can take long, and it can stop half
  * way with the market already closed. Each is said as what it is, and the same key is sent again only where asking
- * again can bring something new.
+ * again can bring something new. The market's own state is part of it: once the status says CLOSED, a close with no
+ * answer is not said to be unknown, whatever the exchange answered or failed to.
  */
 function CloseStatus({
   outcome,
+  state,
   stillResting,
+  askedBefore,
   onRetry,
 }: {
   outcome: CommandOutcome<MarketClosed>;
+  state: MarketStatus['state'];
   /** Set once the exchange has said the close is unfinished: how many orders still rested, if it said. */
   stillResting: number | null | undefined;
+  /** The key has been sent before, so what is on its way asks for an answer rather than closing. */
+  askedBefore: boolean;
   onRetry: () => void;
 }) {
   switch (outcome.kind) {
     case 'idle':
       return null;
     case 'sending':
-      return (
+      // Asked again for a market that is closed already: nothing is being closed, and after an unfinished close
+      // nothing is being cancelled either until the exchange is restarted.
+      return stillResting !== undefined || (askedBefore && state === 'CLOSED') ? (
+        <p role="status" className="outcome outcome-pending">
+          Asking for the close&apos;s answer…
+        </p>
+      ) : (
         <p role="status" className="outcome outcome-pending">
           Closing the market… Every resting order is being cancelled, which can take up to about half a minute on a
           full market.
@@ -140,6 +152,23 @@ function CloseStatus({
               . The exchange has stopped trading and cancels them when it is restarted. Nothing needs to be sent again.
             </p>
             <p>After the restart, the close&apos;s answer says how many orders it cancelled and how many runs it ended.</p>
+            <button type="button" className="quiet" onClick={onRetry}>
+              Ask for the close&apos;s answer
+            </button>
+          </div>
+        );
+      }
+      if (state === 'CLOSED') {
+        // Whatever was answered, or nothing at all: the status settles whether it closed. What is still open is
+        // what the close did, and whether it has finished.
+        return (
+          <div role="alert" className="outcome outcome-pending">
+            <p>
+              The market is closed, but the close has not given its answer here, so how many orders it cancelled and
+              how many runs it ended is not known yet. Until it answers, some orders may still rest: it may still be
+              cancelling them, or the exchange may have stopped, and then cancels them when it is restarted.
+            </p>
+            <p>Asking sends the same key, so nothing is closed twice.</p>
             <button type="button" className="quiet" onClick={onRetry}>
               Ask for the close&apos;s answer
             </button>
@@ -317,7 +346,9 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
       {closing ? (
         <CloseStatus
           outcome={close.outcome}
+          state={market.state}
           stillResting={close.stillResting}
+          askedBefore={close.askedBefore}
           onRetry={close.run}
         />
       ) : (

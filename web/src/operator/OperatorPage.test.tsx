@@ -2648,6 +2648,72 @@ describe('closing the market on the operator screen', () => {
     expect(keys(server)).toHaveLength(3);
   });
 
+  it('asks for the answer of an unfinished close without saying anything is being cancelled', async () => {
+    const { server, state } = exchange('OPEN');
+    const later = answerLater();
+    server.on(`POST ${CLOSE}`, () => {
+      state.market = market('CLOSED');
+      return closes(server).length === 1
+        ? { status: 503, problem: { status: 503, code: 'MARKET_CLOSE_UNFINISHED', detail: 'unfinished', restingOrders: 7 } }
+        : later.reply;
+    });
+    renderPage();
+
+    await confirmClose();
+    fireEvent.click(await button("Ask for the close's answer"));
+
+    // The exchange is stopped, or just back: nothing is being cancelled by this request, which only asks.
+    expect(await screen.findByText("Asking for the close's answer…")).toHaveAttribute('role', 'status');
+    expect(screen.queryByText(/Closing the market…/)).toBeNull();
+    later.answer({ status: 200, json: closedAnswer });
+    expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
+  });
+
+  it('says the market is closed once the status says so, whatever the close was answered or was not', async () => {
+    const { server, state } = exchange('OPEN');
+    const later = answerLater();
+    const answers = [
+      // The answer of a close that went on, stopped half way and was answered unfinished is lost with this one.
+      {
+        status: 504,
+        problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN', detail: 'The outcome is not known yet', commandKey: 'k' },
+      },
+      // The same key then meets the stopped exchange,
+      { status: 503, problem: { status: 503, code: 'TRADING_UNAVAILABLE', detail: 'Trading is unavailable' } },
+      // then the proxy, with the exchange being restarted: no problem body at all.
+      { status: 502 },
+    ];
+    server.on(`POST ${CLOSE}`, () => {
+      state.market = market('CLOSED');
+      return answers[closes(server).length - 1] ?? later.reply;
+    });
+    renderPage();
+
+    await confirmClose();
+    const closedUnanswered =
+      'The market is closed, but the close has not given its answer here, so how many orders it cancelled and how many runs it ended is not known yet. Until it answers, some orders may still rest';
+    for (const sent of [1, 2, 3]) {
+      await waitFor(() => expect(closes(server)).toHaveLength(sent));
+      await waitFor(async () => expect(await said()).toHaveTextContent(closedUnanswered));
+      // Nothing that doubts the close itself, beside a badge that says Closed, and no retry as if nothing happened.
+      const note = await said();
+      expect(note).toHaveTextContent('Asking sends the same key, so nothing is closed twice.');
+      expect(note).not.toHaveTextContent(/is not known here|outcome is not known yet|Not confirmed/);
+      expect(screen.getByText('Closed', { selector: '.state-badge' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Ask again' })).toBeNull();
+      fireEvent.click(within(note).getByRole('button', { name: "Ask for the close's answer" }));
+    }
+
+    // Asked a fourth time, and this one waits: the market being closed, it asks, and closes nothing.
+    expect(await screen.findByText("Asking for the close's answer…")).toHaveAttribute('role', 'status');
+    expect(screen.queryByText(/Closing the market…/)).toBeNull();
+    later.answer({ status: 200, json: closedAnswer });
+    expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
+    expect(keys(server)).toHaveLength(4);
+    expect(new Set(keys(server)).size).toBe(1);
+  });
+
   it('finds a close with no answer as it was on coming back to the page, and sends the same key', async () => {
     const { server, state } = exchange('OPEN');
     server.on(`POST ${CLOSE}`, () => {
