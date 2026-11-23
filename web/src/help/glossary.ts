@@ -56,6 +56,12 @@ export const GLOSSARY = {
     definition:
       'The operator has paused trading. New orders are refused, but open orders can still be cancelled. Trading goes on when the operator resumes the market.',
   },
+  closed: {
+    term: 'Closed',
+    definition:
+      'The operator has ended the market for good. No order is taken any more, every order that was still open was cancelled ' +
+      'and what it had reserved was released, and the bots have stopped. Portfolios, orders and trades stay readable. A closed market never opens again.',
+  },
   spread: {
     term: 'Spread',
     definition:

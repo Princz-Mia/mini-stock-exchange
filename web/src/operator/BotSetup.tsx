@@ -15,7 +15,16 @@ import { useCommand } from './useCommand';
  * makes at most a batch. Every bot in one command gets the same strategy and endowment, and its own token, which goes
  * to the simulator and is never shown here.
  */
-export function BotSetup({ instruments, editable }: { instruments: readonly Instrument[]; editable: boolean }) {
+export function BotSetup({
+  instruments,
+  editable,
+  closed = false,
+}: {
+  instruments: readonly Instrument[];
+  editable: boolean;
+  /** The market has closed: its bots are listed, and trade no more. */
+  closed?: boolean;
+}) {
   const client = useQueryClient();
   const population = useQuery({ queryKey: ['bots'], queryFn: api.botPopulation });
   const [count, setCount] = useState('');
@@ -136,7 +145,11 @@ export function BotSetup({ instruments, editable }: { instruments: readonly Inst
           </fieldset>
         </form>
       ) : (
-        <p className="muted">Bots are created before the market opens; the population is fixed after that.</p>
+        <p className="muted">
+          {closed
+            ? "The market has closed, so no bot can be created. These bots trade no more: the close revoked every bot's token."
+            : 'Bots are created before the market opens; the population is fixed after that.'}
+        </p>
       )}
       <div id={outcomeId}>
         <CommandStatus

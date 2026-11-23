@@ -115,6 +115,9 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
         <p className="muted">Loading…</p>
       ) : active !== undefined ? (
         <ActiveRun run={active} now={now} />
+      ) : market === 'CLOSED' ? (
+        // No form: nothing in it could be sent. The runs the market had stay below, with their comparison.
+        <p className="muted">The market has closed, so no run can start. Its runs stay listed, and can still be compared.</p>
       ) : (
         <StartForm
           market={market}

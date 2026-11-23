@@ -21,6 +21,7 @@ import type {
   InstrumentEditRequest,
   InstrumentRequest,
   Instruments,
+  MarketClosed,
   MarketQuality,
   MarketStatus,
   MarketTransition,
@@ -212,6 +213,13 @@ export const api = {
   /** Operator commands: each is committed when it returns, and a retry with its key returns the first answer. */
   controlMarket: (action: 'open' | 'halt' | 'resume', idempotencyKey: string) =>
     request<MarketTransition>('POST', `/api/v1/admin/market/${action}`, { idempotencyKey }),
+
+  /**
+   * Closes the market for good. It answers once no order rests, which on a full market can take longer than other
+   * commands; a wait that runs out is answered 504, and the same key then returns the close's answer.
+   */
+  closeMarket: (idempotencyKey: string) =>
+    request<MarketClosed>('POST', '/api/v1/admin/market/close', { idempotencyKey }),
 
   addInstrument: (instrument: InstrumentRequest, idempotencyKey: string) =>
     request<InstrumentCreated>('POST', '/api/v1/admin/instruments', { body: instrument, idempotencyKey }),
