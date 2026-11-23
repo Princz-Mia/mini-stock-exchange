@@ -12,8 +12,10 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.authentication.TestingAuthenticationToken;
+import org.springframework.security.web.authentication.preauth.PreAuthenticatedAuthenticationToken;
 
 import com.mia_princz.mse.execution.TestcontainersConfiguration;
+import com.mia_princz.mse.execution.identity.BotPrincipal;
 import com.mia_princz.mse.execution.trading.application.AddInstrument;
 import com.mia_princz.mse.execution.trading.application.AddTrader;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
@@ -35,9 +37,13 @@ import com.mia_princz.mse.execution.trading.domain.SimulationName;
  * keep per account, they keep through a close, since the closed market's people still read it; they drop all of it
  * when the next simulation starts, because the engine tells them. The story over HTTP is in
  * {@code SimulationStartIT}; what each of them does when told is in {@link SimulationChangesTest}.
+ * <p>
+ * The stream here is opened on the bean itself, for a session nobody signed in with. The streams' ticker closes the
+ * streams of sessions that have ended, so its interval is put out of this test's reach: what closes the stream here
+ * must be the start, and nothing may close it before.
  */
 @Import(TestcontainersConfiguration.class)
-@SpringBootTest(properties = "mse.test.database=simulation-changes")
+@SpringBootTest(properties = { "mse.test.database=simulation-changes", "mse.account-events.heartbeat=1h" })
 class SimulationChangesIT {
 
 	@Autowired
@@ -73,18 +79,22 @@ class SimulationChangesIT {
 		TestingAuthenticationToken person = new TestingAuthenticationToken("someone", "n/a");
 		rateLimit.check(person, first);
 		rateLimit.check(person, second);
+		// A bot's account is kept by the other limit. Any account will do: the limit asks nobody whose it is.
+		UUID botAccount = UUID.randomUUID();
+		rateLimit.check(new PreAuthenticatedAuthenticationToken(new BotPrincipal(UUID.randomUUID(), botAccount), null),
+				botAccount);
 		stream.subscribe(first, "a-session");
 		PlacementResult resting = engine
 			.place(new CommandKey(second, UUID.randomUUID(), "POST /api/v1/orders", new byte[32]), new PlaceOrder(
 					UUID.randomUUID(), second, instrument, Side.SELL, OrderType.LIMIT, Price.parse("101.00"), new Quantity(1)))
 			.get(5, TimeUnit.SECONDS);
 		assertThat(resting.state()).isEqualTo(PlacementResult.OrderState.OPEN);
-		assertThat(rateLimit.accountsKept()).isEqualTo(2);
+		assertThat(rateLimit.accountsKept()).as("two people's accounts and a bot's").isEqualTo(3);
 		assertThat(stream.accountsKept()).as("a stream for one account, a version for the other").isEqualTo(2);
 		assertThat(stream.openStreams()).isEqualTo(1);
 
 		engine.close(key(operator), new MarketControl(MarketControl.Action.CLOSE, operator)).get(5, TimeUnit.SECONDS);
-		assertThat(rateLimit.accountsKept()).as("a close forgets nothing: its market is still read").isEqualTo(2);
+		assertThat(rateLimit.accountsKept()).as("a close forgets nothing: its market is still read").isEqualTo(3);
 		assertThat(stream.openStreams()).isEqualTo(1);
 
 		started("After", operator);

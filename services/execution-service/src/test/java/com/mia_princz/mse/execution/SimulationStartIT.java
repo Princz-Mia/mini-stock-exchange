@@ -244,6 +244,8 @@ class SimulationStartIT {
 
 		Map<String, String> manifestBetaOpen;
 
+		Map<String, String> manifestBeforeNames;
+
 		long outboxAtBetaOpen;
 
 		Answer betaClosed;
@@ -761,6 +763,15 @@ class SimulationStartIT {
 		assertThat(story.outboxAtBetaOpen).as("every simulation's events")
 			.isGreaterThan(Long.parseLong(story.manifestAlphaClosed.get("outbox_events")));
 
+		// The backup someone takes before they upgrade runs this script against a database whose simulations have no
+		// name yet. It gives the same figures there, and no name.
+		Map<String, String> named = new LinkedHashMap<>(story.manifestBetaOpen);
+		named.put("current_simulation_name", "");
+		named.remove("created_at");
+		Map<String, String> unnamed = new LinkedHashMap<>(story.manifestBeforeNames);
+		unnamed.remove("created_at");
+		assertThat(unnamed).isEqualTo(named);
+
 		assertThat(story.manifestGamma).containsEntry("simulations", "3")
 			.containsEntry("current_simulation_name", "Gamma")
 			.containsEntry("current_simulation_state", "SETUP")
@@ -958,6 +969,7 @@ class SimulationStartIT {
 			.statusCode();
 		s.statusBetaOpen = answer(anonymous.get("/api/v1/market"));
 		s.manifestBetaOpen = manifest();
+		s.manifestBeforeNames = manifestBeforeNames();
 		s.outboxAtBetaOpen = jdbc.queryForObject("SELECT count(*) FROM outbox", Long.class);
 
 		s.betaClosed = answer(operator.post(CLOSE, "", "Idempotency-Key", UUID.randomUUID().toString()));
@@ -1042,15 +1054,41 @@ class SimulationStartIT {
 				    END IF;
 				END $$""");
 		assertThat(role.getExitCode()).as(role.getStderr()).isZero();
-		ExecResult ran = postgres.execInContainer("sh", "/tmp/backup-execution-db.sh");
-		assertThat(ran.getExitCode()).as(ran.getStderr()).isZero();
+		Map<String, String> figures = figures(inPostgres("sh", "/tmp/backup-execution-db.sh"));
+		inPostgres("test", "-s", "/tmp/execution_db.dump");
+		return figures;
+	}
+
+	/**
+	 * The figures the same script prints for a database from before simulations had a name: the dump the last
+	 * {@link #manifest()} took, restored beside the real database, with the column dropped. Only the database's name
+	 * is changed in the copy of the script that runs there.
+	 */
+	private Map<String, String> manifestBeforeNames() throws Exception {
+		String copy = "execution_db_unnamed";
+		inPostgres("psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c",
+				"DROP DATABASE IF EXISTS " + copy, "-c", "CREATE DATABASE " + copy);
+		inPostgres("pg_restore", "-U", "postgres", "-d", copy, "--exit-on-error", "/tmp/execution_db.dump");
+		inPostgres("psql", "-U", "postgres", "-d", copy, "-v", "ON_ERROR_STOP=1", "-c",
+				"ALTER TABLE simulation DROP COLUMN name");
+		inPostgres("sh", "-c", "sed 's/execution_db/" + copy + "/g' /tmp/backup-execution-db.sh > /tmp/backup-unnamed.sh");
+		return figures(inPostgres("sh", "/tmp/backup-unnamed.sh"));
+	}
+
+	/** Runs a command in the PostgreSQL container, and fails with what it wrote if it did. */
+	private ExecResult inPostgres(String... command) throws Exception {
+		ExecResult ran = postgres.execInContainer(command);
+		assertThat(ran.getExitCode()).as("%s: %s", String.join(" ", command), ran.getStderr()).isZero();
+		return ran;
+	}
+
+	private static Map<String, String> figures(ExecResult ran) {
 		Map<String, String> figures = new LinkedHashMap<>();
 		for (String line : ran.getStdout().lines().toList()) {
 			int equals = line.indexOf('=');
 			assertThat(equals).as("a figure and its value: '%s'", line).isPositive();
 			assertThat(figures.put(line.substring(0, equals), line.substring(equals + 1))).as(line).isNull();
 		}
-		assertThat(postgres.execInContainer("test", "-s", "/tmp/execution_db.dump").getExitCode()).as("the dump").isZero();
 		return figures;
 	}
 

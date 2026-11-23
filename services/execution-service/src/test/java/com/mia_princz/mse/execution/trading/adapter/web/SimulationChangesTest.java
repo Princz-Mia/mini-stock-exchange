@@ -12,7 +12,10 @@ import java.util.UUID;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.security.authentication.TestingAuthenticationToken;
+import org.springframework.security.web.authentication.preauth.PreAuthenticatedAuthenticationToken;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import com.mia_princz.mse.execution.identity.BotPrincipal;
 
 /**
  * What is kept per account is dropped when another simulation starts: an account belongs to one simulation, so none
@@ -21,24 +24,34 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  */
 class SimulationChangesTest {
 
+	/** People and bots have a limit each, and most accounts are bots': both are forgotten. */
 	@Test
-	void theRateLimitsForgetEveryAccount() {
+	void theRateLimitsForgetEveryAccountOfPeopleAndOfBots() {
 		AccountRateLimit limit = new AccountRateLimit(1, 1, new SimpleMeterRegistry());
 		TestingAuthenticationToken person = new TestingAuthenticationToken("trader", "n/a");
 		UUID first = UUID.randomUUID();
 		UUID second = UUID.randomUUID();
+		UUID botAccount = UUID.randomUUID();
+		PreAuthenticatedAuthenticationToken bot = new PreAuthenticatedAuthenticationToken(
+				new BotPrincipal(UUID.randomUUID(), botAccount), null);
 		limit.check(person, first);
 		limit.check(person, second);
 		assertThat(limit.accountsKept()).isEqualTo(2);
+		limit.check(bot, botAccount);
+		assertThat(limit.accountsKept()).as("two people's accounts and a bot's").isEqualTo(3);
 		assertThatThrownBy(() -> limit.check(person, first)).as("one command a second")
+			.isInstanceOf(ApiException.class);
+		assertThatThrownBy(() -> limit.check(bot, botAccount)).as("and one for a bot")
 			.isInstanceOf(ApiException.class);
 
 		limit.started(UUID.randomUUID(), UUID.randomUUID());
 
 		assertThat(limit.accountsKept()).isZero();
-		// Nothing of the old schedule is left: the account's next command goes at once, as its first did.
+		// Nothing of the old schedule is left: each account's next command goes at once, as its first did.
 		limit.check(person, first);
 		assertThat(limit.accountsKept()).isEqualTo(1);
+		limit.check(bot, botAccount);
+		assertThat(limit.accountsKept()).isEqualTo(2);
 	}
 
 	@Test

@@ -488,6 +488,7 @@ class SimulationStartEngineIT {
 		StartSimulation firstCommand = start("Keyed first");
 		SimulationStart first = engine.startSimulation(firstKey, firstCommand).get(5, TimeUnit.SECONDS);
 		Market market = setUp(engine, firstCommand.simulationId());
+		CommandKey firstOpening = opening;
 		CommandKey refusedKey = key(START_ROUTE);
 		StartSimulation refusedCommand = start("Keyed refused");
 		SimulationStart refused = engine.startSimulation(refusedKey, refusedCommand).get(5, TimeUnit.SECONDS);
@@ -520,6 +521,13 @@ class SimulationStartEngineIT {
 		assertThatThrownBy(() -> engine
 			.startSimulation(new CommandKey(operator, firstKey.idempotencyKey(), START_ROUTE, hash("Other")), start("Other"))
 			.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(IdempotencyConflictException.class);
+		// So is the key of another command altogether: the one that opened the first market, whose stored answer is
+		// not a start's and is never read as one.
+		assertThatThrownBy(() -> engine
+			.startSimulation(new CommandKey(operator, firstOpening.idempotencyKey(), START_ROUTE, new byte[32]),
+					start("Opened"))
+			.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(IdempotencyConflictException.class);
+		assertThat(simulations()).isEqualTo(simulations);
 		// A name is taken whatever its case, by a simulation however old; the refusal is the current one's command.
 		SimulationStart taken = engine
 			.startSimulation(key(START_ROUTE), new StartSimulation(UUID.randomUUID(),
@@ -531,6 +539,21 @@ class SimulationStartEngineIT {
 				SELECT action || ' ' || outcome FROM audit_log WHERE simulation_id = ? AND command_sequence = ?""",
 				String.class, secondCommand.simulationId(), secondSequence + 1)).isEqualTo("SIMULATION_START NOT_ALLOWED");
 		assertThat(simulations()).isEqualTo(simulations);
+
+		// A key is one operator's. Another operator's start under the very key that started the first simulation is
+		// neither that answer nor a conflict with it: it is a command of its own, and starts the next simulation.
+		UUID colleague = user("start.colleague", "OPERATOR");
+		StartSimulation theirs = new StartSimulation(UUID.randomUUID(),
+				new SimulationName("Keyed theirs " + UUID.randomUUID().toString().substring(0, 8)), colleague);
+		SimulationStart third = engine
+			.startSimulation(new CommandKey(colleague, firstKey.idempotencyKey(), START_ROUTE, hash("Theirs")), theirs)
+			.get(5, TimeUnit.SECONDS);
+		assertThat(third.status()).isEqualTo(SimulationStart.Status.STARTED);
+		assertThat(third.simulationId()).isEqualTo(theirs.simulationId());
+		assertThat(simulations()).isEqualTo(simulations + 1);
+		assertThat(engine.startSimulation(firstKey, firstCommand).get(5, TimeUnit.SECONDS))
+			.as("and the first operator's key still has its own answer")
+			.isEqualTo(first);
 	}
 
 	/**

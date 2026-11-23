@@ -295,8 +295,34 @@ class SimulationStartTest {
 		assertThat(engine.simulationIdUnlessClosed()).isEqualTo(current);
 	}
 
+	/**
+	 * An engine started again in place tells whoever keeps something per account when the simulation it loads is not
+	 * the one it held, and names the one it held; started again on the same simulation, it tells nobody.
+	 */
+	@Test
+	void anEngineStartedAgainOnAnotherSimulationSaysWhichOneItHeld() {
+		UUID first = takenOver("CLOSED", 2);
+		assertThat(told).as("the first start holds nothing before").isEmpty();
+
+		engine.start();
+		assertThat(told).as("the same simulation again").isEmpty();
+
+		UUID second = takenOver("SETUP", 3);
+		assertThat(told).containsExactly(List.of(first, second));
+
+		engine.start();
+		assertThat(told).hasSize(1);
+	}
+
 	/** An engine that has taken over a simulation in this state, at this epoch, with nothing in it. */
 	private UUID loaded(String state, long epoch) {
+		UUID simulation = takenOver(state, epoch);
+		told.clear();
+		return simulation;
+	}
+
+	/** The same, with whatever the takeover told its listener left to read. */
+	private UUID takenOver(String state, long epoch) {
 		UUID simulation = UUID.randomUUID();
 		when(store.lockMarket()).thenReturn(market(simulation, state, epoch - 1));
 		when(store.currentSimulation()).thenReturn(simulation);
@@ -307,7 +333,6 @@ class SimulationStartTest {
 		when(store.tradingAccounts(simulation)).thenReturn(Set.of());
 		when(store.lockOwnedMarket(simulation, epoch)).thenReturn(Optional.of(market(simulation, state, epoch)));
 		engine.start();
-		told.clear();
 		return simulation;
 	}
 
