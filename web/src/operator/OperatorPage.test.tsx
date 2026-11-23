@@ -1558,6 +1558,65 @@ describe('bot runs on the operator screen', () => {
     expect(current).not.toHaveTextContent('Time left');
   });
 
+  const LEFT_RUNNING =
+    'Running for more than a day with no end time. It keeps trading until someone stops it, and takes up again ' +
+    'after every restart. Select Stop run to end it.';
+
+  it('warns once a run with no end has traded for more than a day, in words that stay the same', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [botRun()];
+    // A day to the second: not yet.
+    clockAt('2026-11-07T10:00:00Z');
+    renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(current).toHaveTextContent('Elapsed1 d 0 hEndsWhen stopped');
+    expect(within(current).queryByText(/no end time/)).toBeNull();
+    expect(within(current).getByRole('button', { name: 'Stop run' })).not.toHaveAccessibleDescription();
+
+    clockAt('2026-11-07T10:00:01Z');
+    const lead = await within(current).findByText('Running for more than a day with no end time.', {}, { timeout: 10_000 });
+    const warning = lead.closest('p');
+    expect(warning).toHaveTextContent(LEFT_RUNNING);
+    // Said in words and marked up as a warning, not by its tint alone; announced politely, and read with the action.
+    expect(lead.tagName).toBe('STRONG');
+    expect(warning).toHaveClass('chart-note');
+    expect(warning).toHaveAttribute('role', 'status');
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toHaveAccessibleDescription(LEFT_RUNNING);
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toBeEnabled();
+
+    // Later answers move the time elapsed and leave the warning as it is, so it is announced once.
+    clockAt('2026-11-08T13:00:00Z');
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed2 d 3 h'), { timeout: 10_000 });
+    expect(within(current).getByText('Running for more than a day with no end time.').closest('p')).toBe(warning);
+    expect(warning?.textContent).toBe(LEFT_RUNNING);
+  }, 20_000);
+
+  it('does not warn once a stop is asked for, nor ever about a timed run', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [botRun()];
+    clockAt('2026-11-08T10:00:00Z');
+    const view = renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(await within(current).findByText(/no end time/)).toBeInTheDocument();
+    state.runs = [botRun({ status: 'STOPPING', desiredState: 'STOPPED', stopRequestedAt: '2026-11-08T09:59:50Z' })];
+    await waitFor(() => expect(within(current).queryByText(/no end time/)).toBeNull(), { timeout: 10_000 });
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toHaveAccessibleDescription(
+      'A stop was asked for at 09:59:50 UTC; the run shows Stopped once the worker confirms.',
+    );
+    view.unmount();
+
+    // The longest timed run, a day, half a minute past its end and not yet asked to stop: it ends by itself.
+    state.runs = [botRun({ endsAt: '2026-11-07T10:00:00Z' })];
+    clockAt('2026-11-07T10:00:30Z');
+    renderPage();
+    const timed = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(timed).toHaveTextContent('Elapsed1 d 0 hEnds10:00:00 UTCTime leftEnding now');
+    expect(within(timed).queryByText(/no end time/)).toBeNull();
+    expect(within(timed).getByRole('button', { name: 'Stop run' })).not.toHaveAccessibleDescription();
+  }, 20_000);
+
   it("shows the simulator a running run's worker reported, and when another took over", async () => {
     const { state } = exchange('OPEN');
     state.runs = [botRun({ manifest: manifest() })];

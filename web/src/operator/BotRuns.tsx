@@ -12,6 +12,7 @@ import {
   activeRun,
   averageRate,
   elapsedSeconds,
+  leftRunning,
   type RunForm,
   runRequest,
   STATUS_LABELS,
@@ -162,6 +163,7 @@ function ActiveRun({ run, now }: { run: BotRun; now: number }) {
   const stopping = run.desiredState === 'STOPPED';
   const rate = averageRate(run);
   const timeLeft = timeLeftText(run, now);
+  const forgotten = leftRunning(run, now);
   const { activity, config } = run;
 
   return (
@@ -174,12 +176,19 @@ function ActiveRun({ run, now }: { run: BotRun; now: number }) {
           type="button"
           className="primary danger"
           disabled={stopping || command.outcome.kind === 'sending' || command.unresolved}
-          aria-describedby={stopping ? 'stop-hint' : undefined}
+          aria-describedby={stopping ? 'stop-hint' : forgotten ? 'left-running' : undefined}
           onClick={() => void command.run(run.runId)}
         >
           Stop run
         </button>
       </div>
+      {/* The words never change while it shows, so a screen reader says it once, not with every refetch. */}
+      {forgotten && (
+        <p id="left-running" className="chart-note" role="status">
+          <strong>Running for more than a day with no end time.</strong> It keeps trading until someone stops it, and
+          takes up again after every restart. Select Stop run to end it.
+        </p>
+      )}
       {stopping && (
         <p id="stop-hint" className="muted">
           A stop was asked for at {run.stopRequestedAt === null ? 'its end time' : utcTime(run.stopRequestedAt)}; the

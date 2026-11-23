@@ -73,6 +73,19 @@ export function timeLeftText(run: BotRun, now: number): string | null {
   return seconds === 0 ? 'Ending now' : durationText(seconds);
 }
 
+/** A run with no end time is warned about once it has gone on for longer than this: a day. */
+export const LEFT_RUNNING_AFTER_SECONDS = 24 * 60 * 60;
+
+/**
+ * Whether the run looks forgotten: it has no end time, nobody has asked it to stop, and it started more than a day
+ * ago. A timed run ends by itself, so it is never one.
+ */
+export function leftRunning(run: BotRun, now: number): boolean {
+  return (
+    run.endsAt === null && run.desiredState === 'RUNNING' && elapsedSeconds(run, now) > LEFT_RUNNING_AFTER_SECONDS
+  );
+}
+
 /** Why a run can't start right now, or null when it can. */
 export function startBlocked(
   market: MarketStatus['state'],

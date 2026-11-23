@@ -8,6 +8,8 @@ import {
   activeRun,
   averageRate,
   elapsedSeconds,
+  LEFT_RUNNING_AFTER_SECONDS,
+  leftRunning,
   remainingSeconds,
   type RunForm,
   runRequest,
@@ -118,12 +120,30 @@ describe('the bot run view', () => {
     expect(timeLeftText({ ...timed, status: 'STOPPING', desiredState: 'STOPPED' }, after(750))).toBeNull();
   });
 
-  it('adds up: the time gone and the time left of a timed run make its length, until it is due', () => {
+  it('takes a run for forgotten only with no end, no stop asked for, and more than a day behind it', () => {
+    const day = LEFT_RUNNING_AFTER_SECONDS;
+    expect(day).toBe(86_400);
+    expect(leftRunning(botRun(), after(day - 1))).toBe(false);
+    expect(leftRunning(botRun(), after(day))).toBe(false);
+    expect(leftRunning(botRun(), after(day + 1))).toBe(true);
+    expect(leftRunning(botRun(), after(13 * day))).toBe(true);
+    // Its worker lost, it still trades again as soon as one takes over.
+    expect(leftRunning(botRun({ status: 'STALE' }), after(day + 1))).toBe(true);
+    // A timed run ends by itself, even while its end is overdue.
+    expect(leftRunning(botRun({ endsAt: '2026-11-07T10:00:00Z' }), after(day + 1))).toBe(false);
+    expect(leftRunning(botRun({ endsAt: '2026-11-06T11:00:00Z' }), after(2 * day))).toBe(false);
+    expect(leftRunning(botRun({ status: 'STOPPING', desiredState: 'STOPPED' }), after(2 * day))).toBe(false);
+  });
+
+  it('never takes a timed run for forgotten, and always one with no end past a day', () => {
     const draw = seeded(1123);
     for (let i = 0; i < 500; i++) {
       const elapsed = draw(3 * 86_400);
       const minutes = 1 + draw(1_440);
       const timed = botRun({ endsAt: new Date(after(minutes * 60)).toISOString() });
+      expect(leftRunning(timed, after(elapsed))).toBe(false);
+      expect(leftRunning(botRun(), after(elapsed))).toBe(elapsed > 86_400);
+      // The time gone and the time left make the run's length, until it is due.
       expect(elapsedSeconds(timed, after(elapsed)) + (remainingSeconds(timed, after(elapsed)) ?? 0)).toBe(
         Math.max(elapsed, minutes * 60),
       );
