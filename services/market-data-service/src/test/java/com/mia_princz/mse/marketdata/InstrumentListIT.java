@@ -278,23 +278,35 @@ class InstrumentListIT {
 
 	/**
 	 * Two simulations whose newest snapshots carry the same instant: the one with the higher id is listed, whichever
-	 * was stored first, so the answer never depends on where a row happens to lie.
+	 * was stored first, so the answer never depends on where a row happens to lie. The lower simulation's
+	 * instrument ids and command sequences lie on both sides of the higher one's, so that neither end of either picks
+	 * the simulation its own id does.
 	 */
 	@Test
 	void simulationsNewestAtTheSameInstantAreToldApartById() throws Exception {
 		UUID low = UUID.fromString("0fffffff-ffff-4fff-8fff-ffffffffffff");
 		UUID high = UUID.fromString("f0000000-0000-4000-8000-000000000000");
-		MarketSnapshot ofLow = Snapshots.in(low, "NOVA", CLOSED, Snapshots.closed(oldNova, 9_000));
-		MarketSnapshot ofHigh = Snapshots.in(high, "NOVA", CLOSED, Snapshots.closed(newNova, 40));
+		UUID lowest = UUID.fromString("10000000-0000-4000-8000-000000000000");
+		UUID lower = UUID.fromString("40000000-0000-4000-8000-000000000000");
+		UUID higher = UUID.fromString("b0000000-0000-4000-8000-000000000000");
+		UUID highest = UUID.fromString("e0000000-0000-4000-8000-000000000000");
+		List<MarketSnapshot> ofLow = List.of(Snapshots.in(low, "NOVA", CLOSED, Snapshots.closed(lowest, 1)),
+				Snapshots.in(low, "VEGA", CLOSED, Snapshots.closed(highest, 9_000)));
+		List<MarketSnapshot> ofHigh = List.of(Snapshots.in(high, "NOVA", CLOSED, Snapshots.closed(lower, 40)),
+				Snapshots.in(high, "VEGA", CLOSED, Snapshots.closed(higher, 40)));
 
-		snapshots.apply(ofLow);
-		snapshots.apply(ofHigh);
-		assertThat(json(get(LIST), 200).get("simulationId").asString()).isEqualTo(high.toString());
+		ofLow.forEach(snapshots::apply);
+		ofHigh.forEach(snapshots::apply);
+		JsonNode storedLast = json(get(LIST), 200);
+		assertThat(storedLast.get("simulationId").asString()).isEqualTo(high.toString());
+		assertThat(listed(storedLast)).containsExactly(lower, higher);
 
 		wipeProjections();
-		snapshots.apply(ofHigh);
-		snapshots.apply(ofLow);
-		assertThat(json(get(LIST), 200).get("simulationId").asString()).isEqualTo(high.toString());
+		ofHigh.reversed().forEach(snapshots::apply);
+		ofLow.reversed().forEach(snapshots::apply);
+		JsonNode storedFirst = json(get(LIST), 200);
+		assertThat(storedFirst.get("simulationId").asString()).isEqualTo(high.toString());
+		assertThat(listed(storedFirst)).containsExactly(lower, higher);
 	}
 
 	/** A simulation that is no longer listed keeps its history: every read by instrument id still serves it. */
