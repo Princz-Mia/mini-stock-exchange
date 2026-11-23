@@ -232,10 +232,42 @@ class SimulationStartTest {
 		assertThat(told).hasSize(1);
 	}
 
+	/**
+	 * A takeover locks the row it chose and then asks again which simulation is current: the writer before it may
+	 * have started a new one while this waited for the row, and the row then held is the one that start retired. It
+	 * locks again and claims the simulation that is current, never the retired one.
+	 */
+	@Test
+	void aTakeoverThatWaitedForAStartLocksAgainAndClaimsTheNewSimulation() {
+		UUID retired = UUID.randomUUID();
+		UUID current = UUID.randomUUID();
+		when(store.lockMarket()).thenReturn(market(retired, "CLOSED", 0), market(current, "SETUP", 6));
+		when(store.currentSimulation()).thenReturn(current);
+		when(store.claimWriterEpoch(current)).thenReturn(7L);
+		when(store.instruments(current)).thenReturn(List.of());
+		when(store.reconciliationProblems(current)).thenReturn(List.of());
+		when(store.restingOrdersByAccount(current)).thenReturn(Map.of());
+		when(store.tradingAccounts(current)).thenReturn(Set.of());
+
+		engine.start();
+
+		InOrder order = inOrder(store);
+		order.verify(store).lockMarket();
+		order.verify(store).currentSimulation();
+		order.verify(store).lockMarket();
+		order.verify(store).currentSimulation();
+		order.verify(store).claimWriterEpoch(current);
+		verify(store, never()).claimWriterEpoch(retired);
+		verify(store, never()).instruments(retired);
+		assertThat(engine.simulationId()).isEqualTo(current);
+		assertThat(engine.simulationIdUnlessClosed()).isEqualTo(current);
+	}
+
 	/** An engine that has taken over a simulation in this state, at this epoch, with nothing in it. */
 	private UUID loaded(String state, long epoch) {
 		UUID simulation = UUID.randomUUID();
 		when(store.lockMarket()).thenReturn(market(simulation, state, epoch - 1));
+		when(store.currentSimulation()).thenReturn(simulation);
 		when(store.claimWriterEpoch(simulation)).thenReturn(epoch);
 		when(store.instruments(simulation)).thenReturn(List.of());
 		when(store.reconciliationProblems(simulation)).thenReturn(List.of());

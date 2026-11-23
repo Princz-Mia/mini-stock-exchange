@@ -93,6 +93,13 @@ public interface TradingStore {
 	Market lockMarket();
 
 	/**
+	 * The current simulation's ID as this statement sees it. Asked once {@link #lockMarket} has returned: a locking
+	 * read that waited for another transaction returns the row it chose before it waited, and never a row that
+	 * transaction added.
+	 */
+	UUID currentSimulation();
+
+	/**
 	 * Locks the simulation's row for the rest of the transaction if {@code writerEpoch} still owns it, without taking a
 	 * command sequence. Empty when another writer has claimed the market since.
 	 */

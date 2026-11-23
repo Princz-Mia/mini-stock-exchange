@@ -13,6 +13,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -123,7 +124,8 @@ class SimulationStartEngineIT {
 	 * is 0. The one at {@link #rollBackIn} does all its work and then fails before its commit. The one at
 	 * {@link #loseAnswerIn} commits, and the answer to its commit is lost. The one at {@link #misreportIn} commits and
 	 * is then reported as a failure that reads as a rollback: what a writer would see if it took a lost answer for a
-	 * refused commit.
+	 * refused commit. The one at {@link #holdIn} does all its work, says so, and commits only when released, so that
+	 * the test can do something while its locks are held.
 	 */
 	private final class FailingTransactions implements TransactionRunner {
 
@@ -136,6 +138,16 @@ class SimulationStartEngineIT {
 		private volatile int loseAnswer = -1;
 
 		private volatile int misreport = -1;
+
+		private volatile int hold = -1;
+
+		private final CountDownLatch held = new CountDownLatch(1);
+
+		private final CountDownLatch release = new CountDownLatch(1);
+
+		void holdIn(int transactions) {
+			hold = asked.get() + transactions;
+		}
 
 		void rollBackIn(int transactions) {
 			rollBack = asked.get() + transactions;
@@ -156,6 +168,22 @@ class SimulationStartEngineIT {
 				return real.inTransaction(() -> {
 					work.get();
 					throw new IllegalStateException("injected failure before the commit");
+				});
+			}
+			if (ordinal == hold) {
+				return real.inTransaction(() -> {
+					T done = work.get();
+					held.countDown();
+					try {
+						if (!release.await(30, TimeUnit.SECONDS)) {
+							throw new IllegalStateException("the held transaction was never released");
+						}
+					}
+					catch (InterruptedException ex) {
+						Thread.currentThread().interrupt();
+						throw new IllegalStateException(ex);
+					}
+					return done;
 				});
 			}
 			T result = real.inTransaction(work);
@@ -495,6 +523,75 @@ class SimulationStartEngineIT {
 		assertThat(simulations()).isEqualTo(simulations);
 	}
 
+	/**
+	 * A process that takes the market over while the writer before it is starting a new simulation. Its locking read
+	 * chose the closed row, the only one there was, and waited for it; when the start commits, that row is retired
+	 * and the new simulation is beside it. The takeover must claim the new simulation, so that the old writer, which
+	 * moved to it with the epoch it had, is fenced, and must leave the retired row alone.
+	 */
+	@Test
+	void aTakeoverThatWaitsForAStartClaimsTheNewSimulationAndFencesTheOldWriter() throws Exception {
+		TradingEngine old = engine();
+		old.start();
+		long epoch = epoch(closed);
+		long closedSequence = sequence(closed);
+		StartSimulation command = start("Raced");
+		transactions.holdIn(0);
+		CompletableFuture<SimulationStart> starting = old.startSimulation(key(START_ROUTE), command);
+		assertThat(transactions.held.await(5, TimeUnit.SECONDS)).as("the start holds the closed row").isTrue();
+
+		CommandWriter nextWriter = new CommandWriter("takeover-writer", 1_000);
+		try {
+			TradingEngine next = new TradingEngine(store, new SpringTransactionRunner(transactionManager), nextWriter,
+					Clock.systemUTC(), (account) -> new byte[0], AccountChanges.NONE, WriterTimings.NONE,
+					System::nanoTime, new RestingOrders(), 2, (millis) -> {
+					});
+			CompletableFuture<Void> takeover = CompletableFuture.runAsync(next::start);
+			for (int waited = 0; waitingForALock() == 0; waited++) {
+				assertThat(waited).as("the takeover never waited for the row").isLessThan(200);
+				assertThat(takeover).isNotDone();
+				Thread.sleep(50);
+			}
+			assertThat(takeover).isNotDone();
+			transactions.release.countDown();
+			assertThat(starting.get(5, TimeUnit.SECONDS).status()).isEqualTo(SimulationStart.Status.STARTED);
+			takeover.get(10, TimeUnit.SECONDS);
+
+			assertThat(next.simulationId()).as("the simulation that is current once the row is held")
+				.isEqualTo(command.simulationId());
+			assertThat(next.simulationIdUnlessClosed()).isEqualTo(command.simulationId());
+			assertThat(epoch(closed)).as("the retired row is claimed by nobody").isZero();
+			assertThat(epoch(command.simulationId())).as("the start gave it the old writer's epoch; the takeover adds one")
+				.isEqualTo(epoch + 1);
+
+			// The old writer moved to the new simulation with the epoch it had: its next command is fenced.
+			assertThat(old.simulationId()).isEqualTo(command.simulationId());
+			Throwable halted = catchThrowable(() -> old
+				.addInstrument(key("POST /api/v1/admin/instruments"),
+						new AddInstrument(UUID.randomUUID(), "NOVA", null, Price.parse("100.00"), operator))
+				.get(5, TimeUnit.SECONDS));
+			assertThat(halted.getCause()).isInstanceOf(WriterHaltException.class);
+			assertThat(halted.getCause().getCause()).hasMessageContaining("another writer owns the market");
+			assertThat(writer.isAvailable()).isFalse();
+
+			// The new owner's commands are the new simulation's, from its second sequence.
+			InstrumentResult added = next
+				.addInstrument(key("POST /api/v1/admin/instruments"),
+						new AddInstrument(UUID.randomUUID(), "NOVA", null, Price.parse("100.00"), operator))
+				.get(5, TimeUnit.SECONDS);
+			assertThat(added.status()).isEqualTo(InstrumentResult.Status.CREATED);
+			assertThat(added.commandSequence()).isEqualTo(2);
+			assertThat(sequence(command.simulationId())).isEqualTo(2);
+			assertThat(sequence(closed)).as("the closed simulation took no command").isEqualTo(closedSequence);
+			assertThat(jdbc.queryForObject("SELECT count(*) FROM instrument WHERE simulation_id = ?", Long.class, closed))
+				.isZero();
+		}
+		finally {
+			transactions.release.countDown();
+			nextWriter.close(Duration.ofSeconds(5));
+		}
+	}
+
 	/** An engine as a process starting on this database has it: nothing in memory yet. */
 	private TradingEngine engine() {
 		writer = new CommandWriter("start-writer", 1_000);
@@ -610,6 +707,13 @@ class SimulationStartEngineIT {
 		hash[0] = (byte) request.hashCode();
 		hash[1] = 1;
 		return hash;
+	}
+
+	/** Sessions of this database that are waiting for a lock another transaction holds. */
+	private long waitingForALock() {
+		return jdbc.queryForObject("""
+				SELECT count(*) FROM pg_stat_activity
+				WHERE datname = current_database() AND wait_event_type = 'Lock'""", Long.class);
 	}
 
 	private long epoch(UUID simulation) {

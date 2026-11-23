@@ -152,6 +152,11 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public UUID currentSimulation() {
+		return jdbc.sql("SELECT id FROM simulation " + CurrentSimulation.FIRST).query(UUID.class).single();
+	}
+
+	@Override
 	public Optional<Market> lockOwnedMarket(UUID simulationId, long writerEpoch) {
 		return jdbc.sql("""
 				SELECT id, state, writer_epoch, max_open_orders_per_account, max_open_orders_total, max_fills_per_command

@@ -270,7 +270,7 @@ public final class TradingEngine {
 	public void start() {
 		UUID previous = simulationId;
 		transactions.inTransaction(() -> {
-			Market market = store.lockMarket();
+			Market market = lockCurrentMarket();
 			UUID simulation = market.simulationId();
 			long epoch = store.claimWriterEpoch(simulation);
 			Map<UUID, OrderBook> rebuilt = new HashMap<>();
@@ -323,6 +323,23 @@ public final class TradingEngine {
 			discardBotTokens();
 		}
 		started = true;
+	}
+
+	/**
+	 * Locks the row of the simulation that is current once the lock is held. The locking read chooses its row before
+	 * it waits for whoever holds it, and after the wait it sees that row as it was left, but not a row added meanwhile.
+	 * So when the writer it takes over from committed the start of a new simulation during the wait, the row this
+	 * holds is the one that start retired, and claiming it would make this the writer of a simulation that is over
+	 * while the other writer kept the new one unfenced. The choice is therefore read again under the lock, and made
+	 * again until the row held is the current one. From then on it stays the current one for the rest of the
+	 * transaction: a start locks the current row before it adds another.
+	 */
+	private Market lockCurrentMarket() {
+		Market market = store.lockMarket();
+		while (!market.simulationId().equals(store.currentSimulation())) {
+			market = store.lockMarket();
+		}
+		return market;
 	}
 
 	/**
