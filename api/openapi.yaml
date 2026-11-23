@@ -2469,7 +2469,10 @@ components:
       additionalProperties: false
       required: [state, simulationId, openedAt, commandSequence]
       properties:
-        state: { type: string, enum: [NOT_SET_UP, SETUP, OPEN, HALTED] }
+        state:
+          type: string
+          enum: [NOT_SET_UP, SETUP, OPEN, HALTED, CLOSED]
+          description: CLOSED is final. The simulation has ended and takes no more orders.
         simulationId:
           oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }]
         openedAt:

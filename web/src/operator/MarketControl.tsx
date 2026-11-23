@@ -15,6 +15,7 @@ const STATE_LABELS: Record<MarketStatus['state'], string> = {
   SETUP: 'Setup',
   OPEN: 'Open',
   HALTED: 'Halted',
+  CLOSED: 'Closed',
 };
 
 const DONE: Record<Action, string> = {
@@ -25,6 +26,8 @@ const DONE: Record<Action, string> = {
 
 /** Why an action is unavailable right now, or null when it is allowed. */
 function blocked(action: Action, state: MarketStatus['state'], instruments: number): string | null {
+  // Closing is final, so no transition leads out of it.
+  if (state === 'CLOSED') return 'The market has closed.';
   switch (action) {
     case 'open':
       if (state === 'NOT_SET_UP') return 'Add an instrument first; that creates the market.';

@@ -86,6 +86,7 @@ describe('the bot run view', () => {
   it('says why a run cannot start: the market first, then the active run, then the bots', () => {
     expect(startBlocked('SETUP', botRun(), tagged(0, 0, 0))).toBe('Bots trade only once the market has opened.');
     expect(startBlocked('NOT_SET_UP', undefined, tagged(1, 3, 1))).toBe('Bots trade only once the market has opened.');
+    expect(startBlocked('CLOSED', undefined, tagged(1, 3, 1))).toBe('The market has closed; bots no longer trade.');
     expect(startBlocked('OPEN', botRun(), tagged(0, 0, 0))).toBe('A run is active; one runs at a time. Stop it first.');
     expect(startBlocked('HALTED', undefined, tagged(0, 0, 0))).toBe('There are no bots; they are created during setup.');
     expect(startBlocked('OPEN', undefined, tagged(0, 0, 0, 4))).toBe(

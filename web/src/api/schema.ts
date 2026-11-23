@@ -1538,8 +1538,11 @@ export interface components {
             readonly quantity: number;
         };
         readonly MarketStatus: {
-            /** @enum {string} */
-            readonly state: "NOT_SET_UP" | "SETUP" | "OPEN" | "HALTED";
+            /**
+             * @description CLOSED is final. The simulation has ended and takes no more orders.
+             * @enum {string}
+             */
+            readonly state: "NOT_SET_UP" | "SETUP" | "OPEN" | "HALTED" | "CLOSED";
             readonly simulationId: components["schemas"]["Uuid"] | null;
             /** @description When the market first opened; null in SETUP. */
             readonly openedAt: components["schemas"]["Timestamp"] | null;
