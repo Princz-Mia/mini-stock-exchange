@@ -1,6 +1,5 @@
-import { useQuery } from '@tanstack/react-query';
-
-import { api, pollEvery } from '../api/client';
+import { pollEvery } from '../api/client';
+import { useInstruments, useMarketStatus } from '../app/market';
 import { AccountSetup } from './AccountSetup';
 import { BotRuns } from './BotRuns';
 import { BotSetup } from './BotSetup';
@@ -15,12 +14,9 @@ import { MarketControl } from './MarketControl';
  * seconds.
  */
 export function OperatorPage() {
-  const market = useQuery({ queryKey: ['market'], queryFn: api.market, refetchInterval: pollEvery(5_000) });
-  const instruments = useQuery({
-    queryKey: ['instruments'],
-    queryFn: api.instruments,
-    refetchInterval: pollEvery(5_000),
-  });
+  const market = useMarketStatus();
+  // This market's instruments only: the list is asked for by the simulation the status names.
+  const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
 
   if (market.isPending) {
     return <p className="page-status">Loading the market…</p>;
@@ -34,7 +30,7 @@ export function OperatorPage() {
       </p>
     );
   }
-  const listed = instruments.data?.instruments ?? [];
+  const listed = instruments.instruments;
   const editable = market.data.state === 'NOT_SET_UP' || market.data.state === 'SETUP';
 
   return (
@@ -45,16 +41,16 @@ export function OperatorPage() {
             The exchange is not answering, so the market state shown may be out of date.
           </p>
         )}
-        <MarketControl market={market.data} instruments={listed.length} />
+        <MarketControl market={market.data} instruments={instruments.isPending ? undefined : listed.length} />
         {!editable && (
           <HealthPanel
             instruments={listed}
             feed={
               instruments.isError
                 ? { kind: 'unreachable' }
-                : instruments.data === undefined
+                : instruments.feed === undefined
                   ? { kind: 'checking' }
-                  : { kind: 'read', feed: instruments.data.feed }
+                  : { kind: 'read', feed: instruments.feed }
             }
           />
         )}

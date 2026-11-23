@@ -222,6 +222,10 @@ describe('portfolio page', () => {
     const ORBIT = '00000000-0000-0000-0000-000000000002';
     const server = signedIn()
       .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/market', {
+        status: 200,
+        json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
+      })
       .on('GET /api/v1/instruments', {
         status: 200,
         json: {
@@ -245,6 +249,10 @@ describe('portfolio page', () => {
     await waitFor(() =>
       expect(within(symbol).getAllByRole('option').map((option) => option.textContent)).toEqual(['All', 'NOVA', 'ORBIT']),
     );
+    // They are this simulation's: the list is asked for by the id the market status gives.
+    expect(
+      server.requests.filter((request) => request.url.startsWith('/api/v1/instruments')).map((request) => request.url),
+    ).toEqual(['/api/v1/instruments?simulationId=s']);
     fireEvent.change(symbol, { target: { value: ORBIT } });
     fireEvent.change(within(executions).getByLabelText('Side'), { target: { value: 'SELL' } });
     await waitFor(() =>

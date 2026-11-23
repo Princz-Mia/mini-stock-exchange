@@ -5,6 +5,7 @@ import { Link, useSearchParams } from 'react-router';
 import { ApiError, api, pollEvery } from '../api/client';
 import type { MarketStatus } from '../api/types';
 import { FeedStatus } from '../app/FeedStatus';
+import { useInstruments, useMarketStatus } from '../app/market';
 import { isOperator, useSession } from '../auth/session';
 import { groupDigits } from '../format';
 import { TermTip } from '../help/TermTip';
@@ -38,11 +39,12 @@ const PAUSED: Record<Exclude<MarketStatus['state'], 'OPEN'>, { badge: string; re
 export function TerminalPage() {
   const [params, setParams] = useSearchParams();
   const create = useContext(StreamContext);
-  const instruments = useQuery({ queryKey: ['instruments'], queryFn: api.instruments, refetchInterval: pollEvery(5_000) });
   const portfolio = useQuery({ queryKey: ['portfolio'], queryFn: api.portfolio, refetchInterval: pollEvery(5_000) });
   // The authoritative phase. The venue state in market data can lag; if this cannot be read, nothing is paused here
   // and the exchange still decides.
-  const market = useQuery({ queryKey: ['market'], queryFn: api.market, refetchInterval: pollEvery(5_000) });
+  const market = useMarketStatus();
+  // The current simulation's instruments, as that status names it: never the list of a simulation before it.
+  const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
   const paused = market.data === undefined || market.data.state === 'OPEN' ? null : PAUSED[market.data.state];
   const orders = useQuery({
     queryKey: ['orders', 'active'],
@@ -54,11 +56,12 @@ export function TerminalPage() {
   const noAccount = portfolio.error instanceof ApiError && portfolio.error.code === 'NO_TRADING_ACCOUNT';
   const operator = isOperator(useSession().data);
 
-  const list = instruments.data?.instruments ?? [];
+  const list = instruments.instruments;
   const selectedId = params.get('instrument') ?? list[0]?.instrumentId ?? null;
   const selected = list.find((instrument) => instrument.instrumentId === selectedId) ?? null;
   const stream = useMarketStream(selected?.instrumentId ?? null, create === undefined ? {} : { create });
   const frame = stream.frame;
+  const feed = stream.feed ?? instruments.feed;
   // The newer of the live frame and the polled list, by market revision: a stream that dropped leaves its last frame
   // behind the list. The header's price, figures, bid and ask all come from the same one, so they never disagree.
   const latest =
@@ -116,7 +119,7 @@ export function TerminalPage() {
                   {market.data?.state === 'HALTED' && <TermTip terms={['halted']} />}
                 </>
               )}
-              <FeedStatus feed={stream.feed ?? instruments.data.feed} />
+              {feed !== undefined && <FeedStatus feed={feed} />}
               <span className={`transport transport-${stream.transport}`} role="status">
                 {TRANSPORT_LABELS[stream.transport]}
               </span>

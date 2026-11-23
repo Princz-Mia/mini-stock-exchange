@@ -78,6 +78,20 @@ async function force(page: Page, theme: 'light' | 'dark' | null): Promise<void> 
   }, theme);
 }
 
+/** The instrument list as the pages ask for it: by the simulation the market status names. */
+const INSTRUMENT_LIST = /\/api\/v1\/instruments(\?|$)/;
+
+/**
+ * The live market, read as still being set up. The simulation is the live one, since the pages ask for the instruments
+ * by it.
+ */
+async function setupMarket(route: Route): Promise<void> {
+  const live = (await (await route.fetch()).json()) as { simulationId: string | null };
+  await route.fulfill({
+    json: { state: 'SETUP', simulationId: live.simulationId, openedAt: null, closedAt: null, commandSequence: '7' },
+  });
+}
+
 /**
  * No sideways scrolling, nothing stored but preferences, and no accessibility violation in either forced theme, each
  * forced against the other system scheme so the forced one has to win. Screenshots of the light page and the dark one
@@ -230,7 +244,7 @@ for (const size of SIZES) {
       // too: stale data and a lost connection show together, as they would.
       const page = await at(browser, size, 'trader', async (fresh) => {
         await fresh.route('**/api/v1/market-events*', (route) => route.abort());
-        await fresh.route(/\/api\/v1\/instruments$/, async (route) => {
+        await fresh.route(INSTRUMENT_LIST, async (route) => {
           const response = await route.fetch();
           const listing = (await response.json()) as { feed: { state: string; lag: number } };
           listing.feed = { state: 'STALE', lag: 12 };
@@ -256,7 +270,7 @@ for (const size of SIZES) {
 
       // Market Data is down.
       const down = await at(browser, size, 'trader', async (fresh) => {
-        await fresh.route(/\/api\/v1\/instruments$/, problem(503, 'UNAVAILABLE'));
+        await fresh.route(INSTRUMENT_LIST, problem(503, 'UNAVAILABLE'));
       });
       await down.getByRole('link', { name: 'Terminal' }).click();
       await expect(down.getByRole('alert')).toContainText('Market data is not reachable');
@@ -505,12 +519,8 @@ for (const size of SIZES) {
       // as it is.
       const edits: unknown[] = [];
       const page = await at(browser, size, 'operator', async (fresh) => {
-        await fresh.route(/\/api\/v1\/market$/, (route) =>
-          route.fulfill({
-            json: { state: 'SETUP', simulationId: '10000000-0000-0000-0000-000000000001', openedAt: null, closedAt: null, commandSequence: '7' },
-          }),
-        );
-        await fresh.route(/\/api\/v1\/instruments$/, async (route) => {
+        await fresh.route(/\/api\/v1\/market$/, setupMarket);
+        await fresh.route(INSTRUMENT_LIST, async (route) => {
           const live = (await (await route.fetch()).json()) as { instruments: { symbol: string; displayName: string | null }[] };
           live.instruments.forEach((instrument) => {
             if (instrument.symbol === 'NOVA') {
@@ -610,11 +620,7 @@ for (const size of SIZES) {
       // is. The holders are the ones the live market has.
       const deletes: string[] = [];
       const page = await at(browser, size, 'operator', async (fresh) => {
-        await fresh.route(/\/api\/v1\/market$/, (route) =>
-          route.fulfill({
-            json: { state: 'SETUP', simulationId: '10000000-0000-0000-0000-000000000001', openedAt: null, closedAt: null, commandSequence: '7' },
-          }),
-        );
+        await fresh.route(/\/api\/v1\/market$/, setupMarket);
         await fresh.route(/\/api\/v1\/admin\/instruments\/[0-9a-f-]+$/, (route) => {
           if (route.request().method() !== 'DELETE') {
             return route.fallback();

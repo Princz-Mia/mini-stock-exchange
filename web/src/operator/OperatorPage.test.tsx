@@ -32,12 +32,16 @@ const NOVA = {
   session: noTrades('100.00'),
 };
 
+const SIMULATION = '10000000-0000-0000-0000-000000000001';
+/** The instrument list as the page asks for it: this market's, by its simulation. */
+const LIST = `/api/v1/instruments?simulationId=${SIMULATION}`;
+
 function market(state: MarketStatus['state']): MarketStatus {
   return state === 'NOT_SET_UP'
     ? { state, simulationId: null, openedAt: null, closedAt: null, commandSequence: null }
     : {
         state,
-        simulationId: '10000000-0000-0000-0000-000000000001',
+        simulationId: SIMULATION,
         openedAt: state === 'SETUP' ? null : '2026-11-05T09:30:00Z',
         closedAt: state === 'CLOSED' ? '2026-11-05T16:00:00Z' : null,
         commandSequence: '7',
@@ -110,7 +114,9 @@ describe('the operator screen', () => {
     exchange('SETUP');
     renderPage();
 
-    expect(await button('Open market')).toBeEnabled();
+    // Not before the instruments are read: a market is not said to have none while its list is on its way.
+    expect(await button('Open market')).toHaveAccessibleDescription('Reading the instruments…');
+    await waitFor(async () => expect(await button('Open market')).toBeEnabled());
     expect(await button('Halt trading')).toBeDisabled();
     expect(await button('Halt trading')).toHaveAccessibleDescription('Only an open market can be halted.');
     expect(await button('Resume trading')).toHaveAccessibleDescription('Only a halted market can be resumed.');
@@ -132,6 +138,48 @@ describe('the operator screen', () => {
 
     expect(await button('Open market')).toBeDisabled();
     expect(await button('Open market')).toHaveAccessibleDescription('Add at least one instrument first.');
+  });
+
+  it("lists this market's instruments, asked for by the simulation the status names", async () => {
+    const { server } = exchange('SETUP');
+    renderPage();
+
+    await screen.findByRole('table', { name: 'Instruments' });
+    const asked = server.requests.filter((request) => request.url.split('?')[0] === '/api/v1/instruments');
+    expect(asked.length).toBeGreaterThan(0);
+    // Never without the simulation, not even before the status was read.
+    expect(asked.every((request) => request.url === LIST)).toBe(true);
+  });
+
+  it('asks Market Data for no list while there is no market, whatever it still holds', async () => {
+    // Market Data would answer with NOVA, of some simulation the exchange no longer has.
+    const { server } = exchange('NOT_SET_UP');
+    renderPage();
+
+    expect(await button('Open market')).toHaveAccessibleDescription('Add an instrument first; that creates the market.');
+    await screen.findByText('No accounts yet.');
+    expect(screen.getByText('No instruments yet.')).toBeInTheDocument();
+    expect(server.requests.filter((request) => request.url.startsWith('/api/v1/instruments'))).toHaveLength(0);
+  });
+
+  it('reads the instruments again when the exchange names another simulation, showing none of the one before', async () => {
+    const NEXT = '10000000-0000-0000-0000-000000000002';
+    const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
+    const { server, state } = exchange('CLOSED');
+    server.on('GET /api/v1/instruments', (request) => ({
+      status: 200,
+      json: { instruments: request.url.endsWith(NEXT) ? [ORBT] : [NOVA], feed: { state: 'LIVE', lag: 0 } },
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+    expect(await screen.findByRole('rowheader', { name: 'NOVA' })).toBeInTheDocument();
+
+    state.market = { ...market('SETUP'), simulationId: NEXT };
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    expect(await screen.findByRole('rowheader', { name: 'ORBT' })).toBeInTheDocument();
+    expect(screen.queryByRole('rowheader', { name: 'NOVA' })).toBeNull();
+    expect(server.requests.at(-1)?.url).toBe(`/api/v1/instruments?simulationId=${NEXT}`);
   });
 
   it('labels a closed market Closed, with no transition out of it and nothing left to set up', async () => {
@@ -219,6 +267,7 @@ describe('the operator screen', () => {
     renderPage();
 
     const form = await screen.findByRole('form', { name: 'Add an instrument' });
+    await screen.findByRole('table', { name: 'Instruments' });
     expect(within(form).queryByRole('button', { name: 'NOVA 100.00' })).toBeNull();
     fireEvent.click(within(form).getByRole('button', { name: 'ORBT 50.00' }));
     fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
@@ -291,7 +340,7 @@ describe('the operator screen', () => {
     expect(server.requests.at(-1)?.body).toEqual({ referencePrice: '1205.5x', displayName: 'Nova  Dyn' });
 
     // An empty name removes it; a save closes the form and puts focus back on Edit.
-    const listReads = () => server.requests.filter((request) => request.url === '/api/v1/instruments').length;
+    const listReads = () => server.requests.filter((request) => request.url === LIST).length;
     const readsBefore = listReads();
     fireEvent.change(name, { target: { value: '   ' } });
     fireEvent.change(price, { target: { value: '1205.50' } });
@@ -605,7 +654,7 @@ describe('the operator screen', () => {
     expect(await button('Delete NOVA')).toHaveFocus();
     expect(deletes()).toHaveLength(0);
 
-    const listReads = server.requests.filter((request) => request.url === '/api/v1/instruments').length;
+    const listReads = server.requests.filter((request) => request.url === LIST).length;
     fireEvent.click(await button('Delete NOVA'));
     fireEvent.click(screen.getByRole('button', { name: 'Confirm delete of NOVA' }));
 
@@ -625,7 +674,7 @@ describe('the operator screen', () => {
     // The row's controls are gone, so focus goes to the add form.
     expect(screen.getByRole('textbox', { name: 'Symbol' })).toHaveFocus();
     await waitFor(() =>
-      expect(server.requests.filter((request) => request.url === '/api/v1/instruments').length).toBeGreaterThan(listReads),
+      expect(server.requests.filter((request) => request.url === LIST).length).toBeGreaterThan(listReads),
     );
   });
 

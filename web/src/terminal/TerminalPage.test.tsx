@@ -193,6 +193,28 @@ describe('terminal', () => {
     expect(screen.queryByRole('button', { name: 'What is halted?' })).toBeNull();
   });
 
+  it("lists the instruments of the simulation the exchange's status names, and of no other", async () => {
+    const server = market().on('GET /api/v1/market', {
+      status: 200,
+      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
+    });
+    renderTerminal();
+
+    await screen.findByRole('heading', { name: 'NOVA', level: 1 });
+    const asked = server.requests.filter((request) => request.url.split('?')[0] === '/api/v1/instruments');
+    expect(asked.length).toBeGreaterThan(0);
+    expect(asked.every((request) => request.url === '/api/v1/instruments?simulationId=s')).toBe(true);
+  });
+
+  it("shows Market Data's own current simulation when the exchange cannot say which one it is", async () => {
+    const server = market().on('GET /api/v1/market', { status: 503, problem: { status: 503, code: 'TRADING_UNAVAILABLE' } });
+    renderTerminal();
+
+    await screen.findByRole('heading', { name: 'NOVA', level: 1 });
+    const asked = server.requests.filter((request) => request.url.split('?')[0] === '/api/v1/instruments');
+    expect(asked.map((request) => request.url)).toEqual(['/api/v1/instruments']);
+  });
+
   it('says the book and tape are not known yet until the first market frame, rather than empty', async () => {
     market();
     const streams = renderTerminal();

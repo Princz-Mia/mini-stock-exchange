@@ -169,7 +169,12 @@ export const api = {
     }
   },
 
-  instruments: () => request<Instruments>('GET', '/api/v1/instruments'),
+  /**
+   * One simulation's instruments: the one named, as the exchange's market status names it, or else whichever Market
+   * Data takes to be current.
+   */
+  instruments: (simulationId?: string) =>
+    request<Instruments>('GET', `/api/v1/instruments${query({ simulationId })}`),
 
   /** An instrument's book minute by minute over a window of command sequences, with its spread and volatility. */
   marketQuality: (instrumentId: string, fromSequence: string, toSequence: string) =>

@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 
 import { ApiError, api, pollEvery } from '../api/client';
 import type { Holding, OrderDetail, OwnTrade } from '../api/types';
+import { useInstruments, useMarketStatus } from '../app/market';
 import { type Column, PagedTable } from '../app/PagedTable';
 import { type Filter, usePagedList } from '../app/paging';
 import { useKeyboardScroll } from '../app/useKeyboardScroll';
@@ -145,12 +146,13 @@ const STATE_FILTER: Filter = { name: 'state', label: 'Status', options: STATES, 
 
 export function PortfolioPage() {
   const portfolio = useQuery({ queryKey: ['portfolio'], queryFn: api.portfolio, ...REFRESH });
-  // The instruments to filter by, by symbol; the terminal reads the same list.
-  const instruments = useQuery({ queryKey: ['instruments'], queryFn: api.instruments });
+  // The instruments to filter by, by symbol; the terminal reads the same list, of the same simulation.
+  const market = useMarketStatus();
+  const instruments = useInstruments(market);
   const symbolFilter: Filter = {
     name: 'instrumentId',
     label: 'Symbol',
-    options: (instruments.data?.instruments ?? [])
+    options: instruments.instruments
       .map((instrument) => ({ value: instrument.instrumentId, label: instrument.symbol }))
       .sort((a, b) => a.label.localeCompare(b.label)),
   };

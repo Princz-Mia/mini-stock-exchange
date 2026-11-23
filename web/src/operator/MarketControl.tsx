@@ -24,14 +24,18 @@ const DONE: Record<Action, string> = {
   resume: 'Trading has resumed.',
 };
 
-/** Why an action is unavailable right now, or null when it is allowed. */
-function blocked(action: Action, state: MarketStatus['state'], instruments: number): string | null {
+/**
+ * Why an action is unavailable right now, or null when it is allowed. The instruments are counted once their list has
+ * been read; until then a market in setup is not said to have none.
+ */
+function blocked(action: Action, state: MarketStatus['state'], instruments: number | undefined): string | null {
   // Closing is final, so no transition leads out of it.
   if (state === 'CLOSED') return 'The market has closed.';
   switch (action) {
     case 'open':
       if (state === 'NOT_SET_UP') return 'Add an instrument first; that creates the market.';
       if (state !== 'SETUP') return 'The market has already opened. It opens only once.';
+      if (instruments === undefined) return 'Reading the instruments…';
       return instruments === 0 ? 'Add at least one instrument first.' : null;
     case 'halt':
       return state === 'OPEN' ? null : 'Only an open market can be halted.';
@@ -41,7 +45,7 @@ function blocked(action: Action, state: MarketStatus['state'], instruments: numb
 }
 
 /** The trading phase and the three transitions, each enabled only when the exchange would allow it. */
-export function MarketControl({ market, instruments }: { market: MarketStatus; instruments: number }) {
+export function MarketControl({ market, instruments }: { market: MarketStatus; instruments: number | undefined }) {
   const client = useQueryClient();
   const send = useCallback(async (action: Action, key: string) => {
     try {
