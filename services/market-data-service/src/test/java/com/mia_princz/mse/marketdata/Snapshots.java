@@ -56,6 +56,24 @@ final class Snapshots {
 	}
 
 	/**
+	 * The snapshot as an instrument of the given simulation wrote it, under a symbol, at a writer-clock time. A
+	 * simulation that starts after another has closed has instruments of its own, usually with the same symbols.
+	 */
+	static MarketSnapshot in(UUID simulation, String symbol, Instant at, MarketSnapshot snapshot) {
+		snapshot.setSimulationId(simulation);
+		snapshot.setSymbol(symbol);
+		snapshot.setGeneratedAt(at.truncatedTo(ChronoUnit.MICROS));
+		return snapshot;
+	}
+
+	/** A new instrument while its simulation is being set up: nothing has traded and nothing can yet. */
+	static MarketSnapshot setup(UUID instrument, long commandSequence) {
+		MarketSnapshot setup = untraded(instrument, commandSequence);
+		setup.setVenueState(VenueState.SETUP);
+		return setup;
+	}
+
+	/**
 	 * The book at a writer-clock time: a best bid and a best ask, each with a level behind it, null for an empty side,
 	 * and the last trade's price, null before the first. Bids are at least 2, so the level behind stays positive.
 	 */
