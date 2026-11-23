@@ -205,6 +205,7 @@ class SimulationStartEngineIT {
 		TradingEngine engine = engine();
 		engine.start();
 		long epoch = epoch(closed);
+		long closedSequence = sequence(closed);
 		long simulations = simulations();
 		CommandKey key = key(START_ROUTE);
 		StartSimulation command = start("Rolled back");
@@ -224,8 +225,20 @@ class SimulationStartEngineIT {
 		SimulationStart started = engine.startSimulation(key, command).get(5, TimeUnit.SECONDS);
 		assertThat(started.status()).isEqualTo(SimulationStart.Status.STARTED);
 		assertThat(engine.simulationId()).isEqualTo(command.simulationId());
+		assertThat(engine.simulationIdUnlessClosed()).as("the engine holds a simulation that is not closed")
+			.isEqualTo(command.simulationId());
 		assertThat(epoch(closed)).isZero();
 		assertThat(told).containsExactly(List.of(closed, command.simulationId()));
+		// The start's stored answer and its audit row are the new simulation's, at its first sequence.
+		assertThat(jdbc.queryForObject("""
+				SELECT (simulation_id = ?) || ' ' || command_sequence || ' ' || response_status FROM command_result
+				WHERE idempotency_key = ?""", String.class, command.simulationId(), key.idempotencyKey()))
+			.isEqualTo("true 1 201");
+		assertThat(jdbc.queryForObject("""
+				SELECT (simulation_id = ?) || ' ' || command_sequence || ' ' || action || ' ' || outcome FROM audit_log
+				WHERE correlation_id = ?""", String.class, command.simulationId(), key.idempotencyKey()))
+			.isEqualTo("true 1 SIMULATION_START APPLIED");
+		assertThat(sequence(closed)).as("the closed simulation took no command for it").isEqualTo(closedSequence);
 	}
 
 	/**
