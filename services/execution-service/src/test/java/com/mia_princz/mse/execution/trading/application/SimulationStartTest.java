@@ -233,6 +233,38 @@ class SimulationStartTest {
 	}
 
 	/**
+	 * A transition has no body, so a key that an earlier simulation answered is that command sent again. It gets that
+	 * answer before any command is opened in the market this engine holds: no sequence is taken, nothing is closed,
+	 * and no bot token file of this market is looked for. The same key for another transition is a conflict.
+	 */
+	@Test
+	void aTransitionsKeyAnsweredInAnEarlierSimulationOpensNoCommandHere() throws Exception {
+		UUID current = loaded("OPEN", 4);
+		CommandKey closing = new CommandKey(operator, UUID.randomUUID(), "POST /api/v1/admin/market/close", new byte[32]);
+		MarketClosing first = new MarketClosing(MarketClosing.Status.CLOSED, "CLOSED", 31, 4, 1);
+		when(store.storedInOtherSimulations(current, closing, MarketClosing.class)).thenReturn(
+				List.of(new TradingStore.StoredResult<>(closing.route(), closing.requestHash(), first)));
+
+		assertThat(engine.close(closing, new MarketControl(MarketControl.Action.CLOSE, operator)).get(5, TimeUnit.SECONDS))
+			.isSameAs(first);
+
+		CommandKey halting = new CommandKey(operator, closing.idempotencyKey(), "POST /api/v1/admin/market/halt",
+				new byte[32]);
+		when(store.storedInOtherSimulations(current, halting, MarketTransition.class)).thenReturn(
+				List.of(new TradingStore.StoredResult<>(closing.route(), closing.requestHash(), null)));
+		assertThatThrownBy(() -> engine.control(halting, new MarketControl(MarketControl.Action.HALT, operator))
+			.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(IdempotencyConflictException.class);
+
+		verify(store, never()).open(any(), anyLong(), any(), any());
+		verify(store, never()).closeMarket(any(), any());
+		verify(store, never()).updateMarketState(any(), anyString());
+		verify(store, never()).botAccounts(any());
+		verify(store, never()).insertAudit(any(), any(), anyString(), anyString(), any(), anyLong());
+		assertThat(engine.simulationIdUnlessClosed()).as("the market this engine holds is not closed").isEqualTo(current);
+		assertThat(writer.isAvailable()).isTrue();
+	}
+
+	/**
 	 * A takeover locks the row it chose and then asks again which simulation is current: the writer before it may
 	 * have started a new one while this waited for the row, and the row then held is the one that start retired. It
 	 * locks again and claims the simulation that is current, never the retired one.

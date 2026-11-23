@@ -88,6 +88,10 @@ class SimulationStartEngineIT {
 
 	private static final String CLOSE_ROUTE = "POST /api/v1/admin/market/close";
 
+	private static final String OPEN_ROUTE = "POST /api/v1/admin/market/open";
+
+	private static final String HALT_ROUTE = "POST /api/v1/admin/market/halt";
+
 	private static final long CASH = 1_000_000;
 
 	private static final long SHARES = 100;
@@ -114,6 +118,12 @@ class SimulationStartEngineIT {
 
 	/** Each simulation an engine said it had moved to, with the one before it. */
 	private final List<List<UUID>> told = new ArrayList<>();
+
+	/** Each time an engine removed bot token files: the accounts it removed them for. */
+	private final List<Collection<UUID>> discarded = new ArrayList<>();
+
+	/** The command that opened the market {@link #setUp} set up last. */
+	private CommandKey opening;
 
 	/** A market set up through the engine: its simulation, its two instruments and its two traders' accounts. */
 	private record Market(UUID simulation, UUID nova, UUID orbt, UUID buyer, UUID seller) {
@@ -592,6 +602,105 @@ class SimulationStartEngineIT {
 		}
 	}
 
+	/**
+	 * Opening, halting, resuming and closing are sent with no body, so a key that was answered in one simulation and
+	 * comes again in the next is that command sent again, whatever state the next market is in. It gets the answer it
+	 * was first given, takes no sequence, leaves no audit row and changes nothing: an old open does not open a market
+	 * still being set up, an old halt does not halt the one that trades, and an old close, the one answer a caller is
+	 * told to ask for again, does not close it or remove its bots' token files.
+	 */
+	@Test
+	void aTransitionsKeyFromAnEarlierSimulationGetsItsFirstAnswerAndChangesNothing() throws Exception {
+		TradingEngine engine = engine();
+		engine.start();
+		Market first = market(engine, "Transitions first");
+		CommandKey firstOpening = opening;
+		CommandKey halting = key(HALT_ROUTE);
+		MarketTransition halted = engine.control(halting, new MarketControl(MarketControl.Action.HALT, operator))
+			.get(5, TimeUnit.SECONDS);
+		assertThat(halted.state()).isEqualTo("HALTED");
+		engine.control(key("POST /api/v1/admin/market/resume"), new MarketControl(MarketControl.Action.RESUME, operator))
+			.get(5, TimeUnit.SECONDS);
+		place(engine, first.buyer(), first.nova(), Side.BUY, "90.00", 5);
+		CommandKey closing = key(CLOSE_ROUTE);
+		MarketClosing closedFirst = engine.close(closing, new MarketControl(MarketControl.Action.CLOSE, operator))
+			.get(5, TimeUnit.SECONDS);
+		assertThat(closedFirst.status()).isEqualTo(MarketClosing.Status.CLOSED);
+		assertThat(closedFirst.canceledOrders()).isEqualTo(1);
+		// The closed market is still the current one: its close's key is answered by it, and tidies up again.
+		discarded.clear();
+		assertThat(engine.close(closing, new MarketControl(MarketControl.Action.CLOSE, operator)).get(5, TimeUnit.SECONDS))
+			.isEqualTo(closedFirst);
+		assertThat(discarded).hasSize(1);
+		long firstSequence = sequence(first.simulation());
+
+		StartSimulation command = start("Transitions second");
+		engine.startSimulation(key(START_ROUTE), command).get(5, TimeUnit.SECONDS);
+		UUID second = command.simulationId();
+		discarded.clear();
+
+		// While the second market is being set up, the key that opened the first does not open it.
+		MarketTransition openedAgain = engine
+			.control(firstOpening, new MarketControl(MarketControl.Action.OPEN, operator))
+			.get(5, TimeUnit.SECONDS);
+		assertThat(openedAgain.status()).isEqualTo(MarketTransition.Status.APPLIED);
+		assertThat(openedAgain.commandSequence()).as("the first market's open").isLessThan(halted.commandSequence());
+		assertThat(state(second)).isEqualTo("SETUP");
+		assertThat(sequence(second)).as("a key answered before takes no sequence").isEqualTo(1);
+
+		Market next = setUp(engine, second);
+		UUID resting = place(engine, next.seller(), next.nova(), Side.SELL, "101.00", 3).orderId();
+		long secondSequence = sequence(second);
+		long audited = audited(second);
+
+		// While it trades, the key that halted the first does not halt it, and the key that closed the first does
+		// not close it.
+		assertThat(engine.control(halting, new MarketControl(MarketControl.Action.HALT, operator)).get(5, TimeUnit.SECONDS))
+			.isEqualTo(halted);
+		assertThat(state(second)).isEqualTo("OPEN");
+		assertThat(engine.close(closing, new MarketControl(MarketControl.Action.CLOSE, operator)).get(5, TimeUnit.SECONDS))
+			.as("the first market's close, with what it cancelled")
+			.isEqualTo(closedFirst);
+		assertThat(state(second)).isEqualTo("OPEN");
+		assertThat(engine.simulationIdUnlessClosed()).isEqualTo(second);
+		assertThat(jdbc.queryForObject("SELECT state FROM orders WHERE id = ?", String.class, resting)).isEqualTo("OPEN");
+		assertThat(discarded).as("no token file of the market that trades is removed").isEmpty();
+		assertThat(sequence(second)).isEqualTo(secondSequence);
+		assertThat(audited(second)).isEqualTo(audited);
+		assertThat(sequence(first.simulation())).isEqualTo(firstSequence);
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM command_result WHERE idempotency_key IN (?, ?, ?)",
+				Long.class, firstOpening.idempotencyKey(), halting.idempotencyKey(), closing.idempotencyKey()))
+			.as("each has the one answer it was first given")
+			.isEqualTo(3);
+
+		// The first market's close, sent as another transition of this one, is a conflict and not a halt.
+		assertThatThrownBy(() -> engine
+			.control(new CommandKey(operator, closing.idempotencyKey(), HALT_ROUTE, new byte[32]),
+					new MarketControl(MarketControl.Action.HALT, operator))
+			.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(IdempotencyConflictException.class);
+		assertThat(state(second)).isEqualTo("OPEN");
+		// A key is one operator's: the same one from another operator is a command of this market.
+		UUID colleague = user("start.colleague", "OPERATOR");
+		MarketTransition theirs = engine
+			.control(new CommandKey(colleague, halting.idempotencyKey(), HALT_ROUTE, new byte[32]),
+					new MarketControl(MarketControl.Action.HALT, colleague))
+			.get(5, TimeUnit.SECONDS);
+		assertThat(theirs.status()).isEqualTo(MarketTransition.Status.APPLIED);
+		assertThat(theirs.commandSequence()).isEqualTo(secondSequence + 1);
+		assertThat(state(second)).isEqualTo("HALTED");
+
+		// A new close closes it, and from then on its own close tidies up as before.
+		MarketClosing closedSecond = engine
+			.close(key(CLOSE_ROUTE), new MarketControl(MarketControl.Action.CLOSE, operator))
+			.get(5, TimeUnit.SECONDS);
+		assertThat(closedSecond.status()).isEqualTo(MarketClosing.Status.CLOSED);
+		assertThat(closedSecond.canceledOrders()).isEqualTo(1);
+		assertThat(state(second)).isEqualTo("CLOSED");
+		assertThat(discarded).hasSize(1);
+		assertThat(reconciliationProblems(first.simulation())).isEmpty();
+		assertThat(reconciliationProblems(second)).isEmpty();
+	}
+
 	/** An engine as a process starting on this database has it: nothing in memory yet. */
 	private TradingEngine engine() {
 		writer = new CommandWriter("start-writer", 1_000);
@@ -604,6 +713,7 @@ class SimulationStartEngineIT {
 
 			@Override
 			public void discard(Collection<UUID> accountIds) {
+				discarded.add(accountIds);
 			}
 
 		};
@@ -657,8 +767,8 @@ class SimulationStartEngineIT {
 				.isEqualTo(AccountResult.Status.CREATED);
 			accounts.add(account);
 		}
-		MarketTransition opened = engine
-			.control(key("POST /api/v1/admin/market/open"), new MarketControl(MarketControl.Action.OPEN, operator))
+		opening = key(OPEN_ROUTE);
+		MarketTransition opened = engine.control(opening, new MarketControl(MarketControl.Action.OPEN, operator))
 			.get(5, TimeUnit.SECONDS);
 		assertThat(opened.status()).isEqualTo(MarketTransition.Status.APPLIED);
 		return new Market(simulation, nova, orbt, accounts.get(0), accounts.get(1));
@@ -714,6 +824,14 @@ class SimulationStartEngineIT {
 		return jdbc.queryForObject("""
 				SELECT count(*) FROM pg_stat_activity
 				WHERE datname = current_database() AND wait_event_type = 'Lock'""", Long.class);
+	}
+
+	private String state(UUID simulation) {
+		return jdbc.queryForObject("SELECT state FROM simulation WHERE id = ?", String.class, simulation);
+	}
+
+	private long audited(UUID simulation) {
+		return jdbc.queryForObject("SELECT count(*) FROM audit_log WHERE simulation_id = ?", Long.class, simulation);
 	}
 
 	private long epoch(UUID simulation) {

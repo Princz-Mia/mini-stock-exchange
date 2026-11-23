@@ -92,6 +92,16 @@ public final class JdbcTradingStore implements TradingStore {
 			SELECT e.batch_id FROM ledger_entry e JOIN journal_batch b ON b.id = e.batch_id
 			WHERE b.simulation_id = ? GROUP BY e.batch_id, e.instrument_id HAVING sum(e.delta) <> 0 LIMIT 20""";
 
+	/**
+	 * A key's stored answers in every simulation, by each simulation's own key index: one probe for each simulation,
+	 * however many answers it has stored.
+	 */
+	private static final String STORED_BY_KEY = """
+			SELECT r.route, r.request_hash, r.response_body::text AS body
+			FROM simulation s JOIN command_result r
+			    ON r.simulation_id = s.id AND r.principal_id = ? AND r.idempotency_key = ?
+			""";
+
 	private final JdbcClient jdbc;
 
 	private final JsonMapper json;
@@ -188,18 +198,24 @@ public final class JdbcTradingStore implements TradingStore {
 			.single();
 	}
 
-	/** By each simulation's own key index: one probe for each simulation, however many answers it has stored. */
 	@Override
 	public <T> List<StoredResult<T>> storedInAnySimulation(CommandKey key, Class<T> type) {
-		return jdbc.sql("""
-				SELECT r.route, r.request_hash, r.response_body::text AS body
-				FROM simulation s JOIN command_result r
-				    ON r.simulation_id = s.id AND r.principal_id = ? AND r.idempotency_key = ?
-				ORDER BY s.created_at, s.id""")
-			.params(key.principalId(), key.idempotencyKey())
+		return stored(jdbc.sql(STORED_BY_KEY + "ORDER BY s.created_at, s.id")
+			.params(key.principalId(), key.idempotencyKey()), key, type);
+	}
+
+	@Override
+	public <T> List<StoredResult<T>> storedInOtherSimulations(UUID simulationId, CommandKey key, Class<T> type) {
+		return stored(jdbc.sql(STORED_BY_KEY + "WHERE s.id <> ? ORDER BY s.created_at, s.id")
+			.params(key.principalId(), key.idempotencyKey(), simulationId), key, type);
+	}
+
+	private <T> List<StoredResult<T>> stored(JdbcClient.StatementSpec statement, CommandKey key, Class<T> type) {
+		return statement
 			.query((row, index) -> {
 				String route = row.getString("route");
 				byte[] hash = row.getBytes("request_hash");
+				// Another route's answer need not fit this route's type; the caller refuses it as a conflict.
 				return new StoredResult<>(route, hash,
 						key.sameRequest(route, hash) ? json.readValue(row.getString("body"), type) : null);
 			})

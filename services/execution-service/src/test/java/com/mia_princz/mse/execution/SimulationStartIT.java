@@ -148,6 +148,8 @@ class SimulationStartIT {
 
 		Answer alphaShared;
 
+		UUID closeKey;
+
 		Answer alphaClosed;
 
 		long alphaEpoch;
@@ -229,6 +231,14 @@ class SimulationStartIT {
 		int oldTokenWhileOpen;
 
 		Answer assignmentBeta;
+
+		Answer alphaClosedAgain;
+
+		long sequencesTakenByTheOldClose;
+
+		boolean newTokenFilesKept;
+
+		int newTokenAfterTheOldClose;
 
 		Answer statusBetaOpen;
 
@@ -631,6 +641,32 @@ class SimulationStartIT {
 	}
 
 	/**
+	 * A transition is sent with no body, so its key is the one thing that says which command it is, and a close's key
+	 * is the one a caller is told to send again when the answer did not come. Sent after the next simulation has
+	 * started and opened, the key that closed Alpha still answers for Alpha, and the market that trades is not
+	 * closed: it takes no command, its bots keep their tokens and their token files, and it stays open.
+	 */
+	@Test
+	void aClosesKeySentAfterTheNextSimulationOpenedAnswersForTheMarketItClosed() {
+		assertThat(story.alphaClosed.json().get("canceledOrders").asInt()).isEqualTo(4);
+		assertThat(story.alphaClosedAgain.status()).as(story.alphaClosedAgain.body()).isEqualTo(200);
+		assertThat(story.alphaClosedAgain.body()).isEqualTo(story.alphaClosed.body());
+		CONTRACT.assertResponse("POST", CLOSE, 200, story.alphaClosedAgain.contentType(), story.alphaClosedAgain.body());
+		assertThat(story.sequencesTakenByTheOldClose).isZero();
+		assertThat(story.statusBetaOpen.json().get("state").asString()).as("read after the old close came again")
+			.isEqualTo("OPEN");
+		assertThat(story.newTokenFilesKept).isTrue();
+		assertThat(story.newTokenAfterTheOldClose).isEqualTo(200);
+		assertThat(jdbc.queryForList("SELECT simulation_id FROM command_result WHERE idempotency_key = ?", UUID.class,
+				story.closeKey)).as("answered once, in the simulation it closed").containsExactly(story.alpha.simulation());
+		assertThat(jdbc.queryForList("SELECT simulation_id FROM audit_log WHERE correlation_id = ?", UUID.class,
+				story.closeKey)).containsExactly(story.alpha.simulation());
+		// Béta was then closed by a close of its own, which found everything still in place.
+		assertThat(story.betaClosed.json().get("canceledOrders").asInt()).isEqualTo(3);
+		assertThat(story.betaClosed.json().get("endedRuns").asInt()).isEqualTo(1);
+	}
+
+	/**
 	 * Balances and holds are each simulation's own. Alpha's accounts hold exactly what they held when Alpha closed,
 	 * through everything Béta did with the same traders and symbols; Béta's hold what Béta's setup and its one trade
 	 * give; nothing is held in either; and each simulation reconciles on its own.
@@ -821,7 +857,8 @@ class SimulationStartIT {
 		ok(operator.post("/api/v1/admin/market/resume", "", "Idempotency-Key", UUID.randomUUID().toString()));
 		CompletableFuture<Void> stream = stream(trader);
 
-		s.alphaClosed = answer(operator.post(CLOSE, "", "Idempotency-Key", UUID.randomUUID().toString()));
+		s.closeKey = UUID.randomUUID();
+		s.alphaClosed = answer(operator.post(CLOSE, "", "Idempotency-Key", s.closeKey.toString()));
 		assertThat(s.alphaClosed.status()).as(s.alphaClosed.body()).isEqualTo(200);
 		// A restart on the closed market, as a stack stopped for the night has: the writer's epoch moves on.
 		long alphaFirstEpoch = epoch(alpha);
@@ -911,6 +948,14 @@ class SimulationStartIT {
 		s.betaLookup = answer(trader.get("/api/v1/commands/" + s.sharedKey));
 		placed(new TestBrowser(port), limit(betaNova, "BUY", 2, "95.00"), bearer(s.beta.botTokens().get("MARKET_MAKER")));
 		s.oldTokenWhileOpen = oldBot.get("/api/v1/portfolio", maker).statusCode();
+		// The key that closed Alpha, sent again while Béta trades, as a close without its answer is asked for.
+		long betaBefore = sequence(beta);
+		s.alphaClosedAgain = answer(operator.post(CLOSE, "", "Idempotency-Key", s.closeKey.toString()));
+		s.sequencesTakenByTheOldClose = sequence(beta) - betaBefore;
+		s.newTokenFilesKept = s.beta.tokenFiles().stream().allMatch(Files::exists);
+		s.newTokenAfterTheOldClose = new TestBrowser(port)
+			.get("/api/v1/portfolio", bearer(s.beta.botTokens().get("MARKET_MAKER")))
+			.statusCode();
 		s.statusBetaOpen = answer(anonymous.get("/api/v1/market"));
 		s.manifestBetaOpen = manifest();
 		s.outboxAtBetaOpen = jdbc.queryForObject("SELECT count(*) FROM outbox", Long.class);

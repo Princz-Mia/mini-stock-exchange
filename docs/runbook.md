@@ -120,7 +120,7 @@ Find what changed the database outside Execution. If it can't be explained, rest
 
 **It stopped while the market was closing.** Nothing to do. A close cancels resting orders 5,000 to a transaction, and the market is closed from the first one. If Execution stops before the last, the next start cancels the rest before it takes commands, and logs `Finished the market's close at startup` with how many. A start that finds none left to cancel logs no such line. Every start on a closed market also removes its bots' token files, in case the close stopped before it had.
 
-**A close answered `504 COMMAND_OUTCOME_UNKNOWN`.** The request waited 45 seconds and the close had not answered. No lookup by key serves a close, so send the same key again. On the operator screen that is **Ask again**, under the note that the close is taking longer than the exchange waits. The answers:
+**A close answered `504 COMMAND_OUTCOME_UNKNOWN`.** The request waited 45 seconds and the close had not answered. No lookup by key serves a close, so send the same key again. The key stays that close's for good: sent after a new simulation has started, it still returns the close of the market it closed and leaves the new one alone. On the operator screen that is **Ask again**, under the note that the close is taking longer than the exchange waits. The answers:
 - **`200`:** the close is done, and this is its answer.
 - **`504` again:** it is still going on.
 - **`503 MARKET_CLOSE_UNFINISHED` or `503 TRADING_UNAVAILABLE`:** Execution stopped trading meanwhile. Restart it, as the next entry says.
@@ -155,6 +155,11 @@ The start's answers:
 - **`409 SIMULATION_NAME_TAKEN`:** names differ, whatever their case. Choose another, with a new key.
 - **`504 COMMAND_OUTCOME_UNKNOWN`:** send the same key again. No lookup by key serves a start; the same key returns its first answer, even after later starts.
 - **`503 TRADING_UNAVAILABLE`** after a start: Execution could not learn whether the start committed, and stopped. Restart it; it loads whichever simulation is current, and the same key then returns the start's answer or starts the simulation.
+
+**Keys from the simulation before.** Every command of the new simulation needs a new `Idempotency-Key`. What an old key does when it is sent again after the start:
+- **Open, halt, resume and close:** it returns the answer it was given in the simulation it was sent to, and changes nothing in the new one. This is what makes it safe to ask for a close's answer late: the key that closed Tuesday's market never closes Wednesday's.
+- **The start of a simulation:** its first answer, as above.
+- **Every other operator command** (instruments, accounts, traders, bots, bot runs): it is a new command in the new simulation. A script that derives its keys from its steps therefore sets up each simulation afresh, and a request sent again by mistake adds its instrument, account or bots to the new simulation. Do not send these again once a new simulation has started.
 
 **Wiping the stack** (`docker compose down -v`) deletes every simulation, every login but the configured ones, and all history. It is for a development stack that should be empty again, not for running the next session.
 

@@ -1741,6 +1741,10 @@ public final class TradingEngine {
 	}
 
 	private MarketTransition controlInTransaction(CommandKey key, MarketControl command) {
+		Optional<MarketTransition> elsewhere = answeredInAnotherSimulation(key, MarketTransition.class);
+		if (elsewhere.isPresent()) {
+			return elsewhere.get();
+		}
 		TradingStore.Opening<MarketTransition> opening = open(key, MarketTransition.class);
 		Market market = opening.market();
 		if (opening.prior().isPresent()) {
@@ -1763,6 +1767,28 @@ public final class TradingEngine {
 		store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "APPLIED", key.idempotencyKey(),
 				sequence);
 		return remember(key, 200, new MarketTransition(MarketTransition.Status.APPLIED, action.to(), sequence));
+	}
+
+	/**
+	 * The answer a transition's key was given in a simulation before this one, if it was given one there. Opening,
+	 * halting, resuming and closing are sent with no body, so nothing in the request says which market it means, and
+	 * a key that was answered in an earlier simulation can only be that command sent again: for a close whose answer
+	 * was lost, that is exactly what its caller was told to do. It gets the answer it was first given, and this
+	 * market, which nobody meant, stays as it is. Any other use of such a key is a conflict.
+	 * <p>
+	 * Read before the command is opened, so it takes no sequence here; only this writer stores answers, so nothing
+	 * can add one between this and the opening.
+	 */
+	private <T> Optional<T> answeredInAnotherSimulation(CommandKey key, Class<T> type) {
+		List<TradingStore.StoredResult<T>> stored = store.storedInOtherSimulations(simulationId, key, type);
+		if (stored.isEmpty()) {
+			return Optional.empty();
+		}
+		return Optional.of(stored.stream()
+			.filter((prior) -> key.sameRequest(prior.route(), prior.requestHash()))
+			.findFirst()
+			.orElseThrow(() -> new IdempotencyConflictException(key))
+			.result());
 	}
 
 	/** The market's instruments in symbol order: the order their snapshots are written in. */
@@ -1852,8 +1878,9 @@ public final class TradingEngine {
 					+ "longest {} ms; {} bot runs ended", result.commandSequence(), result.canceledOrders(),
 					times.transactions, times.total / 1_000_000, times.longest / 1_000_000, result.endedRuns());
 		}
-		// Closed by this command, or by this key's first attempt in a process that stopped before it tidied up.
-		if (result.status() == MarketClosing.Status.CLOSED) {
+		// Closed by this command, or by this key's first attempt in a process that stopped before it tidied up. Not
+		// for a key that closed a simulation before this one, while this one runs: the files here are its bots'.
+		if (closed && result.status() == MarketClosing.Status.CLOSED) {
 			discardBotTokens();
 		}
 		return result;
@@ -1866,6 +1893,10 @@ public final class TradingEngine {
 	 * between the parts.
 	 */
 	private Closing closeInTransaction(CommandKey key, MarketControl command) {
+		Optional<MarketClosing> elsewhere = answeredInAnotherSimulation(key, MarketClosing.class);
+		if (elsewhere.isPresent()) {
+			return new Closing(elsewhere.get(), null);
+		}
 		TradingStore.Opening<MarketClosing> opening = open(key, MarketClosing.class);
 		Market market = opening.market();
 		if (opening.prior().isPresent()) {

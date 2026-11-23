@@ -512,6 +512,10 @@ export interface paths {
          * Open the market for trading, once.
          * @description Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
          *     key returns the first answer, even a refusal. Allowed only from SETUP.
+         *
+         *     The request has no body, so its key alone says which command it is. A key that was answered in an earlier
+         *     simulation is that command sent again: it returns the answer it was first given and changes nothing in the
+         *     current market. A new transition needs a new key.
          */
         readonly post: operations["openMarket"];
         readonly delete?: never;
@@ -533,6 +537,10 @@ export interface paths {
          * Halt trading. New orders are rejected; cancels still work.
          * @description Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
          *     key returns the first answer, even a refusal. Allowed only from OPEN.
+         *
+         *     The request has no body, so its key alone says which command it is. A key that was answered in an earlier
+         *     simulation is that command sent again: it returns the answer it was first given and changes nothing in the
+         *     current market. A new transition needs a new key.
          */
         readonly post: operations["haltMarket"];
         readonly delete?: never;
@@ -554,6 +562,10 @@ export interface paths {
          * Resume trading. Resting orders keep their priority.
          * @description Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
          *     key returns the first answer, even a refusal. Allowed only from HALTED.
+         *
+         *     The request has no body, so its key alone says which command it is. A key that was answered in an earlier
+         *     simulation is that command sent again: it returns the answer it was first given and changes nothing in the
+         *     current market. A new transition needs a new key.
          */
         readonly post: operations["resumeMarket"];
         readonly delete?: never;
@@ -588,6 +600,10 @@ export interface paths {
          *     request waits; it then answers 504 and goes on. No lookup by key serves a close, since
          *     /api/v1/commands/{key} answers for orders and cancels only: send the same key again, which waits for the
          *     close and returns its answer.
+         *
+         *     The request has no body, so its key alone says which close it is, and the key keeps its answer for good.
+         *     Sent again after a new simulation has started, it returns the close of the market it closed, and does not
+         *     close the current one. Closing the current market needs a new key.
          *
          *     A close is never left half done by a running exchange. If one of the later transactions fails, it is tried
          *     again; if the orders still cannot all be canceled, trading stops and the answer is 503
@@ -2010,7 +2026,13 @@ export interface components {
         };
     };
     parameters: {
-        /** @description A client-chosen UUID, kept for retries of the same request. */
+        /**
+         * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+         *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+         *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+         *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+         *     is a new command in the current one, so do not send it again once a new simulation has started.
+         */
         readonly IdempotencyKey: string;
         readonly OrderId: string;
         readonly InstrumentId: string;
@@ -2330,7 +2352,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path?: never;
@@ -2423,7 +2451,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path: {
@@ -2610,7 +2644,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path?: never;
@@ -2663,7 +2703,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path: {
@@ -2727,7 +2773,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path: {
@@ -2834,7 +2886,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path?: never;
@@ -2944,7 +3002,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path?: never;
@@ -3043,7 +3107,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path?: never;
@@ -3108,7 +3178,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path: {
@@ -3246,7 +3322,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path?: never;
@@ -3360,7 +3442,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path: {
@@ -3420,7 +3508,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path?: never;
@@ -3472,7 +3566,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path?: never;
@@ -3524,7 +3624,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path?: never;
@@ -3576,7 +3682,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path?: never;
@@ -3658,7 +3770,13 @@ export interface operations {
         readonly parameters: {
             readonly query?: never;
             readonly header: {
-                /** @description A client-chosen UUID, kept for retries of the same request. */
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
                 readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
             };
             readonly path?: never;

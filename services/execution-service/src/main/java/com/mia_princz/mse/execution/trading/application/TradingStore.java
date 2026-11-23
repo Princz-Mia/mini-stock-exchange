@@ -120,6 +120,9 @@ public interface TradingStore {
 	 */
 	<T> List<StoredResult<T>> storedInAnySimulation(CommandKey key, Class<T> type);
 
+	/** The same, leaving out the answers stored in {@code simulationId}: the ones a command opened there cannot find. */
+	<T> List<StoredResult<T>> storedInOtherSimulations(UUID simulationId, CommandKey key, Class<T> type);
+
 	/** Takes over the market: increments the writer epoch, so a previous writer's next transaction is refused. */
 	long claimWriterEpoch(UUID simulationId);
 
