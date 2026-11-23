@@ -13,6 +13,8 @@ import {
   averageRate,
   elapsedSeconds,
   leftRunning,
+  ranForSeconds,
+  ranForText,
   type RunForm,
   runRequest,
   STATUS_LABELS,
@@ -95,7 +97,7 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
       },
       { replace: true },
     );
-  const columns = [compareColumn(picked, pick), ...RUN_COLUMNS];
+  const columns = [compareColumn(picked, pick), STARTED_COLUMN, ranForColumn(runs.dataUpdatedAt), ...RUN_COLUMNS];
   // The screen's own address goes along, so coming back keeps the table's page size and order.
   const from = useLocation().search;
 
@@ -541,14 +543,29 @@ function compareColumn(picked: readonly string[], pick: (runId: string, on: bool
   };
 }
 
+/**
+ * How long each run lasted, right after its start: on a phone, where the table scrolls inside its panel, both are in
+ * view before any scrolling. A run that is not over is counted to now, the time of the last answer about the current
+ * run, as its own readout is.
+ */
+function ranForColumn(now: number): Column<BotRun> {
+  return {
+    key: 'ran',
+    header: 'Ran for',
+    cell: (run) => ranForText(run, now),
+    sortValue: (run) => ranForSeconds(run, now),
+  };
+}
+
+const STARTED_COLUMN: Column<BotRun> = {
+  key: 'started',
+  header: 'Started',
+  rowHeader: true,
+  cell: (run) => utcTime(run.startedAt),
+  sortValue: (run) => run.startedAt,
+};
+
 const RUN_COLUMNS: readonly Column<BotRun>[] = [
-  {
-    key: 'started',
-    header: 'Started',
-    rowHeader: true,
-    cell: (run) => utcTime(run.startedAt),
-    sortValue: (run) => run.startedAt,
-  },
   { key: 'bots', header: 'Bots', cell: (run) => strategiesText(run.config.strategies) },
   {
     key: 'placed',

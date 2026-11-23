@@ -1,6 +1,6 @@
 import type { BotPopulation, BotRun, BotRunRequest, Instrument, MarketStatus } from '../api/types';
 import { groupInteger, utcTime } from '../format';
-import { durationText } from './compare';
+import { actualDuration, durationText, runSeconds } from './compare';
 
 export const STATUS_LABELS: Record<BotRun['status'], string> = {
   STARTING: 'Starting',
@@ -84,6 +84,19 @@ export function leftRunning(run: BotRun, now: number): boolean {
   return (
     run.endsAt === null && run.desiredState === 'RUNNING' && elapsedSeconds(run, now) > LEFT_RUNNING_AFTER_SECONDS
   );
+}
+
+/**
+ * How long a run lasted, for the history: a stopped run's length as the comparison gives it, and the time so far of
+ * one that is not over.
+ */
+export function ranForText(run: BotRun, now: number): string {
+  return run.status === 'STOPPED' ? actualDuration(run) : `${durationText(elapsedSeconds(run, now))} so far`;
+}
+
+/** The seconds behind ranForText, to sort by; a run of unknown length sorts first. */
+export function ranForSeconds(run: BotRun, now: number): number {
+  return run.status === 'STOPPED' ? (runSeconds(run)?.seconds ?? -1) : elapsedSeconds(run, now);
 }
 
 /** Why a run can't start right now, or null when it can. */

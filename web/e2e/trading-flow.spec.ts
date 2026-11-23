@@ -314,5 +314,7 @@ test.describe.serial('trading through the browser', () => {
     await expect(last).toContainText('1 market maker, 1 noise');
     await expect(last).toContainText(/\d{2}:\d{2}:\d{2} UTC$/);
     await expect(last).not.toContainText('not canceled');
+    // How long it ran, in the cell after the tick box: a minute or two here, and no longer "so far".
+    await expect(last.getByRole('cell').nth(1)).toHaveText(/^(About )?(\d+ min( \d+ s)?|\d+ s)$/);
   });
 });

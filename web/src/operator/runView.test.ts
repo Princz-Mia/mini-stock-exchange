@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { Instrument } from '../api/types';
-import { botRun } from '../test/botRun';
+import { botRun, finishedRun } from '../test/botRun';
 import { noTrades } from '../test/fakeStream';
 import { seeded } from '../test/seeded';
 import {
@@ -10,6 +10,8 @@ import {
   elapsedSeconds,
   LEFT_RUNNING_AFTER_SECONDS,
   leftRunning,
+  ranForSeconds,
+  ranForText,
   remainingSeconds,
   type RunForm,
   runRequest,
@@ -149,6 +151,28 @@ describe('the bot run view', () => {
         Math.max(elapsed, minutes * 60),
       );
     }
+  });
+
+  it("gives the history a stopped run's length, and the time so far of one that is not over", () => {
+    // Its worker confirmed the stop ten minutes in; now does not matter.
+    expect(ranForText(finishedRun(), after(5 * 86_400))).toBe('10 min');
+    expect(ranForSeconds(finishedRun(), after(5 * 86_400))).toBe(600);
+    // Stopped with no end to its window: its worker's last report stands in, 80 seconds in.
+    const unconfirmed = botRun({ status: 'STOPPED', desiredState: 'STOPPED' });
+    expect(ranForText(unconfirmed, after(5 * 86_400))).toBe('About 1 min 20 s');
+    expect(ranForSeconds(unconfirmed, after(5 * 86_400))).toBe(80);
+    const unknown = botRun({
+      status: 'STOPPED',
+      desiredState: 'STOPPED',
+      worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null },
+    });
+    expect(ranForText(unknown, after(600))).toBe('Unknown');
+    expect(ranForSeconds(unknown, after(600))).toBe(-1);
+    // Not over: from its start to now, not to its worker's last report.
+    expect(ranForText(botRun(), after(750))).toBe('12 min 30 s so far');
+    expect(ranForSeconds(botRun(), after(750))).toBe(750);
+    expect(ranForText(botRun({ status: 'STALE' }), after(13 * 86_400 + 4 * 3_600))).toBe('13 d 4 h so far');
+    expect(ranForSeconds(botRun({ status: 'STOPPING', desiredState: 'STOPPED' }), after(750))).toBe(750);
   });
 
   it('says why a run cannot start: the market first, then the active run, then the bots', () => {

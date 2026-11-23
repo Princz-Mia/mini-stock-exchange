@@ -1813,6 +1813,55 @@ describe('bot runs on the operator screen', () => {
     );
   });
 
+  it('says how long each run lasted in the history, and how long the one still going has been', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [
+      // Still going, its worker lost on the first day.
+      botRun({ runId: 'c', startedAt: '2026-11-10T10:00:00Z', status: 'STALE' }),
+      // Confirmed by its worker ten minutes in.
+      finishedRun({ runId: 'b' }),
+      // Stopped without ever having had a worker.
+      botRun({
+        runId: 'a',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        startedAt: '2026-11-06T09:00:00Z',
+        worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null },
+      }),
+    ];
+    clockAt('2026-11-23T14:30:00Z');
+    renderPage();
+
+    const history = await within(await runs()).findByRole('table', { name: 'Recent runs' });
+    expect(within(history).getAllByRole('columnheader').map((header) => header.textContent)).toEqual([
+      'Compare',
+      'Started',
+      'Ran for',
+      'Bots',
+      'Placed',
+      'Canceled',
+      'Ended',
+    ]);
+    // After the tick box: how long, then the bots.
+    const ranFor = () =>
+      within(history)
+        .getAllByRole('row')
+        .slice(1)
+        .map((row) => within(row).getAllByRole('cell')[1]?.textContent);
+    expect(ranFor()).toEqual(['13 d 4 h so far', '10 min', 'Unknown']);
+
+    // The run still going is counted to the same answer as its readout above.
+    clockAt('2026-11-23T15:30:00Z');
+    await waitFor(() => expect(ranFor()).toEqual(['13 d 5 h so far', '10 min', 'Unknown']), { timeout: 10_000 });
+    expect(within(await runs()).getByRole('group', { name: 'Current run' })).toHaveTextContent('Elapsed13 d 5 h');
+
+    // Sorted by length, shortest first: the one of unknown length, then ten minutes, then thirteen days.
+    fireEvent.click(within(history).getByRole('button', { name: 'Ran for' }));
+    expect(ranFor()).toEqual(['Unknown', '10 min', '13 d 5 h so far']);
+    fireEvent.click(within(history).getByRole('button', { name: 'Ran for' }));
+    expect(ranFor()).toEqual(['13 d 5 h so far', '10 min', 'Unknown']);
+  }, 15_000);
+
   it('pages the run history and the accounts with the cursor, size and order they were given', async () => {
     const { server, state } = exchange('OPEN');
     state.bots = 3;
