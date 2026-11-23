@@ -179,6 +179,8 @@ A worker takes the run on its next heartbeat and continues from the totals alrea
 
 **Ended shows "Not confirmed".** The run was stopped with no worker to confirm it: its worker went away first, or it never had one. A worker that comes along later settles a run its worker left: it cancels the run's remaining quotes and confirms, before it takes any new run. A running simulator does this within seconds; if the simulator is down, start it. A run that never had a worker has nothing to settle and stays "Not confirmed". Meanwhile the run's window has no end, so Recent runs marks it "Not finished" and it can't be compared. Starting the next run ends that window at the new run's start, and the old run becomes comparable.
 
+**"Running for more than a day with no end time".** A run started with **Until I stop it** has no end: it trades until someone stops it, and a worker takes it up again after every restart of the simulator or the stack. The run in progress shows how long it has been going under **Elapsed**, and carries this warning once that is more than 24 hours. If nobody meant it to run on, select **Stop run**. A run started **For a set time** ends by itself, and the form starts there, at 60 minutes.
+
 **Figures never appear.** Execution works out each finished run's figures once, in a pass every five seconds, off the writer. Until then the comparison shows "Being worked out…". If that lasts, look in Execution's log:
 - `Bot run figures could not be computed; trying again on the next pass`: the whole pass failed, for example because the database was unreachable;
 - `The figures of bot run … could not be computed`: that one run failed, and the runs after it went on.

@@ -154,7 +154,7 @@ export function workerText(run: BotRun): string {
   }
 }
 
-/** The start form's text fields, as typed. Blank optional fields fall back to the exchange's defaults. */
+/** The start form's fields, as typed. Blank optional fields fall back to the exchange's defaults. */
 export interface RunForm {
   marketMakers: string;
   noise: string;
@@ -164,6 +164,8 @@ export interface RunForm {
   maxOrderQuantity: string;
   maxPosition: string;
   durationMinutes: string;
+  /** A run with no end is chosen outright, never what a blank duration means; the duration typed is then left out. */
+  untilStopped: boolean;
   /** Ticked instruments; every listed one by default. */
   instrumentIds: readonly string[];
 }
@@ -172,7 +174,8 @@ const WHOLE = /^\d{1,9}$/;
 
 /**
  * The request to send, or what is wrong with the form. Only shapes are checked here; the exchange checks ranges and
- * answers in its own words. Ticking every instrument sends none, which the exchange reads as all of them.
+ * answers in its own words. Ticking every instrument sends none, which the exchange reads as all of them. A duration
+ * is always sent unless the run was chosen to last until stopped: the exchange reads none as no end.
  */
 export function runRequest(
   form: RunForm,
@@ -185,8 +188,8 @@ export function runRequest(
     ['seed', 'Seed', false],
     ['maxOrderQuantity', 'Largest order', true],
     ['maxPosition', 'Position limit', true],
-    ['durationMinutes', 'Duration', false],
   ];
+  if (!form.untilStopped) whole.push(['durationMinutes', 'Duration', true]);
   const numbers: Partial<Record<keyof RunForm, number>> = {};
   for (const [field, label, required] of whole) {
     const text = (form[field] as string).trim();

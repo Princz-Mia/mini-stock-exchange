@@ -64,7 +64,8 @@ function form(overrides: Partial<RunForm> = {}): RunForm {
     commandsPerSecond: '4.00',
     maxOrderQuantity: '10',
     maxPosition: '100',
-    durationMinutes: '',
+    durationMinutes: '60',
+    untilStopped: false,
     instrumentIds: [NOVA.instrumentId, ORBT.instrumentId],
     ...overrides,
   };
@@ -219,6 +220,7 @@ describe('the bot run view', () => {
         commandsPerSecond: '4.00',
         maxOrderQuantity: 10,
         maxPosition: 100,
+        durationMinutes: 60,
       },
     });
     expect(
@@ -236,6 +238,38 @@ describe('the bot run view', () => {
         instrumentIds: [ORBT.instrumentId],
       },
     });
+  });
+
+  it('sends no duration only for a run chosen to last until stopped, whatever the minutes field still holds', () => {
+    const sent = (overrides: Partial<RunForm>) => {
+      const built = runRequest(form(overrides), [NOVA, ORBT]);
+      return 'request' in built ? built.request : built;
+    };
+    expect(sent({ untilStopped: true })).not.toHaveProperty('durationMinutes');
+    expect(sent({ untilStopped: true, durationMinutes: '' })).not.toHaveProperty('durationMinutes');
+    expect(sent({ untilStopped: true, durationMinutes: 'soon' })).toEqual({
+      marketMakers: 1,
+      noise: 2,
+      momentum: 0,
+      commandsPerSecond: '4.00',
+      maxOrderQuantity: 10,
+      maxPosition: 100,
+    });
+    expect(sent({ durationMinutes: ' 1440 ' })).toHaveProperty('durationMinutes', 1440);
+    // A set time with no minutes is never read as no end. The limits, 1 to 1440, are the exchange's to refuse.
+    expect(sent({ durationMinutes: '' })).toEqual({ error: 'Duration must be a whole number.' });
+    expect(sent({ durationMinutes: '  ' })).toEqual({ error: 'Duration must be a whole number.' });
+    expect(sent({ durationMinutes: '0' })).toHaveProperty('durationMinutes', 0);
+  });
+
+  it('always sends the minutes of a set time, and never any for a run until stopped', () => {
+    const draw = seeded(60);
+    for (let i = 0; i < 300; i++) {
+      const minutes = draw(2_000);
+      const untilStopped = draw(2) === 1;
+      const built = runRequest(form({ untilStopped, durationMinutes: String(minutes) }), [NOVA, ORBT]);
+      expect('request' in built && built.request.durationMinutes).toBe(untilStopped ? undefined : minutes);
+    }
   });
 
   it('refuses a form that the exchange could only misread', () => {

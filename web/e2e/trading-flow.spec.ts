@@ -255,6 +255,10 @@ test.describe.serial('trading through the browser', () => {
     await expect(form.getByLabel('Market makers')).toHaveValue('1');
     await expect(form.getByLabel('Noise')).toHaveValue('1');
     await expect(form.getByLabel('Momentum')).toHaveValue('0');
+    // A run is for a set time, an hour, unless the operator chooses otherwise. This one is stopped long before.
+    await expect(form.getByRole('radio', { name: 'For a set time' })).toBeChecked();
+    await expect(form.getByRole('radio', { name: 'Until I stop it' })).not.toBeChecked();
+    await expect(form.getByLabel('Duration in minutes')).toHaveValue('60');
     await form.getByLabel('Seed').fill('11');
     await form.getByRole('button', { name: 'Start run' }).click();
 
@@ -262,6 +266,10 @@ test.describe.serial('trading through the browser', () => {
     await expect(runs.getByRole('status', { name: 'Run status: Running' })).toBeVisible({ timeout: 30_000 });
     const current = runs.getByRole('group', { name: 'Current run' });
     await expect(current).toContainText('1 market maker, 1 noise');
+    // It says how long it has been going, and how much of its hour is left: the whole hour for a moment, should the
+    // browser's clock be a little behind the exchange's.
+    await expect(current).toContainText(/Elapsed\d+ (s|min)/);
+    await expect(current).toContainText(/Time left(5\d min|1 h 0 min)/);
     await expect(current).toContainText(/Placed[1-9]/, { timeout: 30_000 });
     // The worker reported its simulator with the run: the package version and the commit its image was built from.
     await expect(current).toContainText(/Simulator\d+\.\d+\.\d+\+[0-9a-f]{12}(\.dirty)?/);

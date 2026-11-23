@@ -1418,7 +1418,94 @@ describe('bot runs on the operator screen', () => {
       commandsPerSecond: '4.00',
       maxOrderQuantity: 10,
       maxPosition: 100,
+      durationMinutes: 60,
     });
+  });
+
+  it('starts a run for an hour unless told otherwise, and never reads an empty duration as no end', async () => {
+    const { server, state } = exchange('OPEN');
+    state.tagged = { marketMakers: 1, noise: 1, momentum: 0 };
+    server.on('POST /api/v1/admin/bot-runs', {
+      status: 201,
+      json: { runId: botRun().runId, bots: 2, commandSequence: '9' },
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    await waitFor(() => expect(within(form).getByLabelText('Noise')).toHaveValue('1'));
+    const length = within(form).getByRole('group', { name: 'Run length' });
+    expect(within(length).getByRole('radio', { name: 'For a set time' })).toBeChecked();
+    expect(within(length).getByRole('radio', { name: 'For a set time' })).toHaveAccessibleDescription(
+      'Ends by itself after the minutes given, from 1 to 1440 (24 hours).',
+    );
+    expect(within(length).getByRole('radio', { name: 'Until I stop it' })).not.toBeChecked();
+    const minutes = within(length).getByLabelText('Duration in minutes');
+    expect(minutes).toHaveValue('60');
+    expect(minutes).toBeEnabled();
+
+    const posted = () => server.requests.filter((request) => request.method === 'POST' && request.url.endsWith('/bot-runs'));
+    fireEvent.change(minutes, { target: { value: '' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    expect(await within(form).findByText('Duration must be a whole number.')).toBeInTheDocument();
+    expect(posted()).toHaveLength(0);
+
+    fireEvent.change(minutes, { target: { value: '15' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    expect(await within(form).findByText('Started a run of 2 bots.')).toBeInTheDocument();
+    expect(within(form).queryByText('Duration must be a whole number.')).toBeNull();
+    expect(posted()).toHaveLength(1);
+    expect(posted()[0]?.body).toEqual({
+      marketMakers: 1,
+      noise: 1,
+      momentum: 0,
+      commandsPerSecond: '4.00',
+      maxOrderQuantity: 10,
+      maxPosition: 100,
+      durationMinutes: 15,
+    });
+  });
+
+  it('starts a run with no end only when that is chosen, and says what it means', async () => {
+    const { server, state } = exchange('OPEN');
+    state.tagged = { marketMakers: 1, noise: 1, momentum: 0 };
+    server.on('POST /api/v1/admin/bot-runs', {
+      status: 201,
+      json: { runId: botRun().runId, bots: 2, commandSequence: '9' },
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    await waitFor(() => expect(within(form).getByLabelText('Noise')).toHaveValue('1'));
+    const untilStopped = within(form).getByRole('radio', { name: 'Until I stop it' });
+    const minutes = within(form).getByLabelText('Duration in minutes');
+    fireEvent.click(untilStopped);
+    expect(untilStopped).toBeChecked();
+    expect(within(form).getByRole('radio', { name: 'For a set time' })).not.toBeChecked();
+    expect(untilStopped).toHaveAccessibleDescription(
+      'Keeps trading until someone selects Stop run, and takes up again after every restart.',
+    );
+    // The minutes stay as they were for a change of mind, but can't be typed and aren't sent.
+    expect(minutes).toBeDisabled();
+    expect(minutes).toHaveValue('60');
+
+    const posted = () => server.requests.filter((request) => request.method === 'POST' && request.url.endsWith('/bot-runs'));
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    await waitFor(() => expect(posted()).toHaveLength(1));
+    expect(posted()[0]?.body).toEqual({
+      marketMakers: 1,
+      noise: 1,
+      momentum: 0,
+      commandsPerSecond: '4.00',
+      maxOrderQuantity: 10,
+      maxPosition: 100,
+    });
+    expect(await within(form).findByText('Started a run of 2 bots.')).toBeInTheDocument();
+
+    fireEvent.click(within(form).getByRole('radio', { name: 'For a set time' }));
+    expect(minutes).toBeEnabled();
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    await waitFor(() => expect(posted()).toHaveLength(2));
+    expect(posted()[1]?.body).toMatchObject({ durationMinutes: 60 });
   });
 
   it('starts on the chosen instruments only, and never sends an empty choice', async () => {

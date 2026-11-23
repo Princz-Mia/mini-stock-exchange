@@ -31,13 +31,16 @@ import { comparability, durationText, MAX_COMPARED, parseRunIds, withTick } from
 import { SimulatorSettings } from './SimulatorSettings';
 
 type Typed = Partial<Omit<RunForm, 'instrumentIds'>> & { instrumentIds?: readonly string[] };
+type TextField = Exclude<keyof RunForm, 'instrumentIds' | 'untilStopped'>;
 
+// A run ends by itself after an hour unless the operator says otherwise: one with no end is easy to forget.
 const DEFAULTS = {
   seed: '',
   commandsPerSecond: '4.00',
   maxOrderQuantity: '10',
   maxPosition: '100',
-  durationMinutes: '',
+  durationMinutes: '60',
+  untilStopped: false,
 };
 
 /**
@@ -307,7 +310,7 @@ function StartForm({
   };
   const blocked =
     unavailable ?? startBlocked(market, undefined, population?.byStrategy) ?? shortfallText(form, population?.byStrategy);
-  const field = (name: keyof Omit<RunForm, 'instrumentIds'>) => ({
+  const field = (name: TextField) => ({
     value: form[name],
     onChange: (event: { target: { value: string } }) => setTyped({ ...typed, [name]: event.target.value }),
   });
@@ -366,11 +369,44 @@ function StartForm({
             Seed
             <input {...field('seed')} inputMode="numeric" placeholder="Chosen for you" />
           </label>
-          <label>
-            Duration in minutes
-            <input {...field('durationMinutes')} inputMode="numeric" placeholder="Until stopped" />
-          </label>
         </div>
+        <fieldset className="choices run-length">
+          <legend>Run length</legend>
+          <div className="run-length-choice">
+            <label>
+              <input
+                type="radio"
+                name="run-length"
+                checked={!form.untilStopped}
+                onChange={() => setTyped({ ...typed, untilStopped: false })}
+                aria-describedby="run-length-timed"
+              />
+              For a set time
+            </label>
+            <p id="run-length-timed" className="muted">
+              Ends by itself after the minutes given, from 1 to 1440 (24 hours).
+            </p>
+            <label className="run-length-minutes">
+              Duration in minutes
+              <input {...field('durationMinutes')} inputMode="numeric" disabled={form.untilStopped} />
+            </label>
+          </div>
+          <div className="run-length-choice">
+            <label>
+              <input
+                type="radio"
+                name="run-length"
+                checked={form.untilStopped}
+                onChange={() => setTyped({ ...typed, untilStopped: true })}
+                aria-describedby="run-length-open"
+              />
+              Until I stop it
+            </label>
+            <p id="run-length-open" className="muted">
+              Keeps trading until someone selects Stop run, and takes up again after every restart.
+            </p>
+          </div>
+        </fieldset>
         {instruments.length > 0 && (
           <fieldset className="choices">
             <legend>Instruments</legend>
