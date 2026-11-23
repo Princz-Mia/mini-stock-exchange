@@ -91,33 +91,18 @@ class TradingConfiguration {
 
 	/**
 	 * {@code simulationChanges} is everything that keeps something per account of a simulation. Each is told when the
-	 * engine has moved to another simulation, and each on its own, so that one failing does not keep the rest from
-	 * forgetting.
+	 * engine has moved to another simulation, and each on its own ({@link SimulationChanges#all}).
 	 */
 	@Bean
 	TradingEngine tradingEngine(TradingStore store, WriterConnections connections, CommandWriter writer, Clock clock,
 			BotCredentials botCredentials, AccountChanges accountChanges, List<SimulationChanges> simulationChanges,
 			MeterRegistry meters,
 			@Value("${mse.market.close-chunk-orders:" + TradingEngine.CLOSE_CHUNK_ORDERS + "}") int closeChunkOrders) {
-		SimulationChanges all = (previous, simulation) -> {
-			RuntimeException failed = null;
-			for (SimulationChanges each : simulationChanges) {
-				try {
-					each.started(previous, simulation);
-				}
-				catch (RuntimeException ex) {
-					failed = failed == null ? ex : failed;
-				}
-			}
-			if (failed != null) {
-				throw failed;
-			}
-		};
 		// The store and the transactions share the writer's data source, so a command's statements join its transaction.
 		return new TradingEngine(store,
 				new SpringTransactionRunner(new JdbcTransactionManager(connections.dataSource())), writer, clock,
 				botCredentials, accountChanges, new MicrometerWriterTimings(meters), System::nanoTime,
-				new RestingOrders(), closeChunkOrders, Thread::sleep, all);
+				new RestingOrders(), closeChunkOrders, Thread::sleep, SimulationChanges.all(simulationChanges));
 	}
 
 	@Bean(destroyMethod = "close")
