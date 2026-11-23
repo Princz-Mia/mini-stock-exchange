@@ -114,7 +114,12 @@ class ApiContractIT {
 		String book = "/api/v1/instruments/{instrumentId}/book";
 		String tape = "/api/v1/instruments/{instrumentId}/trades";
 
-		check("/api/v1/instruments", "/api/v1/instruments", 200);
+		String list = "/api/v1/instruments";
+		check(list, list, 200);
+		// One simulation's list by its id, a simulation never heard of, which has none, and an id that is not one.
+		check(list, list + "?simulationId=" + Snapshots.SIMULATION, 200);
+		check(list, list + "?simulationId=" + UUID.randomUUID(), 200);
+		check(list, list + "?simulationId=nope", 400);
 		check(book, path(book, instrument), 200);
 		check(book, path(book, closed), 200);
 		check(book, path(book, instrument) + "?depth=99", 400);
