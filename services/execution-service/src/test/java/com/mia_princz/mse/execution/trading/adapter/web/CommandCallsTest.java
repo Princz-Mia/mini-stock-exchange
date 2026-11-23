@@ -10,14 +10,18 @@ import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 
+import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterHaltException;
+import com.mia_princz.mse.execution.trading.application.TradingEngine.CloseUnfinishedException;
 import com.mia_princz.mse.execution.trading.application.TradingEngine.UnknownAccountException;
 import com.mia_princz.mse.execution.trading.application.TradingEngine.UnknownInstrumentException;
 
 class CommandCallsTest {
 
+	private static final UUID KEY = UUID.randomUUID();
+
 	private static ApiException answer(RuntimeException failure) {
-		return catchThrowableOfType(ApiException.class, () -> CommandCalls.await(UUID.randomUUID(), Duration.ofSeconds(1),
-				() -> CompletableFuture.failedFuture(failure)));
+		return catchThrowableOfType(ApiException.class,
+				() -> CommandCalls.await(KEY, Duration.ofSeconds(1), () -> CompletableFuture.failedFuture(failure)));
 	}
 
 	@Test
@@ -44,6 +48,35 @@ class CommandCallsTest {
 
 		assertThat(failed.status()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
 		assertThat(failed.toProblem().getProperties()).containsEntry("code", "COMMAND_FAILED");
+	}
+
+	/**
+	 * A close that committed and then halted the writer is not a command that applied nothing, and not only "trading
+	 * is unavailable": the answer says the market is closed, which close it was and how much of it is left.
+	 */
+	@Test
+	void aCloseThatCommittedAndCouldNotFinishSaysTheMarketIsClosed() {
+		ApiException unfinished = answer(new WriterHaltException("halted",
+				new CloseUnfinishedException(41, 7_000, new IllegalStateException("the database went away"))));
+
+		assertThat(unfinished.status()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+		assertThat(unfinished.toProblem().getProperties()).containsEntry("code", "MARKET_CLOSE_UNFINISHED")
+			.containsEntry("state", "CLOSED")
+			.containsEntry("commandSequence", "41")
+			.containsEntry("restingOrders", 7_000)
+			.containsEntry("commandKey", KEY.toString());
+		assertThat(unfinished.getMessage()).contains("The market is closed", "7000 orders still rest")
+			.doesNotContain("nothing was applied");
+	}
+
+	/** Any other halt says only that trading has stopped: what the command did is not known. */
+	@Test
+	void anyOtherHaltIsTradingUnavailable() {
+		ApiException halted = answer(new WriterHaltException("halted", new IllegalStateException("out of step")));
+
+		assertThat(halted.status()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+		assertThat(halted.toProblem().getProperties()).containsEntry("code", "TRADING_UNAVAILABLE")
+			.doesNotContainKey("restingOrders");
 	}
 
 }

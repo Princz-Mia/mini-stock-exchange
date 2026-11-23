@@ -91,7 +91,8 @@ class MarketController {
 
 	/**
 	 * Closes the market for good. A close with many orders resting takes several transactions, so it waits longer for
-	 * its answer than other commands do; past that, the close goes on and the same key returns its answer.
+	 * its answer than other commands do; past that, the close goes on and the same key returns its answer. A close that
+	 * committed and could not cancel every order is answered by {@link CommandCalls} as unfinished, not as failed.
 	 */
 	@PostMapping("/admin/market/close")
 	CloseResponse close(@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader,

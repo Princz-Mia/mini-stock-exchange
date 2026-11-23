@@ -75,6 +75,12 @@ public final class TradingEngine {
 	 */
 	static final String SWEEP = "MARKET_CLOSE_SWEEP";
 
+	/** How many times a later part of a close's sweep is tried before the writer gives the close up. */
+	static final int SWEEP_ATTEMPTS = 3;
+
+	/** The wait before a part that failed is tried again, once for each attempt made so far. */
+	private static final long SWEEP_RETRY_PAUSE_MILLIS = 200;
+
 	private static final Logger LOG = LoggerFactory.getLogger(TradingEngine.class);
 
 	private static final long FALLBACK_LOG_INTERVAL_NANOS = 10_000_000_000L;
@@ -268,7 +274,7 @@ public final class TradingEngine {
 		try {
 			finishSweep(actor, times);
 		}
-		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
+		catch (RuntimeException | Error ex) {
 			throw new IllegalStateException("The market's close could not be finished", ex);
 		}
 		LOG.info("Finished the market's close at startup: {} resting orders cancelled in {} transactions in {} ms, "
@@ -327,8 +333,12 @@ public final class TradingEngine {
 	 * The rest of the resting orders are cancelled in the same writer submission, so no other command comes between,
 	 * in further transactions of a bounded size, each with its own command sequence: all of them in one would hold the
 	 * writer for one very large commit. The books change after each commit, as for every command. The answer is given
-	 * once no order rests. If the process stops before that, startup finishes the sweep; a part that fails without
-	 * halting the writer fails the command, whose key, sent again, then finishes it.
+	 * once no order rests.
+	 * <p>
+	 * A close whose own transaction has committed is never left half done on a running writer. A later part that fails
+	 * and rolls back is tried again a few times; if it still fails, or anything else stops the sweep, the writer halts
+	 * with a {@link CloseUnfinishedException} as the cause, and startup cancels what still rests before it takes a
+	 * command. So a writer that takes commands for a closed market has no order resting.
 	 */
 	public CompletableFuture<MarketClosing> close(CommandKey key, MarketControl command) {
 		if (command.action() != MarketControl.Action.CLOSE) {
@@ -1532,29 +1542,30 @@ public final class TradingEngine {
 			long start = nanoTime.getAsLong();
 			closing = timed("close", () -> closeInTransaction(key, command));
 			times.add(nanoTime.getAsLong() - start);
-			if (closing.swept() != null) {
-				closed = true;
-				applySweep(closing.swept());
-			}
-			if (!"CLOSED".equals(closing.result().state())) {
-				// Refused from a state that can't be closed; nothing was swept and nothing is left to sweep.
-				return closing.result();
-			}
-			// Closed by this command, by this key's first attempt, or already closed when this command came: whichever
-			// it was, no order rests once a close has answered.
-			finishSweep(command.actorUserId(), times);
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 		MarketClosing result = closing.result();
-		if (result.status() == MarketClosing.Status.CLOSED) {
-			discardBotTokens();
-		}
 		if (closing.swept() != null) {
+			// Committed: the market is closed for good, whatever becomes of the orders that still rest.
+			closed = true;
+			try {
+				applySweep(closing.swept());
+				finishSweep(command.actorUserId(), times);
+			}
+			catch (RuntimeException | Error ex) {
+				// Not an answer of "failed, nothing applied", and not a writer that goes on with a market half closed.
+				throw new WriterHaltException("The market closed, but its resting orders were not all cancelled",
+						new CloseUnfinishedException(result.commandSequence(), restingOrders(), ex));
+			}
 			LOG.info("The market closed at sequence {}: {} resting orders cancelled in {} transactions in {} ms, the "
 					+ "longest {} ms; {} bot runs ended", result.commandSequence(), result.canceledOrders(),
 					times.transactions, times.total / 1_000_000, times.longest / 1_000_000, result.endedRuns());
+		}
+		// Closed by this command, or by this key's first attempt in a process that stopped before it tidied up.
+		if (result.status() == MarketClosing.Status.CLOSED) {
+			discardBotTokens();
 		}
 		return result;
 	}
@@ -1602,12 +1613,44 @@ public final class TradingEngine {
 		while (restingOrders() > 0) {
 			if (Thread.currentThread().isInterrupted()) {
 				throw new CommandWriter.WriterStoppedException(
-						"Writer closed before the market's close had cancelled every order; a restart finishes it");
+						"Writer closed before the market's close had cancelled every order");
 			}
+			applySweep(sweepPart(actorUserId, times));
+		}
+	}
+
+	/**
+	 * One later part of the sweep, committed. A part that fails and rolls back left the database and the books as they
+	 * were, so it is tried again, a few times with a short wait: a connection that dropped is replaced by then. A part
+	 * that may have committed, or a market that is no longer this writer's, is not tried again.
+	 */
+	private Swept sweepPart(UUID actorUserId, SweepTimes times) {
+		for (int attempt = 1;; attempt++) {
 			long start = nanoTime.getAsLong();
-			Swept swept = timed("close", () -> sweepInTransaction(actorUserId));
-			times.add(nanoTime.getAsLong() - start);
-			applySweep(swept);
+			try {
+				Swept swept = timed("close", () -> sweepInTransaction(actorUserId));
+				times.add(nanoTime.getAsLong() - start);
+				return swept;
+			}
+			catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
+				// Not known to have rolled back, or not to be written by this writer at all.
+				throw ex;
+			}
+			catch (RuntimeException ex) {
+				if (attempt == SWEEP_ATTEMPTS) {
+					throw ex;
+				}
+				LOG.warn("A part of the market's close failed and rolled back; trying it again (attempt {} of {})",
+						attempt, SWEEP_ATTEMPTS, ex);
+				try {
+					Thread.sleep(SWEEP_RETRY_PAUSE_MILLIS * attempt);
+				}
+				catch (InterruptedException interrupted) {
+					Thread.currentThread().interrupt();
+					throw new CommandWriter.WriterStoppedException(
+							"Writer closed before the market's close had cancelled every order");
+				}
+			}
 		}
 	}
 
@@ -1666,28 +1709,23 @@ public final class TradingEngine {
 
 	/**
 	 * Applies a committed part of the sweep to the books and tells its accounts. Anything that fails here leaves the
-	 * books behind the database, so the writer halts.
+	 * books behind the database, so whoever runs the sweep stops for it: the writer halts, or startup fails.
 	 */
 	private void applySweep(Swept swept) {
-		try {
-			long start = nanoTime.getAsLong();
-			swept.canceled().forEach((instrumentId, orders) -> {
-				OrderBook book = books.get(instrumentId);
-				for (UUID orderId : orders) {
-					if (book.cancel(orderId).isEmpty()) {
-						throw new BookOutOfStepException(orderId);
-					}
+		long start = nanoTime.getAsLong();
+		swept.canceled().forEach((instrumentId, orders) -> {
+			OrderBook book = books.get(instrumentId);
+			for (UUID orderId : orders) {
+				if (book.cancel(orderId).isEmpty()) {
+					throw new BookOutOfStepException(orderId);
 				}
-			});
-			if (!swept.canceled().isEmpty()) {
-				timings.record(WriterTimings.Phase.APPLY, "close", nanoTime.getAsLong() - start);
 			}
-			if (!swept.accounts().isEmpty()) {
-				accountChanges.changed(swept.accounts(), swept.sequence());
-			}
+		});
+		if (!swept.canceled().isEmpty()) {
+			timings.record(WriterTimings.Phase.APPLY, "close", nanoTime.getAsLong() - start);
 		}
-		catch (RuntimeException | Error ex) {
-			throw new WriterHaltException("The books could not apply a committed market close", ex);
+		if (!swept.accounts().isEmpty()) {
+			accountChanges.changed(swept.accounts(), swept.sequence());
 		}
 	}
 
@@ -1975,6 +2013,38 @@ public final class TradingEngine {
 
 		BookOutOfStepException(UUID orderId) {
 			super("The book and the database disagree about order " + orderId);
+		}
+
+	}
+
+	/**
+	 * The market closed, and this writer could not finish cancelling the orders that rested. The close itself
+	 * committed, so nothing of it is undone and nothing is to be sent again: the writer halts with this as the cause,
+	 * and the next start cancels what still rests before it takes a command.
+	 */
+	public static final class CloseUnfinishedException extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+
+		private final long commandSequence;
+
+		private final int restingOrders;
+
+		public CloseUnfinishedException(long commandSequence, int restingOrders, Throwable cause) {
+			super("The market closed at sequence " + commandSequence + ", and " + restingOrders
+					+ " orders still rest; the next start cancels them", cause);
+			this.commandSequence = commandSequence;
+			this.restingOrders = restingOrders;
+		}
+
+		/** The close's own sequence. */
+		public long commandSequence() {
+			return commandSequence;
+		}
+
+		/** The orders still in the books when the writer stopped. */
+		public int restingOrders() {
+			return restingOrders;
 		}
 
 	}

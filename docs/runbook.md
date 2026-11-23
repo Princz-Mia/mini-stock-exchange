@@ -104,6 +104,8 @@ Find what changed the database outside Execution. If it can't be explained, rest
 
 **It stopped while the market was closing.** Nothing to do. A close cancels resting orders 5,000 to a transaction, and the market is closed from the first one. If Execution stops before the last, the next start cancels the rest before it takes commands, and logs `Finished the market's close at startup` with how many. A close that answered `504 COMMAND_OUTCOME_UNKNOWN` is still going on: send the same key again for its answer.
 
+**A close answered `503 MARKET_CLOSE_UNFINISHED`.** Restart Execution. The market is closed: its runs have ended and its bot tokens are revoked, but some orders still rest with their holds, and `restingOrders` in the answer says how many. A transaction of the close failed three times in a row (the database was away, say), or its outcome could not be known, and Execution stopped trading: its health is `DOWN` with `writer halted`, and its log has `halted the writer` with the cause. Nothing needs sending again. The restart cancels the rest before it takes commands, as above, and the close's key then returns its answer. If the restart fails with `The market's close could not be finished`, the cause in the log is what to fix first.
+
 ## A command's outcome is unknown
 
 An order or cancel answered `504 COMMAND_OUTCOME_UNKNOWN` was admitted but not answered in time. It may still have committed. The terminal resolves this by itself. By hand, look the key up:

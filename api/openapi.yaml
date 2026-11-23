@@ -1042,6 +1042,11 @@ paths:
 
         The answer comes once no order rests. A close with very many resting orders can take longer than the
         request waits; it then answers 504 and goes on, and the same key returns its answer.
+
+        A close is never left half done by a running exchange. If one of the later transactions fails, it is tried
+        again; if the orders still cannot all be canceled, the answer is 503 MARKET_CLOSE_UNFINISHED and trading
+        stops. The market is CLOSED by then, so nothing is to be sent again: the exchange cancels the orders that
+        still rest when it restarts, before it takes any command, and the same key then returns the close's answer.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       responses:
@@ -1063,7 +1068,18 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
         '503':
-          $ref: '#/components/responses/Unavailable'
+          description: |
+            EXCHANGE_BUSY (not queued; retry with the same key), TRADING_UNAVAILABLE, or MARKET_CLOSE_UNFINISHED:
+            the close committed, so the market is CLOSED, its bot runs have ended and its bot tokens are revoked,
+            but not every resting order could be canceled, and trading has stopped. The problem carries state
+            (CLOSED), the close's commandSequence, restingOrders (how many orders still rested when trading
+            stopped) and commandKey. The exchange finishes the close when it restarts. Has Retry-After.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
         '504':
           $ref: '#/components/responses/OutcomeUnknown'
 
@@ -1520,6 +1536,10 @@ components:
         commandSequence: { $ref: '#/components/schemas/Sequence' }
         commandKey: { $ref: '#/components/schemas/Uuid' }
         reason: { type: string }
+        restingOrders:
+          type: integer
+          minimum: 0
+          description: With MARKET_CLOSE_UNFINISHED, the orders a closed market still had resting when trading stopped.
         usage: { $ref: '#/components/schemas/InstrumentUsage' }
         shortfall: { $ref: '#/components/schemas/BotShortfall' }
     FieldError:
@@ -2562,7 +2582,7 @@ components:
         canceledOrders:
           type: integer
           minimum: 0
-          description: How many orders rested when the market closed. The close canceled every one of them.
+          description: How many orders rested when the market closed. None of them rests once this answer is given.
         endedRuns:
           type: integer
           minimum: 0

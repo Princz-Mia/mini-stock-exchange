@@ -18,6 +18,7 @@ import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterBusy
 import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterHaltException;
 import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterStoppedException;
 import com.mia_princz.mse.execution.trading.application.IdempotencyConflictException;
+import com.mia_princz.mse.execution.trading.application.TradingEngine.CloseUnfinishedException;
 import com.mia_princz.mse.execution.trading.application.TradingEngine.UnknownAccountException;
 import com.mia_princz.mse.execution.trading.application.TradingEngine.UnknownInstrumentException;
 
@@ -76,13 +77,17 @@ final class CommandCalls {
 			if (cause instanceof WriterHaltException) {
 				// Trading stays stopped until a restart rebuilds from the database, so the reason must be on record.
 				LOG.error("Command {} halted the writer; trading is stopped until a restart", key, cause);
+				if (cause.getCause() instanceof CloseUnfinishedException unfinished) {
+					throw closeUnfinished(key, unfinished);
+				}
 				throw unavailable();
 			}
 			if (cause instanceof WriterStoppedException) {
 				throw unavailable();
 			}
 			// Anything else failed inside the command's transaction, which rolled back. Answered here, because an error
-			// dispatch would be refused by the deny-by-default rules and look like a 403.
+			// dispatch would be refused by the deny-by-default rules and look like a 403. A close is the one command
+			// with more than one transaction, and a failure after its first never comes here: it halts the writer.
 			LOG.error("Command {} failed and was not applied", key, cause);
 			throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "COMMAND_FAILED",
 					"The command failed and nothing was applied; retrying the same key is safe");
@@ -106,6 +111,22 @@ final class CommandCalls {
 		catch (NoSuchAlgorithmException ex) {
 			throw new IllegalStateException(ex);
 		}
+	}
+
+	/**
+	 * A close that committed and then could not cancel every resting order. Answered as what it is: the market is
+	 * closed, so "nothing was applied" would be false, and nothing is to be sent again, since the next start finishes
+	 * it.
+	 */
+	private static ApiException closeUnfinished(UUID key, CloseUnfinishedException unfinished) {
+		return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "MARKET_CLOSE_UNFINISHED",
+				"The market is closed, but " + unfinished.restingOrders() + " orders still rest. Trading is stopped; "
+						+ "the exchange cancels them when it restarts, and the same key then returns the close's "
+						+ "answer")
+			.with("state", "CLOSED")
+			.with("commandSequence", Long.toString(unfinished.commandSequence()))
+			.with("restingOrders", unfinished.restingOrders())
+			.with("commandKey", key.toString());
 	}
 
 	private static ApiException unavailable() {

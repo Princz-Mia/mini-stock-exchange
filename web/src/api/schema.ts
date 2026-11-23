@@ -586,6 +586,11 @@ export interface paths {
          *
          *     The answer comes once no order rests. A close with very many resting orders can take longer than the
          *     request waits; it then answers 504 and goes on, and the same key returns its answer.
+         *
+         *     A close is never left half done by a running exchange. If one of the later transactions fails, it is tried
+         *     again; if the orders still cannot all be canceled, the answer is 503 MARKET_CLOSE_UNFINISHED and trading
+         *     stops. The market is CLOSED by then, so nothing is to be sent again: the exchange cancels the orders that
+         *     still rest when it restarts, before it takes any command, and the same key then returns the close's answer.
          */
         readonly post: operations["closeMarket"];
         readonly delete?: never;
@@ -882,6 +887,8 @@ export interface components {
             readonly commandSequence?: components["schemas"]["Sequence"];
             readonly commandKey?: components["schemas"]["Uuid"];
             readonly reason?: string;
+            /** @description With MARKET_CLOSE_UNFINISHED, the orders a closed market still had resting when trading stopped. */
+            readonly restingOrders?: number;
             readonly usage?: components["schemas"]["InstrumentUsage"];
             readonly shortfall?: components["schemas"]["BotShortfall"];
         };
@@ -1604,7 +1611,7 @@ export interface components {
             readonly state: "CLOSED";
             /** @description The close's own sequence. The transactions that cancel the rest of the orders follow it. */
             readonly commandSequence: components["schemas"]["Sequence"];
-            /** @description How many orders rested when the market closed. The close canceled every one of them. */
+            /** @description How many orders rested when the market closed. None of them rests once this answer is given. */
             readonly canceledOrders: number;
             /** @description How many bot runs the close ended. */
             readonly endedRuns: number;
@@ -3518,7 +3525,22 @@ export interface operations {
                     readonly "application/problem+json": components["schemas"]["Problem"];
                 };
             };
-            readonly 503: components["responses"]["Unavailable"];
+            /**
+             * @description EXCHANGE_BUSY (not queued; retry with the same key), TRADING_UNAVAILABLE, or MARKET_CLOSE_UNFINISHED:
+             *     the close committed, so the market is CLOSED, its bot runs have ended and its bot tokens are revoked,
+             *     but not every resting order could be canceled, and trading has stopped. The problem carries state
+             *     (CLOSED), the close's commandSequence, restingOrders (how many orders still rested when trading
+             *     stopped) and commandKey. The exchange finishes the close when it restarts. Has Retry-After.
+             */
+            readonly 503: {
+                headers: {
+                    readonly "Retry-After"?: number;
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             readonly 504: components["responses"]["OutcomeUnknown"];
         };
     };
