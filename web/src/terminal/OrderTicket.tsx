@@ -1,6 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useQueryClient } from '@tanstack/react-query';
-import { type ReactNode, useCallback, useEffect } from 'react';
+import { type ReactNode, useCallback, useEffect, useState } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { Link } from 'react-router';
 import { z } from 'zod';
@@ -190,6 +190,13 @@ export function OrderTicket({
   const intent = useOrderIntent({ onAccepted });
   const unresolved = isUnresolved(intent.outcome);
   const sending = intent.outcome.kind === 'sending';
+  // The close found an order of this ticket on its way or unresolved. Only that order's answer is shown with the
+  // statement that the market closed: an answer from before the close, such as an order accepted an hour ago and
+  // cancelled by the close since, says nothing true there.
+  const [caughtByClose, setCaughtByClose] = useState(false);
+  if (closed !== null && (unresolved || sending) && !caughtByClose) {
+    setCaughtByClose(true);
+  }
   const {
     register,
     handleSubmit,
@@ -227,8 +234,8 @@ export function OrderTicket({
   if (closed !== null && !unresolved && !sending) {
     return (
       <ClosedTicket closedAt={closed.closedAt} stillOpen={closed.stillOpen}>
-        {/* What became of the last order sent, if the close came right behind it. */}
-        <OutcomeMessage outcome={intent.outcome} />
+        {/* What became of the order the close caught unanswered, and of no order before it. */}
+        {caughtByClose && <OutcomeMessage outcome={intent.outcome} />}
       </ClosedTicket>
     );
   }

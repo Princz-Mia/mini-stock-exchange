@@ -365,6 +365,61 @@ describe('terminal', () => {
     expect(keys[1]).toBe(keys[0]);
   });
 
+  it('shows no answer from before the close with the statement that the market closed', async () => {
+    const accepted = {
+      status: 201,
+      json: {
+        orderId: '00000000-0000-0000-0000-0000000000aa',
+        state: 'OPEN',
+        reason: null,
+        filledQuantity: 0,
+        workingQuantity: 1,
+        canceledQuantity: 0,
+        commandSequence: '10',
+      },
+    };
+    const rejected = {
+      status: 422,
+      problem: { status: 422, code: 'INSUFFICIENT_CASH', orderId: '00000000-0000-0000-0000-0000000000ab', commandSequence: '10' },
+    };
+    const busy = { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY' } };
+    const cases = [
+      { answers: [accepted], said: 'Accepted and resting: 1 shares working, none filled yet.' },
+      { answers: [rejected], said: 'Rejected: Not enough available cash for this order at its price limit.' },
+      // Unresolved for a while, and settled by its retry while the market was still open: also long before the close.
+      { answers: [busy, accepted], said: 'Accepted and resting: 1 shares working, none filled yet.' },
+    ];
+    for (const { answers, said } of cases) {
+      let status = OPEN as typeof OPEN | typeof CLOSED;
+      let sent = 0;
+      market()
+        .on('GET /api/v1/market', () => ({ status: 200, json: status }))
+        .on('GET /api/v1/orders', (request) =>
+          status === CLOSED ? afterClose(request) : { status: 200, json: { orders: [], nextCursor: null } },
+        )
+        .on('POST /api/v1/orders', () => answers[sent++]!);
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      const view = renderTerminal('/terminal', null, client);
+      const ticket = await view.findByRole('region', { name: 'Order · NOVA' });
+      await waitFor(() => expect(within(ticket).getByRole('button', { name: 'Buy NOVA' })).toBeEnabled());
+      fireEvent.click(within(ticket).getByRole('button', { name: 'Buy NOVA' }));
+      if (answers.length > 1) {
+        fireEvent.click(await view.findByRole('button', { name: 'Retry the same order' }));
+      }
+      expect(await view.findByText(said)).toBeInTheDocument();
+
+      // The trader stays on the instrument, and the market closes an hour later. The order that rested was cancelled
+      // by the close since; what the ticket said of it when it was placed is no longer so.
+      status = CLOSED;
+      await client.invalidateQueries({ queryKey: ['market'] });
+      const closed = await view.findByRole('region', { name: 'Market closed' });
+      expect(view.queryByText(said)).toBeNull();
+      expect(within(closed).queryByRole('alert')).toBeNull();
+      expect(within(closed).getAllByRole('status')).toHaveLength(1);
+      view.unmount();
+    }
+  });
+
   it('tells a user who never had an account that the market closed, not how to get one', async () => {
     const noAccount = { status: 403, problem: { status: 403, code: 'NO_TRADING_ACCOUNT' } };
     signedIn()
