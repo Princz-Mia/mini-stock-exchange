@@ -340,9 +340,11 @@ class TradingQueries {
 
 	/** A key is per simulation: the same one may have another answer in an older, closed simulation. */
 	Optional<StoredCommand> command(UUID principalId, UUID idempotencyKey) {
-		return jdbc.sql("""
-				SELECT route, response_body::text AS body FROM command_result
-				WHERE simulation_id = %s AND principal_id = ? AND idempotency_key = ?""".formatted(CurrentSimulation.ID))
+		return jdbc
+			.sql("""
+					SELECT route, response_body::text AS body FROM command_result
+					WHERE simulation_id = %s AND principal_id = ? AND idempotency_key = ?"""
+				.formatted(CurrentSimulation.ID))
 			.params(principalId, idempotencyKey)
 			.query((row, index) -> new StoredCommand(row.getString("route"), row.getString("body")))
 			.optional();

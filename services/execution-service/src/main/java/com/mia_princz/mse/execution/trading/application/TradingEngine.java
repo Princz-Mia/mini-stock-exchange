@@ -186,7 +186,8 @@ public final class TradingEngine {
 			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings, LongSupplier nanoTime,
 			RestingOrders resting, int closeChunkOrders) {
 		if (closeChunkOrders < 1) {
-			throw new IllegalArgumentException("A close cancels at least one order per transaction: " + closeChunkOrders);
+			throw new IllegalArgumentException(
+					"A close cancels at least one order per transaction: " + closeChunkOrders);
 		}
 		this.closeChunkOrders = closeChunkOrders;
 		this.resting = resting;
