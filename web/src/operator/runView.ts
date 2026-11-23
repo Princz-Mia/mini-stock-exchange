@@ -1,5 +1,6 @@
 import type { BotPopulation, BotRun, BotRunRequest, Instrument, MarketStatus } from '../api/types';
 import { groupInteger, utcTime } from '../format';
+import { durationText } from './compare';
 
 export const STATUS_LABELS: Record<BotRun['status'], string> = {
   STARTING: 'Starting',
@@ -47,6 +48,29 @@ export function averageRate(run: BotRun): string | null {
 export function activeRun(runs: readonly BotRun[]): BotRun | undefined {
   const newest = runs[0];
   return newest === undefined || newest.status === 'STOPPED' ? undefined : newest;
+}
+
+/**
+ * Whole seconds from the run's start to now, a time in epoch milliseconds. Never negative: the start is on the
+ * exchange's clock and now on the browser's, and the two may disagree a little.
+ */
+export function elapsedSeconds(run: BotRun, now: number): number {
+  return Math.max(0, Math.floor((now - Date.parse(run.startedAt)) / 1000));
+}
+
+/** Whole seconds until a timed run's end, 0 once it is due; null for a run that lasts until it is stopped. */
+export function remainingSeconds(run: BotRun, now: number): number | null {
+  return run.endsAt === null ? null : Math.max(0, Math.ceil((Date.parse(run.endsAt) - now) / 1000));
+}
+
+/**
+ * A timed run's time left, in words; null for a run with no end, and once a stop has been asked for, as its end time
+ * no longer decides anything.
+ */
+export function timeLeftText(run: BotRun, now: number): string | null {
+  const seconds = remainingSeconds(run, now);
+  if (seconds === null || run.desiredState === 'STOPPED') return null;
+  return seconds === 0 ? 'Ending now' : durationText(seconds);
 }
 
 /** Why a run can't start right now, or null when it can. */

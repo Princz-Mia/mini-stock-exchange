@@ -11,6 +11,7 @@ import { groupInteger, utcTime } from '../format';
 import {
   activeRun,
   averageRate,
+  elapsedSeconds,
   type RunForm,
   runRequest,
   STATUS_LABELS,
@@ -19,12 +20,13 @@ import {
   statusClass,
   strategiesText,
   taggedSplit,
+  timeLeftText,
   workerText,
 } from './runView';
 import { populationText } from './strategies';
 import { CommandStatus } from './CommandStatus';
 import { useCommand } from './useCommand';
-import { comparability, MAX_COMPARED, parseRunIds, withTick } from './compare';
+import { comparability, durationText, MAX_COMPARED, parseRunIds, withTick } from './compare';
 import { SimulatorSettings } from './SimulatorSettings';
 
 type Typed = Partial<Omit<RunForm, 'instrumentIds'>> & { instrumentIds?: readonly string[] };
@@ -40,7 +42,8 @@ const DEFAULTS = {
 /**
  * Bot runs: the one that is running with its worker and activity, a form to start the next, and every run a page at a
  * time. Everything shown is what Execution committed and what the worker last reported. The current run is refetched
- * every two seconds; the history every five, and at once whenever the newest run changes, so the two agree.
+ * every two seconds; the history every five, and at once whenever the newest run changes, so the two agree. How long
+ * the run has been going is counted up to the last answer, so it moves with each refetch and needs no timer of its own.
  */
 export function BotRuns({ market, instruments }: { market: MarketStatus['state']; instruments: readonly Instrument[] }) {
   const runs = useQuery({ queryKey: ['bot-runs'], queryFn: api.botRuns, refetchInterval: pollEvery(2_000) });
@@ -103,7 +106,7 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
       {runs.isPending ? (
         <p className="muted">Loading…</p>
       ) : active !== undefined ? (
-        <ActiveRun run={active} />
+        <ActiveRun run={active} now={runs.dataUpdatedAt} />
       ) : (
         <StartForm
           market={market}
@@ -143,7 +146,7 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
   );
 }
 
-function ActiveRun({ run }: { run: BotRun }) {
+function ActiveRun({ run, now }: { run: BotRun; now: number }) {
   const client = useQueryClient();
   const send = useCallback(
     async (runId: string, key: string) => {
@@ -158,6 +161,7 @@ function ActiveRun({ run }: { run: BotRun }) {
   const command = useCommand(send);
   const stopping = run.desiredState === 'STOPPED';
   const rate = averageRate(run);
+  const timeLeft = timeLeftText(run, now);
   const { activity, config } = run;
 
   return (
@@ -192,8 +196,16 @@ function ActiveRun({ run }: { run: BotRun }) {
         <dd className="num">{config.seed}</dd>
         <dt>Started</dt>
         <dd>{utcTime(run.startedAt)}</dd>
+        <dt>Elapsed</dt>
+        <dd>{durationText(elapsedSeconds(run, now))}</dd>
         <dt>Ends</dt>
         <dd>{run.endsAt === null ? 'When stopped' : utcTime(run.endsAt)}</dd>
+        {timeLeft !== null && (
+          <>
+            <dt>Time left</dt>
+            <dd>{timeLeft}</dd>
+          </>
+        )}
         <dt>Last heartbeat</dt>
         <dd>{run.worker.heartbeatAt === null ? 'None yet' : utcTime(run.worker.heartbeatAt)}</dd>
         <dt>Simulator</dt>

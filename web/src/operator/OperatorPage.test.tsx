@@ -1321,9 +1321,12 @@ describe('adding traders on the operator screen', () => {
 
 describe('bot runs on the operator screen', () => {
   beforeEach(() => resetSession());
+  afterEach(() => vi.useRealTimers());
 
   const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
   const runs = () => screen.findByRole('region', { name: 'Bot runs' });
+  /** Sets the browser's clock and nothing else: timers still run, so the screen keeps asking every two seconds. */
+  const clockAt = (time: string) => vi.setSystemTime(new Date(time));
 
   it('ticks finished runs for a comparison, four at most, and links to it', async () => {
     const { state } = exchange('OPEN');
@@ -1516,6 +1519,43 @@ describe('bot runs on the operator screen', () => {
     // Its worker hasn't reported its simulator yet: nothing to open.
     expect(counters).toHaveTextContent('SimulatorNot reported yet');
     expect(within(panel).queryByText('Simulator settings')).toBeNull();
+  });
+
+  it('says how long the run has been going and how long a timed one has left, as of the last answer', async () => {
+    const { state } = exchange('OPEN');
+    const timed = botRun({ endsAt: '2026-11-06T11:00:00Z' });
+    state.runs = [timed];
+    // Its worker last reported at 10:01:20; the run is twelve and a half minutes old all the same.
+    clockAt('2026-11-06T10:12:30Z');
+    renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(current).toHaveTextContent('Started10:00:00 UTCElapsed12 min 30 sEnds11:00:00 UTCTime left47 min 30 sLast');
+    // Each answer moves both; nothing on the screen counts between answers.
+    clockAt('2026-11-06T10:59:59Z');
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed59 min 59 sEnds11:00:00 UTCTime left1 sLast'), {
+      timeout: 10_000,
+    });
+    clockAt('2026-11-06T11:00:04Z');
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed1 h 0 minEnds11:00:00 UTCTime leftEnding now'), {
+      timeout: 10_000,
+    });
+    // The exchange asks for the stop at the end time; from then on there is nothing left to count down.
+    state.runs = [{ ...timed, status: 'STOPPING', desiredState: 'STOPPED' }];
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed1 h 0 minEnds11:00:00 UTCLast heartbeat'), {
+      timeout: 10_000,
+    });
+  }, 20_000);
+
+  it('counts a run with no end from its start, in days once it is that old, with no time left to show', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [botRun({ startedAt: '2026-11-10T10:00:00Z', status: 'STALE' })];
+    clockAt('2026-11-23T14:30:00Z');
+    renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(current).toHaveTextContent('Started10:00:00 UTCElapsed13 d 4 hEndsWhen stoppedLast heartbeat');
+    expect(current).not.toHaveTextContent('Time left');
   });
 
   it("shows the simulator a running run's worker reported, and when another took over", async () => {

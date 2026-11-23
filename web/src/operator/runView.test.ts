@@ -7,14 +7,22 @@ import { seeded } from '../test/seeded';
 import {
   activeRun,
   averageRate,
+  elapsedSeconds,
+  remainingSeconds,
   type RunForm,
   runRequest,
   shortfallText,
   startBlocked,
   strategiesText,
   taggedSplit,
+  timeLeftText,
   workerText,
 } from './runView';
+
+/** The fixture run started at 10:00:00 on 6 November; this is that many seconds later. */
+function after(seconds: number): number {
+  return Date.parse('2026-11-06T10:00:00Z') + seconds * 1000;
+}
 
 function tagged(marketMakers: number, noise: number, momentum: number, untagged = 0) {
   return { marketMakers, noise, momentum, untagged };
@@ -80,6 +88,45 @@ describe('the bot run view', () => {
     expect(activeRun([stopped])).toBeUndefined();
     for (const status of ['STARTING', 'RUNNING', 'STALE', 'STOPPING'] as const) {
       expect(activeRun([botRun({ status }), stopped])?.status).toBe(status);
+    }
+  });
+
+  it('counts whole seconds from the start, whatever the worker last reported, and never below zero', () => {
+    expect(elapsedSeconds(botRun(), after(0))).toBe(0);
+    expect(elapsedSeconds(botRun(), after(0.999))).toBe(0);
+    expect(elapsedSeconds(botRun(), after(750))).toBe(750);
+    // The fixture's worker last reported 80 seconds in; a run whose worker is lost keeps ageing.
+    expect(elapsedSeconds(botRun({ status: 'STALE' }), after(13 * 86_400))).toBe(13 * 86_400);
+    expect(elapsedSeconds(botRun({ worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null } }), after(9))).toBe(9);
+    // A browser clock behind the exchange's.
+    expect(elapsedSeconds(botRun(), after(-30))).toBe(0);
+  });
+
+  it('counts down to a timed run\'s end, and has nothing to count for a run with no end', () => {
+    const timed = botRun({ endsAt: '2026-11-06T11:00:00Z' });
+    expect(remainingSeconds(timed, after(0))).toBe(3_600);
+    expect(remainingSeconds(timed, after(750))).toBe(2_850);
+    expect(remainingSeconds(timed, after(3_599.5))).toBe(1);
+    expect(remainingSeconds(timed, after(3_600))).toBe(0);
+    expect(remainingSeconds(timed, after(3_700))).toBe(0);
+    expect(remainingSeconds(botRun(), after(750))).toBeNull();
+
+    expect(timeLeftText(timed, after(750))).toBe('47 min 30 s');
+    expect(timeLeftText(timed, after(3_600))).toBe('Ending now');
+    expect(timeLeftText(botRun(), after(750))).toBeNull();
+    // Once a stop is asked for, by the operator or at its end, the end time decides nothing.
+    expect(timeLeftText({ ...timed, status: 'STOPPING', desiredState: 'STOPPED' }, after(750))).toBeNull();
+  });
+
+  it('adds up: the time gone and the time left of a timed run make its length, until it is due', () => {
+    const draw = seeded(1123);
+    for (let i = 0; i < 500; i++) {
+      const elapsed = draw(3 * 86_400);
+      const minutes = 1 + draw(1_440);
+      const timed = botRun({ endsAt: new Date(after(minutes * 60)).toISOString() });
+      expect(elapsedSeconds(timed, after(elapsed)) + (remainingSeconds(timed, after(elapsed)) ?? 0)).toBe(
+        Math.max(elapsed, minutes * 60),
+      );
     }
   });
 
