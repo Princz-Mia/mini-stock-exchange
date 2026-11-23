@@ -173,8 +173,9 @@ class BotRunController {
 	/**
 	 * The run's commands in the command sequence: from its start to its end. {@code stopSequence} is the operator's
 	 * stop command, if there was one; {@code endSequence} stays null until the run is finished, and {@code endedBy}
-	 * says how it ended: WORKER, NEXT_START, or NOT_KEPT for a run recorded before windows were kept. {@code endedAt}
-	 * is when it ended, set with the end: the worker's confirmation, or the next run's start.
+	 * says how it ended: WORKER, NEXT_START, MARKET_CLOSE, or NOT_KEPT for a run recorded before windows were kept.
+	 * {@code endedAt} is when it ended, set with the end: the worker's confirmation, the next run's start, or the
+	 * market's close.
 	 */
 	record Window(String startSequence, String stopSequence, String endSequence, String endedBy, Instant endedAt) {
 	}
