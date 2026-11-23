@@ -1,5 +1,6 @@
 package com.mia_princz.mse.execution.trading.domain;
 
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.NavigableMap;
@@ -45,6 +46,15 @@ public final class BookDelta {
 	public static BookDelta cancel(BookOrder order) {
 		BookDelta delta = new BookDelta();
 		delta.add(order.side(), order.price().cents(), -order.remainingQuantity(), -1);
+		return delta;
+	}
+
+	/** Several cancelled resting orders leave their levels at once. */
+	public static BookDelta cancel(Collection<BookOrder> orders) {
+		BookDelta delta = new BookDelta();
+		for (BookOrder order : orders) {
+			delta.add(order.side(), order.price().cents(), -order.remainingQuantity(), -1);
+		}
 		return delta;
 	}
 

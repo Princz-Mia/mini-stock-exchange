@@ -268,6 +268,43 @@ class OrderBookTest {
 		assertThat(book.depthAfter(delta, Side.BUY, 20)).containsExactly(new DepthLevel(Price.parse("99.00"), 4, 1));
 	}
 
+	/** Several cancels as one change: a level that loses every order goes, one that keeps some shrinks. */
+	@Test
+	void depthAfterSeveralCancelsAtOnce() {
+		OrderRequest best = rest(UUID.randomUUID(), Side.BUY, "99.00", 3);
+		OrderRequest behind = rest(UUID.randomUUID(), Side.BUY, "99.00", 4);
+		rest(UUID.randomUUID(), Side.BUY, "98.00", 5);
+		OrderRequest lower = rest(UUID.randomUUID(), Side.BUY, "98.00", 6);
+		OrderRequest offer = rest(UUID.randomUUID(), Side.SELL, "101.00", 2);
+
+		BookDelta delta = BookDelta.cancel(List.of(book.find(best.orderId()).orElseThrow(),
+				book.find(behind.orderId()).orElseThrow(), book.find(lower.orderId()).orElseThrow(),
+				book.find(offer.orderId()).orElseThrow()));
+
+		assertThat(book.depthAfter(delta, Side.BUY, 20)).containsExactly(new DepthLevel(Price.parse("98.00"), 5, 1));
+		assertThat(book.depthAfter(delta, Side.SELL, 20)).isEmpty();
+		assertThat(book.depthAfter(BookDelta.cancel(List.of()), Side.BUY, 20)).isEqualTo(book.depth(Side.BUY, 20));
+		assertThat(book.size()).as("book unchanged").isEqualTo(5);
+	}
+
+	/** A side's first orders, best price first and the earliest first at a price, without reading the whole side. */
+	@Test
+	void theFirstOrdersOfASideComeInPriorityOrderUpToALimit() {
+		OrderRequest second = rest(UUID.randomUUID(), Side.SELL, "101.00", 1);
+		OrderRequest first = rest(UUID.randomUUID(), Side.SELL, "100.00", 2);
+		OrderRequest third = rest(UUID.randomUUID(), Side.SELL, "101.00", 3);
+		rest(UUID.randomUUID(), Side.BUY, "90.00", 4);
+
+		assertThat(book.orders(Side.SELL, 2)).extracting(BookOrder::orderId)
+			.containsExactly(first.orderId(), second.orderId());
+		assertThat(book.orders(Side.SELL, 3)).extracting(BookOrder::orderId)
+			.containsExactly(first.orderId(), second.orderId(), third.orderId());
+		assertThat(book.orders(Side.SELL, 10)).isEqualTo(book.orders(Side.SELL)).hasSize(3);
+		assertThat(book.orders(Side.SELL, 0)).isEmpty();
+		assertThat(book.orders(Side.BUY, 1)).singleElement()
+			.satisfies((order) -> assertThat(order.remainingQuantity()).isEqualTo(4));
+	}
+
 	@Test
 	void deltaThatDoesNotFitTheBookIsRefused() {
 		OrderRequest resting = rest(UUID.randomUUID(), Side.BUY, "99.00", 3);
