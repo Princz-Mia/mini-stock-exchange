@@ -174,6 +174,16 @@ def test_a_running_market_is_left_alone() -> None:
         assert "nothing to do" in done
 
 
+def test_a_closed_market_is_left_alone_in_one_line() -> None:
+    exchange = FakeExchange("CLOSED")
+
+    done = seed(operator(exchange), bots=20, trader_password=TRADER_PASSWORD)
+
+    assert exchange.applied == [], "no setup command is sent to be refused"
+    assert exchange.state == "CLOSED"
+    assert done == "the market is closed; the demo seed starts no new one, so nothing to do"
+
+
 def test_a_refused_field_is_named_in_the_error() -> None:
     exchange = FakeExchange()
     exchange.answers[seeding.key("trader:trader")] = httpx.Response(
