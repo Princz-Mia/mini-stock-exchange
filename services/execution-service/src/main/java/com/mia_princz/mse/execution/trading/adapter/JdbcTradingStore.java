@@ -249,6 +249,23 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public void closeMarket(UUID simulationId, Instant closedAt) {
+		expectOne(jdbc.sql("UPDATE simulation SET state = 'CLOSED', closed_at = ? WHERE id = ?")
+			.params(Timestamp.from(closedAt), simulationId)
+			.update(), "close market");
+	}
+
+	@Override
+	public Optional<UUID> closedBy(UUID simulationId) {
+		return jdbc.sql("""
+				SELECT actor_user_id FROM audit_log
+				WHERE simulation_id = ? AND action = 'MARKET_CLOSE' AND outcome = 'APPLIED'""")
+			.param(simulationId)
+			.query(UUID.class)
+			.optional();
+	}
+
+	@Override
 	public void insertAudit(UUID simulationId, UUID actorUserId, String action, String outcome, UUID correlationId,
 			long commandSequence) {
 		expectOne(jdbc.sql("""
@@ -467,6 +484,39 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public int endBotRunsAtClose(UUID simulationId, long sequence, Instant at) {
+		Timestamp closedAt = Timestamp.from(at);
+		// The runs first, then their instruments: the order the worker's confirmation takes its locks in. A run its
+		// operator had already asked to stop keeps that stop's sequence. A clock set back since a run started must not
+		// make its end fall before its start, which the table refuses.
+		List<UUID> ended = jdbc.sql("""
+				UPDATE bot_run SET stop_sequence = coalesce(stop_sequence, ?), end_sequence = ?,
+				    ended_by = 'MARKET_CLOSE', ended_at = GREATEST(?, started_at)
+				WHERE simulation_id = ? AND ended_by IS NULL
+				RETURNING id""")
+			.params(sequence, sequence, closedAt, simulationId)
+			.query(UUID.class)
+			.list();
+		if (!ended.isEmpty()) {
+			jdbc.sql("""
+					UPDATE bot_run_instrument r SET end_trade_sequence = i.last_trade_sequence
+					FROM instrument i
+					WHERE r.run_id = ANY(?::uuid[]) AND i.simulation_id = r.simulation_id AND i.id = r.instrument_id""")
+				.param(ended.stream().map(UUID::toString).toArray(String[]::new))
+				.update();
+		}
+		// Then every run no worker has confirmed is recorded as stopped, now: the ones just ended, and any that ended
+		// earlier (by the next start, or before windows were kept) and keep that end.
+		jdbc.sql("""
+				UPDATE bot_run SET desired_state = 'STOPPED', stop_requested_at = coalesce(stop_requested_at, ?),
+				    stopped_at = ?
+				WHERE simulation_id = ? AND stopped_at IS NULL""")
+			.params(closedAt, closedAt, simulationId)
+			.update();
+		return ended.size();
+	}
+
+	@Override
 	public void insertBotAccount(UUID simulationId, UUID accountId, String displayName, BotStrategy strategy) {
 		// clock_timestamp, not the transaction's now(): bots made by one command then list in the order they were made.
 		expectOne(jdbc.sql("""
@@ -514,6 +564,23 @@ public final class JdbcTradingStore implements TradingStore {
 		return jdbc.sql("UPDATE api_token SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL")
 			.params(Timestamp.from(at), accountId)
 			.update();
+	}
+
+	@Override
+	public int revokeBotTokens(UUID simulationId, Instant at) {
+		return jdbc.sql("""
+				UPDATE api_token t SET revoked_at = ? FROM account a
+				WHERE a.id = t.account_id AND a.simulation_id = ? AND t.revoked_at IS NULL""")
+			.params(Timestamp.from(at), simulationId)
+			.update();
+	}
+
+	@Override
+	public List<UUID> botAccounts(UUID simulationId) {
+		return jdbc.sql("SELECT id FROM account WHERE simulation_id = ? AND kind = 'BOT'")
+			.param(simulationId)
+			.query(UUID.class)
+			.list();
 	}
 
 	@Override
@@ -896,6 +963,7 @@ public final class JdbcTradingStore implements TradingStore {
 	/**
 	 * Cancels orders the book held for their owners, after the transaction's fills of them, each guarded by what the
 	 * book said: still resting, the owner's, with exactly that quantity working. A row that differs halts the writer.
+	 * A market's close cancels through here too, many orders at once.
 	 */
 	private void cancelOrders(List<WriteSet.Cancel> cancels) {
 		for (List<WriteSet.Cancel> chunk : chunks(cancels, 4)) {

@@ -113,7 +113,7 @@ describe('terminal', () => {
   it('pauses new orders while the market is halted, but still lets the trader cancel', async () => {
     const server = market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'HALTED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '9' },
+      json: { state: 'HALTED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
     });
     renderTerminal();
 
@@ -132,7 +132,7 @@ describe('terminal', () => {
   it("has a part for every step of the trader's tour, but the Portfolio link, which is in the top bar", async () => {
     market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '9' },
+      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
     });
     renderTerminal();
     await screen.findByRole('region', { name: 'Order · NOVA' });
@@ -144,7 +144,7 @@ describe('terminal', () => {
   it('explains a halt beside its badge, but not a market that has not opened yet', async () => {
     market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'SETUP', simulationId: 's', openedAt: null, commandSequence: '2' },
+      json: { state: 'SETUP', simulationId: 's', openedAt: null, closedAt: null, commandSequence: '2' },
     });
     renderTerminal();
     await screen.findByRole('region', { name: 'Order · NOVA' });
@@ -155,7 +155,13 @@ describe('terminal', () => {
   it('shows a closed market as closed and takes no new orders', async () => {
     const server = market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'CLOSED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '12' },
+      json: {
+        state: 'CLOSED',
+        simulationId: 's',
+        openedAt: '2026-11-04T09:00:00Z',
+        closedAt: '2026-11-04T17:00:00Z',
+        commandSequence: '12',
+      },
     });
     renderTerminal();
 
@@ -173,7 +179,7 @@ describe('terminal', () => {
   it('takes orders once the market is open', async () => {
     market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '9' },
+      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
     });
     renderTerminal();
 

@@ -26,7 +26,10 @@ public final class WriteSet {
 	public record MakerFill(UUID orderId, long quantity, int fills) {
 	}
 
-	/** A resting order cancelled by its owner, with exactly {@code quantity} working when it was. */
+	/**
+	 * A resting order cancelled, by its owner or by the market's close, with exactly {@code quantity} working when it
+	 * was.
+	 */
 	public record Cancel(UUID orderId, UUID accountId, long quantity, String reason) {
 	}
 

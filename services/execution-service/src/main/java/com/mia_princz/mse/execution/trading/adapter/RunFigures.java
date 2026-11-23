@@ -22,7 +22,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 /**
  * Each finished bot run's figures, computed once from its window and stored, off the writer: the trades in its
  * instruments, and per strategy its bots' commands, refusals, fills and estimated P&L. A run is finished once its
- * window has an end (V30); one recorded before windows were kept never is.
+ * window has an end (V30), whether its worker, the next start or the market's close ended it; one recorded before
+ * windows were kept never is.
  * <p>
  * Everything is read in one repeatable-read snapshot. The run's bots may already trade in a later run, so holdings at
  * an edge are today's holdings less what the bots traded since: no balance history is needed, and the writer's tables
@@ -38,6 +39,9 @@ public final class RunFigures {
 	private static final String PLACE = "POST /api/v1/orders";
 
 	private static final String CANCEL = "POST /api/v1/orders/{id}/cancel";
+
+	/** How a run with a window ended; every one of them has an end sequence. */
+	private static final String ENDED = "('WORKER', 'NEXT_START', 'MARKET_CLOSE')";
 
 	private final JdbcClient jdbc;
 
@@ -67,9 +71,9 @@ public final class RunFigures {
 	public int computeFinished() {
 		List<UUID> due = jdbc.sql("""
 				SELECT r.id FROM bot_run r
-				WHERE r.ended_by IN ('WORKER', 'NEXT_START')
+				WHERE r.ended_by IN %s
 				    AND NOT EXISTS (SELECT 1 FROM bot_run_figures f WHERE f.run_id = r.id)
-				ORDER BY r.start_sequence LIMIT ?""")
+				ORDER BY r.start_sequence LIMIT ?""".formatted(ENDED))
 			.param(PASS)
 			.query(UUID.class)
 			.list();
@@ -127,7 +131,7 @@ public final class RunFigures {
 	private boolean compute(UUID runId) {
 		Optional<Window> found = jdbc.sql("""
 				SELECT simulation_id, start_sequence, end_sequence FROM bot_run
-				WHERE id = ? AND ended_by IN ('WORKER', 'NEXT_START')""")
+				WHERE id = ? AND ended_by IN %s""".formatted(ENDED))
 			.param(runId)
 			.query((row, index) -> new Window(row.getObject(1, UUID.class), row.getLong(2), row.getLong(3)))
 			.optional();

@@ -34,11 +34,12 @@ const NOVA = {
 
 function market(state: MarketStatus['state']): MarketStatus {
   return state === 'NOT_SET_UP'
-    ? { state, simulationId: null, openedAt: null, commandSequence: null }
+    ? { state, simulationId: null, openedAt: null, closedAt: null, commandSequence: null }
     : {
         state,
         simulationId: '10000000-0000-0000-0000-000000000001',
         openedAt: state === 'SETUP' ? null : '2026-11-05T09:30:00Z',
+        closedAt: state === 'CLOSED' ? '2026-11-05T16:00:00Z' : null,
         commandSequence: '7',
       };
 }

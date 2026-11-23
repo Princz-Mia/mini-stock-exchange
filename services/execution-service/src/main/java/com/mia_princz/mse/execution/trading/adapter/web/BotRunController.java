@@ -117,6 +117,8 @@ class BotRunController {
 		ApiException refused = switch (result.status()) {
 			case NO_MARKET, NOT_OPEN -> new ApiException(HttpStatus.CONFLICT, "MARKET_NOT_OPEN",
 					"Bots run only while the market is open or halted");
+			case MARKET_CLOSED -> new ApiException(HttpStatus.CONFLICT, "MARKET_CLOSED",
+					"The market has closed; no bot run starts in it");
 			case RUN_ACTIVE -> new ApiException(HttpStatus.CONFLICT, "RUN_ACTIVE",
 					"A bot run is already running; stop it first");
 			case NOT_ENOUGH_BOTS -> notEnoughBots(result.shortfall());

@@ -5,9 +5,11 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -49,7 +51,8 @@ import com.mia_princz.mse.execution.trading.domain.Side;
  * commit. Each command is planned against the books as the run's earlier commands leave them, held in an overlay;
  * the books, the tapes and every count the writer keeps change only after the commit, in sequence order, and then
  * each command gets its answer. A run that fails without halting rolls back and its commands run again one by one,
- * so each gets the answer it would get alone. Any other command is a transaction of its own. If anything leaves the
+ * so each gets the answer it would get alone. Any other command is a transaction of its own, except closing the
+ * market, which cancels every resting order and takes one transaction for each part of them. If anything leaves the
  * books and the database possibly out of step, the writer halts.
  */
 public final class TradingEngine {
@@ -59,6 +62,18 @@ public final class TradingEngine {
 
 	/** Levels per side in a public market snapshot. */
 	static final int SNAPSHOT_LEVELS = 20;
+
+	/** The most resting orders one transaction of a market's close cancels, unless configured. */
+	public static final int CLOSE_CHUNK_ORDERS = 5_000;
+
+	/** The reason on an order the market's close cancelled. */
+	static final String CANCELED_BY_CLOSE = "MARKET_CLOSED";
+
+	/**
+	 * What a later part of a close's sweep is recorded as: its audit action, and the route of its stored answer, which
+	 * no request ever comes by.
+	 */
+	static final String SWEEP = "MARKET_CLOSE_SWEEP";
 
 	private static final Logger LOG = LoggerFactory.getLogger(TradingEngine.class);
 
@@ -84,6 +99,8 @@ public final class TradingEngine {
 	private final WriterTimings timings;
 
 	private final LongSupplier nanoTime;
+
+	private final int closeChunkOrders;
 
 	private final Map<UUID, OrderBook> books = new HashMap<>();
 
@@ -160,6 +177,18 @@ public final class TradingEngine {
 	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
 			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings, LongSupplier nanoTime,
 			RestingOrders resting) {
+		this(store, transactions, writer, clock, botCredentials, accountChanges, timings, nanoTime, resting,
+				CLOSE_CHUNK_ORDERS);
+	}
+
+	/** {@code closeChunkOrders} is the most resting orders one transaction of a market's close cancels. */
+	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
+			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings, LongSupplier nanoTime,
+			RestingOrders resting, int closeChunkOrders) {
+		if (closeChunkOrders < 1) {
+			throw new IllegalArgumentException("A close cancels at least one order per transaction: " + closeChunkOrders);
+		}
+		this.closeChunkOrders = closeChunkOrders;
 		this.resting = resting;
 		this.store = store;
 		this.transactions = transactions;
@@ -176,7 +205,8 @@ public final class TradingEngine {
 	 * previous writer, restores resting orders in their original priority, then reconciles balances, the ledger and
 	 * open orders. Any disagreement fails startup instead of trading on state that cannot be trusted. The market is
 	 * the current simulation's, closed or not: a closed one is loaded the same way, so that every command is answered
-	 * by it, as closed.
+	 * by it, as closed. A closed market that still has resting orders was closed by a process that stopped before it
+	 * had cancelled them all; they are cancelled here, before any command is admitted.
 	 */
 	public void start() {
 		transactions.inTransaction(() -> {
@@ -217,7 +247,32 @@ public final class TradingEngine {
 			accounts.addAll(store.tradingAccounts(simulation));
 			return null;
 		});
+		if (closed && restingOrders() > 0) {
+			finishInterruptedClose();
+		}
 		started = true;
+	}
+
+	/**
+	 * Finishes the order sweep of a close that a stopped process left unfinished, on the thread that starts the engine:
+	 * the books are rebuilt and reconciled, and no command runs yet. The sweep's parts are recorded under the operator
+	 * who closed the market, as they would have been. Anything that fails here fails startup.
+	 */
+	private void finishInterruptedClose() {
+		UUID actor = transactions.inTransaction(() -> store.closedBy(simulationId))
+			.orElseThrow(() -> new IllegalStateException("Simulation " + simulationId + " is closed with "
+					+ restingOrders() + " orders still resting, and no close of it is on record"));
+		int resting = restingOrders();
+		SweepTimes times = new SweepTimes();
+		try {
+			finishSweep(actor, times);
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
+			throw new IllegalStateException("The market's close could not be finished", ex);
+		}
+		LOG.info("Finished the market's close at startup: {} resting orders cancelled in {} transactions in {} ms, "
+				+ "the longest {} ms", resting, times.transactions, times.total / 1_000_000, times.longest / 1_000_000);
+		discardBotTokens();
 	}
 
 	/** Starts with no market to rebuild: commands are admitted, and the first setup command creates the market. */
@@ -256,7 +311,29 @@ public final class TradingEngine {
 	 * reads it from the locked market row. Books are untouched, so resting orders keep their priority.
 	 */
 	public CompletableFuture<MarketTransition> control(CommandKey key, MarketControl command) {
+		if (command.action() == MarketControl.Action.CLOSE) {
+			throw new IllegalArgumentException("Closing is its own command, with its own answer");
+		}
 		return submit(() -> processControl(key, command));
+	}
+
+	/**
+	 * Closes the market, for good, from OPEN or HALTED. The close takes effect at the command's sequence: every later
+	 * command reads it from the locked market row and is refused as for a closed market. In the command's own
+	 * transaction every bot run that has not ended ends, every bot token is revoked, the first part of the resting
+	 * orders is cancelled with their holds released, and every instrument's snapshot says CLOSED.
+	 * <p>
+	 * The rest of the resting orders are cancelled in the same writer submission, so no other command comes between,
+	 * in further transactions of a bounded size, each with its own command sequence: all of them in one would hold the
+	 * writer for one very large commit. The books change after each commit, as for every command. The answer is given
+	 * once no order rests. If the process stops before that, startup finishes the sweep; a part that fails without
+	 * halting the writer fails the command, whose key, sent again, then finishes it.
+	 */
+	public CompletableFuture<MarketClosing> close(CommandKey key, MarketControl command) {
+		if (command.action() != MarketControl.Action.CLOSE) {
+			throw new IllegalArgumentException("Not a close: " + command.action());
+		}
+		return submit("close", () -> processClose(key, command));
 	}
 
 	/**
@@ -303,7 +380,7 @@ public final class TradingEngine {
 		return submit(() -> processRevoke(key, command));
 	}
 
-	/** Starts a bot run while the market is open or halted; one run runs at a time. */
+	/** Starts a bot run while the market is open or halted; one run runs at a time, and none in a closed market. */
 	public CompletableFuture<BotRunResult> startBotRun(CommandKey key, StartBotRun command) {
 		return submit(() -> processStartRun(key, command));
 	}
@@ -1286,7 +1363,10 @@ public final class TradingEngine {
 		List<UUID> instruments = command.instrumentIds().isEmpty()
 				? store.instruments(simulationId).stream().map(TradingStore.Instrument::id).toList()
 				: command.instrumentIds();
-		if (!"OPEN".equals(market.state()) && !"HALTED".equals(market.state())) {
+		if ("CLOSED".equals(market.state())) {
+			refusal = BotRunResult.Status.MARKET_CLOSED;
+		}
+		else if (!"OPEN".equals(market.state()) && !"HALTED".equals(market.state())) {
 			refusal = BotRunResult.Status.NOT_OPEN;
 		}
 		else if (running.isPresent() && (running.get().endsAt() == null || running.get().endsAt().isAfter(now))
@@ -1380,7 +1460,7 @@ public final class TradingEngine {
 		}
 		long sequence = opening.sequence();
 		MarketControl.Action action = command.action();
-		if (!action.from().equals(market.state())) {
+		if (!action.allowedFrom(market.state())) {
 			store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "NOT_ALLOWED",
 					key.idempotencyKey(), sequence);
 			return remember(key, 409,
@@ -1389,14 +1469,238 @@ public final class TradingEngine {
 		store.updateMarketState(simulationId, action.to());
 		// Every instrument's public state carries the venue state, so each one gets a snapshot at this sequence.
 		Market changed = market.withState(action.to());
-		List<TradingStore.Instrument> listed = new ArrayList<>(catalogue.values());
-		listed.sort(java.util.Comparator.comparing(TradingStore.Instrument::symbol));
-		for (TradingStore.Instrument instrument : listed) {
+		for (TradingStore.Instrument instrument : listed()) {
 			snapshot(changed, instrument, books.get(instrument.id()), BookDelta.none(), sequence, List.of());
 		}
 		store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "APPLIED", key.idempotencyKey(),
 				sequence);
 		return remember(key, 200, new MarketTransition(MarketTransition.Status.APPLIED, action.to(), sequence));
+	}
+
+	/** The market's instruments in symbol order: the order their snapshots are written in. */
+	private List<TradingStore.Instrument> listed() {
+		List<TradingStore.Instrument> listed = new ArrayList<>(catalogue.values());
+		listed.sort(Comparator.comparing(TradingStore.Instrument::symbol));
+		return listed;
+	}
+
+	/**
+	 * One committed part of a close's order sweep, to apply to the books: the orders it cancelled, by instrument, and
+	 * the accounts they belonged to.
+	 */
+	private record Swept(Map<UUID, List<UUID>> canceled, Set<UUID> accounts, long sequence) {
+
+		int orders() {
+			int orders = 0;
+			for (List<UUID> ofInstrument : canceled.values()) {
+				orders += ofInstrument.size();
+			}
+			return orders;
+		}
+
+	}
+
+	/** The close's answer and, when this transaction closed the market, the first part of its sweep; else null. */
+	private record Closing(MarketClosing result, Swept swept) {
+	}
+
+	/** How long a close's transactions took, in nanoseconds on the writer's clock. */
+	private static final class SweepTimes {
+
+		private int transactions;
+
+		private long total;
+
+		private long longest;
+
+		void add(long nanos) {
+			transactions++;
+			total += nanos;
+			longest = Math.max(longest, nanos);
+		}
+
+	}
+
+	private MarketClosing processClose(CommandKey key, MarketControl command) {
+		if (simulationId == null) {
+			return MarketClosing.notSetUp();
+		}
+		SweepTimes times = new SweepTimes();
+		Closing closing;
+		try {
+			long start = nanoTime.getAsLong();
+			closing = timed("close", () -> closeInTransaction(key, command));
+			times.add(nanoTime.getAsLong() - start);
+			if (closing.swept() != null) {
+				closed = true;
+				applySweep(closing.swept());
+			}
+			if (!"CLOSED".equals(closing.result().state())) {
+				// Refused from a state that can't be closed; nothing was swept and nothing is left to sweep.
+				return closing.result();
+			}
+			// Closed by this command, by this key's first attempt, or already closed when this command came: whichever
+			// it was, no order rests once a close has answered.
+			finishSweep(command.actorUserId(), times);
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+		MarketClosing result = closing.result();
+		if (result.status() == MarketClosing.Status.CLOSED) {
+			discardBotTokens();
+		}
+		if (closing.swept() != null) {
+			LOG.info("The market closed at sequence {}: {} resting orders cancelled in {} transactions in {} ms, the "
+					+ "longest {} ms; {} bot runs ended", result.commandSequence(), result.canceledOrders(),
+					times.transactions, times.total / 1_000_000, times.longest / 1_000_000, result.endedRuns());
+		}
+		return result;
+	}
+
+	/**
+	 * The close itself, at its sequence. Everything that makes the market closed is in this one transaction: the
+	 * state, the runs' ends, the tokens' revocation and each instrument's last state. Only the cancelling of resting
+	 * orders may go on after it, and the holds of those not yet cancelled are still in place, so the market reconciles
+	 * between the parts.
+	 */
+	private Closing closeInTransaction(CommandKey key, MarketControl command) {
+		TradingStore.Opening<MarketClosing> opening = open(key, MarketClosing.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return new Closing(replay(key, opening.prior().get()), null);
+		}
+		long sequence = opening.sequence();
+		MarketControl.Action action = command.action();
+		if (!action.allowedFrom(market.state())) {
+			store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "NOT_ALLOWED",
+					key.idempotencyKey(), sequence);
+			return new Closing(remember(key, 409,
+					new MarketClosing(MarketClosing.Status.NOT_ALLOWED, market.state(), sequence, 0, 0)), null);
+		}
+		// One reading of the service's clock for everything the close stamps.
+		Instant now = clock.instant();
+		store.closeMarket(simulationId, now);
+		int endedRuns = store.endBotRunsAtClose(simulationId, sequence, now);
+		store.revokeBotTokens(simulationId, now);
+		int resting = restingOrders();
+		// Every instrument's public state carries the venue state, so each gets a snapshot at this sequence: its last.
+		Swept swept = sweep(market.withState(action.to()), sequence, true);
+		store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "APPLIED", key.idempotencyKey(),
+				sequence);
+		return new Closing(remember(key, 200,
+				new MarketClosing(MarketClosing.Status.CLOSED, action.to(), sequence, resting, endedRuns)), swept);
+	}
+
+	/**
+	 * Cancels whatever still rests in the closed market, one part per transaction, until no order rests. Each part is a
+	 * command of its own, with the next sequence; the books change after each commit. A writer being closed stops
+	 * between two parts, and startup finishes the rest.
+	 */
+	private void finishSweep(UUID actorUserId, SweepTimes times) {
+		while (restingOrders() > 0) {
+			if (Thread.currentThread().isInterrupted()) {
+				throw new CommandWriter.WriterStoppedException(
+						"Writer closed before the market's close had cancelled every order; a restart finishes it");
+			}
+			long start = nanoTime.getAsLong();
+			Swept swept = timed("close", () -> sweepInTransaction(actorUserId));
+			times.add(nanoTime.getAsLong() - start);
+			applySweep(swept);
+		}
+	}
+
+	/**
+	 * A later part of a close's sweep. It leaves what every command sequence leaves: a stored answer, under a key of
+	 * its own and the operator who closed, and an audit row; and what a cancel leaves: each order's update, the
+	 * release of its hold, and a snapshot of each instrument whose book changes, still saying CLOSED.
+	 */
+	private Swept sweepInTransaction(UUID actorUserId) {
+		CommandKey key = new CommandKey(actorUserId, UUID.randomUUID(), SWEEP, new byte[32]);
+		TradingStore.Opening<MarketSweep> opening = open(key, MarketSweep.class);
+		Market market = opening.market();
+		if (!"CLOSED".equals(market.state())) {
+			throw new IllegalStateException("Only a closed market is swept; this one is " + market.state());
+		}
+		long sequence = opening.sequence();
+		int resting = restingOrders();
+		Swept swept = sweep(market, sequence, false);
+		store.insertAudit(simulationId, actorUserId, SWEEP, "APPLIED", key.idempotencyKey(), sequence);
+		remember(key, 200, new MarketSweep(swept.orders(), resting - swept.orders(), sequence));
+		return swept;
+	}
+
+	/**
+	 * Collects one part of a close's sweep into the current transaction: resting orders up to the part's limit,
+	 * instrument by instrument in symbol order, each cancelled and its hold released exactly as its owner's cancel
+	 * would, and a snapshot of each instrument whose book the part changes, or of every instrument when the market's
+	 * state changes with it. The books themselves change only once the transaction has committed.
+	 */
+	private Swept sweep(Market market, long sequence, boolean everyInstrument) {
+		Map<UUID, List<UUID>> canceled = new LinkedHashMap<>();
+		Set<UUID> owners = new LinkedHashSet<>();
+		int left = closeChunkOrders;
+		for (TradingStore.Instrument instrument : listed()) {
+			OrderBook book = books.get(instrument.id());
+			List<BookOrder> orders = new ArrayList<>(book.orders(Side.BUY, left));
+			orders.addAll(book.orders(Side.SELL, left - orders.size()));
+			left -= orders.size();
+			List<UUID> ids = new ArrayList<>(orders.size());
+			for (BookOrder order : orders) {
+				cancelWithRelease(instrument.id(), order, CANCELED_BY_CLOSE, sequence);
+				owners.add(order.accountId());
+				ids.add(order.orderId());
+			}
+			if (!orders.isEmpty()) {
+				canceled.put(instrument.id(), ids);
+			}
+			if (everyInstrument || !orders.isEmpty()) {
+				snapshot(market, instrument, book, BookDelta.cancel(orders), sequence, List.of());
+			}
+		}
+		// One command for each account, however many of its orders the part cancels.
+		writes.touch(owners);
+		return new Swept(canceled, owners, sequence);
+	}
+
+	/**
+	 * Applies a committed part of the sweep to the books and tells its accounts. Anything that fails here leaves the
+	 * books behind the database, so the writer halts.
+	 */
+	private void applySweep(Swept swept) {
+		try {
+			long start = nanoTime.getAsLong();
+			swept.canceled().forEach((instrumentId, orders) -> {
+				OrderBook book = books.get(instrumentId);
+				for (UUID orderId : orders) {
+					if (book.cancel(orderId).isEmpty()) {
+						throw new BookOutOfStepException(orderId);
+					}
+				}
+			});
+			if (!swept.canceled().isEmpty()) {
+				timings.record(WriterTimings.Phase.APPLY, "close", nanoTime.getAsLong() - start);
+			}
+			if (!swept.accounts().isEmpty()) {
+				accountChanges.changed(swept.accounts(), swept.sequence());
+			}
+		}
+		catch (RuntimeException | Error ex) {
+			throw new WriterHaltException("The books could not apply a committed market close", ex);
+		}
+	}
+
+	/**
+	 * Removes the closed market's bot token files. Every token is revoked already, so this only tidies the secret
+	 * store, and nothing it runs into may fail the close.
+	 */
+	private void discardBotTokens() {
+		try {
+			botCredentials.discard(transactions.inTransaction(() -> store.botAccounts(simulationId)));
+		}
+		catch (RuntimeException ex) {
+			LOG.warn("The closed market's bot token files could not be removed; their tokens are revoked", ex);
+		}
 	}
 
 	/**
@@ -1440,13 +1744,8 @@ public final class TradingEngine {
 	 */
 	private Ran cancelResting(RunState run, Market market, CommandKey key, CancelOrder command, UUID instrumentId,
 			BookOrder resting, long sequence) {
-		writes.cancel(command.orderId(), command.accountId(), resting.remainingQuantity(), "CANCELED_BY_OWNER");
+		cancelWithRelease(instrumentId, resting, "CANCELED_BY_OWNER", sequence);
 		run.orders.put(command.orderId(), new RunOrder(command.accountId(), "CANCELED"));
-		SettlementPlan release = Settlement.cancel(instrumentId, resting);
-		for (SettlementPlan.Batch batch : release.batches()) {
-			writes.batch(batch.cause(), null, sequence, batch.postings());
-		}
-		release.balanceChanges().forEach(writes::balance);
 		writes.touch(List.of(command.accountId()));
 		BookOverlay overlay = run.overlay(instrumentId);
 		snapshot(run, market, instrumentId, overlay, BookDelta.cancel(resting), sequence, List.of());
@@ -1457,13 +1756,28 @@ public final class TradingEngine {
 	}
 
 	/**
+	 * Collects what cancelling an order the book holds writes, whoever cancels it: the order's guarded update, and the
+	 * release of its whole remaining hold as a balanced batch with its balance changes.
+	 */
+	private void cancelWithRelease(UUID instrumentId, BookOrder resting, String reason, long sequence) {
+		writes.cancel(resting.orderId(), resting.accountId(), resting.remainingQuantity(), reason);
+		SettlementPlan release = Settlement.cancel(instrumentId, resting);
+		for (SettlementPlan.Batch batch : release.batches()) {
+			writes.batch(batch.cause(), null, sequence, batch.postings());
+		}
+		release.balanceChanges().forEach(writes::balance);
+	}
+
+	/**
 	 * An order inside its run's transaction. Its balances are what the run read from the database, with the run's
 	 * earlier changes to them added; the order is matched against its book with the run's earlier commands over it,
 	 * and its plan joins them once its rows are collected.
 	 */
 	private Ran placeInRun(RunState run, Market market, CommandKey key, PlaceOrder command, long sequence) {
 		if (!"OPEN".equals(market.state())) {
-			return reject(run, key, command, RejectionCode.MARKET_NOT_OPEN, sequence);
+			// A closed market never opens again, so its refusal has its own code: nothing is gained by trying later.
+			return reject(run, key, command, "CLOSED".equals(market.state()) ? RejectionCode.MARKET_CLOSED
+					: RejectionCode.MARKET_NOT_OPEN, sequence);
 		}
 		long hold = Settlement.holdAmount(command.side(), command.bound(), command.quantity().shares());
 		if (command.side() == Side.BUY && run.available(command.accountId(), null) < hold) {
@@ -1630,6 +1944,8 @@ public final class TradingEngine {
 			case PlacementResult placement -> placement.commandSequence();
 			case CancelResult cancel -> cancel.commandSequence();
 			case MarketTransition transition -> transition.commandSequence();
+			case MarketClosing closing -> closing.commandSequence();
+			case MarketSweep sweep -> sweep.commandSequence();
 			case InstrumentResult instrument -> instrument.commandSequence();
 			case InstrumentEdit edit -> edit.commandSequence();
 			case InstrumentDeletion deletion -> deletion.commandSequence();
