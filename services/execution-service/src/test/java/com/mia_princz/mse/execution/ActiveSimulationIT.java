@@ -6,6 +6,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.net.http.HttpResponse;
+import java.sql.Connection;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -54,6 +56,8 @@ import com.mia_princz.mse.execution.trading.domain.Side;
 				"mse.dev-users.trader-password=" + ActiveSimulationIT.PASSWORD,
 				"mse.dev-users.operator-password=" + ActiveSimulationIT.PASSWORD,
 				"mse.simulator.token=" + ActiveSimulationIT.SIMULATOR_TOKEN,
+				// A read that waits for a lock fails after five seconds; see the test that locks the simulation table.
+				"spring.datasource.hikari.connection-init-sql=SET lock_timeout = '5s'",
 				// One trader and one bot send commands back to back. AccountRateLimitIT covers pacing.
 				"mse.trading.human-commands-per-second=1000", "mse.trading.bot-commands-per-second=1000" })
 class ActiveSimulationIT {
@@ -80,7 +84,7 @@ class ActiveSimulationIT {
 
 	/** What the API said while the closed simulation was the only one. */
 	private record Before(JsonNode status, boolean active, String portfolio, int accounts, String open,
-			boolean assigned) {
+			boolean assigned, int closedToken) {
 	}
 
 	private static Closed closed;
@@ -124,7 +128,8 @@ class ActiveSimulationIT {
 						JSON.readTree(operator.get("/api/v1/admin/accounts").body()).get("accounts").size(),
 						problem(operator.post("/api/v1/admin/market/open", "", "Idempotency-Key",
 								UUID.randomUUID().toString()), 409),
-						!assignment().get("run").isNull());
+						!assignment().get("run").isNull(),
+						new TestBrowser(port).get("/api/v1/portfolio", bearer(CLOSED_TOKEN.token())).statusCode());
 				active = activeSimulation();
 			}
 		}
@@ -140,6 +145,8 @@ class ActiveSimulationIT {
 		assertThat(before.accounts()).isZero();
 		assertThat(before.open()).isEqualTo("MARKET_NOT_SET_UP");
 		assertThat(before.assigned()).isFalse();
+		// The writer has no simulation to compare, so the token check asks the database, which has none active.
+		assertThat(before.closedToken()).isEqualTo(401);
 		assertThat(store.hasActiveSimulation()).isTrue();
 	}
 
@@ -267,6 +274,28 @@ class ActiveSimulationIT {
 		assertThat(beat.statusCode()).as(beat.body()).isEqualTo(200);
 		assertThat(JSON.readTree(beat.body()).get("desiredState").asString()).isEqualTo("RUNNING");
 		assertThat(assignment().get("run").get("worker").get("workerId").asString()).isEqualTo("worker-a");
+	}
+
+	/**
+	 * A bot's token is checked without reading the simulation's row. The writer rewrites that row with every run, and
+	 * while a backup's snapshot keeps the old versions, each read of it walks them all; a check made on every bot
+	 * request must not pay that. Here nothing can read the table at all while a bot asks for an order, on a route that
+	 * reads nothing of the simulation itself: a token check that read it would wait and fail on the lock timeout.
+	 */
+	@Test
+	void aBotTokenIsCheckedWithoutReadingTheSimulationRow() throws Exception {
+		TestBrowser bot = new TestBrowser(port);
+		try (Connection locking = owner.getDataSource().getConnection()) {
+			locking.setAutoCommit(false);
+			try (Statement lock = locking.createStatement()) {
+				lock.execute("LOCK TABLE simulation IN ACCESS EXCLUSIVE MODE");
+				assertThat(problem(bot.get("/api/v1/orders/" + UUID.randomUUID(), bearer(ACTIVE_TOKEN.token())), 404))
+					.isEqualTo("ORDER_NOT_FOUND");
+			}
+			finally {
+				locking.rollback();
+			}
+		}
 	}
 
 	/**

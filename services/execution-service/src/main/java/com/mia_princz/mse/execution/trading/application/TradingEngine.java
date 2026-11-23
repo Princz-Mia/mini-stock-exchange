@@ -123,7 +123,8 @@ public final class TradingEngine {
 	record QueuedCancel(CommandKey key, CancelOrder command, long admitted) implements Trading {
 	}
 
-	private UUID simulationId;
+	/** Written by the writer only; volatile so that {@link #simulationId()} can answer on any thread. */
+	private volatile UUID simulationId;
 
 	private long writerEpoch;
 
@@ -216,6 +217,14 @@ public final class TradingEngine {
 	/** Starts with no market to rebuild: commands are admitted, and the first setup command creates the market. */
 	public void startEmpty() {
 		started = true;
+	}
+
+	/**
+	 * The simulation this engine writes for, from memory and on any thread: the active one, since only the writer
+	 * sets a market up. Null while there is none, and until startup has taken the market over.
+	 */
+	public UUID simulationId() {
+		return simulationId;
 	}
 
 	/** Places an order. A repeat of the same key and request returns the first committed result unchanged. */

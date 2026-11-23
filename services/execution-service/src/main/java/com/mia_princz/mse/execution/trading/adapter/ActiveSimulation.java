@@ -10,6 +10,10 @@ package com.mia_princz.mse.execution.trading.adapter;
  * account to act for; and the writer starts with no market, as it does on an empty database. Only the market's status
  * falls back to the newest simulation ({@link #OR_ELSE_NEWEST}), so that a closed market reads as closed, not as one
  * never set up.
+ * <p>
+ * The writer holds the same ID in memory ({@code TradingEngine.simulationId()}), because only it sets a market up. A
+ * check made on every bot request compares that one, so that it never reads the simulation's row, which the writer
+ * rewrites with every run.
  */
 public final class ActiveSimulation {
 
