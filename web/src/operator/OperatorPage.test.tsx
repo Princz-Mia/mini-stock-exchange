@@ -289,6 +289,27 @@ describe('the operator screen', () => {
     }
   });
 
+  it("reads the traders without an account again when the exchange names another simulation", async () => {
+    const NEXT = '10000000-0000-0000-0000-000000000002';
+    const { server, state } = exchange('SETUP');
+    state.unfunded = ['dana'];
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+    expect(await screen.findByRole('rowheader', { name: 'dana' })).toBeInTheDocument();
+    const reads = () => server.requests.filter((request) => request.url.split('?')[0] === '/api/v1/admin/traders').length;
+    const before = reads();
+
+    // Still in setup, so the list stays on screen: only the simulation is another, and its logins' accounts with it.
+    state.unfunded = ['erin'];
+    state.market = { ...market('SETUP'), simulationId: NEXT };
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    // The list has no poll of its own: without this it would show the other simulation's until the page is left.
+    expect(await screen.findByRole('rowheader', { name: 'erin' }, { timeout: 900 })).toBeInTheDocument();
+    expect(screen.queryByRole('rowheader', { name: 'dana' })).toBeNull();
+    expect(reads()).toBeGreaterThan(before);
+  });
+
   it('opens the market with a key and shows the committed state', async () => {
     const { server, state } = exchange('SETUP');
     server.on('POST /api/v1/admin/market/open', () => {
@@ -2468,6 +2489,34 @@ describe('closing the market on the operator screen', () => {
     expect(await button('Close the market')).toHaveFocus();
     expect(closes(server)).toHaveLength(0);
     expect(screen.getByText('Open', { selector: '.state-badge' })).toBeInTheDocument();
+  });
+
+  it('opens the confirmation as a modal, and closes it while it is still on the page', async () => {
+    // The stand-in for a browser's dialog cannot hold the keyboard in or hand focus back, so what the page relies on
+    // is checked as what it calls: a modal, which does both, closed before it is removed, or nothing is handed back.
+    const showModal = vi.spyOn(HTMLDialogElement.prototype, 'showModal');
+    const closing = HTMLDialogElement.prototype.close;
+    const closedWhile: boolean[] = [];
+    const close = vi.spyOn(HTMLDialogElement.prototype, 'close').mockImplementation(function (this: HTMLDialogElement) {
+      closedWhile.push(this.isConnected);
+      closing.call(this);
+    });
+    try {
+      exchange('OPEN');
+      renderPage();
+
+      fireEvent.click(await button('Close the market'));
+      expect(showModal).toHaveBeenCalledTimes(1);
+      expect(showModal.mock.contexts[0]).toBe(dialog());
+      expect(dialog()).toHaveAttribute('open');
+
+      fireEvent.click(within(dialog()).getByRole('button', { name: 'Do not close' }));
+      expect(screen.queryByRole('alertdialog')).toBeNull();
+      expect(closedWhile).toEqual([true]);
+    } finally {
+      showModal.mockRestore();
+      close.mockRestore();
+    }
   });
 
   it('leaves the market as it is on Escape, with focus back where it was', async () => {

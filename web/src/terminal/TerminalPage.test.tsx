@@ -627,6 +627,38 @@ describe('terminal', () => {
     expect(screen.queryByText(/is not part of this market/)).toBeNull();
   });
 
+  it('falls back when the market on screen becomes another, which does not list the instrument shown', async () => {
+    const VEGA = '00000000-0000-0000-0000-000000000003';
+    let status = { state: 'CLOSED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: '2026-11-04T17:00:00Z', commandSequence: '12' };
+    const server = market()
+      .on('GET /api/v1/market', () => ({ status: 200, json: status }))
+      .on('GET /api/v1/instruments', (request) => ({
+        status: 200,
+        json: {
+          simulationId: request.url.endsWith('simulationId=t') ? 't' : 's',
+          instruments: request.url.endsWith('simulationId=t')
+            ? [instrument(VEGA, 'VEGA', null)]
+            : [instrument(NOVA, 'NOVA', null), instrument(ORBIT, 'ORBIT', '40.00')],
+          feed: { state: 'LIVE', lag: 0 },
+        },
+      }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    // The address is a good one for the market it was opened in.
+    const streams = renderTerminal(`/terminal?instrument=${ORBIT}`, null, client);
+    await screen.findByRole('heading', { name: 'ORBIT', level: 1 });
+    expect(screen.queryByText(/is not part of this market/)).toBeNull();
+
+    // The tab is left open, and the next simulation is set up: the same address now names an instrument of another.
+    status = { state: 'SETUP', simulationId: 't', openedAt: '', closedAt: '', commandSequence: '1' };
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    await screen.findByRole('heading', { name: 'VEGA', level: 1 });
+    expect(screen.getByText('The instrument in this address is not part of this market. Showing VEGA instead.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^(NOVA|ORBIT)/ })).toBeNull();
+    expect(streams.latest()?.url).toContain(VEGA);
+    expect(server.requests.at(-1)?.url).not.toContain(ORBIT);
+  });
+
   it('keeps the ticket and its unresolved order when the status is read after the list, for the same simulation', async () => {
     // The exchange is flapping: its status cannot be read at first, so the page starts from Market Data's own list.
     let reachable = false;

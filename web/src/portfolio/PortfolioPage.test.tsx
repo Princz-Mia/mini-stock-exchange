@@ -1,11 +1,13 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { App } from '../App';
 import { resetSession } from '../api/client';
 import { GLOSSARY } from '../help/glossary';
 import { signedIn } from '../test/fakeServer';
-import { orderReason } from './PortfolioPage';
+import { PortfolioPage, orderReason } from './PortfolioPage';
 
 const PORTFOLIO = {
   cash: { total: '10404.00', available: '10224.00', reserved: '180.00' },
@@ -386,6 +388,42 @@ describe('portfolio page', () => {
       expect(closed).not.toHaveTextContent(/no order is open|where your account ended/);
       view.unmount();
     }
+  });
+
+  it("reads the trader's balances and history again as soon as the market is seen to have closed", async () => {
+    let closed = false;
+    const server = signedIn()
+      .on('GET /api/v1/portfolio', () => ({ status: 200, json: closed ? SETTLED : PORTFOLIO }))
+      .on('GET /api/v1/market', () => ({
+        status: 200,
+        json: closed ? CLOSED_MARKET : { ...CLOSED_MARKET, state: 'OPEN', closedAt: null },
+      }))
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/portfolio']}>
+          <PortfolioPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const summary = await screen.findByRole('region', { name: 'Summary' });
+    expect(summary).toHaveTextContent('180.00');
+    await screen.findByText('No orders yet.');
+    await screen.findByText('No executions yet.');
+    const paths = ['/api/v1/portfolio', '/api/v1/orders', '/api/v1/portfolio/trades'];
+    const reads = () => paths.map((path) => server.requests.filter((request) => request.url.split('?')[0] === path).length);
+    const before = reads();
+
+    closed = true;
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    // At once, not at the next poll five seconds on: what the close released is no longer shown as reserved.
+    const said = within(await screen.findByRole('region', { name: 'Market closed' })).getByRole('status');
+    await waitFor(() => expect(said).toHaveTextContent('no order is open and nothing is reserved'), { timeout: 900 });
+    await waitFor(() => expect(reads().every((count, index) => count > before[index]!)).toBe(true), { timeout: 900 });
   });
 
   it('tells a user who had no account in a closed market that it closed, not how to get one', async () => {
