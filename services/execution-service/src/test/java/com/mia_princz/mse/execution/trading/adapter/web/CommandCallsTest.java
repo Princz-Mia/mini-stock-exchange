@@ -10,6 +10,7 @@ import java.util.concurrent.CompletableFuture;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 
+import com.mia_princz.mse.execution.trading.application.TradingEngine.UnknownAccountException;
 import com.mia_princz.mse.execution.trading.application.TradingEngine.UnknownInstrumentException;
 
 class CommandCallsTest {
@@ -25,6 +26,15 @@ class CommandCallsTest {
 
 		assertThat(refused.status()).isEqualTo(HttpStatus.UNPROCESSABLE_CONTENT);
 		assertThat(refused.toProblem().getProperties()).containsEntry("code", "UNKNOWN_INSTRUMENT");
+	}
+
+	/** The answer a user without an account gets on the same route: by now the caller is one. */
+	@Test
+	void anAccountThatDoesNotTradeHereIsANamedRefusal() {
+		ApiException refused = answer(new UnknownAccountException(UUID.randomUUID()));
+
+		assertThat(refused.status()).isEqualTo(HttpStatus.FORBIDDEN);
+		assertThat(refused.toProblem().getProperties()).containsEntry("code", "NO_TRADING_ACCOUNT");
 	}
 
 	/** A fault rolled its transaction back; answering it as a refusal would claim something was decided. */

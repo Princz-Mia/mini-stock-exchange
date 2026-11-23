@@ -122,6 +122,11 @@ class ActiveSimulationIT {
 		trader = TestBrowser.loggedIn(port, "trader", PASSWORD);
 		synchronized (ActiveSimulationIT.class) {
 			if (active == null) {
+				// Closed long before the fixture's, and stored first: of two closed simulations the status names the newer.
+				owner.update("""
+						INSERT INTO simulation (id, state, opened_at, closed_at, created_at)
+						VALUES (?, 'CLOSED', now() - interval '9 days', now() - interval '8 days',
+						    now() - interval '10 days')""", UUID.randomUUID());
 				closed = closedSimulation();
 				before = new Before(JSON.readTree(operator.get("/api/v1/market").body()), store.hasActiveSimulation(),
 						problem(trader.get("/api/v1/portfolio"), 403),
@@ -135,9 +140,12 @@ class ActiveSimulationIT {
 		}
 	}
 
-	/** With every simulation closed there is no market to act on, and only the status still names the closed one. */
+	/**
+	 * With every simulation closed there is no market to act on, and only the status still names a closed one: the one
+	 * closed last, not the older one beside it.
+	 */
 	@Test
-	void withNoActiveSimulationOnlyTheStatusNamesTheClosedOne() {
+	void withNoActiveSimulationOnlyTheStatusNamesTheNewestClosedOne() {
 		assertThat(before.status().get("state").asString()).isEqualTo("CLOSED");
 		assertThat(before.status().get("simulationId").asString()).isEqualTo(closed.simulation().toString());
 		assertThat(before.active()).isFalse();
@@ -231,15 +239,7 @@ class ActiveSimulationIT {
 			.get(5, TimeUnit.SECONDS);
 		assertThat(canceled.status()).isEqualTo(CancelResult.Status.NOT_FOUND);
 
-		UUID orderId = UUID.randomUUID();
-		long sequence = sequence(active.simulation());
-		assertThatThrownBy(() -> engine
-			.place(new CommandKey(closed.bot(), UUID.randomUUID(), "POST /api/v1/orders", new byte[32]),
-					new PlaceOrder(orderId, closed.bot(), UUID.fromString(active.nova()), Side.BUY, OrderType.LIMIT,
-							new Price(9_000), new Quantity(1)))
-			.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(TradingEngine.UnknownAccountException.class);
-		assertThat(jdbc.queryForObject("SELECT count(*) FROM orders WHERE id = ?", Long.class, orderId)).isZero();
-		assertThat(sequence(active.simulation())).as("refused before its transaction").isEqualTo(sequence);
+		assertRefusedBeforeAnyWrite(closed.bot());
 
 		HttpResponse<String> placed = trader.post("/api/v1/orders", order(active.nova(), "BUY", 1, "80.00"),
 				"Idempotency-Key", UUID.randomUUID().toString());
@@ -300,7 +300,8 @@ class ActiveSimulationIT {
 
 	/**
 	 * A restart takes over the active simulation only: it claims that one's epoch, rebuilds that one's books and
-	 * reconciles that one's balances. The closed simulation would fail any of it.
+	 * reconciles that one's balances. The closed simulation would fail any of it. The accounts the writer then knows
+	 * are the active simulation's too: a closed one's is refused as it was before the restart.
 	 */
 	@Test
 	void aRestartRebuildsAndReconcilesTheActiveSimulationOnly() throws Exception {
@@ -322,6 +323,7 @@ class ActiveSimulationIT {
 		assertThat(epoch(closed.simulation())).as("a closed simulation is never taken over").isEqualTo(7);
 		assertThat(engine.depth(UUID.fromString(active.orbt()), Side.BUY).get(5, TimeUnit.SECONDS))
 			.containsExactly(new DepthLevel(new Price(4_000), 3, 1));
+		assertRefusedBeforeAnyWrite(closed.bot());
 		assertThat(cancel(trader, JSON.readTree(resting.body()).get("orderId").asString()).statusCode()).isEqualTo(200);
 	}
 
@@ -431,6 +433,19 @@ class ActiveSimulationIT {
 		owner.update("INSERT INTO bot_assignment (run_id, account_id, account_kind, strategy) VALUES (?, ?, 'BOT', 'NOISE')",
 				running, bot);
 		return new Closed(simulation, trader, bot, open, stuck, running);
+	}
+
+	/** The account's order for the active NOVA fails as not an account of this market, and leaves nothing behind. */
+	private void assertRefusedBeforeAnyWrite(UUID account) {
+		UUID orderId = UUID.randomUUID();
+		long sequence = sequence(active.simulation());
+		assertThatThrownBy(() -> engine
+			.place(new CommandKey(account, UUID.randomUUID(), "POST /api/v1/orders", new byte[32]),
+					new PlaceOrder(orderId, account, UUID.fromString(active.nova()), Side.BUY, OrderType.LIMIT,
+							new Price(9_000), new Quantity(1)))
+			.get(5, TimeUnit.SECONDS)).hasCauseInstanceOf(TradingEngine.UnknownAccountException.class);
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM orders WHERE id = ?", Long.class, orderId)).isZero();
+		assertThat(sequence(active.simulation())).as("refused before its transaction").isEqualTo(sequence);
 	}
 
 	private UUID user(String username) {
