@@ -47,6 +47,21 @@ const PORTFOLIO = {
   unrealizedPercent: '-0.41',
 };
 
+/** The same account once nothing of it is reserved: no order of its own is open any more. */
+const SETTLED = {
+  ...PORTFOLIO,
+  cash: { total: '10404.00', available: '10404.00', reserved: '0.00' },
+  holdings: PORTFOLIO.holdings.map((holding) => ({ ...holding, available: holding.total, reserved: 0 })),
+};
+
+const CLOSED_MARKET = {
+  state: 'CLOSED',
+  simulationId: 's',
+  openedAt: '2026-11-04T09:00:00Z',
+  closedAt: '2026-11-04T17:00:00Z',
+  commandSequence: '12',
+};
+
 function trade(n: number) {
   return {
     tradeId: `00000000-0000-0000-0000-0000000001${String(n).padStart(2, '0')}`,
@@ -321,17 +336,8 @@ describe('portfolio page', () => {
       updatedAt: '2026-11-04T17:00:00Z',
     };
     signedIn()
-      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
-      .on('GET /api/v1/market', {
-        status: 200,
-        json: {
-          state: 'CLOSED',
-          simulationId: 's',
-          openedAt: '2026-11-04T09:00:00Z',
-          closedAt: '2026-11-04T17:00:00Z',
-          commandSequence: '12',
-        },
-      })
+      .on('GET /api/v1/portfolio', { status: 200, json: SETTLED })
+      .on('GET /api/v1/market', { status: 200, json: CLOSED_MARKET })
       .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
       .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [trade(1)], nextCursor: null } })
       .on('GET /api/v1/orders', {
@@ -343,7 +349,7 @@ describe('portfolio page', () => {
 
     const closed = await screen.findByRole('region', { name: 'Market closed' });
     expect(within(closed).getByRole('status')).toHaveTextContent(
-      'The market closed on 4 Nov 2026, 17:00:00 UTC. Nothing trades any more, so this is where your account ended',
+      'The market closed on 4 Nov 2026, 17:00:00 UTC. Nothing trades any more, so this is where your account ended: no order is open and nothing is reserved. Your executions and orders stay below.',
     );
     // What the account ended with, and its history, stay.
     expect(screen.getByRole('region', { name: 'Summary' })).toHaveTextContent('22,100.00');
@@ -354,6 +360,32 @@ describe('portfolio page', () => {
       .slice(1)
       .map((row) => row.lastElementChild?.textContent);
     expect(states).toEqual(['canceled · the market closed', 'canceled · CANCELED_BY_OWNER']);
+  });
+
+  it('does not say nothing is reserved in a closed market while something still is', async () => {
+    // The close has not cancelled every order of this account yet, or stopped half way: cash, shares or both are held.
+    const held = [
+      PORTFOLIO,
+      { ...SETTLED, cash: PORTFOLIO.cash },
+      { ...SETTLED, holdings: PORTFOLIO.holdings },
+    ];
+    for (const portfolio of held) {
+      signedIn()
+        .on('GET /api/v1/portfolio', { status: 200, json: portfolio })
+        .on('GET /api/v1/market', { status: 200, json: CLOSED_MARKET })
+        .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+        .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
+        .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+      window.history.pushState({}, '', '/portfolio');
+      const view = render(<App />);
+
+      const closed = within(await view.findByRole('region', { name: 'Market closed' })).getByRole('status');
+      expect(closed).toHaveTextContent(
+        'The market closed on 4 Nov 2026, 17:00:00 UTC. Nothing trades any more, but some of your orders are still open, with what they reserve. The close cancels them and releases it: it is doing so now, or does when the exchange is restarted if it has stopped. Your balances are final once nothing is reserved.',
+      );
+      expect(closed).not.toHaveTextContent(/no order is open|where your account ended/);
+      view.unmount();
+    }
   });
 
   it('says nothing of a close while the market is open, and words only the close among the reasons', async () => {

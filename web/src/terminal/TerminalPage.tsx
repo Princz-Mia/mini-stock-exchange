@@ -47,8 +47,6 @@ export function TerminalPage() {
   // The current simulation's instruments, as that status names it: never the list of a simulation before it.
   const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
   const paused = market.data === undefined || market.data.state === 'OPEN' ? null : PAUSED[market.data.state];
-  // Final, unlike a halt: the ticket gives way to a statement, and nothing here says trading will come back.
-  const closed = market.data?.state === 'CLOSED' ? { closedAt: market.data.closedAt } : null;
   // A close cancels every open order and releases what it reserved. The trader's own lists are read again when the
   // status says so, without waiting for their next poll or for the account's own notification.
   useRefreshOnMarketChange(market.data, PRIVATE_QUERIES);
@@ -57,6 +55,10 @@ export function TerminalPage() {
     queryFn: () => api.orders('active'),
     refetchInterval: pollEvery(5_000),
   });
+  // Final, unlike a halt: the ticket gives way to a statement, and nothing here says trading will come back. The
+  // statement goes by the orders still listed as open: the market is closed before the last of them is cancelled.
+  const closed =
+    market.data?.state === 'CLOSED' ? { closedAt: market.data.closedAt, stillOpen: orders.data?.orders.length } : null;
   // A trader login without an account yet, such as an operator who also trades before funding itself: the market is
   // shown, the ticket is not.
   const noAccount = portfolio.error instanceof ApiError && portfolio.error.code === 'NO_TRADING_ACCOUNT';
@@ -175,6 +177,7 @@ export function TerminalPage() {
       <div className="terminal-orders">
         <OwnOrders
           orders={orders.data?.orders ?? []}
+          read={orders.data !== undefined}
           instrument={selected === null ? null : { instrumentId: selected.instrumentId, symbol: selected.symbol }}
           closed={closed !== null}
         />

@@ -209,6 +209,9 @@ export function PortfolioPage() {
     );
   }
   const { cash, holdings, equity, costBasis, unrealized, unrealizedPercent } = portfolio.data;
+  // An open order reserves cash or shares, so while anything is reserved in a closed market, the close has not
+  // cancelled every order yet: it is still at it, or the exchange stopped half way and finishes when restarted.
+  const reserved = toCents(cash.reserved) > 0n || holdings.some((holding) => holding.reserved > 0);
 
   return (
     <div className="stack">
@@ -216,9 +219,11 @@ export function PortfolioPage() {
         <section className="panel ended" aria-labelledby="portfolio-closed-title">
           <h2 id="portfolio-closed-title">Market closed</h2>
           <p role="status">
-            The market closed{market.data.closedAt === null ? '' : ` on ${utcDateTime(market.data.closedAt)}`}. Nothing
-            trades any more, so this is where your account ended: no order is open and nothing is reserved. Your
-            executions and orders stay below.
+            The market closed{market.data.closedAt === null ? '' : ` on ${utcDateTime(market.data.closedAt)}`}.{' '}
+            {reserved
+              ? 'Nothing trades any more, but some of your orders are still open, with what they reserve. The close cancels them and releases it: it is doing so now, or does when the exchange is restarted if it has stopped. Your balances are final once nothing is reserved.'
+              : 'Nothing trades any more, so this is where your account ended: no order is open and nothing is reserved.'}{' '}
+            Your executions and orders stay below.
           </p>
         </section>
       )}

@@ -109,17 +109,36 @@ function OutcomeMessage({ outcome }: { outcome: Outcome }) {
 }
 
 /**
+ * What the close has done with the trader's open orders, by the list of them beside the ticket. The market reads as
+ * closed before the last order is cancelled, and stays so with orders resting when the exchange stopped half way: that
+ * they were cancelled is said only once none is listed as open.
+ */
+export function closedOrdersText(stillOpen: number | undefined): string {
+  if (stillOpen === undefined) {
+    return 'The close cancels any order of yours that was still open, and releases what it had reserved.';
+  }
+  if (stillOpen === 0) {
+    return 'Any order of yours that was still open was cancelled, and what it had reserved was released.';
+  }
+  const orders = stillOpen === 1 ? '1 order of yours is' : `${groupInteger(stillOpen)} orders of yours are`;
+  return `${orders} still open, with what ${stillOpen === 1 ? 'it reserves' : 'they reserve'}. The close cancels ${stillOpen === 1 ? 'it' : 'them'}: it is doing so now, or does when the exchange is restarted if it has stopped.`;
+}
+
+/**
  * In the ticket's place once the market has closed: that it closed and when, and what became of the trader's orders
  * and balances. No form, since no order will ever be taken again; a halt, which ends, keeps the ticket.
  */
 export function ClosedTicket({
   closedAt,
   account = true,
+  stillOpen,
   children,
 }: {
   closedAt: string | null;
   /** Whether the user traded in this market; one who never had an account has no orders or balances to hear of. */
   account?: boolean;
+  /** How many of the trader's orders are still listed as open, in any instrument; undefined until the list is read. */
+  stillOpen?: number | undefined;
   children?: ReactNode;
 }) {
   return (
@@ -130,8 +149,8 @@ export function ClosedTicket({
       </p>
       {account ? (
         <p className="muted">
-          Any order of yours that was still open was cancelled, and what it had reserved was released. Your{' '}
-          <Link to="/portfolio">portfolio</Link> and your history of orders and trades stay as the market left them.
+          {closedOrdersText(stillOpen)} Your <Link to="/portfolio">portfolio</Link> and your history of orders and
+          trades stay {stillOpen === undefined || stillOpen === 0 ? 'as the market left them' : 'to read'}.
         </p>
       ) : (
         <p className="muted">You had no trading account in it.</p>
@@ -155,7 +174,7 @@ export function OrderTicket({
    * Set once the market has closed, with when. The ticket then gives way to a statement of that, unless an order sent
    * before is still unresolved: that one keeps its Retry, which finds out what became of it.
    */
-  closed?: { closedAt: string | null } | null;
+  closed?: { closedAt: string | null; stillOpen?: number | undefined } | null;
 }) {
   const client = useQueryClient();
   const watch = useFillWatch();
@@ -207,7 +226,7 @@ export function OrderTicket({
 
   if (closed !== null && !unresolved && !sending) {
     return (
-      <ClosedTicket closedAt={closed.closedAt}>
+      <ClosedTicket closedAt={closed.closedAt} stillOpen={closed.stillOpen}>
         {/* What became of the last order sent, if the close came right behind it. */}
         <OutcomeMessage outcome={intent.outcome} />
       </ClosedTicket>

@@ -8,6 +8,7 @@ import { FillWatch } from '../app/FillNotice';
 import { TOURS } from '../help/tours';
 import { signedIn } from '../test/fakeServer';
 import { fakeStreams, frame, noTrades } from '../test/fakeStream';
+import { closedOrdersText } from './OrderTicket';
 import { StreamContext, TerminalPage } from './TerminalPage';
 
 const NOVA = '00000000-0000-0000-0000-000000000001';
@@ -96,7 +97,7 @@ function renderTerminal(
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
 ) {
   const streams = fakeStreams();
-  render(
+  const view = render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[at]}>
         <StreamContext.Provider value={streams.create}>
@@ -107,7 +108,7 @@ function renderTerminal(
       </MemoryRouter>
     </QueryClientProvider>,
   );
-  return streams;
+  return Object.assign(view, streams);
 }
 
 describe('terminal', () => {
@@ -222,6 +223,64 @@ describe('terminal', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Recent orders' }));
     const recent = await screen.findByRole('table', { name: 'Recent orders' });
     expect(within(recent).getByRole('row', { name: /NOVA/ })).toHaveTextContent('Canceled · the market closed');
+  });
+
+  it('does not say the close cancelled orders still listed as open, and offers no cancel of them', async () => {
+    // Closed, and the close has not got to this trader's order: it is still at it, or the exchange stopped half way.
+    const server = market().on('GET /api/v1/market', { status: 200, json: CLOSED });
+    renderTerminal();
+
+    const closed = await screen.findByRole('region', { name: 'Market closed' });
+    await waitFor(() =>
+      expect(closed).toHaveTextContent(
+        '1 order of yours is still open, with what it reserves. The close cancels it: it is doing so now, or does when the exchange is restarted if it has stopped.',
+      ),
+    );
+    expect(closed).not.toHaveTextContent(/was cancelled|was released|as the market left them/);
+    expect(closed).toHaveTextContent('Your portfolio and your history of orders and trades stay to read.');
+    expect(within(closed).getByRole('link', { name: 'portfolio' })).toHaveAttribute('href', '/portfolio');
+
+    expect(screen.getByRole('tab', { name: 'Open orders (1)' })).toBeInTheDocument();
+    const open = screen.getByRole('table', { name: 'Open orders' });
+    expect(within(open).getByRole('row', { name: /NOVA/ })).toHaveTextContent('Waiting for the close to cancel it');
+    expect(
+      screen.getByText(/^The market has closed, and the close cancels these: it is doing so now, or does when the exchange is restarted/),
+    ).toBeInTheDocument();
+    // A closed market takes no cancel, so none is offered: it could only fail.
+    expect(screen.queryByRole('button', { name: /^Cancel / })).toBeNull();
+    expect(screen.queryByText(/any order that was still open was cancelled by the close/)).toBeNull();
+    expect(server.requests.some((request) => request.method === 'POST')).toBe(false);
+  });
+
+  it('says nothing of what the close did to orders it could not read', async () => {
+    market()
+      .on('GET /api/v1/market', { status: 200, json: CLOSED })
+      .on('GET /api/v1/orders', { status: 503, problem: { status: 503, code: 'TRADING_UNAVAILABLE' } });
+    renderTerminal();
+
+    const closed = await screen.findByRole('region', { name: 'Market closed' });
+    // What a close does, in place of what this one has done: the list that would tell has not been read.
+    expect(closed).toHaveTextContent(
+      'The close cancels any order of yours that was still open, and releases what it had reserved.',
+    );
+    expect(await screen.findByText('No open orders.')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByText(/was cancelled|still open, with what/)).toBeNull(),
+    );
+  });
+
+  it('says what the close did with open orders by how many are still listed', () => {
+    // Before the list is read, what a close does; that they were cancelled only once none is left.
+    expect(closedOrdersText(undefined)).toBe(
+      'The close cancels any order of yours that was still open, and releases what it had reserved.',
+    );
+    expect(closedOrdersText(0)).toBe(
+      'Any order of yours that was still open was cancelled, and what it had reserved was released.',
+    );
+    expect(closedOrdersText(1)).toMatch(/^1 order of yours is still open, with what it reserves\. The close cancels it: /);
+    expect(closedOrdersText(1200)).toMatch(
+      /^1,200 orders of yours are still open, with what they reserve\. The close cancels them: /,
+    );
   });
 
   it('says nothing of a close under an empty list of open orders while the market is open', async () => {
