@@ -304,6 +304,10 @@ class MarketCloseSweepIT {
 		assertThat(errors(output)).anyMatch((line) -> line.contains("giving the close up (attempt 3 of 3)"))
 			.anyMatch((line) -> line.contains("The market's close at sequence " + close
 					+ " halted the writer before it finished; resting orders left: at most 3."));
+		assertThat(causeLogged(output, "giving the close up (attempt 3 of 3)")).as("the attempt's line, with its cause")
+			.startsWith(ProcessStopped.class.getName());
+		assertThat(causeLogged(output, "halted the writer before it finished")).as("the halt's line, with its cause")
+			.startsWith(ProcessStopped.class.getName());
 
 		// Between two parts: closed for good, with what the first transaction cancelled and nothing more.
 		assertThat(sequence()).isEqualTo(close);
@@ -505,6 +509,9 @@ class MarketCloseSweepIT {
 		assertThat(errors(output)).as("on record, with what the books still hold")
 			.anyMatch((line) -> line.contains("The market's close halted the writer in its own transaction")
 					&& line.contains("resting orders in the books: 5."));
+		assertThat(causeLogged(output, "halted the writer in its own transaction"))
+			.as("with the cause, which nothing else writes down once the request is gone")
+			.startsWith(CommitOutcomeUnknownException.class.getName());
 		// Not an unfinished close as far as this writer knows, so a close sent to it is told no more than that.
 		assertThatThrownBy(() -> engine.close(closeKey, closeCommand())).isInstanceOf(WriterStoppedException.class);
 		assertThat(jdbc.queryForObject("SELECT state FROM simulation WHERE id = ?", String.class, simulation))
@@ -1017,6 +1024,20 @@ class MarketCloseSweepIT {
 	/** The lines the log holds at ERROR since the test began. */
 	private static List<String> errors(CapturedOutput output) {
 		return output.getAll().lines().filter((line) -> line.contains("ERROR")).toList();
+	}
+
+	/**
+	 * What the log gives as the cause of the first ERROR line with this text since the test began: the first line of
+	 * the stack trace under it. A line logged without its cause has the log's next line there, or nothing.
+	 */
+	static String causeLogged(CapturedOutput output, String text) {
+		return output.getAll()
+			.lines()
+			.dropWhile((line) -> !(line.contains("ERROR") && line.contains(text)))
+			.skip(1)
+			.filter((line) -> !line.isBlank())
+			.findFirst()
+			.orElse("");
 	}
 
 	private MarketControl closeCommand() {

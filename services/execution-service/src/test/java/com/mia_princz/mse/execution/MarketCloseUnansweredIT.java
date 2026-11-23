@@ -27,6 +27,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
+import com.mia_princz.mse.execution.trading.application.TradingStore;
 
 /**
  * A close that halts the writer after its request has stopped waiting, over real HTTP. Nobody is listening for the
@@ -119,6 +120,10 @@ class MarketCloseUnansweredIT {
 			.as("the halt, where the search for a halted writer finds it")
 			.anyMatch((line) -> line.contains("The market's close at sequence " + (before + 1)
 					+ " halted the writer before it finished; resting orders left: at most 1."));
+		// An out-of-step row is not tried again, so no other line has the cause, and nobody waits to log it.
+		assertThat(MarketCloseSweepIT.causeLogged(output, "halted the writer before it finished"))
+			.as("the halt's line, with what caused it")
+			.startsWith(TradingStore.OutOfStepException.class.getName());
 		assertThat(output.getAll()).as("the request was gone, so it logged nothing")
 			.doesNotContain("Command " + key + " halted the writer");
 
