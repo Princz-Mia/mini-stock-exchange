@@ -22,7 +22,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import com.mia_princz.mse.execution.identity.ApiTokens;
 import com.mia_princz.mse.execution.identity.BotPrincipal;
-import com.mia_princz.mse.execution.trading.adapter.ActiveSimulation;
+import com.mia_princz.mse.execution.trading.adapter.CurrentSimulation;
 
 /**
  * Authenticates a request by its bot token, for the stateless bot chain only. A malformed, unknown or revoked token is
@@ -83,7 +83,7 @@ public final class BotTokenFilter extends OncePerRequestFilter {
 		UUID simulation = writerSimulation.get();
 		byte[] hash = ApiTokens.hash(token);
 		return (simulation != null ? jdbc.sql(TOKEN + "?").params(hash, simulation)
-				: jdbc.sql(TOKEN + ActiveSimulation.ID).param(hash))
+				: jdbc.sql(TOKEN + CurrentSimulation.ID).param(hash))
 			.query((row, index) -> new BotPrincipal(row.getObject("id", UUID.class),
 					row.getObject("account_id", UUID.class)))
 			.optional();

@@ -15,7 +15,7 @@ package com.mia_princz.mse.execution.trading.adapter;
  * check made on every bot request compares that one, so that it never reads the simulation's row, which the writer
  * rewrites with every run.
  */
-public final class ActiveSimulation {
+public final class CurrentSimulation {
 
 	/** True of the active simulation's row. */
 	public static final String CONDITION = "state <> 'CLOSED'";
@@ -26,7 +26,7 @@ public final class ActiveSimulation {
 	/** Ends a query on {@code simulation} that returns the active one or, if every one is closed, the newest. */
 	public static final String OR_ELSE_NEWEST = "ORDER BY (state = 'CLOSED'), created_at DESC, id DESC LIMIT 1";
 
-	private ActiveSimulation() {
+	private CurrentSimulation() {
 	}
 
 }

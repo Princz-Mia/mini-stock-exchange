@@ -112,7 +112,7 @@ public final class JdbcTradingStore implements TradingStore {
 
 	@Override
 	public boolean hasActiveSimulation() {
-		return jdbc.sql("SELECT EXISTS (SELECT 1 FROM simulation WHERE " + ActiveSimulation.CONDITION + ")")
+		return jdbc.sql("SELECT EXISTS (SELECT 1 FROM simulation WHERE " + CurrentSimulation.CONDITION + ")")
 			.query(Boolean.class)
 			.single();
 	}
@@ -135,7 +135,7 @@ public final class JdbcTradingStore implements TradingStore {
 	public Market lockMarket() {
 		return jdbc.sql("""
 				SELECT id, state, writer_epoch, max_open_orders_per_account, max_open_orders_total, max_fills_per_command
-				FROM simulation WHERE %s FOR UPDATE""".formatted(ActiveSimulation.CONDITION))
+				FROM simulation WHERE %s FOR UPDATE""".formatted(CurrentSimulation.CONDITION))
 			.query((row, index) -> new Market(row.getObject("id", UUID.class), row.getString("state"),
 					row.getLong("writer_epoch"), row.getInt("max_open_orders_per_account"),
 					row.getInt("max_open_orders_total"), row.getInt("max_fills_per_command")))

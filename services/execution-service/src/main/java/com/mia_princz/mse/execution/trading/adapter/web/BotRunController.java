@@ -30,7 +30,7 @@ import org.springframework.web.bind.annotation.RestController;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
-import com.mia_princz.mse.execution.trading.adapter.ActiveSimulation;
+import com.mia_princz.mse.execution.trading.adapter.CurrentSimulation;
 import com.mia_princz.mse.execution.trading.application.BotRunResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.StartBotRun;
@@ -274,7 +274,7 @@ class BotRunController {
 				ORDER BY started_at %2$s, id %2$s LIMIT :limit""".formatted(
 				only != null ? " AND id = :only"
 						: after == null ? "" : " AND (started_at, id) " + direction.after() + " (:afterAt, :afterId)",
-				direction.direction(), ActiveSimulation.ID))
+				direction.direction(), CurrentSimulation.ID))
 			.param("only", only)
 			.param("afterAt", after == null ? null : Timestamp.from(after.startedAt()))
 			.param("afterId", after == null ? null : after.id())

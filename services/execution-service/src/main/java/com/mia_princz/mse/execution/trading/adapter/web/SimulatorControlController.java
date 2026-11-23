@@ -27,7 +27,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import tools.jackson.databind.JsonNode;
 
-import com.mia_princz.mse.execution.trading.adapter.ActiveSimulation;
+import com.mia_princz.mse.execution.trading.adapter.CurrentSimulation;
 
 /**
  * The simulator's control plane: which run to work on, its bots, and its heartbeat. Internal, by the simulator's own
@@ -114,7 +114,7 @@ class SimulatorControlController {
 	@GetMapping("/assignment")
 	Assignment assignment() {
 		Timestamp now = Timestamp.from(clock.instant());
-		String active = "WHERE simulation_id = " + ActiveSimulation.ID + " AND ";
+		String active = "WHERE simulation_id = " + CurrentSimulation.ID + " AND ";
 		Optional<Run> run = jdbc.sql(select(active + """
 				stopped_at IS NULL AND worker_id IS NOT NULL AND (desired_state = 'STOPPED' OR ends_at <= ?)
 				ORDER BY started_at, id LIMIT 1"""))
