@@ -26,6 +26,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.health.contributor.Status;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -41,12 +42,17 @@ import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.execution.identity.ApiTokens;
 import com.mia_princz.mse.execution.trading.adapter.JdbcTradingStore;
 import com.mia_princz.mse.execution.trading.adapter.SpringTransactionRunner;
+import com.mia_princz.mse.execution.trading.adapter.TradingStartup;
+import com.mia_princz.mse.execution.trading.adapter.WriterOwnership;
 import com.mia_princz.mse.execution.trading.application.AccountChanges;
+import com.mia_princz.mse.execution.trading.application.AddInstrument;
 import com.mia_princz.mse.execution.trading.application.BotCredentials;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.CommandWriter;
+import com.mia_princz.mse.execution.trading.application.InstrumentResult;
 import com.mia_princz.mse.execution.trading.application.MarketClosing;
 import com.mia_princz.mse.execution.trading.application.MarketControl;
+import com.mia_princz.mse.execution.trading.application.MarketTransition;
 import com.mia_princz.mse.execution.trading.application.PlaceOrder;
 import com.mia_princz.mse.execution.trading.application.PlacementResult;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
@@ -90,6 +96,10 @@ class MarketCloseSweepIT {
 
 	@Autowired
 	PlatformTransactionManager transactionManager;
+
+	/** The application's own hold on the market, which a process started by the test shares. */
+	@Autowired
+	WriterOwnership ownership;
 
 	private TradingStore store;
 
@@ -400,9 +410,46 @@ class MarketCloseSweepIT {
 			.containsExactly(List.of(olderBot), List.of(trader));
 	}
 
+	/**
+	 * A process that starts on a database whose only market is closed, through the startup the application itself
+	 * runs. It loads that market, as closed. So a setup command is refused by it, as by any market past SETUP; it does
+	 * not find "no market" and quietly create a second one, and a transition is not answered as if nothing were set up.
+	 */
+	@Test
+	void aProcessThatStartsOnAClosedMarketLoadsItAndSetupCommandsCreateNoOther() throws Exception {
+		TradingEngine engine = engine();
+		engine.start();
+		engine.close(key(CLOSE_ROUTE), new MarketControl(MarketControl.Action.CLOSE, operator)).get(5, TimeUnit.SECONDS);
+		long simulations = jdbc.queryForObject("SELECT count(*) FROM simulation", Long.class);
+		long sequence = sequence();
+
+		TradingEngine next = restarted();
+		TradingStartup startup = new TradingStartup(ownership, store, next, writer);
+		startup.run(null);
+
+		assertThat(startup.health().getStatus()).isEqualTo(Status.UP);
+		assertThat(next.simulationId()).isEqualTo(simulation);
+		assertThat(next.simulationIdUnlessClosed()).isNull();
+		InstrumentResult added = next
+			.addInstrument(key("POST /api/v1/admin/instruments"),
+					new AddInstrument(UUID.randomUUID(), "LATE", null, Price.parse("1.00"), operator))
+			.get(5, TimeUnit.SECONDS);
+		assertThat(added.status()).isEqualTo(InstrumentResult.Status.NOT_IN_SETUP);
+		MarketTransition opened = next
+			.control(key("POST /api/v1/admin/market/open"), new MarketControl(MarketControl.Action.OPEN, operator))
+			.get(5, TimeUnit.SECONDS);
+		assertThat(opened.status()).isEqualTo(MarketTransition.Status.NOT_ALLOWED);
+		assertThat(opened.state()).isEqualTo("CLOSED");
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM simulation", Long.class)).isEqualTo(simulations);
+		assertThat(jdbc.queryForObject("SELECT count(*) FROM simulation WHERE state <> 'CLOSED'", Long.class)).isZero();
+		assertThat(sequence()).as("both refusals are the closed market's own commands").isEqualTo(sequence + 2);
+	}
+
 	/** A new market beside the closed ones: open, with two instruments. Whatever was not closed before it is, first. */
 	private void newSimulation() {
-		jdbc.update("UPDATE simulation SET state = 'CLOSED', closed_at = now() WHERE state <> 'CLOSED'");
+		jdbc.update("""
+				UPDATE simulation SET state = 'CLOSED', opened_at = coalesce(opened_at, now()), closed_at = now()
+				WHERE state <> 'CLOSED'""");
 		simulation = UUID.randomUUID();
 		issuance = UUID.randomUUID();
 		first = UUID.randomUUID();
