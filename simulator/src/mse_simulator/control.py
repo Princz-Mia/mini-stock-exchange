@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 RUNNING = "RUNNING"
 STOPPED = "STOPPED"
 
+# A heartbeat's refusal for a run whose stop is already recorded.
+RUN_FINISHED = "RUN_FINISHED"
+
 # The most bots one page holds, as Execution allows: 10,000 bots are ten pages.
 BOTS_PER_PAGE = 1000
 

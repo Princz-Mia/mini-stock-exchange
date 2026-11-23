@@ -7,6 +7,7 @@ from uuid import UUID
 import numpy as np
 
 from mse_simulator.market import Instrument, MarketView
+from mse_simulator.prices import BASIS_POINT, limit_price
 from mse_simulator.strategy import (
     Cancel,
     Holdings,
@@ -15,9 +16,9 @@ from mse_simulator.strategy import (
     Place,
     Positions,
     affordable,
-    clamp,
     oldest_stale,
 )
+from mse_simulator.values import View
 
 SIDES = ("BUY", "SELL")
 
@@ -26,25 +27,37 @@ SIDES = ("BUY", "SELL")
 class MarketMakerConfig:
     quote_size: int
     max_position: int
-    # Each quote sits this many ticks from the reservation price.
-    half_spread_ticks: int
-    # The reservation price moves this many ticks against each quote size of inventory.
-    skew_ticks: int
-    # A quote this many ticks off its target, or crossing the other side, is replaced.
-    requote_ticks: int
+    # Each quote sits this far from the reservation price, in basis points of it; at least a tick.
+    half_spread_bp: float
+    # The reservation price moves this far against each quote size of inventory.
+    skew_bp: float
+    # A quote this far off its target, or crossing the other side, is replaced. At least a tick.
+    requote_bp: float
     quote_lifetime: float
 
 
 class MarketMaker:
-    """Quotes one instrument, drawn once from the run's. The reservation price is the anchor moved
-    ``skew_ticks`` down for each quote size the bot is long, and up for each it is short: a long
-    maker quotes lower to sell down, a short one higher. Old quotes are cancelled before new ones
-    are placed, so at most one quote per side rests; quotes still near their target stay put. It
-    never quotes more than it holds or than the run's position limit allows."""
+    """Quotes one instrument: the one its place among the run's makers gives it, so the makers
+    spread evenly over the run's instruments, or one drawn from its seed. The reservation price is
+    the bot's own idea of the value, moved ``skew_bp`` down for each quote size the bot is long and
+    up for each it is short: a long maker quotes lower to sell down, a short one higher. Because
+    it quotes around a value and not around the current price, it buys below that value and sells
+    above it wherever the market goes, which is what pulls the market back. Old quotes are
+    cancelled before new ones are placed, so at most one quote per side rests; quotes still near
+    their target stay put. It never quotes more than it holds or than the run's position limit
+    allows."""
 
-    def __init__(self, rng: np.random.Generator, config: MarketMakerConfig) -> None:
+    def __init__(
+        self,
+        rng: np.random.Generator,
+        config: MarketMakerConfig,
+        view: View | None = None,
+        place: int | None = None,
+    ) -> None:
         self._rng = rng
         self._config = config
+        self._view = view or View(None)
+        self._place = place
         self._positions = Positions(config.max_position)
         self._instrument: UUID | None = None
 
@@ -62,8 +75,7 @@ class MarketMaker:
         if not tradable:
             return None
         if self._instrument is None:
-            pick = market.instruments[int(self._rng.integers(len(market.instruments)))]
-            self._instrument = pick.instrument_id
+            self._instrument = self._pick(market.instruments)
         instrument = next(
             (item for item in market.instruments if item.instrument_id == self._instrument), None
         )
@@ -100,16 +112,26 @@ class MarketMaker:
                 return Place(instrument.instrument_id, side, quantity, limit)
         return None
 
+    def _pick(self, instruments: tuple[Instrument, ...]) -> UUID:
+        if self._place is None:
+            return instruments[int(self._rng.integers(len(instruments)))].instrument_id
+        ordered = sorted(item.instrument_id for item in instruments)
+        return ordered[self._place % len(ordered)]
+
     def quotes(
         self, instrument: Instrument, holdings: Holdings, instruments: tuple[Instrument, ...]
     ) -> tuple[int, int]:
-        """The bid and ask the maker wants now, on the tick grid and inside the price band."""
-        tick = instrument.tick
+        """The bid and ask the maker wants now, on the tick grid and inside the price band. The
+        reservation price itself is not rounded: only the two quotes are, each away from the other,
+        so the pair stays centred on it."""
         moved = self._positions.moved(instrument.instrument_id, holdings, instruments)
-        lean = round(self._config.skew_ticks * moved / self._config.quote_size)
-        reservation = round(instrument.anchor() / tick) * tick - lean * tick
-        half = self._config.half_spread_ticks * tick
-        return clamp(reservation - half, instrument), clamp(reservation + half, instrument)
+        lean = self._config.skew_bp * BASIS_POINT * moved / self._config.quote_size
+        reservation = self._view.of(instrument) * (1 - lean)
+        half = max(self._config.half_spread_bp * BASIS_POINT * reservation, instrument.tick)
+        return (
+            limit_price(reservation - half, "BUY", instrument),
+            limit_price(reservation + half, "SELL", instrument),
+        )
 
     def _off(self, order: OpenOrder, bid: int, ask: int, tick: int) -> bool:
         if order.limit is None:
@@ -118,4 +140,5 @@ class MarketMaker:
             target, crosses = bid, order.limit >= ask
         else:
             target, crosses = ask, order.limit <= bid
-        return crosses or abs(order.limit - target) >= self._config.requote_ticks * tick
+        drift = max(self._config.requote_bp * BASIS_POINT * target, tick)
+        return crosses or abs(order.limit - target) >= drift

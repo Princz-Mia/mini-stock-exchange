@@ -16,17 +16,39 @@ same public and authenticated API as people use.
 - **Strategies:** each bot draws from its own generator, seeded by the run's seed and its account, so the same
   observations give the same decisions. Market makers take the first turns of a run. No bot orders more than it
   holds or than the run's position limit allows, and old orders are cancelled.
-  - **Market maker:** one bid and one ask on one of the run's instruments, a few ticks either side of a
-    reservation price: the mid, the last trade or the reference, leaning against the bot's inventory. Quotes
-    that drift too far from their target, or would cross the other side, are cancelled before new ones go in.
-  - **Momentum:** short and long moving averages of each instrument's price, sampled once per market poll for
-    all momentum bots. Past a threshold, the side is drawn with a bias toward the trend, at the best opposite
-    quote, one order at a time with a cooldown after each.
-  - **Noise:** limit orders on the run's instruments, a random side a few ticks either side of the mid, the
-    last trade or the reference price.
+  - **Fair values:** each instrument of a run has a fair value that only the bots know. It starts at the
+    market's price, wanders at random, and is pulled back toward the instrument's reference price (half of a
+    gap closes in four hours), so it moves a few percent and returns. It moves one step per market poll while
+    the market is open, from the run's seed. Each bot sees it through a small bias of its own. A value never
+    sets a price: it only shapes the orders a bot sends, and prices are made by orders meeting in the book.
+  - **Prices:** spreads and offsets are in basis points of the price, at least one tick, so a cheap instrument
+    trades like a dear one. A limit is rounded to the tick once, a buy down and a sell up, which favours
+    neither side.
+  - **Market maker:** one bid and one ask on one instrument, ten basis points either side of a reservation
+    price: the bot's idea of the value, leaning against its inventory. It quotes around the value, not around
+    the current price, so it buys below the value and sells above it wherever the market is. The run's makers
+    take its instruments in turn. Quotes that drift too far from their target, or would cross the other side,
+    are cancelled before new ones go in.
+  - **Momentum:** short and long moving averages of each instrument's mid, sampled once per market poll for
+    all momentum bots and started afresh after a halt. Past a threshold, the side is drawn with a bias toward
+    the trend, never more than three orders in four. An order takes the best opposite quote only if it is
+    within twenty basis points of the price and rests otherwise, one order at a time with a cooldown.
+  - **Noise:** limit orders on the run's instruments, a random side, up to thirty basis points either side of
+    a centre: the mid (or the last trade, or the reference price) moved a quarter of the way toward the bot's
+    idea of the value.
 - **Stop:** once the run is stopped or out of time, no new orders; every command in flight gets its final
   answer, every open order of the run's bots is cancelled (each one that can't be is reported), and the
   worker confirms the stop. A worker that stops without that leaves the run to the next one.
+- **Market close:** a market that closes ends the run at once, with nothing for the worker to settle: the
+  exchange itself cancels every order, revokes the bots' tokens and ends the run. The worker starts no new step
+  and sends no cancel. It gives the commands already sent up to 15 seconds to be answered, reports its totals in
+  one last heartbeat, which the exchange is expected to refuse and which is not sent again, logs one line, and
+  goes back to asking for its next run. It learns of the close from its market poll, from the first refused
+  token or from a heartbeat refused because the run is finished, whichever comes first. A halt is not a close:
+  the run goes on, and new orders wait for the resume.
+- **Refused tokens:** a bot whose token the exchange refuses takes no more steps in that run, since a token is
+  never renewed, and the worker asks at once whether the market closed. So a close costs at most one refused
+  call per bot, and a single revoked bot does not fail at every turn. The worker's log counts such bots.
 - **Safety:** a command keeps its idempotency key until the exchange answers it finally, so a retry after a busy,
   timed-out, rate-limited or lost answer can't apply twice. New orders pause while the market isn't open or market data
   isn't live and recent.
