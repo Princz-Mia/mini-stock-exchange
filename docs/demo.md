@@ -4,14 +4,15 @@ A scripted walk through the exchange: an operator runs the market, bots trade, a
 
 ## Before you start
 
-Do this beforehand. The first build takes a few minutes.
+Do this beforehand. The first build takes a few minutes. A new stack has no market, so the demo turns on the demo seed, which prepares one, before the first start:
 
 ```powershell
 .\scripts\init-env.ps1
+(Get-Content .env) -replace '^MSE_DEMO_SEED=.*', 'MSE_DEMO_SEED=true' | Set-Content .env
 docker compose --profile full up -d --build --wait
 ```
 
-On Linux or macOS, use `./scripts/init-env.sh`. The stack starts with a demo market already set up but not yet open: NOVA, ORBT, HELI, QUAD and VELO, the trader funded, and 20 bots ready: 4 market makers, 12 noise and 4 momentum bots. Opening it is the operator's step, below.
+On Linux or macOS, use `./scripts/init-env.sh` and `sed -i 's/^MSE_DEMO_SEED=.*/MSE_DEMO_SEED=true/' .env`, or edit the line in `.env` by hand. The stack starts with a demo market already set up but not yet open: NOVA, ORBT, HELI, QUAD and VELO, the trader funded, and 20 bots ready: 4 market makers, 12 noise and 4 momentum bots. Opening it is the operator's step, below. Without the seed, set the same up by hand on the operator screen first: the five **Starting scenario** instruments, a trader added with cash and shares, and 20 bots from **Create bots**.
 
 The passwords for `operator` and `trader` are `DEV_OPERATOR_PASSWORD` and `DEV_TRADER_PASSWORD` in `.env`. Use two browser windows, one of them private, so both can be signed in at once: the operator in one, the trader in the other. Open <http://localhost:8080> in both.
 

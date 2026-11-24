@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -362,3 +363,18 @@ def test_the_seed_says_in_its_last_line_that_the_operator_opens_the_market(
         " (4 market makers, 12 noise, 4 momentum);"
         " the market is left in setup for the operator to open"
     )
+
+
+def test_a_fresh_stack_starts_with_the_seed_off() -> None:
+    # A new .env is copied from the template, and Compose falls back to its own default: both must
+    # leave the seed off, so a fresh stack has no market until the operator sets one up.
+    root = Path(__file__).resolve().parents[2]
+    template = (root / ".env.example").read_text(encoding="utf-8").splitlines()
+    compose = (root / "compose.yaml").read_text(encoding="utf-8").splitlines()
+
+    assert [line for line in template if line.startswith("MSE_DEMO_SEED=")] == [
+        "MSE_DEMO_SEED=false"
+    ]
+    assert [line.strip() for line in compose if line.strip().startswith("MSE_DEMO_SEED:")] == [
+        "MSE_DEMO_SEED: ${MSE_DEMO_SEED:-false}"
+    ]
