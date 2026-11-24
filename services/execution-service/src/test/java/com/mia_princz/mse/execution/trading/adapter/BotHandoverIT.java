@@ -8,6 +8,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -98,11 +99,14 @@ class BotHandoverIT {
 
 		private volatile boolean rollBackNext;
 
+		/** The next transaction commits, and then its connection is lost before the commit is confirmed. */
+		private volatile boolean unknownAfterNextCommit;
+
 		private int commitsChecked;
 
 		@Override
 		public <T> T inTransaction(Supplier<T> work) {
-			return real.inTransaction(() -> {
+			T committed = real.inTransaction(() -> {
 				T done = work.get();
 				check();
 				if (rollBackNext) {
@@ -111,6 +115,12 @@ class BotHandoverIT {
 				}
 				return done;
 			});
+			if (unknownAfterNextCommit) {
+				unknownAfterNextCommit = false;
+				throw new TransactionRunner.CommitOutcomeUnknownException(
+						new SQLException("injected: connection lost after the commit"));
+			}
+			return committed;
 		}
 
 		private void check() {
@@ -275,6 +285,38 @@ class BotHandoverIT {
 		assertThat(tokenFiles()).as("a transaction that rolled back keeps no file").hasSize(5);
 		assertThat(jdbc.queryForObject("SELECT count(*) FROM account WHERE kind = 'BOT' AND simulation_id = ?",
 				Long.class, simulation)).isEqualTo(5);
+		assertThat(transactions.problems).isEmpty();
+	}
+
+	/**
+	 * A commit whose outcome is unknown may have made its bots, so their files are kept: here it did commit, and a
+	 * file deleted now would leave a bot that exists with a token nobody can ever read. The writer halts. A command
+	 * that was never queued, refused by a writer that no longer takes commands, makes no bot, and its files are gone
+	 * before it is refused.
+	 */
+	@Test
+	void theFilesOfACommitWhoseOutcomeIsUnknownStayAndThoseOfACommandNeverQueuedGo() throws Exception {
+		transactions.unknownAfterNextCommit = true;
+		Throwable lost = catchThrowable(() -> provision(key(BOTS_ROUTE), 6, BotStrategy.NOISE));
+
+		assertThat(lost).isInstanceOf(ExecutionException.class);
+		assertThat(lost.getCause()).isInstanceOf(CommandWriter.WriterHaltException.class);
+		List<UUID> made = jdbc.queryForList("SELECT id FROM account WHERE kind = 'BOT' AND simulation_id = ?",
+				UUID.class, simulation);
+		assertThat(made).as("the commit went through").hasSize(6);
+		assertThat(tokenFiles()).as("every committed bot keeps its token file")
+			.containsExactlyInAnyOrderElementsOf(made.stream().map((id) -> id + ".token").toList());
+		for (UUID bot : made) {
+			String token = Files.readString(tokens.resolve(bot + ".token"), StandardCharsets.US_ASCII).strip();
+			assertThat(jdbc.queryForObject("SELECT token_hash FROM api_token WHERE account_id = ?", byte[].class, bot))
+				.isEqualTo(ApiTokens.hash(token));
+		}
+
+		writer.close(Duration.ofSeconds(5));
+		Throwable refused = catchThrowable(() -> engine.provisionBots(key(BOTS_ROUTE),
+				new ProvisionBots(4, 50_000_00, holdings(), BotStrategy.NOISE, operator)));
+		assertThat(refused).isInstanceOf(CommandWriter.WriterStoppedException.class);
+		assertThat(tokenFiles()).as("the four tokens of the command never queued are gone").hasSize(6);
 		assertThat(transactions.problems).isEmpty();
 	}
 
