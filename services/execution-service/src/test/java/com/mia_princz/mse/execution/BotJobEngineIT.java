@@ -14,6 +14,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
@@ -48,6 +49,7 @@ import com.mia_princz.mse.execution.trading.application.InstrumentResult;
 import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
 import com.mia_princz.mse.execution.trading.application.SimulationChanges;
 import com.mia_princz.mse.execution.trading.application.StartBotJob;
+import com.mia_princz.mse.execution.trading.application.StopBotJob;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
 import com.mia_princz.mse.execution.trading.application.TradingStore;
 import com.mia_princz.mse.execution.trading.application.WriterTimings;
@@ -98,11 +100,18 @@ class BotJobEngineIT {
 	/** While set, handing tokens over fails, as a full disk would. */
 	private final AtomicBoolean handoverFails = new AtomicBoolean();
 
+	/** How many more hand-overs fail, as a disk that is full for a moment would; then they go through again. */
+	private final AtomicInteger handoversToFail = new AtomicInteger();
+
+	/** Hand-overs that failed, each one a part's attempt. */
+	private final AtomicInteger failedHandovers = new AtomicInteger();
+
 	private final BotCredentials credentials = new BotCredentials() {
 
 		@Override
 		public byte[] issue(UUID accountId) {
-			if (handoverFails.get()) {
+			if (handoverFails.get() || handoversToFail.getAndUpdate((left) -> Math.max(0, left - 1)) > 0) {
+				failedHandovers.incrementAndGet();
 				throw new IllegalStateException("No space left for the token of bot account " + accountId);
 			}
 			issued.add(accountId);
@@ -295,6 +304,7 @@ class BotJobEngineIT {
 
 		BotJob failed = awaitState(job.id(), BotJob.State.FAILED);
 
+		assertThat(failedHandovers).as("the third part, tried three times in all").hasValue(3);
 		assertThat(failed.createdTotal()).isEqualTo(8);
 		assertThat(failed.failure()).startsWith("Bots could not be made: No space left for the token of bot account ");
 		assertThat(failed.finishedAt()).isNotNull();
@@ -303,6 +313,80 @@ class BotJobEngineIT {
 				SELECT action || ' ' || outcome FROM audit_log WHERE simulation_id = ? AND action LIKE 'BOT_JOB_%'
 				ORDER BY command_sequence""", String.class, simulation))
 			.containsExactly("BOT_JOB_START APPLIED", "BOT_JOB_FAIL APPLIED");
+	}
+
+	/**
+	 * A part that fails once, as a disk full for a moment would make it, is tried again under the same key and goes
+	 * through: the job ends DONE with exactly what was asked, and no failure is recorded. One bad moment never fails a
+	 * job of thousands of bots.
+	 */
+	@Test
+	void aPartThatFailsOnceIsTriedAgainAndTheJobGoesOn() throws Exception {
+		TradingEngine engine = engine((job) -> {
+			if (job.partsDone() == 2) {
+				handoversToFail.set(1);
+			}
+		});
+		engine.start();
+		instrument(engine);
+		BotJob job = start(engine, UUID.randomUUID(), new BotJob.Counts(4, 12, 4)).job();
+
+		BotJob done = awaitState(job.id(), BotJob.State.DONE);
+
+		assertThat(failedHandovers).as("the third part failed once").hasValue(1);
+		assertThat(done.created()).isEqualTo(new BotJob.Counts(4, 12, 4));
+		assertThat(done.failure()).isNull();
+		assertThat(bots()).hasSize(20).doesNotHaveDuplicates();
+		assertThat(jdbc.queryForList("""
+				SELECT action || ' ' || outcome FROM audit_log WHERE simulation_id = ? AND action LIKE 'BOT_JOB_%'
+				ORDER BY command_sequence""", String.class, simulation))
+			.containsExactly("BOT_JOB_START APPLIED");
+		assertThat(store.reconciliationProblems(simulation)).isEmpty();
+	}
+
+	/**
+	 * Once a part is answered that the job was stopped, its runner lets the job go: it hands over no more tokens for
+	 * it, and a job started after it is made. A runner that kept asking would hold its one thread for ever, writing
+	 * and deleting a part's tokens on each pass, and no later job would ever be made.
+	 */
+	@Test
+	void aRunnerLetsAStoppedJobGoAndMakesTheNextOne() throws Exception {
+		AtomicReference<TradingEngine> built = new AtomicReference<>();
+		UUID firstKey = UUID.randomUUID();
+		CountDownLatch stopped = new CountDownLatch(1);
+		TradingEngine engine = engine((job) -> {
+			if (job.partsDone() == 1 && job.idempotencyKey().equals(firstKey)) {
+				try {
+					BotJobResult stop = built.get()
+						.stopBotJob(key("POST /api/v1/admin/bot-jobs/{jobId}/stop"), new StopBotJob(job.id(), operator))
+						.get(10, TimeUnit.SECONDS);
+					assertThat(stop.status()).isEqualTo(BotJobResult.Status.STOPPED);
+					stopped.countDown();
+				}
+				catch (Exception ex) {
+					throw new IllegalStateException(ex);
+				}
+			}
+		});
+		built.set(engine);
+		engine.start();
+		instrument(engine);
+		BotJob first = start(engine, firstKey, new BotJob.Counts(0, 20, 0)).job();
+		assertThat(stopped.await(30, TimeUnit.SECONDS)).isTrue();
+		// The part after the stop is answered as stopped, under its own key, and its tokens are removed.
+		awaitTrue(() -> jdbc.queryForObject("SELECT count(*) FROM command_result WHERE idempotency_key = ?", Long.class,
+				BotJob.partKey(firstKey, 1)) == 1);
+		awaitTrue(() -> discarded.size() == PART);
+		int handedOver = issued.size();
+		assertThat(handedOver).as("the part made and the part refused").isEqualTo(2 * PART);
+
+		Thread.sleep(500);
+		assertThat(issued).as("no more tokens for a stopped job").hasSize(handedOver);
+		BotJob next = start(engine, UUID.randomUUID(), new BotJob.Counts(0, 6, 0)).job();
+		BotJob done = awaitState(next.id(), BotJob.State.DONE);
+		assertThat(done.createdTotal()).isEqualTo(6);
+		assertThat(job(first.id()).state()).isEqualTo(BotJob.State.STOPPED);
+		assertThat(bots()).hasSize(PART + 6);
 	}
 
 	/**
