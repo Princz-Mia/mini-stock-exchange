@@ -127,6 +127,21 @@ describe('the operator screen', () => {
     expect(await button('Open market')).toHaveAccessibleDescription('Add at least one instrument first.');
   });
 
+  it('labels a closed market Closed, with no transition out of it and nothing left to set up', async () => {
+    exchange('CLOSED');
+    renderPage();
+
+    expect(await screen.findByText('Closed', { selector: '.state-badge' })).toHaveClass('state-closed');
+    for (const name of ['Open market', 'Halt trading', 'Resume trading']) {
+      expect(await button(name)).toBeDisabled();
+      expect(await button(name)).toHaveAccessibleDescription('The market has closed.');
+    }
+    expect(screen.queryByText("Opening freezes the instruments and every account's endowment.")).toBeNull();
+    // Like any market past setup: the instruments are read-only.
+    await screen.findByRole('table', { name: 'Instruments' });
+    expect(screen.queryByRole('button', { name: 'Edit NOVA' })).toBeNull();
+  });
+
   it('opens the market with a key and shows the committed state', async () => {
     const { server, state } = exchange('SETUP');
     server.on('POST /api/v1/admin/market/open', () => {
@@ -1464,6 +1479,14 @@ describe('bot runs on the operator screen', () => {
     renderPage();
     expect(await button('Start run')).toBeDisabled();
     expect(await button('Start run')).toHaveAccessibleDescription('Bots trade only once the market has opened.');
+  });
+
+  it('cannot start once the market has closed, and says why', async () => {
+    const { state } = exchange('CLOSED');
+    state.tagged = { marketMakers: 1, noise: 2, momentum: 0 };
+    renderPage();
+    expect(await button('Start run')).toBeDisabled();
+    expect(await button('Start run')).toHaveAccessibleDescription('The market has closed; bots no longer trade.');
   });
 
   it('cannot start without bots once open, and says why', async () => {

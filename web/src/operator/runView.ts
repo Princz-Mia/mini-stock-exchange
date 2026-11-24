@@ -55,6 +55,7 @@ export function startBlocked(
   active: BotRun | undefined,
   byStrategy: ByStrategy | undefined,
 ): string | null {
+  if (market === 'CLOSED') return 'The market has closed; bots no longer trade.';
   if (market !== 'OPEN' && market !== 'HALTED') return 'Bots trade only once the market has opened.';
   if (active !== undefined) return 'A run is active; one runs at a time. Stop it first.';
   if (byStrategy === undefined) return null;

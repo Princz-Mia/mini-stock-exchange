@@ -77,17 +77,52 @@ class SnapshotProjectionIT {
 		assertThat(bidLevels(instrument)).isEqualTo(2);
 	}
 
-	/** A state the API does not have yet is shown as UNKNOWN, not refused by the table's CHECK. */
+	/**
+	 * A closed venue is stored as CLOSED, whether its snapshot arrives alone or in a poll. A simulation that has ended
+	 * sends nothing newer, so only a late copy of an older snapshot can still arrive, and it changes nothing.
+	 */
 	@Test
-	void aClosedVenueIsShownAsUnknownUntilTheApiHasIt() {
+	void aClosedVenueIsStoredAsClosedAndStaysSo() {
+		UUID alone = UUID.randomUUID();
+		UUID inAPoll = UUID.randomUUID();
+		projection.apply(Snapshots.snapshot(alone, 3, 1));
+
+		assertThat(projection.apply(Snapshots.closed(alone, 4))).isTrue();
+		assertThat(projection.applyAll(List.of(Snapshots.snapshot(inAPoll, 3, 1), Snapshots.closed(inAPoll, 4)),
+				(changed) -> {
+				})).hasValue(2);
+
+		assertThat(venueState(alone)).isEqualTo("CLOSED");
+		assertThat(venueState(inAPoll)).isEqualTo("CLOSED");
+		assertThat(projection.apply(Snapshots.snapshot(alone, 2, 1))).as("a late copy from while it was open").isFalse();
+		assertThat(projection.applyAll(List.of(Snapshots.snapshot(inAPoll, 2, 1)), (changed) -> {
+		})).hasValue(0);
+		assertThat(venueState(alone)).isEqualTo("CLOSED");
+		assertThat(venueState(inAPoll)).isEqualTo("CLOSED");
+	}
+
+	/**
+	 * A state newer than this build reads as UNKNOWN, and is stored so. The table takes exactly the states the
+	 * projection can write.
+	 */
+	@Test
+	void theTableTakesEveryStateTheProjectionWritesAndNoOther() {
+		for (VenueState state : VenueState.values()) {
+			UUID instrument = UUID.randomUUID();
+			MarketSnapshot snapshot = Snapshots.snapshot(instrument, 3, 1);
+			snapshot.setVenueState(state);
+
+			assertThat(projection.apply(snapshot)).as(state.name()).isTrue();
+
+			assertThat(venueState(instrument)).isEqualTo(state.name());
+		}
 		UUID instrument = UUID.randomUUID();
-		MarketSnapshot closed = Snapshots.snapshot(instrument, 3, 1);
-		closed.setVenueState(VenueState.CLOSED);
-
-		assertThat(projection.apply(closed)).isTrue();
-
-		assertThat(jdbc.queryForObject("SELECT venue_state FROM market_snapshot WHERE instrument_id = ?", String.class,
-				instrument)).isEqualTo("UNKNOWN");
+		projection.apply(Snapshots.snapshot(instrument, 3, 1));
+		assertThatThrownBy(
+				() -> jdbc.update("UPDATE market_snapshot SET venue_state = 'SUSPENDED' WHERE instrument_id = ?", instrument))
+			.satisfies((thrown) -> assertThat(
+					((SQLException) NestedExceptionUtils.getMostSpecificCause(thrown)).getMessage())
+				.contains("market_snapshot_venue_state_check"));
 	}
 
 	/** An operator's edit during setup reaches the instrument; a late copy of the old price does not undo it. */
@@ -238,6 +273,11 @@ class SnapshotProjectionIT {
 
 	private long rows(String table, UUID instrument) {
 		return jdbc.queryForObject("SELECT count(*) FROM " + table + " WHERE instrument_id = ?", Long.class,
+				instrument);
+	}
+
+	private String venueState(UUID instrument) {
+		return jdbc.queryForObject("SELECT venue_state FROM market_snapshot WHERE instrument_id = ?", String.class,
 				instrument);
 	}
 

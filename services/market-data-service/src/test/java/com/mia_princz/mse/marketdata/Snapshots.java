@@ -48,6 +48,13 @@ final class Snapshots {
 		return removal;
 	}
 
+	/** A traded instrument's snapshot once its simulation has ended: the last trade stays as its final price. */
+	static MarketSnapshot closed(UUID instrument, long commandSequence) {
+		MarketSnapshot closed = snapshot(instrument, commandSequence, 1);
+		closed.setVenueState(VenueState.CLOSED);
+		return closed;
+	}
+
 	/**
 	 * The book at a writer-clock time: a best bid and a best ask, each with a level behind it, null for an empty side,
 	 * and the last trade's price, null before the first. Bids are at least 2, so the level behind stays positive.

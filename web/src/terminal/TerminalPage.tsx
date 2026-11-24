@@ -27,6 +27,7 @@ const PAUSED: Record<Exclude<MarketStatus['state'], 'OPEN'>, { badge: string; re
   HALTED: { badge: 'Trading halted', reason: 'Trading is halted. New orders are paused; you can still cancel open orders.' },
   SETUP: { badge: 'Not open yet', reason: 'The market has not opened yet.' },
   NOT_SET_UP: { badge: 'Not set up', reason: 'The market has not been set up yet.' },
+  CLOSED: { badge: 'Market closed', reason: 'The market has closed and takes no more orders.' },
 };
 
 /**

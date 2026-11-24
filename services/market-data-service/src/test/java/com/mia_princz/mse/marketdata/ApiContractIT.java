@@ -77,6 +77,9 @@ class ApiContractIT {
 		snapshots.apply(named);
 		// Before its first trade: no last price, an empty tape and no book.
 		snapshots.apply(Snapshots.untraded(UUID.randomUUID(), 1));
+		// A venue that has closed: the list and its book name the state.
+		UUID closed = UUID.randomUUID();
+		snapshots.apply(Snapshots.closed(closed, 2));
 		for (long sequence = 1; sequence <= 3; sequence++) {
 			trades.apply(Trades.trade(instrument, sequence));
 		}
@@ -87,6 +90,7 @@ class ApiContractIT {
 
 		check("/api/v1/instruments", "/api/v1/instruments", 200);
 		check(book, path(book, instrument), 200);
+		check(book, path(book, closed), 200);
 		check(book, path(book, instrument) + "?depth=99", 400);
 		check(book, path(book, UUID.randomUUID()), 404);
 		check(tape, path(tape, instrument) + "?limit=2", 200);

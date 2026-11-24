@@ -2469,7 +2469,10 @@ components:
       additionalProperties: false
       required: [state, simulationId, openedAt, commandSequence]
       properties:
-        state: { type: string, enum: [NOT_SET_UP, SETUP, OPEN, HALTED] }
+        state:
+          type: string
+          enum: [NOT_SET_UP, SETUP, OPEN, HALTED, CLOSED]
+          description: CLOSED is final. The simulation has ended and takes no more orders.
         simulationId:
           oneOf: [{ $ref: '#/components/schemas/Uuid' }, { type: 'null' }]
         openedAt:
@@ -2578,7 +2581,10 @@ components:
         price: { $ref: '#/components/schemas/Price' }
     VenueState:
       type: string
-      enum: [SETUP, OPEN, HALTED, UNKNOWN]
+      description: |
+        The trading phase as of the instrument's latest snapshot. CLOSED is final: the simulation has ended, and the
+        last price stays as the instrument's final price. UNKNOWN is a phase this service does not know.
+      enum: [SETUP, OPEN, HALTED, CLOSED, UNKNOWN]
     Instruments:
       type: object
       additionalProperties: false

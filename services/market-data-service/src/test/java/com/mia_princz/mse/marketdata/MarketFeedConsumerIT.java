@@ -51,6 +51,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import com.mia_princz.mse.contracts.events.CandleUpdated;
 import com.mia_princz.mse.contracts.events.MarketSnapshot;
 import com.mia_princz.mse.contracts.events.TradeExecuted;
+import com.mia_princz.mse.contracts.events.VenueState;
 import com.mia_princz.mse.contracts.events.WireEvents;
 import com.mia_princz.mse.marketdata.projection.Checkpoints;
 import com.mia_princz.mse.marketdata.projection.MarketFeedConsumer;
@@ -179,11 +180,7 @@ class MarketFeedConsumerIT {
 		Map<String, Object> before = market(instrument);
 		List<Map<String, Object>> minutesBefore = minutes(instrument);
 
-		try (Connection owner = DriverManager.getConnection(TestcontainersConfiguration.jdbcUrl(postgres, "market_data_db"),
-				"market_data_owner", TestcontainersConfiguration.MARKET_DATA_OWNER_PASSWORD);
-				Statement wipe = owner.createStatement()) {
-			wipe.execute("TRUNCATE market_snapshot, instrument_projection, processed_event, projection_checkpoint, spread_minute");
-		}
+		wipeProjections();
 		assertThat(sequenceOrZero(instrument)).isZero();
 
 		MarketFeedConsumer rebuilt = feed(Map.of());
@@ -193,6 +190,45 @@ class MarketFeedConsumerIT {
 		assertThat(market(instrument)).isEqualTo(before);
 		// Nothing compacted yet, so every snapshot is read again, and the book's minutes come back as they were.
 		assertThat(minutes(instrument)).isEqualTo(minutesBefore).isNotEmpty();
+	}
+
+	/**
+	 * A simulation that has ended sends nothing after its last snapshots, so a rebuild has only the topic to learn
+	 * that the venue closed. Read again from the start, the market ends CLOSED as before, at its last trade's price.
+	 */
+	@Test
+	void aRebuildKeepsAClosedVenue() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		publish(Snapshots.snapshot(instrument, 1, 2));
+		MarketSnapshot halted = Snapshots.snapshot(instrument, 2, 2);
+		halted.setVenueState(VenueState.HALTED);
+		publish(halted);
+		publish(Snapshots.closed(instrument, 3));
+		MarketFeedConsumer first = feed(Map.of());
+		first.start();
+		waitUntil(() -> first.state() == State.LIVE);
+		first.close();
+		Map<String, Object> before = market(instrument);
+		assertThat(before).containsEntry("venue_state", "CLOSED")
+			.containsEntry("source_command_sequence", 3L)
+			.containsEntry("last_price_cents", 10_000L);
+
+		wipeProjections();
+		assertThat(sequenceOrZero(instrument)).isZero();
+		MarketFeedConsumer rebuilt = feed(Map.of());
+		rebuilt.start();
+		waitUntil(() -> rebuilt.state() == State.LIVE);
+
+		assertThat(market(instrument)).isEqualTo(before);
+	}
+
+	/** Empties what the market topic is projected into, as the owner: the runtime role may not. */
+	private void wipeProjections() throws Exception {
+		try (Connection owner = DriverManager.getConnection(TestcontainersConfiguration.jdbcUrl(postgres, "market_data_db"),
+				"market_data_owner", TestcontainersConfiguration.MARKET_DATA_OWNER_PASSWORD);
+				Statement wipe = owner.createStatement()) {
+			wipe.execute("TRUNCATE market_snapshot, instrument_projection, processed_event, projection_checkpoint, spread_minute");
+		}
 	}
 
 	@Test

@@ -152,6 +152,24 @@ describe('terminal', () => {
     expect(screen.queryByRole('button', { name: 'What is halted?' })).toBeNull();
   });
 
+  it('shows a closed market as closed and takes no new orders', async () => {
+    const server = market().on('GET /api/v1/market', {
+      status: 200,
+      json: { state: 'CLOSED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '12' },
+    });
+    renderTerminal();
+
+    const ticket = await screen.findByRole('region', { name: 'Order · NOVA' });
+    const buy = within(ticket).getByRole('button', { name: 'Buy NOVA' });
+    await waitFor(() => expect(buy).toBeDisabled());
+    expect(buy).toHaveAccessibleDescription('The market has closed and takes no more orders.');
+    expect(screen.getByText('Market closed')).toHaveClass('state-badge');
+    // A close is not a halt: the tip that explains halts stays away, and nothing says trading will come back.
+    expect(screen.queryByText('Trading halted')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'What is halted?' })).toBeNull();
+    expect(server.requests.some((request) => request.method === 'POST')).toBe(false);
+  });
+
   it('takes orders once the market is open', async () => {
     market().on('GET /api/v1/market', {
       status: 200,

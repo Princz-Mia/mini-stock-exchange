@@ -1538,8 +1538,11 @@ export interface components {
             readonly quantity: number;
         };
         readonly MarketStatus: {
-            /** @enum {string} */
-            readonly state: "NOT_SET_UP" | "SETUP" | "OPEN" | "HALTED";
+            /**
+             * @description CLOSED is final. The simulation has ended and takes no more orders.
+             * @enum {string}
+             */
+            readonly state: "NOT_SET_UP" | "SETUP" | "OPEN" | "HALTED" | "CLOSED";
             readonly simulationId: components["schemas"]["Uuid"] | null;
             /** @description When the market first opened; null in SETUP. */
             readonly openedAt: components["schemas"]["Timestamp"] | null;
@@ -1619,8 +1622,12 @@ export interface components {
             readonly minute: components["schemas"]["Timestamp"];
             readonly price: components["schemas"]["Price"];
         };
-        /** @enum {string} */
-        readonly VenueState: "SETUP" | "OPEN" | "HALTED" | "UNKNOWN";
+        /**
+         * @description The trading phase as of the instrument's latest snapshot. CLOSED is final: the simulation has ended, and the
+         *     last price stays as the instrument's final price. UNKNOWN is a phase this service does not know.
+         * @enum {string}
+         */
+        readonly VenueState: "SETUP" | "OPEN" | "HALTED" | "CLOSED" | "UNKNOWN";
         readonly Instruments: {
             readonly instruments: readonly components["schemas"]["Instrument"][];
             readonly feed: components["schemas"]["Feed"];
