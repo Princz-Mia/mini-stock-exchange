@@ -238,6 +238,39 @@ describe('portfolio page', () => {
     expect(window.location.search).toBe('?executionsOrder=oldest');
   });
 
+  it('says when the market closes at its set time, and once closed that it closed then', async () => {
+    let status: Record<string, unknown> = {
+      state: 'HALTED',
+      simulationId: 's',
+      openedAt: '2026-11-04T09:00:00Z',
+      closesAt: '2026-11-04T17:00:00Z',
+      closedAt: null,
+      closedOnSchedule: false,
+      commandSequence: '9',
+    };
+    signedIn()
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/market', () => ({
+        status: 200,
+        json: status,
+        headers: { Date: new Date('2026-11-04T16:30:00Z').toUTCString() },
+      }))
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    window.history.pushState({}, '', '/portfolio');
+    render(<App />);
+
+    expect(
+      await screen.findByText(/^The market closes at its set time, 4 Nov 2026, 17:00:00 UTC, in (30 min 0 s|29 min 59 s)\.$/),
+    ).toBeInTheDocument();
+    // The next read of the status, five seconds on, finds it closed at that time.
+    status = { ...status, state: 'CLOSED', closedAt: '2026-11-04T17:00:00Z', closedOnSchedule: true };
+    const closed = await screen.findByRole('region', { name: 'Market closed' }, { timeout: 7_000 });
+    expect(closed).toHaveTextContent('The market closed at its set time on 4 Nov 2026, 17:00:00 UTC.');
+    expect(screen.queryByText(/closes at its set time/)).toBeNull();
+  }, 15_000);
+
   it('filters executions and orders by symbol, side and status, as the server is asked', async () => {
     const ORBIT = '00000000-0000-0000-0000-000000000002';
     const server = signedIn()

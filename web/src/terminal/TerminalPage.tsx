@@ -4,6 +4,7 @@ import { Link, useSearchParams } from 'react-router';
 
 import { ApiError, api, pollEvery } from '../api/client';
 import type { MarketStatus } from '../api/types';
+import { CloseTime } from '../app/closeTime';
 import { FeedStatus } from '../app/FeedStatus';
 import {
   useAskAgainWhenFunded,
@@ -72,7 +73,9 @@ export function TerminalPage() {
   // Final, unlike a halt: the ticket gives way to a statement, and nothing here says trading will come back. The
   // statement goes by the orders still listed as open: the market is closed before the last of them is cancelled.
   const closed =
-    market.data?.state === 'CLOSED' ? { closedAt: market.data.closedAt, stillOpen: orders.data?.orders.length } : null;
+    market.data?.state === 'CLOSED'
+      ? { closedAt: market.data.closedAt, onSchedule: market.data.closedOnSchedule, stillOpen: orders.data?.orders.length }
+      : null;
   // A trader login without an account yet, such as an operator who also trades before funding itself: the market is
   // shown, the ticket is not.
   const noAccount = portfolio.error instanceof ApiError && portfolio.error.code === 'NO_TRADING_ACCOUNT';
@@ -158,6 +161,8 @@ export function TerminalPage() {
                 {TRANSPORT_LABELS[stream.transport]}
               </span>
             </div>
+            {/* When the market closes by itself, counted down on the exchange's clock. */}
+            <CloseTime market={market.data} className="chart-note close-time" />
             {notListed && (
               <p className="chart-note" role="status">
                 The instrument in this address is not part of this market. Showing {selected.symbol} instead.
@@ -175,7 +180,7 @@ export function TerminalPage() {
           {noAccount ? (
             // Getting an account is setup advice, and a closed market is past setting up.
             closed !== null ? (
-              <ClosedTicket closedAt={closed.closedAt} account={false} />
+              <ClosedTicket closedAt={closed.closedAt} onSchedule={closed.onSchedule} account={false} />
             ) : (
               <NoAccount operator={operator} />
             )

@@ -3625,3 +3625,185 @@ describe('starting a new simulation on the operator screen', () => {
     expect(nameField()).toHaveValue('');
   });
 });
+
+describe('a market opened for a set time, on the operator screen', () => {
+  beforeEach(() => resetSession());
+
+  const OPEN = '/api/v1/admin/market/open';
+  const CLOSES_AT = '2026-11-05T11:00:00Z';
+  const marketPanel = () => screen.findByRole('region', { name: 'Market' });
+  const opens = (server: ReturnType<typeof exchange>['server']) =>
+    server.requests.filter((request) => request.method === 'POST' && request.url === OPEN);
+  /** The market after an opening: open, and when it was given a duration, with the time the exchange closes it. */
+  const opened = (closesAt: string | null): MarketStatus => ({ ...market('OPEN'), closesAt });
+  const confirmClose = async () => {
+    fireEvent.click(await button('Close the market'));
+    const dialog = screen.getByRole('alertdialog', { name: 'Close the market for good?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close the market for good' }));
+  };
+
+  it('opens until it is closed unless a set time is chosen, and then sends no body', async () => {
+    const { server, state } = exchange('SETUP');
+    server.on(`POST ${OPEN}`, () => {
+      state.market = opened(null);
+      return { status: 200, json: { state: 'OPEN', commandSequence: '8', closesAt: null } };
+    });
+    renderPage();
+
+    const length = await screen.findByRole('group', { name: 'Market length' });
+    expect(within(length).getByRole('radio', { name: 'Until I close it' })).toBeChecked();
+    expect(within(length).getByRole('textbox', { name: 'Hours' })).toBeDisabled();
+    await waitFor(async () => expect(await button('Open market')).toBeEnabled());
+    fireEvent.click(await button('Open market'));
+
+    expect(await screen.findByText('The market is open.')).toBeInTheDocument();
+    expect(opens(server)).toHaveLength(1);
+    expect(opens(server)[0]?.body).toBeUndefined();
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'Market length' })).toBeNull());
+    expect(within(await marketPanel()).queryByText('Closes')).toBeNull();
+  });
+
+  it('opens for a set time in hours and minutes, and says when the exchange closes it', async () => {
+    const { server, state } = exchange('SETUP');
+    server.on(`POST ${OPEN}`, () => {
+      state.market = opened(CLOSES_AT);
+      return { status: 200, json: { state: 'OPEN', commandSequence: '8', closesAt: CLOSES_AT } };
+    });
+    renderPage();
+
+    const length = await screen.findByRole('group', { name: 'Market length' });
+    fireEvent.click(within(length).getByRole('radio', { name: 'For a set time' }));
+    fireEvent.change(within(length).getByRole('textbox', { name: 'Hours' }), { target: { value: '1' } });
+    fireEvent.change(within(length).getByRole('textbox', { name: 'Minutes' }), { target: { value: '30' } });
+    await waitFor(async () => expect(await button('Open market')).toBeEnabled());
+    fireEvent.click(await button('Open market'));
+
+    expect(
+      await screen.findByText('The market is open. The exchange closes it by itself at 5 Nov 2026, 11:00:00 UTC.'),
+    ).toBeInTheDocument();
+    expect(opens(server).map((request) => request.body)).toEqual([{ durationMinutes: 90 }]);
+    const panel = await marketPanel();
+    await waitFor(() => expect(within(panel).getByText('Closes')).toBeInTheDocument());
+    expect(within(panel).getByText('5 Nov 2026, 11:00:00 UTC')).toBeInTheDocument();
+  });
+
+  it('says why a set time cannot be sent, and does not send it', async () => {
+    const { server } = exchange('SETUP');
+    renderPage();
+
+    const length = await screen.findByRole('group', { name: 'Market length' });
+    fireEvent.click(within(length).getByRole('radio', { name: 'For a set time' }));
+    const hours = within(length).getByRole('textbox', { name: 'Hours' });
+    const minutes = within(length).getByRole('textbox', { name: 'Minutes' });
+    const cases: [string, string, string][] = [
+      ['0', '4', 'A set time is at least 5 minutes.'],
+      ['721', '0', 'A set time is at most 30 days (720 hours).'],
+      ['0', '75', 'Minutes go up to 59; give a longer time in hours.'],
+      ['one', '0', 'Give the set time in whole hours and minutes.'],
+    ];
+    for (const [h, m, problem] of cases) {
+      fireEvent.change(hours, { target: { value: h } });
+      fireEvent.change(minutes, { target: { value: m } });
+      expect(await within(length).findByRole('alert')).toHaveTextContent(problem);
+      expect(hours).toHaveAttribute('aria-invalid', 'true');
+      expect(await button('Open market')).toBeDisabled();
+    }
+    // The limits themselves are taken, as the exchange takes them.
+    for (const [h, m] of [
+      ['0', '5'],
+      ['720', '0'],
+    ] as const) {
+      fireEvent.change(hours, { target: { value: h } });
+      fireEvent.change(minutes, { target: { value: m } });
+      await waitFor(() => expect(within(length).queryByRole('alert')).toBeNull());
+    }
+    fireEvent.click(within(length).getByRole('radio', { name: 'Until I close it' }));
+    expect(within(length).queryByRole('alert')).toBeNull();
+    expect(opens(server)).toHaveLength(0);
+  });
+
+  it("counts down to the close time on the exchange's clock, and says when the time has come", async () => {
+    const { server, state } = exchange('OPEN');
+    state.market = opened(CLOSES_AT);
+    // The exchange's clock, which this browser's is not: its answers carry it, ninety seconds before the close.
+    let clock = '2026-11-05T10:58:30Z';
+    server.on('GET /api/v1/market', () => ({
+      status: 200,
+      json: state.market,
+      headers: { Date: new Date(clock).toUTCString() },
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderWith(client);
+
+    const panel = await marketPanel();
+    expect(
+      await within(panel).findByText(
+        /^The market closes at its set time, 5 Nov 2026, 11:00:00 UTC, in 1 min (30|29) s\.$/,
+      ),
+    ).toBeInTheDocument();
+    clock = '2026-11-05T11:00:00Z';
+    await client.invalidateQueries({ queryKey: ['market'] });
+    expect(
+      await within(panel).findByText(
+        'Its set time, 5 Nov 2026, 11:00:00 UTC, has come: the exchange is closing the market, and new orders are refused.',
+        {},
+        { timeout: 2_000 },
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Open', { selector: '.state-badge' })).toBeInTheDocument();
+  });
+
+  it('says a market closed at its set time, not by anyone here', async () => {
+    const { state } = exchange('CLOSED');
+    state.market = { ...market('CLOSED'), closesAt: '2026-11-05T16:00:00Z', closedOnSchedule: true };
+    renderPage();
+
+    const ended = await screen.findByRole('region', { name: 'This market has ended' });
+    expect(ended).toHaveTextContent('It closed at its set time on 5 Nov 2026, 16:00:00 UTC. Trading is over for good');
+    const panel = await marketPanel();
+    expect(within(panel).getByText(/· at its set time/)).toBeInTheDocument();
+    expect(panel).toHaveTextContent('The market closed at its set time. Closing is final');
+  });
+
+  it('does not claim a close sent here closed a market that closed at its set time first', async () => {
+    const { server, state } = exchange('OPEN');
+    state.market = opened(CLOSES_AT);
+    const scheduled = { ...market('CLOSED'), closesAt: CLOSES_AT, closedAt: CLOSES_AT, closedOnSchedule: true };
+    server.on('POST /api/v1/admin/market/close', () => {
+      state.market = scheduled;
+      return {
+        status: 409,
+        problem: {
+          status: 409,
+          code: 'MARKET_TRANSITION_NOT_ALLOWED',
+          detail: 'closed',
+          state: 'CLOSED',
+          commandSequence: '12',
+        },
+      };
+    });
+    renderPage();
+
+    await confirmClose();
+    expect(
+      await screen.findByText('The market had already closed at its set time, so this close changed nothing.'),
+    ).toBeInTheDocument();
+  });
+
+  it('says a close with no answer changed nothing once the status shows the set time closed the market', async () => {
+    const { server, state } = exchange('OPEN');
+    state.market = opened(CLOSES_AT);
+    server.on('POST /api/v1/admin/market/close', () => {
+      state.market = { ...market('CLOSED'), closesAt: CLOSES_AT, closedAt: CLOSES_AT, closedOnSchedule: true };
+      return { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN', detail: 'later' } };
+    });
+    renderPage();
+
+    await confirmClose();
+    expect(
+      await screen.findByText('The market closed at its set time, so this close changed nothing.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/the close has not given its answer here/)).toBeNull();
+    expect(screen.queryByRole('button', { name: "Ask for the close's answer" })).toBeNull();
+  });
+});

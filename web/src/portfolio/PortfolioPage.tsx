@@ -9,11 +9,12 @@ import {
   useMarketStatus,
   useRefreshOnMarketChange,
 } from '../app/market';
+import { CloseTime, closedPhrase } from '../app/closeTime';
 import { type Column, PagedTable } from '../app/PagedTable';
 import { type Filter, filterParam, usePagedList } from '../app/paging';
 import { PRIVATE_QUERIES } from '../app/useAccountEvents';
 import { useKeyboardScroll } from '../app/useKeyboardScroll';
-import { groupDigits, groupInteger, utcDateTime, utcTime } from '../format';
+import { groupDigits, groupInteger, utcTime } from '../format';
 import { TermTip } from '../help/TermTip';
 import { toCents } from '../terminal/money';
 import { Moved } from '../terminal/Moved';
@@ -226,7 +227,7 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
     if (noAccount && market.data?.state === 'CLOSED') {
       return (
         <p role="status" className="page-status">
-          The market closed{market.data.closedAt === null ? '' : ` on ${utcDateTime(market.data.closedAt)}`}. You had no
+          The market {closedPhrase(market.data.closedAt, market.data.closedOnSchedule)}. You had no
           trading account in it, so there is no portfolio to show.
         </p>
       );
@@ -250,7 +251,7 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
         <section className="panel ended" aria-labelledby="portfolio-closed-title">
           <h2 id="portfolio-closed-title">Market closed</h2>
           <p role="status">
-            The market closed{market.data.closedAt === null ? '' : ` on ${utcDateTime(market.data.closedAt)}`}.{' '}
+            The market {closedPhrase(market.data.closedAt, market.data.closedOnSchedule)}.{' '}
             {reserved
               ? 'Nothing trades any more, but some of your orders are still open, with what they reserve. The close cancels them and releases it: it is doing so now, or does when the exchange is restarted if it has stopped. Your balances are final once nothing is reserved.'
               : 'Nothing trades any more, so this is where your account ended: no order is open and nothing is reserved.'}{' '}
@@ -258,6 +259,7 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
           </p>
         </section>
       )}
+      <CloseTime market={market.data} />
       <section className="summary" aria-label="Summary">
         <div className="figure">
           <span className="figure-label">

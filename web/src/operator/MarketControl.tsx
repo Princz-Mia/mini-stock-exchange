@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api } from '../api/client';
 import type { MarketClosed, MarketStatus, MarketTransition } from '../api/types';
+import { CloseTime, closedPhrase } from '../app/closeTime';
 import { groupInteger, utcDateTime, utcTime } from '../format';
 import { TermTip } from '../help/TermTip';
 import { useCloseCommand } from './closeCommand';
@@ -12,6 +13,12 @@ import { type CommandOutcome, useCommand } from './useCommand';
 
 type Transition = 'open' | 'halt' | 'resume';
 type Action = Transition | 'close';
+
+/** A transition as sent: an opening may carry a duration, in minutes. */
+interface Sent {
+  action: Transition;
+  durationMinutes?: number;
+}
 
 interface Done {
   action: Transition;
@@ -31,6 +38,133 @@ const DONE: Record<Transition, string> = {
   halt: 'Trading is halted. Cancels still work.',
   resume: 'Trading has resumed.',
 };
+
+/** What a transition did, and for an opening with a duration when the exchange closes the market. */
+function doneText({ action, transition }: Done): string {
+  const closesAt = transition.closesAt ?? null;
+  return action === 'open' && closesAt !== null
+    ? `The market is open. The exchange closes it by itself at ${utcDateTime(closesAt)}.`
+    : DONE[action];
+}
+
+/** The shortest and longest set time an opening may have, as the exchange takes them: 5 minutes to 30 days. */
+export const MIN_OPEN_MINUTES = 5;
+export const MAX_OPEN_MINUTES = 30 * 24 * 60;
+
+/** How long the market is to stay open, as typed: until it is closed, or for hours and minutes. */
+export interface MarketLength {
+  timed: boolean;
+  hours: string;
+  minutes: string;
+}
+
+/**
+ * The duration in minutes a market length asks for: undefined for one that stays open until it is closed, or why the
+ * hours and minutes typed cannot be sent.
+ */
+export function openDuration(length: MarketLength): { minutes: number | undefined } | { problem: string } {
+  if (!length.timed) {
+    return { minutes: undefined };
+  }
+  const hours = length.hours.trim() === '' ? '0' : length.hours.trim();
+  const minutes = length.minutes.trim() === '' ? '0' : length.minutes.trim();
+  if (!/^\d{1,4}$/.test(hours) || !/^\d{1,4}$/.test(minutes)) {
+    return { problem: 'Give the set time in whole hours and minutes.' };
+  }
+  if (Number(minutes) > 59) {
+    return { problem: 'Minutes go up to 59; give a longer time in hours.' };
+  }
+  const total = Number(hours) * 60 + Number(minutes);
+  if (total < MIN_OPEN_MINUTES) {
+    return { problem: `A set time is at least ${MIN_OPEN_MINUTES} minutes.` };
+  }
+  if (total > MAX_OPEN_MINUTES) {
+    return { problem: 'A set time is at most 30 days (720 hours).' };
+  }
+  return { minutes: total };
+}
+
+/**
+ * How long the market stays open once it opens: until an operator closes it, the default, or for a set time, after
+ * which the exchange closes it by itself. The same choice as a bot run's length.
+ */
+function MarketLengthChoice({
+  length,
+  onChange,
+  problem,
+  disabled,
+}: {
+  length: MarketLength;
+  onChange: (length: MarketLength) => void;
+  problem: string | null;
+  disabled: boolean;
+}) {
+  return (
+    <fieldset className="choices run-length" disabled={disabled}>
+      <legend>Market length</legend>
+      <div className="run-length-choice">
+        <label>
+          <input
+            type="radio"
+            name="market-length"
+            checked={!length.timed}
+            onChange={() => onChange({ ...length, timed: false })}
+            aria-describedby="market-length-open"
+          />
+          Until I close it
+        </label>
+        <p id="market-length-open" className="muted">
+          Trades until someone selects Close the market.
+        </p>
+      </div>
+      <div className="run-length-choice">
+        <label>
+          <input
+            type="radio"
+            name="market-length"
+            checked={length.timed}
+            onChange={() => onChange({ ...length, timed: true })}
+            aria-describedby="market-length-timed"
+          />
+          For a set time
+        </label>
+        <p id="market-length-timed" className="muted">
+          The exchange closes the market by itself once the time is up, from 5 minutes to 30 days, counted on its own
+          clock from the opening. You can still close it sooner.
+        </p>
+        <div className="field-row">
+          <label className="run-length-minutes">
+            Hours
+            <input
+              value={length.hours}
+              onChange={(event) => onChange({ ...length, hours: event.target.value })}
+              inputMode="numeric"
+              disabled={!length.timed}
+              aria-invalid={length.timed && problem !== null}
+              aria-describedby={problem === null ? undefined : 'market-length-problem'}
+            />
+          </label>
+          <label className="run-length-minutes">
+            Minutes
+            <input
+              value={length.minutes}
+              onChange={(event) => onChange({ ...length, minutes: event.target.value })}
+              inputMode="numeric"
+              disabled={!length.timed}
+              aria-invalid={length.timed && problem !== null}
+              aria-describedby={problem === null ? undefined : 'market-length-problem'}
+            />
+          </label>
+        </div>
+        {length.timed && problem !== null && (
+          <p id="market-length-problem" className="field-error" role="alert">
+            {problem}
+          </p>
+        )}
+      </div>
+    </fieldset>
+  );
+}
 
 /**
  * What the market is called on this page: the name it was started with. One nobody named, which the first setup
@@ -104,13 +238,18 @@ export function unfinishedText(stillResting: number | null): string {
  * A refused close, in words. The exchange says which state the market was in: a close that found it closed already
  * changed nothing, which is not a failure to report as one.
  */
-function closeRefusal(outcome: Extract<CommandOutcome<MarketClosed>, { kind: 'refused' }>): string {
+function closeRefusal(
+  outcome: Extract<CommandOutcome<MarketClosed>, { kind: 'refused' }>,
+  closedOnSchedule: boolean,
+): string {
   if (outcome.code !== 'MARKET_TRANSITION_NOT_ALLOWED') {
     return outcome.message;
   }
   switch (outcome.problem?.state) {
     case 'CLOSED':
-      return 'The market had already closed, so this close changed nothing.';
+      return closedOnSchedule
+        ? 'The market had already closed at its set time, so this close changed nothing.'
+        : 'The market had already closed, so this close changed nothing.';
     case 'SETUP':
       return 'The market has not opened yet, and only a market that has opened can be closed. Nothing was changed.';
     default:
@@ -127,12 +266,15 @@ function closeRefusal(outcome: Extract<CommandOutcome<MarketClosed>, { kind: 're
 function CloseStatus({
   outcome,
   state,
+  closedOnSchedule,
   stillResting,
   askedBefore,
   onRetry,
 }: {
   outcome: CommandOutcome<MarketClosed>;
   state: MarketStatus['state'];
+  /** The exchange closed the market at its set time: then no close sent from here closed it. */
+  closedOnSchedule: boolean;
   /** Set once the exchange has said the close is unfinished: how many orders still rested, if it said. */
   stillResting: number | null | undefined;
   /** The key has been sent before, so what is on its way asks for an answer rather than closing. */
@@ -164,7 +306,7 @@ function CloseStatus({
     case 'refused':
       return (
         <p role="alert" className="outcome outcome-rejected">
-          {closeRefusal(outcome)}
+          {closeRefusal(outcome, closedOnSchedule)}
         </p>
       );
     case 'unresolved': {
@@ -178,6 +320,15 @@ function CloseStatus({
               Ask for the close&apos;s answer
             </button>
           </div>
+        );
+      }
+      if (state === 'CLOSED' && closedOnSchedule) {
+        // Only one close applies, and the status says it was the exchange's own at the set time: this one, whatever
+        // became of it, closed nothing, and nothing is left to ask it.
+        return (
+          <p role="status" className="outcome outcome-ok">
+            The market closed at its set time, so this close changed nothing.
+          </p>
         );
       }
       if (state === 'CLOSED') {
@@ -237,9 +388,9 @@ function CloseStatus({
 export function MarketControl({ market, instruments }: { market: MarketStatus; instruments: number | undefined }) {
   const client = useQueryClient();
   const send = useCallback(
-    async (action: Transition, key: string): Promise<Done> => {
+    async ({ action, durationMinutes }: Sent, key: string): Promise<Done> => {
       try {
-        return { action, transition: await api.controlMarket(action, key) };
+        return { action, transition: await api.controlMarket(action, key, durationMinutes) };
       } finally {
         void client.invalidateQueries({ queryKey: ['market'] });
       }
@@ -253,12 +404,17 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
   const busy = command.outcome.kind === 'sending' || close.outcome.kind === 'sending';
   const unresolved = command.unresolved || close.outcome.kind === 'unresolved';
   const [confirming, setConfirming] = useState(false);
+  const [length, setLength] = useState<MarketLength>({ timed: false, hours: '1', minutes: '0' });
+  const duration = openDuration(length);
+  const lengthProblem = 'problem' in duration ? duration.problem : null;
   const closeButton = useRef<HTMLButtonElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const run = (action: Transition) => {
     // Its answer takes the place of a close that was refused.
     close.forget();
-    void command.run(action);
+    // Only an opening has a length; one that cannot be sent keeps its button disabled.
+    const minutes = action === 'open' && 'minutes' in duration ? duration.minutes : undefined;
+    void command.run(minutes === undefined ? { action } : { action, durationMinutes: minutes });
   };
 
   // Not closing puts focus back where it was. A browser does that when a dialog closes; this keeps it so wherever
@@ -311,17 +467,33 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
         <dd>{marketName(market)}</dd>
         <dt>Opened</dt>
         <dd>{market.openedAt === null ? 'Not yet' : when(market.openedAt)}</dd>
+        {typeof market.closesAt === 'string' && !closed && (
+          <>
+            <dt>Closes</dt>
+            <dd>{utcDateTime(market.closesAt)}</dd>
+          </>
+        )}
         {market.closedAt !== null && (
           <>
             <dt>Closed</dt>
-            <dd>{when(market.closedAt)}</dd>
+            <dd>
+              {when(market.closedAt)}
+              {market.closedOnSchedule && ' · at its set time'}
+            </dd>
           </>
         )}
         <dt>Last command</dt>
         <dd className="num">{market.commandSequence ?? '—'}</dd>
       </dl>
+      <CloseTime market={market} className="close-time" />
+      {market.state === 'SETUP' && (
+        <MarketLengthChoice length={length} onChange={setLength} problem={lengthProblem} disabled={busy || unresolved} />
+      )}
       {closed ? (
-        <p className="muted">Closing is final: this market cannot be opened, halted or resumed again.</p>
+        <p className="muted">
+          {market.closedOnSchedule ? `The market ${closedPhrase(null, true)}. ` : ''}Closing is final: this market cannot
+          be opened, halted or resumed again.
+        </p>
       ) : (
         <ul className="control-list">
           {ACTIONS.map(({ action, label }) => {
@@ -335,7 +507,7 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
                   ref={action === 'close' ? closeButton : undefined}
                   type="button"
                   className={action === 'halt' || action === 'close' ? 'primary danger' : 'primary'}
-                  disabled={reason !== null || busy || unresolved}
+                  disabled={reason !== null || busy || unresolved || (action === 'open' && lengthProblem !== null)}
                   aria-describedby={note === null ? undefined : hint}
                   aria-haspopup={action === 'close' ? 'dialog' : undefined}
                   onClick={() => (action === 'close' ? setConfirming(true) : run(action))}
@@ -371,12 +543,13 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
         <CloseStatus
           outcome={close.outcome}
           state={market.state}
+          closedOnSchedule={market.closedOnSchedule}
           stillResting={close.stillResting}
           askedBefore={close.askedBefore}
           onRetry={close.run}
         />
       ) : (
-        <CommandStatus outcome={command.outcome} done={(result) => DONE[result.action]} onRetry={() => void command.retry()} />
+        <CommandStatus outcome={command.outcome} done={doneText} onRetry={() => void command.retry()} />
       )}
     </section>
   );

@@ -1,3 +1,4 @@
+import { heardFromExchange } from '../app/closeTime';
 import type {
   AccountCreated,
   AccountPage,
@@ -209,12 +210,27 @@ export const api = {
   /** The first committed answer for a key; a 404 means nothing committed, so retrying with that key is safe. */
   placement: (idempotencyKey: string) => request<Order>('GET', `/api/v1/commands/${idempotencyKey}`),
 
-  /** The authoritative trading phase, readable by anyone. */
-  market: () => request<MarketStatus>('GET', '/api/v1/market'),
+  /**
+   * The authoritative trading phase, readable by anyone. Its answer also sets the exchange's clock as this page counts
+   * it, for a countdown to the market's close time.
+   */
+  market: async () => {
+    const { data, sentAt } = await answer<MarketStatus>('GET', '/api/v1/market');
+    heardFromExchange(sentAt);
+    return data;
+  },
 
-  /** Operator commands: each is committed when it returns, and a retry with its key returns the first answer. */
-  controlMarket: (action: 'open' | 'halt' | 'resume', idempotencyKey: string) =>
-    request<MarketTransition>('POST', `/api/v1/admin/market/${action}`, { idempotencyKey }),
+  /**
+   * Operator commands: each is committed when it returns, and a retry with its key returns the first answer. An opening
+   * may give a duration in minutes, after which the exchange closes the market itself; without one it sends no body,
+   * and the market stays open until it is closed.
+   */
+  controlMarket: (action: 'open' | 'halt' | 'resume', idempotencyKey: string, durationMinutes?: number) =>
+    request<MarketTransition>(
+      'POST',
+      `/api/v1/admin/market/${action}`,
+      durationMinutes === undefined ? { idempotencyKey } : { body: { durationMinutes }, idempotencyKey },
+    ),
 
   /**
    * Closes the market for good. It answers once no order rests, which on a full market can take longer than other

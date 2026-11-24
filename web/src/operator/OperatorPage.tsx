@@ -1,6 +1,7 @@
 import { pollEvery } from '../api/client';
+import { closedPhrase } from '../app/closeTime';
 import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
-import { groupInteger, utcDateTime } from '../format';
+import { groupInteger } from '../format';
 import { AccountSetup } from './AccountSetup';
 import { BotRuns } from './BotRuns';
 import { BotSetup } from './BotSetup';
@@ -87,7 +88,13 @@ export function OperatorPage() {
         )}
         {market.data.simulationId === null && <StartSimulation start={start} market={market.data} />}
         <StartNotice start={start} market={market.data} />
-        {closed && <Ended closedAt={market.data.closedAt} simulationId={market.data.simulationId} />}
+        {closed && (
+          <Ended
+            closedAt={market.data.closedAt}
+            onSchedule={market.data.closedOnSchedule}
+            simulationId={market.data.simulationId}
+          />
+        )}
         {closed && <StartSimulation start={start} market={market.data} />}
         {!editable && <BotRuns market={market.data.state} closedAt={market.data.closedAt} instruments={listed} />}
         <InstrumentSetup instruments={listed} editable={editable} closed={closed} />
@@ -145,14 +152,23 @@ export function restingOrdersText(known: {
  * First on the page of a market that has closed: that it has ended and when, what the close did, and what is still
  * here to read. The panels under it say the same of themselves in a line each, in place of their forms.
  */
-function Ended({ closedAt, simulationId }: { closedAt: string | null; simulationId: string | null }) {
+function Ended({
+  closedAt,
+  onSchedule,
+  simulationId,
+}: {
+  closedAt: string | null;
+  /** The exchange closed it at its set time, and no operator. */
+  onSchedule: boolean;
+  simulationId: string | null;
+}) {
   const close = useCloseCommand(simulationId);
   const health = useHealthSummary();
   return (
     <section className="panel ended" aria-labelledby="ended-title">
       <h2 id="ended-title">This market has ended</h2>
       <p>
-        It closed{closedAt === null ? '' : ` on ${utcDateTime(closedAt)}`}. Trading is over for good: every bot run
+        It {closedPhrase(closedAt, onSchedule)}. Trading is over for good: every bot run
         ended, and every bot&apos;s token stopped working.
       </p>
       <p>
