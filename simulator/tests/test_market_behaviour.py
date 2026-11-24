@@ -69,6 +69,9 @@ class Run:
         # Every momentum order with the market view its bot saw.
         self.momentum_orders: list[tuple[Place, MarketView]] = []
         self.market.on_place.append(self._watch)
+        # Every fill's price by instrument.
+        self.fills: dict[UUID, list[int]] = {instrument: [] for instrument in self.market.books}
+        self.market.on_trade.append(lambda instrument, price: self.fills[instrument].append(price))
         for index, name in enumerate(population):
             strategy = runner._strategy(name, np.random.default_rng([seed, index + 1]), run)
             self.market.join(strategy, cash=10_000_000, shares=1_000)
@@ -242,10 +245,6 @@ def far_orders(market: ToyMarket) -> None:
         market.rest(seller, Place(instrument, "SELL", 1, book.reference * 5))
 
 
-def traded(run: Run, instrument: UUID) -> list[int]:
-    return [quotes[instrument][2] for quotes in run.market.history if quotes[instrument][2]]
-
-
 GATE_PAIR = {"references": [10_000], "population": ["MARKET_MAKER", "NOISE"]}
 
 
@@ -262,10 +261,14 @@ def test_one_far_order_on_each_side_does_not_move_a_run() -> None:
         assert run.market.history[0][UUID(int=1)] == (100, 50_000, None)
         for instrument, book in run.market.books.items():
             assert run.fair[0][instrument] == pytest.approx(book.reference)
-            prices = traded(run, instrument)
-            assert len(prices) > 900
+            prices = run.fills[instrument]
+            assert len(prices) > 150
             assert max(abs(price / book.reference - 1) for price in prices) < 0.04
             assert all(abs(fair[instrument] / book.reference - 1) < 0.05 for fair in run.fair)
+        # Nobody ever traded with a far order: each is still there, whole.
+        people = [a for a in run.market.accounts if isinstance(a.strategy, Passive)]
+        assert [len(a.orders) for a in people] == [len(run.market.books)] * 2
+        assert all(order.working == 1 for a in people for order in a.orders.values())
 
 
 def test_a_book_counted_as_narrow_however_wide_brings_the_climb_back() -> None:
@@ -274,7 +277,7 @@ def test_a_book_counted_as_narrow_however_wide_brings_the_climb_back() -> None:
     run = Run(1, commands=4_000, setup=far_orders, narrow_book_bp=20_000, **GATE_PAIR)
     nova = UUID(int=1)
     assert run.fair[0][nova] == pytest.approx(25_050)
-    assert max(traded(run, nova)) > 20_000
+    assert max(run.fills[nova]) > 20_000
 
 
 def test_a_collapsed_market_climbs_back_toward_its_reference() -> None:

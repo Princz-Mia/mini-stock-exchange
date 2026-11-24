@@ -69,6 +69,9 @@ class ToyMarket:
         self.history: list[dict[UUID, tuple[int | None, int | None, int | None]]] = []
         self.on_poll: list[Callable[[MarketView], None]] = []
         self.on_place: list[Callable[[Account, Place, MarketView], None]] = []
+        # Every fill as it happens, with its instrument and price: the history sees only the last
+        # trade of each poll.
+        self.on_trade: list[Callable[[UUID, int], None]] = []
         self._poll_seconds = poll_seconds
         self._next_poll = 0.0
         self._next_bot = 0
@@ -207,6 +210,8 @@ class ToyMarket:
             remaining -= quantity
             book.last = maker.limit
             self.trades += 1
+            for observer in self.on_trade:
+                observer(intent.instrument_id, maker.limit)
             if maker.working == 0:
                 opposite.pop(0)
                 del other.orders[maker.order_id]
