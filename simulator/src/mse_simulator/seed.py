@@ -9,6 +9,7 @@ endpoints the operator screen uses.
 Each step has an idempotency key derived from its name, so running the seed again repeats the first
 answers instead of doing anything twice, and a seed interrupted halfway finishes on the next run. A
 market that is already open or halted was set up before, by the seed or by hand, and is left alone.
+So is a closed one: starting a new market after a close is the operator's step, not the seed's.
 
     python -m mse_simulator.seed
 
@@ -120,11 +121,15 @@ class Operator:
 
 
 def seed(operator: Operator, bots: int, trader_password: str) -> str:
-    """Sets the market up and opens it, unless it is already running. Returns what it did."""
+    """Sets the market up and opens it, unless it is already running or closed. Returns what it
+    did."""
     operator.sign_in()
     state = operator.market_state()
     if state in {"OPEN", "HALTED"}:
         return f"the market is already {state.lower()}; nothing to do"
+    if state == "CLOSED":
+        # Setup commands are refused on a closed market, and a new one is the operator's to start.
+        return "the market is closed; the demo seed starts no new one, so nothing to do"
     ids: dict[str, UUID] = {}
     for symbol, price in INSTRUMENTS.items():
         created = operator.command(
