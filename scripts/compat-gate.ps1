@@ -218,15 +218,35 @@ function Get-MarketDataValue {
     return (Invoke-Psql 'market_data_app' $passwords.market_data_app 'market_data_db' $Sql).Output
 }
 
-function Get-Nova { return Get-ExecutionValue "SELECT id FROM instrument WHERE symbol = 'NOVA'" }
+# The current simulation, as both services define it: the one not closed or, once every one has, the one created last.
+# Once the market has closed and a second simulation started, each simulation has its own NOVA and its own sequences,
+# so every query below that means "the market" names this one.
+$currentSimulation = "(SELECT id FROM simulation ORDER BY state = 'CLOSED', created_at DESC, id DESC LIMIT 1)"
 
-function Get-LatestBotTrade { return [long](Get-ExecutionValue "SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id JOIN account s ON s.id = t.seller_account_id WHERE b.kind = 'BOT' OR s.kind = 'BOT'") }
+function Get-CurrentSimulation { return Get-ExecutionValue "SELECT $currentSimulation" }
+
+function Get-Nova { return Get-ExecutionValue "SELECT id FROM instrument WHERE symbol = 'NOVA' AND simulation_id = $currentSimulation" }
+
+# Every simulation's NOVA, the oldest simulation first, each as the simulation, NOVA's id and the simulation's state.
+function Get-EveryNova {
+    return @((Get-ExecutionValue "SELECT string_agg(s.id || ' ' || i.id || ' ' || s.state, ',' ORDER BY s.created_at, s.id) FROM simulation s JOIN instrument i ON i.simulation_id = s.id WHERE i.symbol = 'NOVA'") -split ',')
+}
+
+function Get-LatestBotTrade { return [long](Get-ExecutionValue "SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id JOIN account s ON s.id = t.seller_account_id WHERE t.simulation_id = $currentSimulation AND (b.kind = 'BOT' OR s.kind = 'BOT')") }
 
 function Get-Listing {
     try { return Invoke-RestMethod "$api/instruments" -TimeoutSec 10 } catch { return $null }
 }
 
-# NOVA's newest trade on the public tape. Every trade in the stack is NOVA's; the smoke tests' simulations are not listed.
+function Get-ListedNova {
+    # A simulation's instruments as Market Data lists them by the simulation's id, each as its id and venue state.
+    param([string]$Simulation)
+    try { $listing = Invoke-RestMethod "$api/instruments?simulationId=$Simulation" -TimeoutSec 10 } catch { return '' }
+    return (@($listing.instruments | ForEach-Object { "$($_.instrumentId) $($_.venueState)" }) -join ',')
+}
+
+# NOVA's newest trade on the public tape: the current simulation's, the only one listed. The smoke tests' simulations
+# are never listed.
 function Get-Published {
     $listing = Get-Listing
     if ($null -eq $listing) { return -1 }
@@ -261,8 +281,51 @@ function Stop-BotRun {
     if (-not (Wait-Until 30 { (Invoke-RestMethod "$api/admin/bot-runs?limit=1" -WebSession $Session).runs[0].status -eq 'STOPPED' })) {
         throw "run $Run did not stop"
     }
-    Assert-Equal 'bot orders left open' '0' (Get-ExecutionValue "SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id WHERE a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')")
+    Assert-Equal 'bot orders left open' '0' (Get-ExecutionValue "SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id WHERE o.simulation_id = $currentSimulation AND a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')")
 }
+
+function Get-ApiStatus {
+    param($Session, [string]$Path)
+    try { return [int](Invoke-WebRequest "$api$Path" -WebSession $Session -UseBasicParsing).StatusCode }
+    catch {
+        if ($null -eq $_.Exception.Response) { throw }
+        return [int]$_.Exception.Response.StatusCode
+    }
+}
+
+function Set-UpMarket {
+    # As the browser test set up the first simulation: NOVA at 100.00, the trader and the counterparty with 100,000.00
+    # and 500 shares each, a market maker and a noise bot with 10,000.00 and 100 shares each; then open. NOVA's id.
+    param($Operator)
+    $added = Invoke-ApiCommand $Operator '/admin/instruments' '{"symbol":"NOVA","referencePrice":"100.00"}'
+    Assert-Equal 'add NOVA' '201' $added.Status
+    $instrument = ($added.Body | ConvertFrom-Json).instrumentId
+    $holdings = ',"holdings":[{"instrumentId":"' + $instrument + '","quantity":'
+    foreach ($username in 'trader', 'counterparty') {
+        $funded = Invoke-ApiCommand $Operator '/admin/accounts' ('{"username":"' + $username + '","cash":"100000.00"' + $holdings + '500}]}')
+        Assert-Equal "fund $username" '201' $funded.Status
+    }
+    foreach ($strategy in 'MARKET_MAKER', 'NOISE') {
+        $bots = Invoke-ApiCommand $Operator '/admin/bots' ('{"count":1,"cash":"10000.00"' + $holdings + '100}],"strategy":"' + $strategy + '"}')
+        Assert-Equal "provision a $strategy bot" '201' $bots.Status
+    }
+    Assert-Equal 'open the market' '200' (Invoke-ApiCommand $Operator '/admin/market/open').Status
+    return $instrument
+}
+
+function Get-LedgerCheck {
+    # A simulation's balances against its ledger, as Execution's startup reconciliation compares them: each account's
+    # cash and shares, in total and reserved. How many differ, then how many were compared.
+    param([string]$Simulation)
+    $cash = "'00000000-0000-0000-0000-000000000000'::uuid"
+    return Get-ExecutionValue ("WITH l AS (SELECT e.account_id, coalesce(e.instrument_id, $cash) AS asset, sum(e.delta) AS total, coalesce(sum(e.delta) FILTER (WHERE e.bucket = 'RESERVED'), 0) AS reserved FROM ledger_entry e JOIN account a ON a.id = e.account_id WHERE a.simulation_id = '$Simulation' AND a.kind <> 'ISSUANCE' GROUP BY 1, 2), " +
+        "b AS (SELECT c.account_id, $cash AS asset, c.total_cents AS total, c.reserved_cents AS reserved FROM cash_balance c JOIN account a ON a.id = c.account_id WHERE a.simulation_id = '$Simulation' UNION ALL SELECT p.account_id, p.instrument_id, p.total_quantity, p.reserved_quantity FROM position p JOIN account a ON a.id = p.account_id WHERE a.simulation_id = '$Simulation') " +
+        "SELECT count(*) FILTER (WHERE coalesce(l.total, 0) <> coalesce(b.total, 0) OR coalesce(l.reserved, 0) <> coalesce(b.reserved, 0)) || ' ' || count(*) FROM l FULL JOIN b ON l.account_id = b.account_id AND l.asset = b.asset")
+}
+
+# A bot's read with the token the close step copied inside Execution's container, so the token never reaches this
+# shell. No double quotes: Windows PowerShell 5.1 strips them from native arguments.
+$copiedBotRead = "curl -s -o /dev/null -w '%{http_code}' -H Authorization:\ Bearer\ `$(cat /tmp/closed-bot.token) http://localhost:8080/api/v1/portfolio"
 
 function Invoke-TraderRoundTrip {
     # A resting order placed and cancelled, then the balances read.
@@ -275,9 +338,23 @@ function Invoke-TraderRoundTrip {
 }
 
 function Assert-Reconciled {
-    $report = Invoke-InContainer 'market-data-service' @('curl', '-fsS', 'http://localhost:8080/internal/reconciliation/candles')
+    # Every stored candle exact. A candle missing altogether reconciles too, so for each instrument named the candles
+    # must also cover every trade the export has: an instrument whose candles were never computed would pass otherwise.
+    param([string[]]$Covering = @())
+    $report = ''
+    foreach ($attempt in 1..60) {
+        $report = Invoke-InContainer 'market-data-service' @('curl', '-fsS', 'http://localhost:8080/internal/reconciliation/candles')
+        if (@($Covering | Where-Object { $report -notmatch (Get-CoveredPattern $_) }).Count -eq 0) { break }
+        Start-Sleep -Seconds 2
+    }
     Assert-Match 'candles reconcile with the trade export' '"reconciled":true' $report
     Assert-Match 'candles were checked' '"candlesChecked":[1-9]' $report
+    foreach ($instrument in $Covering) { Assert-Match "the candles of $instrument cover every exported trade" (Get-CoveredPattern $instrument) $report }
+}
+
+function Get-CoveredPattern {
+    param([string]$Instrument)
+    return '"instrumentId":"' + $Instrument + '","candlesThroughTradeSequence":"([1-9][0-9]*)","exportedThroughTradeSequence":"\1"'
 }
 
 # Recovery steps: every projection table Market Data derives (service_identity is configuration, not derived).
@@ -303,18 +380,35 @@ function Invoke-MarketDataOwner {
 }
 
 function Assert-CaughtUp {
-    # Nothing waiting in the outbox, every trade public with the same totals, candles current and reconciled.
-    $nova = Get-Nova
+    # Nothing waiting in the outbox. In every simulation, the closed one too: NOVA's trades all public with the same
+    # totals, its session figures as its public trades add up, and Market Data listing it by the simulation's id in the
+    # simulation's state. The default list is the current simulation's, its NOVA's candles are current, and every
+    # NOVA's candles cover its trades and reconcile exactly.
     if (-not (Wait-Until 60 { (Get-OutboxPending) -eq 0 })) { throw "outbox still holds $(Get-OutboxPending) events" }
-    [void](Wait-Until 60 { (Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$nova'") -eq (Get-MarketDataValue "$tradeTotals FROM public_trade WHERE instrument_id = '$nova'") })
-    Assert-Equal "NOVA's public trades: count, shares, notional, last sequence" `
-        (Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$nova'") `
-        (Get-MarketDataValue "$tradeTotals FROM public_trade WHERE instrument_id = '$nova'")
-    Assert-Equal "NOVA's session figures: as its public trades add up" `
-        (Get-MarketDataValue "$sessionFromTape WHERE instrument_id = '$nova'") `
-        (Get-MarketDataValue "$sessionKept WHERE instrument_id = '$nova'")
+    $novas = Get-EveryNova
+    foreach ($entry in $novas) {
+        $simulation, $instrument, $state = $entry -split ' '
+        [void](Wait-Until 60 { (Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$instrument'") -eq (Get-MarketDataValue "$tradeTotals FROM public_trade WHERE instrument_id = '$instrument'") })
+        Assert-Equal "NOVA's public trades in $simulation ($state): count, shares, notional, last sequence" `
+            (Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$instrument'") `
+            (Get-MarketDataValue "$tradeTotals FROM public_trade WHERE instrument_id = '$instrument'")
+        Assert-Equal "NOVA's session figures in $simulation`: as its public trades add up" `
+            (Get-MarketDataValue "$sessionFromTape WHERE instrument_id = '$instrument'") `
+            (Get-MarketDataValue "$sessionKept WHERE instrument_id = '$instrument'")
+        [void](Wait-Until 30 { (Get-ListedNova $simulation) -eq "$instrument $state" })
+        Assert-Equal "Market Data lists $simulation by its id: NOVA alone, $state" "$instrument $state" (Get-ListedNova $simulation)
+    }
+    $current = Get-CurrentSimulation
+    [void](Wait-Until 30 { "$((Get-Listing).simulationId)" -eq $current })
+    Assert-Equal "Market Data's default list: the current simulation's" $current "$((Get-Listing).simulationId)"
+    $nova = Get-Nova
     if (-not (Wait-Until 120 { (Get-TradesBehind $nova) -eq 0 })) { throw "candles still '$(Get-TradesBehind $nova)' trades behind" }
-    Assert-Reconciled
+    Assert-Reconciled @($novas | ForEach-Object { ($_ -split ' ')[1] })
+}
+
+function Get-EveryNovaTotals {
+    # Execution's trade totals for every simulation's NOVA, in Get-EveryNova's order.
+    return (@(Get-EveryNova | ForEach-Object { Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$(($_ -split ' ')[1])'" }) -join ' | ')
 }
 
 # Security scanners, pinned by digest. Their vulnerability database is downloaded on every run, so a vulnerability
@@ -792,6 +886,108 @@ try {
         Assert-Reconciled
     }
 
+    Step 'Close and start again: history kept, a new market trades' {
+        # The operator closes the market while people's orders rest and a bot run trades. Every resting order is
+        # cancelled and its hold released, the run ends with the close, the bots' tokens stop working, nothing more
+        # trades, and the trader still reads their portfolio. Then the operator starts a second simulation by name,
+        # sets it up again with the same symbol, the same traders and new bots, opens it, and people and bots trade in
+        # it, with sequences from 1. The steps after this one run with both simulations in the database.
+        $operator = New-ApiSession 'operator' $operatorPassword
+        $trader = New-ApiSession 'trader' $traderPassword
+        $counterparty = New-ApiSession 'counterparty' $counterpartyPassword
+        $closed = Get-CurrentSimulation
+        Assert-Equal 'the current simulation, by its row and by the market status' $closed (Invoke-RestMethod "$api/market" -WebSession $operator).simulationId
+        $oldNova = Get-Nova
+        $bid = Invoke-ApiCommand $trader '/orders' (New-LimitOrder $oldNova 'BUY' '1.00')
+        Assert-Equal 'the trader bids far below the market' '201' $bid.Status
+        $offer = Invoke-ApiCommand $counterparty '/orders' (New-LimitOrder $oldNova 'SELL' '500.00')
+        Assert-Equal 'the counterparty offers far above it' '201' $offer.Status
+        $people = "'$(($bid.Body | ConvertFrom-Json).orderId)', '$(($offer.Body | ConvertFrom-Json).orderId)'"
+        $cash = "SELECT sum(c.total_cents) || ' ' || sum(c.reserved_cents) FROM cash_balance c JOIN account a ON a.id = c.account_id WHERE a.simulation_id = '$closed'"
+        $shares = "SELECT sum(p.total_quantity) || ' ' || sum(p.reserved_quantity) FROM position p JOIN account a ON a.id = p.account_id WHERE a.simulation_id = '$closed'"
+        # A bot's token, copied inside the container while it still works, to send again once the close revoked it.
+        [void](Invoke-InContainer 'execution-service' @('sh', '-c', 'umask 077; cp $(ls /run/mse/bot-tokens/*.token | head -n 1) /tmp/closed-bot.token'))
+        Assert-Equal 'a bot read before the close' '200' (Invoke-InContainer 'execution-service' @('sh', '-c', $copiedBotRead))
+        $before = Get-LatestBotTrade
+        $run = Start-BotRun $operator 19
+        if (-not (Wait-Until 60 { (Get-LatestBotTrade) -gt $before })) { throw "no bot trade after $before" }
+        $cashBefore = Get-ExecutionValue $cash
+        $sharesBefore = Get-ExecutionValue $shares
+        Assert-Match 'cash in total, and held for orders, before the close' '^[1-9][0-9]* [1-9][0-9]*$' $cashBefore
+        Assert-Match 'shares in total, and held for orders, before the close' '^[1-9][0-9]* [1-9][0-9]*$' $sharesBefore
+        "bot orders resting before the close => $(Get-ExecutionValue "SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id WHERE o.simulation_id = '$closed' AND a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')")" | Add-Content -Encoding utf8 $script:currentLog
+
+        $close = Invoke-ApiCommand $operator '/admin/market/close'
+        Assert-Equal 'the operator closes the market' '200' $close.Status
+        $answer = $close.Body | ConvertFrom-Json
+        Assert-Equal 'runs the close ended' '1' $answer.endedRuns
+        Assert-Equal 'orders still resting' '0' (Get-ExecutionValue "SELECT count(*) FROM orders WHERE simulation_id = '$closed' AND state IN ('OPEN', 'PARTIALLY_FILLED')")
+        Assert-Equal 'orders cancelled with MARKET_CLOSED, as many as the close says' "$($answer.canceledOrders)" (Get-ExecutionValue "SELECT count(*) FROM orders WHERE simulation_id = '$closed' AND state = 'CANCELED' AND reason = 'MARKET_CLOSED'")
+        Assert-Equal "the people's two orders among them" 'CANCELED MARKET_CLOSED,CANCELED MARKET_CLOSED' (Get-ExecutionValue "SELECT string_agg(state || ' ' || reason, ',') FROM orders WHERE id IN ($people)")
+        Assert-Equal 'cash in total as before, none held' "$(($cashBefore -split ' ')[0]) 0" (Get-ExecutionValue $cash)
+        Assert-Equal 'shares in total as before, none held' "$(($sharesBefore -split ' ')[0]) 0" (Get-ExecutionValue $shares)
+        Assert-Match "the closed simulation's balances match its ledger: differing, compared" '^0 [1-9][0-9]*$' (Get-LedgerCheck $closed)
+        if (-not (Wait-Until 15 { $null -ne (Invoke-RestMethod "$api/admin/bot-runs/$run" -WebSession $operator).figures })) { throw "run $run has no figures" }
+        $detail = Invoke-RestMethod "$api/admin/bot-runs/$run" -WebSession $operator
+        Assert-Equal "the run: ended by the close, at its sequence" "STOPPED MARKET_CLOSE $($answer.commandSequence)" "$($detail.run.status) $($detail.run.window.endedBy) $($detail.run.window.endSequence)"
+        Assert-Equal "the run's figures, per strategy" 'MARKET_MAKER NOISE' ((@($detail.figures.strategies | ForEach-Object { $_.strategy }) | Sort-Object) -join ' ')
+        Assert-Match "the closed simulation's bot tokens: unrevoked, of all" '^0 [2-9][0-9]*$' (Get-ExecutionValue "SELECT count(*) FILTER (WHERE t.revoked_at IS NULL) || ' ' || count(*) FROM api_token t JOIN account a ON a.id = t.account_id WHERE a.simulation_id = '$closed'")
+        Assert-Equal 'a bot read after the close' '401' (Invoke-InContainer 'execution-service' @('sh', '-c', $copiedBotRead))
+        [void](Invoke-InContainer 'execution-service' @('rm', '-f', '/tmp/closed-bot.token'))
+        $refused = Invoke-ApiCommand $trader '/orders' (New-LimitOrder $oldNova 'BUY' '1.00')
+        Assert-Equal 'an order after the close' '422' $refused.Status
+        Assert-Match 'is refused as final' '"code":"MARKET_CLOSED"' $refused.Body
+        $refused = Invoke-ApiCommand $operator '/admin/bot-runs' '{"marketMakers":1,"noise":1,"seed":21,"commandsPerSecond":"4.00"}'
+        Assert-Equal 'a bot run after the close' '409' $refused.Status
+        Assert-Match 'is refused as final' '"code":"MARKET_CLOSED"' $refused.Body
+        $status = Invoke-RestMethod "$api/market" -WebSession $operator
+        Assert-Equal 'the market status' "CLOSED $closed" "$($status.state) $($status.simulationId)"
+        [void](Wait-Until 15 { (Get-ListedNova $closed) -eq "$oldNova CLOSED" })
+        Assert-Equal "NOVA's venue state at Market Data" "$oldNova CLOSED" (Get-ListedNova $closed)
+        $portfolio = Invoke-RestMethod "$api/portfolio" -WebSession $trader
+        $holding = @($portfolio.holdings | Where-Object { $_.instrumentId -eq $oldNova })[0]
+        Assert-Equal "the trader's final portfolio: cash, reserved, NOVA, reserved" `
+            (Get-ExecutionValue "SELECT (c.total_cents / 100) || '.' || lpad((c.total_cents % 100)::text, 2, '0') || ' 0.00 ' || p.total_quantity || ' 0' FROM account a JOIN app_user u ON u.id = a.owner_user_id JOIN cash_balance c ON c.account_id = a.id JOIN position p ON p.account_id = a.id AND p.instrument_id = '$oldNova' WHERE a.simulation_id = '$closed' AND u.username = 'trader'") `
+            "$($portfolio.cash.total) $($portfolio.cash.reserved) $($holding.total) $($holding.reserved)"
+
+        $started = Invoke-ApiCommand $operator '/admin/simulations' '{"name":"Second simulation"}'
+        Assert-Equal 'the operator starts a new simulation' '201' $started.Status
+        $second = $started.Body | ConvertFrom-Json
+        $new = $second.simulationId
+        Assert-Equal 'in setup, as its first command' 'SETUP 1' "$($second.state) $($second.commandSequence)"
+        if ($new -eq $closed) { throw 'the start answered with the closed simulation' }
+        Assert-Equal 'the current simulation, by its row' $new (Get-CurrentSimulation)
+        $status = Invoke-RestMethod "$api/market" -WebSession $operator
+        Assert-Equal 'the market status' "SETUP $new Second simulation" "$($status.state) $($status.simulationId) $($status.name)"
+        Assert-Equal "the closed simulation's writer epoch, which no writer holds" '0' (Get-ExecutionValue "SELECT writer_epoch FROM simulation WHERE id = '$closed'")
+        Assert-Equal 'the trader has no account until funded' '403' (Get-ApiStatus $trader '/portfolio')
+        $nova = Set-UpMarket $operator
+        if ($nova -eq $oldNova) { throw 'the new NOVA has the closed NOVA id' }
+        Assert-Equal "NOVA by its symbol: the new simulation's" $nova (Get-Nova)
+        Assert-Equal 'the counterparty offers one share' '201' (Invoke-ApiCommand $counterparty '/orders' (New-LimitOrder $nova 'SELL' '100.00')).Status
+        Assert-Match 'the trader buys it' '"state":"FILLED"' (Invoke-ApiCommand $trader '/orders' (New-LimitOrder $nova 'BUY' '100.00')).Body
+        Assert-Equal "NOVA's trades from 1: first, last" '1 1' (Get-ExecutionValue "SELECT min(trade_sequence) || ' ' || max(trade_sequence) FROM trades WHERE instrument_id = '$nova'")
+        $last = Get-ExecutionValue "SELECT last_command_sequence FROM simulation WHERE id = '$new'"
+        Assert-Equal 'a stored answer for each command from 1: count, first, last' "$last 1 $last" (Get-ExecutionValue "SELECT count(*) || ' ' || min(command_sequence) || ' ' || max(command_sequence) FROM command_result WHERE simulation_id = '$new'")
+        if ([long]$last -ge [long](Get-ExecutionValue "SELECT last_command_sequence FROM simulation WHERE id = '$closed'")) { throw "the new simulation's sequence $last did not start again" }
+        [void](Wait-Until 15 { "$((Get-Listing).simulationId)" -eq $new })
+        $listing = Get-Listing
+        Assert-Equal 'the instrument list: the new simulation, its NOVA alone' "$new $nova" "$($listing.simulationId) $((@($listing.instruments) | ForEach-Object { $_.instrumentId }) -join ' ')"
+        Assert-Equal "the closed simulation's list, by its id" "$oldNova CLOSED" (Get-ListedNova $closed)
+        Assert-Match "the closed NOVA's tape, by its id" '"trades":\[\{' ((& curl.exe -s -m 10 "$api/instruments/$oldNova/trades") | Out-String)
+        Assert-Match "the closed NOVA's candles, by its id" '"candles":\[\{' ((& curl.exe -s -m 10 "$api/instruments/$oldNova/candles") | Out-String)
+        $run = Start-BotRun $operator 23
+        if (-not (Wait-Until 60 { (Get-LatestBotTrade) -gt 0 })) { throw 'no bot trade in the new simulation' }
+        $listed = (Invoke-RestMethod "$api/admin/bot-runs?limit=1" -WebSession $operator).runs[0]
+        Assert-Equal 'the simulator took up the new run' "$run RUNNING" "$($listed.runId) $($listed.status)"
+        $files = ((Invoke-InContainer 'execution-service' @('ls', '/run/mse/bot-tokens')) -split "`n" | ForEach-Object { $_.Trim() -replace '\.token$', '' } | Where-Object { $_ } | Sort-Object) -join ' '
+        $bots = ((Get-ExecutionValue "SELECT string_agg(id::text, ' ') FROM account WHERE kind = 'BOT' AND simulation_id = '$new'") -split ' ' | Sort-Object) -join ' '
+        Assert-Equal "the bots' token files: the new bots' alone" $bots $files
+        Stop-BotRun $operator $run
+        Assert-CaughtUp
+        Assert-Match "the new simulation's balances match its ledger: differing, compared" '^0 [1-9][0-9]*$' (Get-LedgerCheck $new)
+    }
+
     Step 'Kafka outage: people trade, the feed catches up' {
         # With Kafka down, both services stay ready and people still trade: the counterparty sells to the trader, the
         # trader places and cancels, and balances read as usual. The public feed says it is stale, and its tape stops
@@ -853,7 +1049,8 @@ try {
     Step 'Rebuild: Market Data rebuilt from Kafka matches exactly' {
         # Everything Market Data derived is deleted while it is stopped: instruments, books, tape, candles, the events it
         # saw and its checkpoints. Started again, it must rebuild all of it from Kafka's retained topics until every feed
-        # is live, with the same trade totals as Execution and candles that reconcile exactly.
+        # is live, with the same trade totals as Execution and candles that reconcile exactly: for both simulations, the
+        # closed one listed by its id as CLOSED and the current one listed by default.
         Invoke-Checked 'docker' ($compose + @('stop', 'market-data-service'))
         Invoke-MarketDataOwner "TRUNCATE $projections"
         Assert-Equal 'public trades after the wipe' '0' (Get-MarketDataValue 'SELECT count(*) FROM public_trade')
@@ -886,19 +1083,21 @@ try {
 
     Step 'Restore: a backup restored, and everything derived rebuilt to match' {
         # A backup, one more trade after it, then a restore. Execution must be back at the backup exactly, so the
-        # extra trade is gone, and Market Data and the candles must rebuild from the republished history to match it.
+        # extra trade is gone, and Market Data and the candles must rebuild from the republished history to match it,
+        # both simulations' history.
         $backup = Join-Path $runDir 'backup'
         if (Test-Path $backup) { Remove-Item -Recurse -Force $backup }
         Invoke-Checked 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts\backup.ps1', '-Project', 'mse-gate', '-EnvFile', $envFile, '-To', $backup)
         $nova = Get-Nova
-        $atBackup = Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$nova'"
+        # Both simulations' trades, the closed one's too: a restore republishes every simulation's history.
+        $atBackup = Get-EveryNovaTotals
         "at the backup => $atBackup" | Add-Content -Encoding utf8 $script:currentLog
         $trader = New-ApiSession 'trader' $traderPassword
         $counterparty = New-ApiSession 'counterparty' $counterpartyPassword
         Assert-Equal 'the counterparty offers one share' '201' (Invoke-ApiCommand $counterparty '/orders' (New-LimitOrder $nova 'SELL' '87.80')).Status
         Assert-Match 'a trade after the backup' '"state":"FILLED"' (Invoke-ApiCommand $trader '/orders' (New-LimitOrder $nova 'BUY' '87.80')).Body
         Invoke-Checked 'powershell.exe' @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts\restore.ps1', $backup, '-Project', 'mse-gate', '-EnvFile', $envFile, '-Yes')
-        Assert-Equal 'Execution back at the backup' $atBackup (Get-ExecutionValue "$tradeTotals FROM trades WHERE instrument_id = '$nova'")
+        Assert-Equal "Execution back at the backup, every simulation's NOVA" $atBackup (Get-EveryNovaTotals)
         Assert-CaughtUp
         # The book's minutes come back from the republished snapshots, and none from after the backup is left: the
         # newest minute ends at the market's sequence, which a minute kept from the extra trade would pass.

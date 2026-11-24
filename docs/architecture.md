@@ -267,7 +267,7 @@ flowchart TD
 | A projection write fails | The batch rolls back and is retried; nothing skipped | The cause is fixed |
 | Execution's database is lost | — | Restore a backup; everything derived is rebuilt from it |
 
-The gate rehearses each of these, and compares Execution's trade totals with Market Data's and reconciles every candle with Execution's trade export afterwards.
+The gate rehearses each of these, and compares Execution's trade totals with Market Data's and reconciles every candle with Execution's trade export afterwards. Before it stops Kafka, it closes the market and starts a second simulation: the rehearsals from then on run with two simulations in the database, the first closed, and compare both.
 
 ## Decisions
 

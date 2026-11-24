@@ -306,13 +306,30 @@ retry() { # attempts command...: every two seconds until the command succeeds
 
 execution_sql() { psql_as execution_owner execution_db "$1" | tr -d '\r'; }
 market_data_sql() { psql_as market_data_app market_data_db "$1" | tr -d '\r'; }
-nova() { execution_sql "SELECT id FROM instrument WHERE symbol = 'NOVA'"; }
+# The current simulation, as both services define it: the one not closed or, once every one has, the one created last.
+# Once the market has closed and a second simulation started, each simulation has its own NOVA and its own sequences,
+# so every query below that means "the market" names this one.
+current_simulation="(SELECT id FROM simulation ORDER BY state = 'CLOSED', created_at DESC, id DESC LIMIT 1)"
+current_simulation_id() { execution_sql "SELECT $current_simulation"; }
+nova() { execution_sql "SELECT id FROM instrument WHERE symbol = 'NOVA' AND simulation_id = $current_simulation"; }
+every_nova() { # every simulation's NOVA, the oldest simulation first, each as the simulation, NOVA's id and its state
+  execution_sql "SELECT string_agg(s.id || ' ' || i.id || ' ' || s.state, ',' ORDER BY s.created_at, s.id)
+    FROM simulation s JOIN instrument i ON i.simulation_id = s.id WHERE i.symbol = 'NOVA'" | tr ',' '\n'
+}
 latest_bot_trade() {
   execution_sql "SELECT coalesce(max(t.trade_sequence), 0) FROM trades t JOIN account b ON b.id = t.buyer_account_id
-    JOIN account s ON s.id = t.seller_account_id WHERE b.kind = 'BOT' OR s.kind = 'BOT'"
+    JOIN account s ON s.id = t.seller_account_id WHERE t.simulation_id = $current_simulation AND (b.kind = 'BOT' OR s.kind = 'BOT')"
 }
 bot_trade_after() { [ "$(latest_bot_trade)" -gt "$1" ] 2>/dev/null; }
-# NOVA's newest trade on the public tape. Every trade in the stack is NOVA's; the smoke tests' simulations are not listed.
+listed_simulation() { curl -s -m 10 "$api/instruments" | grep -o '"simulationId":"[0-9a-f-]*"' | head -n 1 | cut -d'"' -f4; }
+listed_nova() { # simulation: its instruments as Market Data lists them by the simulation's id, each as its id and venue state
+  curl -s -m 10 "$api/instruments?simulationId=$1" | sed 's/"instrumentId"/\n&/g' |
+    sed -nE 's/^"instrumentId":"([0-9a-f-]{36})"[^}]*"venueState":"([A-Z]+)".*/\1 \2/p' | paste -sd, -
+}
+listed_as() { [ "$(listed_nova "$1")" = "$2" ]; }
+default_list_is() { [ "$(listed_simulation)" = "$1" ]; }
+# NOVA's newest trade on the public tape: the current simulation's, the only one listed. The smoke tests' simulations
+# are never listed.
 published() {
   curl -s -m 10 "$api/instruments" | sed 's/"instrumentId"/\n&/g' | grep '"symbol":"NOVA"' |
     grep -o '"lastTradeSequence":"[0-9]*"' | grep -o '[0-9]*'
@@ -334,9 +351,17 @@ totals="SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quan
 # left out of a wipe while the tape is replayed into it.
 session_from_tape="SELECT count(*) || ' ' || sum(quantity) || ' ' || sum(price_cents * quantity) || ' ' || max(price_cents) || ' ' || min(price_cents) || ' ' || (array_agg(price_cents ORDER BY trade_sequence DESC))[1] FROM public_trade"
 session_kept="SELECT trade_count || ' ' || volume || ' ' || notional_cents || ' ' || high_cents || ' ' || low_cents || ' ' || last_price_cents FROM instrument_session"
-totals_match() {
-  [ "$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")" = \
-    "$(market_data_sql "$totals FROM public_trade WHERE instrument_id = '$(nova)'")" ]
+totals_match() { # [instrument], NOVA by default
+  local instrument=${1:-$(nova)}
+  [ "$(execution_sql "$totals FROM trades WHERE instrument_id = '$instrument'")" = \
+    "$(market_data_sql "$totals FROM public_trade WHERE instrument_id = '$instrument'")" ]
+}
+every_nova_totals() { # Execution's trade totals for every simulation's NOVA, in every_nova's order
+  local entry
+  # docker compose exec reads standard input, so each query is given none, and the list is left to the loop.
+  every_nova | while read -r entry; do
+    execution_sql "$totals FROM trades WHERE instrument_id = '$(printf '%s' "$entry" | cut -d' ' -f2)'" < /dev/null
+  done | paste -sd'|' -
 }
 
 start_bot_run() { # jar seed: prints the run's ID
@@ -350,7 +375,48 @@ stop_bot_run() { # jar run
   note "stop: $(api_command "$1" "/admin/bot-runs/$2/stop" | tr '\n' ' ')"
   retry 30 run_stopped "$1" || { fail "run $2 did not stop"; return 1; }
   assert_equal 'bot orders left open' 0 "$(execution_sql "SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id
-    WHERE a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')")"
+    WHERE o.simulation_id = $current_simulation AND a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')")"
+}
+
+api_status() { curl -s -m 10 -o /dev/null -w '%{http_code}' -b "$1" "$api$2"; } # jar path
+
+set_up_market() { # jar: as the browser test set up the first simulation, then open; prints NOVA's ID
+  # NOVA at 100.00, the trader and the counterparty with 100,000.00 and 500 shares each, a market maker and a noise bot
+  # with 10,000.00 and 100 shares each.
+  local added instrument holdings username strategy
+  added=$(api_command "$1" /admin/instruments '{"symbol":"NOVA","referencePrice":"100.00"}')
+  assert_equal 'add NOVA' 201 "$(status_of "$added")" || return 1
+  instrument=$(body_of "$added" | sed -nE 's/.*"instrumentId":"([0-9a-f-]{36})".*/\1/p')
+  holdings=",\"holdings\":[{\"instrumentId\":\"$instrument\",\"quantity\":"
+  for username in trader counterparty; do
+    assert_equal "fund $username" 201 "$(status_of "$(api_command "$1" /admin/accounts \
+      "{\"username\":\"$username\",\"cash\":\"100000.00\"${holdings}500}]}")")" || return 1
+  done
+  for strategy in MARKET_MAKER NOISE; do
+    assert_equal "provision a $strategy bot" 201 "$(status_of "$(api_command "$1" /admin/bots \
+      "{\"count\":1,\"cash\":\"10000.00\"${holdings}100}],\"strategy\":\"$strategy\"}")")" || return 1
+  done
+  assert_equal 'open the market' 200 "$(status_of "$(api_command "$1" /admin/market/open)")" || return 1
+  printf '%s' "$instrument"
+}
+
+ledger_check() { # simulation: its balances against its ledger, as Execution's startup reconciliation compares them
+  # Each account's cash and shares, in total and reserved. How many differ, then how many were compared.
+  local cash="'00000000-0000-0000-0000-000000000000'::uuid"
+  execution_sql "WITH l AS (SELECT e.account_id, coalesce(e.instrument_id, $cash) AS asset, sum(e.delta) AS total,
+      coalesce(sum(e.delta) FILTER (WHERE e.bucket = 'RESERVED'), 0) AS reserved
+      FROM ledger_entry e JOIN account a ON a.id = e.account_id WHERE a.simulation_id = '$1' AND a.kind <> 'ISSUANCE' GROUP BY 1, 2),
+    b AS (SELECT c.account_id, $cash AS asset, c.total_cents AS total, c.reserved_cents AS reserved
+      FROM cash_balance c JOIN account a ON a.id = c.account_id WHERE a.simulation_id = '$1'
+      UNION ALL SELECT p.account_id, p.instrument_id, p.total_quantity, p.reserved_quantity
+      FROM position p JOIN account a ON a.id = p.account_id WHERE a.simulation_id = '$1')
+    SELECT count(*) FILTER (WHERE coalesce(l.total, 0) <> coalesce(b.total, 0) OR coalesce(l.reserved, 0) <> coalesce(b.reserved, 0))
+      || ' ' || count(*) FROM l FULL JOIN b ON l.account_id = b.account_id AND l.asset = b.asset"
+}
+
+# A bot's read with the token the close step copied inside Execution's container, so the token never reaches this shell.
+copied_bot_read() {
+  compose exec -T execution-service sh -c "curl -s -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer \$(cat /tmp/closed-bot.token)\" http://localhost:8080/api/v1/portfolio"
 }
 
 trader_round_trip() { # jar: a resting order placed and cancelled, then the balances read
@@ -362,12 +428,28 @@ trader_round_trip() { # jar: a resting order placed and cancelled, then the bala
     assert_match 'and reads the balances' '"cash":\{"total"' "$(curl -s -m 10 -b "$1" "$api/portfolio")"
 }
 
-reconciled() {
-  local report
-  report=$(compose exec -T market-data-service curl -fsS http://localhost:8080/internal/reconciliation/candles 2>&1)
+reconciled() { # [instrument...]
+  # Every stored candle exact. A candle missing altogether reconciles too, so for each instrument named the candles must
+  # also cover every trade the export has: an instrument whose candles were never computed would pass otherwise.
+  local report instrument short i
+  for i in $(seq 1 60); do
+    report=$(compose exec -T market-data-service curl -fsS http://localhost:8080/internal/reconciliation/candles 2>&1)
+    short=0
+    for instrument in "$@"; do
+      printf '%s' "$report" | grep -Eq "$(covered_pattern "$instrument")" || short=1
+    done
+    [ "$short" = 0 ] && break
+    sleep 2
+  done
   note "reconciliation => $report"
   assert_match 'candles reconcile with the trade export' '"reconciled":true' "$report" &&
-    assert_match 'candles were checked' '"candlesChecked":[1-9]' "$report"
+    assert_match 'candles were checked' '"candlesChecked":[1-9]' "$report" || return 1
+  for instrument in "$@"; do
+    assert_match "the candles of $instrument cover every exported trade" "$(covered_pattern "$instrument")" "$report" || return 1
+  done
+}
+covered_pattern() {
+  printf '"instrumentId":"%s","candlesThroughTradeSequence":"([1-9][0-9]*)","exportedThroughTradeSequence":"%s"' "$1" '\1'
 }
 
 bot_trading() {
@@ -558,6 +640,133 @@ flink_outage() {
   reconciled
 }
 
+close_and_start() {
+  # The operator closes the market while people's orders rest and a bot run trades. Every resting order is cancelled
+  # and its hold released, the run ends with the close, the bots' tokens stop working, nothing more trades, and the
+  # trader still reads their portfolio. Then the operator starts a second simulation by name, sets it up again with the
+  # same symbol, the same traders and new bots, opens it, and people and bots trade in it, with sequences from 1. The
+  # steps after this one run with both simulations in the database.
+  local operator="$run_dir/close-operator.txt" trader="$run_dir/close-trader.txt"
+  local counterparty="$run_dir/close-counterparty.txt"
+  local closed old_nova bid offer people cash shares cash_before shares_before before run close sequence canceled
+  local detail refused status portfolio started new nova last listing files bots
+  api_login "$operator" operator "$operator_password" && api_login "$trader" trader "$trader_password" &&
+    api_login "$counterparty" counterparty "$counterparty_password" || return 1
+  closed=$(current_simulation_id)
+  assert_match 'the current simulation, by its row and by the market status' "\"simulationId\":\"$closed\"" \
+    "$(curl -s -m 10 -b "$operator" "$api/market")" || return 1
+  old_nova=$(nova)
+  bid=$(api_command "$trader" /orders "$(limit_order "$old_nova" BUY 1.00)")
+  assert_equal 'the trader bids far below the market' 201 "$(status_of "$bid")" || return 1
+  offer=$(api_command "$counterparty" /orders "$(limit_order "$old_nova" SELL 500.00)")
+  assert_equal 'the counterparty offers far above it' 201 "$(status_of "$offer")" || return 1
+  people="'$(body_of "$bid" | sed -nE 's/.*"orderId":"([0-9a-f-]{36})".*/\1/p')', '$(body_of "$offer" | sed -nE 's/.*"orderId":"([0-9a-f-]{36})".*/\1/p')'"
+  cash="SELECT sum(c.total_cents) || ' ' || sum(c.reserved_cents) FROM cash_balance c JOIN account a ON a.id = c.account_id WHERE a.simulation_id = '$closed'"
+  shares="SELECT sum(p.total_quantity) || ' ' || sum(p.reserved_quantity) FROM position p JOIN account a ON a.id = p.account_id WHERE a.simulation_id = '$closed'"
+  # A bot's token, copied inside the container while it still works, to send again once the close revoked it.
+  compose exec -T execution-service sh -c 'umask 077; cp $(ls /run/mse/bot-tokens/*.token | head -n 1) /tmp/closed-bot.token' >> "$log" 2>&1
+  assert_equal 'a bot read before the close' 200 "$(copied_bot_read)" || return 1
+  before=$(latest_bot_trade)
+  run=$(start_bot_run "$operator" 19) || return 1
+  retry 60 bot_trade_after "$before" || { fail "no bot trade after $before"; return 1; }
+  cash_before=$(execution_sql "$cash")
+  shares_before=$(execution_sql "$shares")
+  assert_match 'cash in total, and held for orders, before the close' '^[1-9][0-9]* [1-9][0-9]*$' "$cash_before" &&
+    assert_match 'shares in total, and held for orders, before the close' '^[1-9][0-9]* [1-9][0-9]*$' "$shares_before" || return 1
+  note "bot orders resting before the close => $(execution_sql "SELECT count(*) FROM orders o JOIN account a ON a.id = o.account_id
+    WHERE o.simulation_id = '$closed' AND a.kind = 'BOT' AND o.state IN ('OPEN', 'PARTIALLY_FILLED')")"
+
+  close=$(api_command "$operator" /admin/market/close)
+  assert_equal 'the operator closes the market' 200 "$(status_of "$close")" || return 1
+  sequence=$(body_of "$close" | sed -nE 's/.*"commandSequence":"([0-9]+)".*/\1/p')
+  canceled=$(body_of "$close" | sed -nE 's/.*"canceledOrders":([0-9]+).*/\1/p')
+  assert_equal 'runs the close ended' 1 "$(body_of "$close" | sed -nE 's/.*"endedRuns":([0-9]+).*/\1/p')" &&
+    assert_equal 'orders still resting' 0 \
+      "$(execution_sql "SELECT count(*) FROM orders WHERE simulation_id = '$closed' AND state IN ('OPEN', 'PARTIALLY_FILLED')")" &&
+    assert_equal 'orders cancelled with MARKET_CLOSED, as many as the close says' "$canceled" \
+      "$(execution_sql "SELECT count(*) FROM orders WHERE simulation_id = '$closed' AND state = 'CANCELED' AND reason = 'MARKET_CLOSED'")" &&
+    assert_equal "the people's two orders among them" 'CANCELED MARKET_CLOSED,CANCELED MARKET_CLOSED' \
+      "$(execution_sql "SELECT string_agg(state || ' ' || reason, ',') FROM orders WHERE id IN ($people)")" &&
+    assert_equal 'cash in total as before, none held' "${cash_before%% *} 0" "$(execution_sql "$cash")" &&
+    assert_equal 'shares in total as before, none held' "${shares_before%% *} 0" "$(execution_sql "$shares")" &&
+    assert_match "the closed simulation's balances match its ledger: differing, compared" '^0 [1-9][0-9]*$' \
+      "$(ledger_check "$closed")" || return 1
+  figures_computed() { curl -s -m 10 -b "$operator" "$api/admin/bot-runs/$run" | grep -q '"figures":{'; }
+  retry 15 figures_computed || { fail "run $run has no figures"; return 1; }
+  detail=$(curl -s -m 10 -b "$operator" "$api/admin/bot-runs/$run")
+  note "run => $detail"
+  assert_match 'the run: stopped' "\"runId\":\"$run\",\"status\":\"STOPPED\"" "$detail" &&
+    assert_match 'the run: ended by the close, at its sequence' "\"endSequence\":\"$sequence\",\"endedBy\":\"MARKET_CLOSE\"" "$detail" &&
+    assert_equal "the run's figures, per strategy" 'MARKET_MAKER NOISE' \
+      "$(printf '%s' "$detail" | sed 's/.*"figures"://' | grep -o '"strategy":"[A-Z_]*"' | cut -d'"' -f4 | sort | paste -sd' ' -)" &&
+    assert_match "the closed simulation's bot tokens: unrevoked, of all" '^0 [2-9][0-9]*$' \
+      "$(execution_sql "SELECT count(*) FILTER (WHERE t.revoked_at IS NULL) || ' ' || count(*) FROM api_token t
+        JOIN account a ON a.id = t.account_id WHERE a.simulation_id = '$closed'")" &&
+    assert_equal 'a bot read after the close' 401 "$(copied_bot_read)" || return 1
+  compose exec -T execution-service rm -f /tmp/closed-bot.token >> "$log" 2>&1
+  refused=$(api_command "$trader" /orders "$(limit_order "$old_nova" BUY 1.00)")
+  assert_equal 'an order after the close' 422 "$(status_of "$refused")" &&
+    assert_match 'is refused as final' '"code":"MARKET_CLOSED"' "$(body_of "$refused")" || return 1
+  refused=$(api_command "$operator" /admin/bot-runs '{"marketMakers":1,"noise":1,"seed":21,"commandsPerSecond":"4.00"}')
+  assert_equal 'a bot run after the close' 409 "$(status_of "$refused")" &&
+    assert_match 'is refused as final' '"code":"MARKET_CLOSED"' "$(body_of "$refused")" || return 1
+  status=$(curl -s -m 10 -b "$operator" "$api/market")
+  assert_match 'the market status' "\"state\":\"CLOSED\",\"simulationId\":\"$closed\"" "$status" || return 1
+  retry 15 listed_as "$closed" "$old_nova CLOSED"
+  assert_equal "NOVA's venue state at Market Data" "$old_nova CLOSED" "$(listed_nova "$closed")" || return 1
+  portfolio=$(curl -s -m 10 -b "$trader" "$api/portfolio")
+  note "portfolio => $portfolio"
+  assert_equal "the trader's final portfolio: cash, reserved, NOVA, reserved" \
+    "$(execution_sql "SELECT (c.total_cents / 100) || '.' || lpad((c.total_cents % 100)::text, 2, '0') || ' 0.00 ' || p.total_quantity || ' 0'
+      FROM account a JOIN app_user u ON u.id = a.owner_user_id JOIN cash_balance c ON c.account_id = a.id
+      JOIN position p ON p.account_id = a.id AND p.instrument_id = '$old_nova' WHERE a.simulation_id = '$closed' AND u.username = 'trader'")" \
+    "$(printf '%s' "$portfolio" | sed -nE 's/.*"cash":\{"total":"([0-9.]+)","available":"[0-9.]+","reserved":"([0-9.]+)"\}.*/\1 \2/p') $(printf '%s' "$portfolio" |
+      sed 's/"instrumentId"/\n&/g' | grep "^\"instrumentId\":\"$old_nova\"" | sed -nE 's/.*"total":([0-9]+),"available":[0-9]+,"reserved":([0-9]+).*/\1 \2/p')" || return 1
+
+  started=$(api_command "$operator" /admin/simulations '{"name":"Second simulation"}')
+  assert_equal 'the operator starts a new simulation' 201 "$(status_of "$started")" || return 1
+  new=$(body_of "$started" | sed -nE 's/.*"simulationId":"([0-9a-f-]{36})".*/\1/p')
+  assert_match 'in setup, as its first command' '"state":"SETUP","commandSequence":"1"' "$(body_of "$started")" || return 1
+  [ -n "$new" ] && [ "$new" != "$closed" ] || { fail 'the start answered with no new simulation'; return 1; }
+  assert_equal 'the current simulation, by its row' "$new" "$(current_simulation_id)" &&
+    assert_match 'the market status' "\"state\":\"SETUP\",\"simulationId\":\"$new\",\"name\":\"Second simulation\"" \
+      "$(curl -s -m 10 -b "$operator" "$api/market")" &&
+    assert_equal "the closed simulation's writer epoch, which no writer holds" 0 \
+      "$(execution_sql "SELECT writer_epoch FROM simulation WHERE id = '$closed'")" &&
+    assert_equal 'the trader has no account until funded' 403 "$(api_status "$trader" /portfolio)" || return 1
+  nova=$(set_up_market "$operator") || return 1
+  [ "$nova" != "$old_nova" ] || { fail 'the new NOVA has the closed NOVA id'; return 1; }
+  assert_equal "NOVA by its symbol: the new simulation's" "$nova" "$(nova)" &&
+    assert_equal 'the counterparty offers one share' 201 \
+      "$(status_of "$(api_command "$counterparty" /orders "$(limit_order "$nova" SELL 100.00)")")" &&
+    assert_match 'the trader buys it' '"state":"FILLED"' \
+      "$(body_of "$(api_command "$trader" /orders "$(limit_order "$nova" BUY 100.00)")")" &&
+    assert_equal "NOVA's trades from 1: first, last" '1 1' \
+      "$(execution_sql "SELECT min(trade_sequence) || ' ' || max(trade_sequence) FROM trades WHERE instrument_id = '$nova'")" || return 1
+  last=$(execution_sql "SELECT last_command_sequence FROM simulation WHERE id = '$new'")
+  assert_equal 'a stored answer for each command from 1: count, first, last' "$last 1 $last" \
+    "$(execution_sql "SELECT count(*) || ' ' || min(command_sequence) || ' ' || max(command_sequence) FROM command_result WHERE simulation_id = '$new'")" || return 1
+  [ "$last" -lt "$(execution_sql "SELECT last_command_sequence FROM simulation WHERE id = '$closed'")" ] ||
+    { fail "the new simulation's sequence $last did not start again"; return 1; }
+  retry 15 default_list_is "$new"
+  listing=$(curl -s -m 10 "$api/instruments")
+  assert_equal 'the instrument list: the new simulation, its NOVA alone' "$new $nova" \
+    "$(listed_simulation) $(printf '%s' "$listing" | grep -o '"instrumentId":"[0-9a-f-]*"' | cut -d'"' -f4 | paste -sd' ' -)" &&
+    assert_equal "the closed simulation's list, by its id" "$old_nova CLOSED" "$(listed_nova "$closed")" &&
+    assert_match "the closed NOVA's tape, by its id" '"trades":\[\{' "$(curl -s -m 10 "$api/instruments/$old_nova/trades")" &&
+    assert_match "the closed NOVA's candles, by its id" '"candles":\[\{' "$(curl -s -m 10 "$api/instruments/$old_nova/candles")" || return 1
+  run=$(start_bot_run "$operator" 23) || return 1
+  retry 60 bot_trade_after 0 || { fail 'no bot trade in the new simulation'; return 1; }
+  assert_match 'the simulator took up the new run' "^\\{\"runs\":\\[\\{\"runId\":\"$run\",\"status\":\"RUNNING\"" \
+    "$(curl -s -m 10 -b "$operator" "$api/admin/bot-runs?limit=1")" || return 1
+  files=$(compose exec -T execution-service ls /run/mse/bot-tokens | tr -d '\r' | sed 's/\.token$//' | LC_ALL=C sort | paste -sd' ' -)
+  bots=$(execution_sql "SELECT id FROM account WHERE kind = 'BOT' AND simulation_id = '$new'" | LC_ALL=C sort | paste -sd' ' -)
+  assert_equal "the bots' token files: the new bots' alone" "$bots" "$files" &&
+    stop_bot_run "$operator" "$run" &&
+    caught_up &&
+    assert_match "the new simulation's balances match its ledger: differing, compared" '^0 [1-9][0-9]*$' "$(ledger_check "$new")"
+}
+
 dashboard() {
   # Grafana provisions the dashboard from the repository; every query on it must work against the live stack.
   GRAFANA_ADMIN_PASSWORD="$grafana_password" uv run --project simulator --frozen python scripts/check-dashboard.py \
@@ -574,18 +783,37 @@ public_behind() { # Market Data's public trades are short of Execution's
   [ "$(market_data_sql "SELECT count(*) FROM public_trade WHERE instrument_id = '$(nova)'")" -lt \
     "$(execution_sql "SELECT count(*) FROM trades WHERE instrument_id = '$(nova)'")" ] 2>/dev/null
 }
-caught_up() { # nothing waiting in the outbox, every trade public with the same totals, candles current
+caught_up() {
+  # Nothing waiting in the outbox. In every simulation, the closed one too: NOVA's trades all public with the same
+  # totals, its session figures as its public trades add up, and Market Data listing it by the simulation's id in the
+  # simulation's state. The default list is the current simulation's, its NOVA's candles are current, and every NOVA's
+  # candles cover its trades and reconcile exactly.
+  local novas simulation instrument state current
   retry 60 outbox_drained || { fail "outbox still holds $(outbox_pending) events"; return 1; }
-  retry 60 totals_match || { fail "public trades differ from Execution's"; return 1; }
-  assert_equal "NOVA's public trades: count, shares, notional, last sequence" \
-    "$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")" \
-    "$(market_data_sql "$totals FROM public_trade WHERE instrument_id = '$(nova)'")" || return 1
-  assert_equal "NOVA's session figures: as its public trades add up" \
-    "$(market_data_sql "$session_from_tape WHERE instrument_id = '$(nova)'")" \
-    "$(market_data_sql "$session_kept WHERE instrument_id = '$(nova)'")" || return 1
+  novas=$(every_nova)
+  # The list on its own descriptor: docker compose exec reads standard input, and would take the rest of it.
+  while read -r simulation instrument state <&3; do
+    retry 60 totals_match "$instrument" || { fail "public trades differ from Execution's for $instrument"; return 1; }
+    assert_equal "NOVA's public trades in $simulation ($state): count, shares, notional, last sequence" \
+      "$(execution_sql "$totals FROM trades WHERE instrument_id = '$instrument'")" \
+      "$(market_data_sql "$totals FROM public_trade WHERE instrument_id = '$instrument'")" || return 1
+    assert_equal "NOVA's session figures in $simulation: as its public trades add up" \
+      "$(market_data_sql "$session_from_tape WHERE instrument_id = '$instrument'")" \
+      "$(market_data_sql "$session_kept WHERE instrument_id = '$instrument'")" || return 1
+    retry 30 listed_as "$simulation" "$instrument $state"
+    assert_equal "Market Data lists $simulation by its id: NOVA alone, $state" "$instrument $state" \
+      "$(listed_nova "$simulation")" || return 1
+  done 3<<EOF
+$novas
+EOF
+  current=$(current_simulation_id)
+  retry 30 default_list_is "$current"
+  assert_equal "Market Data's default list: the current simulation's" "$current" "$(listed_simulation)" || return 1
   retry 120 candles_current "$(nova)" ||
     { fail "candles still '$(trades_behind "$(nova)")' trades behind"; return 1; }
-  reconciled
+  # Word splitting on purpose: one argument per NOVA.
+  # shellcheck disable=SC2046
+  reconciled $(printf '%s\n' "$novas" | cut -d' ' -f2)
 }
 
 crash_recovery() {
@@ -609,7 +837,8 @@ crash_recovery() {
 projection_rebuild() {
   # Everything Market Data derived is deleted while it is stopped: instruments, books, tape, candles, the events it saw
   # and its checkpoints. Started again, it must rebuild all of it from Kafka's retained topics until every feed is live,
-  # with the same trade totals as Execution and candles that reconcile exactly.
+  # with the same trade totals as Execution and candles that reconcile exactly: for both simulations, the closed one
+  # listed by its id as CLOSED and the current one listed by default.
   compose stop market-data-service >> "$log" 2>&1 || return 1
   psql_as market_data_owner market_data_db "TRUNCATE $projections" >> "$log" 2>&1 || { fail 'truncate failed'; return 1; }
   assert_equal 'public trades after the wipe' 0 "$(market_data_sql 'SELECT count(*) FROM public_trade')" || return 1
@@ -742,7 +971,8 @@ EOF
 
 restore_rehearsal() {
   # A backup, one more trade after it, then a restore. Execution must be back at the backup exactly, so the extra
-  # trade is gone, and Market Data and the candles must rebuild from the republished history to match it again.
+  # trade is gone, and Market Data and the candles must rebuild from the republished history to match it again, both
+  # simulations' history.
   # Paths relative to the repository: the scripts hand them to Docker unconverted, which on Windows means as typed.
   local backup=runtime/compat-gate/backup gate_env=runtime/compat-gate/gate.env
   local trader="$run_dir/restore-trader.txt" counterparty="$run_dir/restore-counterparty.txt"
@@ -750,7 +980,8 @@ restore_rehearsal() {
   rm -rf "$backup"
   bash scripts/backup.sh --project mse-gate --env-file "$gate_env" --to "$backup" >> "$log" 2>&1 ||
     { fail 'the backup failed'; return 1; }
-  at_backup=$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")
+  # Both simulations' trades, the closed one's too: a restore republishes every simulation's history.
+  at_backup=$(every_nova_totals)
   note "at the backup => $at_backup"
   api_login "$trader" trader "$trader_password" &&
     api_login "$counterparty" counterparty "$counterparty_password" || return 1
@@ -760,8 +991,7 @@ restore_rehearsal() {
   assert_match 'a trade after the backup' '"state":"FILLED"' "$(body_of "$bought")" || return 1
   bash scripts/restore.sh "$backup" --project mse-gate --env-file "$gate_env" --yes >> "$log" 2>&1 ||
     { fail 'the restore failed'; return 1; }
-  assert_equal 'Execution back at the backup' "$at_backup" \
-    "$(execution_sql "$totals FROM trades WHERE instrument_id = '$(nova)'")" &&
+  assert_equal "Execution back at the backup, every simulation's NOVA" "$at_backup" "$(every_nova_totals)" &&
     caught_up || return 1
   # The book's minutes come back from the republished snapshots, and none from after the backup is left: the newest
   # minute ends at the market's sequence, which a minute kept from the extra trade would pass.
@@ -863,6 +1093,7 @@ step 'Toolchain versions' toolchain &&
   step 'Reconciliation: candles match the trade export exactly' reconciled_candles &&
   step 'Dashboard: Grafana loads it and every query works' dashboard &&
   step 'Flink outage: trading goes on, candles catch up' flink_outage &&
+  step 'Close and start again: history kept, a new market trades' close_and_start &&
   step 'Kafka outage: people trade, the feed catches up' kafka_outage &&
   step 'Crash: Execution killed mid-trading restarts and reconciles' crash_recovery &&
   step 'Rebuild: Market Data rebuilt from Kafka matches exactly' projection_rebuild &&
