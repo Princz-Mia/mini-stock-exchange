@@ -121,6 +121,11 @@ export function restingOrdersText(known: {
   stillResting: number | null | undefined;
   /** The exchange says it has stopped taking commands. */
   writerHalted: boolean;
+  /**
+   * The exchange closed the market because its set time had come. A close sent from here then closed nothing, and
+   * whether it ever answers says nothing of the orders: the exchange's own close cancels them.
+   */
+  closedOnSchedule?: boolean;
 }): string {
   if (known.stillResting !== undefined) {
     if (known.stillResting === 0) {
@@ -135,7 +140,10 @@ export function restingOrdersText(known: {
           : `At most ${groupInteger(known.stillResting)} orders still rest, with their holds`;
     return `${count}: the close was left unfinished. The exchange has stopped, and cancels ${known.stillResting === 1 ? 'it' : 'them'} when it is restarted.`;
   }
-  switch (known.close) {
+  // The exchange's own close for the set time cancels the orders, so one sent from here and never answered, or still
+  // on its way, says nothing of them.
+  const close = known.closedOnSchedule === true && known.close !== 'done' ? 'idle' : known.close;
+  switch (close) {
     case 'done':
       return 'Every order that still rested was cancelled and its hold released.';
     case 'sending':
@@ -180,6 +188,7 @@ function Ended({
           close: close.outcome.kind,
           stillResting: close.stillResting,
           writerHalted: health.data?.writer.available === false,
+          closedOnSchedule: onSchedule,
         })}
       </p>
       <p className="muted">

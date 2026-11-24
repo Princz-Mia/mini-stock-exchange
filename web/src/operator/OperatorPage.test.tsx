@@ -324,6 +324,16 @@ describe('the operator screen', () => {
       expect(text(close, undefined, true)).toMatch(/The exchange has stopped taking commands: any order the close had not cancelled/);
       expect(text(close, undefined, true)).not.toMatch(/was cancelled|were cancelled/);
     }
+    // Closed by the exchange for its set time: a close sent from here that never answered, or is still on its way,
+    // says nothing of the orders, which the exchange's own close cancels.
+    for (const close of ['unresolved', 'sending'] as const) {
+      expect(restingOrdersText({ close, stillResting: undefined, writerHalted: false, closedOnSchedule: true })).toMatch(
+        /^A close cancels every order that still rested and releases its hold, which/,
+      );
+    }
+    expect(restingOrdersText({ close: 'unresolved', stillResting: 3, writerHalted: true, closedOnSchedule: true })).toMatch(
+      /^At most 3 orders still rest/,
+    );
   });
 
   it("reads the traders without an account again when the exchange names another simulation", async () => {
@@ -3805,6 +3815,10 @@ describe('a market opened for a set time, on the operator screen', () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/the close has not given its answer here/)).toBeNull();
     expect(screen.queryByRole('button', { name: "Ask for the close's answer" })).toBeNull();
+    // Nothing will ever answer that close, and the orders are the exchange's own close's to cancel.
+    const ended = await screen.findByRole('region', { name: 'This market has ended' });
+    expect(ended).toHaveTextContent('A close cancels every order that still rested and releases its hold');
+    expect(ended).not.toHaveTextContent('The close has not answered yet');
   });
 
   it('names both times when the exchange closed the market well after its set time', async () => {
