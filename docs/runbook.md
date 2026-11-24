@@ -127,6 +127,8 @@ Trading goes on, and the public market and candles fall behind, and say so.
 
 **If the backlog reaches its limit,** Execution stops admitting new orders (`New orders paused`), so the database can't fill up. Cancels are still accepted. New orders resume as soon as the backlog drains (`New orders resumed`).
 
+**After the host slept, or the network dropped,** a connection can die with one of the relay's queries in flight. The relay and the admission check read on connections of their own (`mse-outbox` in `pg_stat_activity`), and a read there that gets no answer fails after `mse.outbox.socket-timeout`, 60 seconds by default. The relay then backs off and carries on by itself, so the backlog stops growing within about a minute. If it still grows while Kafka is healthy, restart Execution.
+
 ## Flink restarted, or candles are behind
 
 The JobManager resumes from its newest completed checkpoint, so candles continue where they stopped, with nothing counted twice. Until it catches up, the chart's candles say they are behind. Trading is never affected.
