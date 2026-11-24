@@ -326,13 +326,23 @@ class SimulationStartEngineIT {
 	 * simulation, as a command of a market that has a successor. The closed row's epoch is 0, which no writer holds,
 	 * so that command finds nothing to lock: the writer halts as any stale writer does, and neither simulation is
 	 * written.
+	 * <p>
+	 * The command sent here is a transition the closed simulation has itself answered before. A transition looks its
+	 * key up in the other simulations before it opens, and must not take an answer of the simulation it holds from
+	 * there: that answer is read by the opening, under the row's lock, which is what stops a writer that has lost the
+	 * row.
 	 */
 	@Test
 	void aWriterThatMissedItsOwnStartCanWriteNothingMoreIntoTheClosedSimulation() throws Exception {
 		TradingEngine engine = engine();
 		engine.start();
 		long epoch = epoch(closed);
+		CommandKey answered = key(OPEN_ROUTE);
+		MarketTransition refused = engine.control(answered, new MarketControl(MarketControl.Action.OPEN, operator))
+			.get(5, TimeUnit.SECONDS);
+		assertThat(refused.status()).as("a closed market does not open").isEqualTo(MarketTransition.Status.NOT_ALLOWED);
 		long closedSequence = sequence(closed);
+		long closedAudited = audited(closed);
 		StartSimulation command = start("Missed start");
 
 		transactions.misreportIn(0);
@@ -350,16 +360,16 @@ class SimulationStartEngineIT {
 		assertThat(store.lockOwnedMarket(closed, epoch)).isEmpty();
 
 		Throwable halted = catchThrowable(() -> engine
-			.control(key("POST /api/v1/admin/market/open"), new MarketControl(MarketControl.Action.OPEN, operator))
+			.control(answered, new MarketControl(MarketControl.Action.OPEN, operator))
 			.get(5, TimeUnit.SECONDS));
 
+		assertThat(halted).as("not the answer the closed simulation once gave").isNotNull();
 		assertThat(halted.getCause()).isInstanceOf(WriterHaltException.class);
 		assertThat(halted.getCause().getCause()).hasMessageContaining("another writer owns the market");
 		assertThat(writer.isAvailable()).isFalse();
 		assertThat(sequence(closed)).as("no command of the closed simulation").isEqualTo(closedSequence);
 		assertThat(sequence(command.simulationId())).isEqualTo(1);
-		assertThat(jdbc.queryForObject("SELECT count(*) FROM audit_log WHERE simulation_id = ?", Long.class, closed))
-			.isZero();
+		assertThat(audited(closed)).isEqualTo(closedAudited);
 	}
 
 	/**
