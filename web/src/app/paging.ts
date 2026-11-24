@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
 import { useSearchParams } from 'react-router';
 
-import type { ListOrder } from '../api/client';
+import type { ListOrder, Read } from '../api/client';
 
 /**
  * Long lists, one page at a time. The server pages by keyset cursor, which only goes forward, so the browser keeps the
@@ -120,7 +120,8 @@ interface Options<T> {
   table: string;
   /** The query key prefix, so invalidating it refreshes the page on screen. */
   queryKey: readonly unknown[];
-  fetch: (cursor: string | undefined, paging: Paging) => Promise<Page<T>>;
+  /** `read` carries the query's signal, which stops a page nobody waits for any more. */
+  fetch: (cursor: string | undefined, paging: Paging, read: Read) => Promise<Page<T>>;
   defaults: Omit<Paging, 'filters'>;
   filters?: readonly Filter[];
   refetchInterval?: (query: { state: { error: unknown } }) => number | false;
@@ -157,7 +158,7 @@ export function usePagedList<T>({
   const query = useQuery({
     queryKey: [...queryKey, paging.size, paging.order, filtered, cursor ?? null],
     // Each page remembers where it starts, so while the next one loads the rows shown keep their own numbering.
-    queryFn: async () => ({ ...(await fetch(cursor, paging)), offset: start }),
+    queryFn: async ({ signal }) => ({ ...(await fetch(cursor, paging, { signal })), offset: start }),
     // While another page of the same list loads, the page shown stays. A new page size, order or filter is a different
     // list, so its old rows are not shown under the new settings.
     placeholderData: (previous, previousQuery) => {

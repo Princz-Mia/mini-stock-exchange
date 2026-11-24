@@ -54,7 +54,8 @@ export function useInstruments(market: StatusRead, options: { refetchInterval?: 
   const simulation = listedSimulation(market);
   const list = useQuery({
     queryKey: ['instruments', simulation ?? null],
-    queryFn: () => api.instruments(simulation === MARKET_DATA_CURRENT ? undefined : (simulation ?? undefined)),
+    queryFn: ({ signal }) =>
+      api.instruments(simulation === MARKET_DATA_CURRENT ? undefined : (simulation ?? undefined), { signal }),
     enabled: simulation !== undefined && simulation !== null,
     // A page that had to start from Market Data's own current simulation, the status being unreadable, goes on from
     // that list when the status then names the very same simulation: the list is asked again by id, but nothing on

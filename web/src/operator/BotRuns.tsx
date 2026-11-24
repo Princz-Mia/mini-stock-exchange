@@ -71,8 +71,8 @@ export function BotRuns({
   const history = usePagedList({
     table: 'runs',
     queryKey: ['bot-runs', 'history'],
-    fetch: async (cursor, { size, order }) => {
-      const page = await api.botRunPage(cursor, size, order);
+    fetch: async (cursor, { size, order }, read) => {
+      const page = await api.botRunPage(cursor, size, order, read);
       return { rows: page.runs, nextCursor: page.nextCursor };
     },
     defaults: { size: 10, order: 'newest' },

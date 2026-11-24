@@ -112,8 +112,8 @@ function UnfundedTraders({ onFund, busy }: { onFund: (username: string) => void;
   const traders = usePagedList({
     table: 'traders',
     queryKey: ['traders'],
-    fetch: async (cursor, { size, order }) => {
-      const page = await api.traders(cursor, size, order, false);
+    fetch: async (cursor, { size, order }, read) => {
+      const page = await api.traders(cursor, size, order, false, read);
       return { rows: page.traders, nextCursor: page.nextCursor };
     },
     defaults: { size: 10, order: 'oldest' },
@@ -160,8 +160,8 @@ export function AccountSetup({
   const accounts = usePagedList({
     table: 'accounts',
     queryKey: ['accounts'],
-    fetch: async (cursor, { size, order }) => {
-      const page = await api.accounts(cursor, size, order);
+    fetch: async (cursor, { size, order }, read) => {
+      const page = await api.accounts(cursor, size, order, read);
       return { rows: page.accounts, nextCursor: page.nextCursor };
     },
     defaults: { size: 25, order: 'oldest' },
