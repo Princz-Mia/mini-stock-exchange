@@ -302,10 +302,11 @@ describe('portfolio page', () => {
     await waitFor(() =>
       expect(within(symbol).getAllByRole('option').map((option) => option.textContent)).toEqual(['All', 'NOVA', 'ORBIT']),
     );
-    // They are this simulation's: the list is asked for by the id the market status gives.
+    // They are this simulation's: the list is asked for by the id the market status gives. Market Data's own list,
+    // asked for at the same time as the status, says of no simulation whose it is, so it is not used.
     expect(
       server.requests.filter((request) => request.url.startsWith('/api/v1/instruments')).map((request) => request.url),
-    ).toEqual(['/api/v1/instruments?simulationId=s']);
+    ).toEqual(['/api/v1/instruments', '/api/v1/instruments?simulationId=s']);
     fireEvent.change(symbol, { target: { value: ORBIT } });
     fireEvent.change(within(executions).getByLabelText('Side'), { target: { value: 'SELL' } });
     await waitFor(() =>

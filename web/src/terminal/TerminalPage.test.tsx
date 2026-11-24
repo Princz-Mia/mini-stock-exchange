@@ -576,8 +576,12 @@ describe('terminal', () => {
 
     await screen.findByRole('heading', { name: 'NOVA', level: 1 });
     const asked = server.requests.filter((request) => request.url.split('?')[0] === '/api/v1/instruments');
-    expect(asked.length).toBeGreaterThan(0);
-    expect(asked.every((request) => request.url === '/api/v1/instruments?simulationId=s')).toBe(true);
+    expect(asked.some((request) => request.url === '/api/v1/instruments?simulationId=s')).toBe(true);
+    // Market Data's own list is asked for once, at the same time as the status. It says of no simulation whose it is,
+    // so it is never shown.
+    expect(asked.filter((request) => !request.url.includes('simulationId')).map((request) => request.url)).toEqual([
+      '/api/v1/instruments',
+    ]);
   });
 
   it("shows Market Data's own current simulation when the exchange cannot say which one it is", async () => {

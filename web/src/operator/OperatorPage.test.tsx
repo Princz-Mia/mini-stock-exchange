@@ -181,20 +181,29 @@ describe('the operator screen', () => {
 
     await screen.findByRole('table', { name: 'Instruments' });
     const asked = server.requests.filter((request) => request.url.split('?')[0] === '/api/v1/instruments');
-    expect(asked.length).toBeGreaterThan(0);
-    // Never without the simulation, not even before the status was read.
-    expect(asked.every((request) => request.url === LIST)).toBe(true);
+    expect(asked.some((request) => request.url === LIST)).toBe(true);
+    // Without the simulation only once, at the same time as the status, and that list says of no simulation whose it
+    // is, so it is never shown.
+    expect(asked.filter((request) => request.url !== LIST).map((request) => request.url)).toEqual(['/api/v1/instruments']);
   });
 
-  it('asks Market Data for no list while there is no market, whatever it still holds', async () => {
-    // Market Data would answer with NOVA, of some simulation the exchange no longer has.
+  it('shows no list while there is no market, whatever Market Data still holds', async () => {
+    // Market Data answers with NOVA, of some simulation the exchange no longer has.
     const { server } = exchange('NOT_SET_UP');
+    server.on('GET /api/v1/instruments', {
+      status: 200,
+      json: { simulationId: '10000000-0000-0000-0000-000000000009', instruments: [NOVA], feed: { state: 'LIVE', lag: 0 } },
+    });
     renderPage();
 
     expect(await button('Open market')).toHaveAccessibleDescription('Start a simulation or add an instrument first; either creates the market.');
     await screen.findByText('No accounts yet.');
     expect(screen.getByText('No instruments yet.')).toBeInTheDocument();
-    expect(server.requests.filter((request) => request.url.startsWith('/api/v1/instruments'))).toHaveLength(0);
+    expect(screen.queryByRole('rowheader', { name: 'NOVA' })).toBeNull();
+    // Only the early read made while the status was on its way, and nothing after it.
+    expect(server.requests.filter((request) => request.url.startsWith('/api/v1/instruments')).map((request) => request.url)).toEqual([
+      '/api/v1/instruments',
+    ]);
   });
 
   it('reads the instruments again when the exchange names another simulation, showing none of the one before', async () => {
