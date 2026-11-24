@@ -220,6 +220,35 @@ class BotHandoverIT {
 	}
 
 	/**
+	 * Bots list in the order they were made even when the clock alone would not say so: a bot already in the market
+	 * whose time is ahead of the clock (a clock set back since, say) still comes before the bots made after it, and
+	 * each bot made by one statement gets a time of its own. The clock alone would put them all before it, and give
+	 * many of one statement the same time on a fast enough database.
+	 */
+	@Test
+	void botsListAfterTheNewestBotWhateverTheClockSays() throws Exception {
+		jdbc.update("""
+				INSERT INTO account (id, simulation_id, kind, display_name, bot_strategy, created_at)
+				VALUES (?, ?, 'BOT', 'bot-0001', 'NOISE', clock_timestamp() + interval '1 hour')""", UUID.randomUUID(),
+				simulation);
+
+		assertThat(provision(key(BOTS_ROUTE), 50, BotStrategy.MARKET_MAKER).lastBot()).isEqualTo("bot-0051");
+
+		List<String> names = jdbc.queryForList("""
+				SELECT display_name FROM account WHERE kind = 'BOT' AND simulation_id = ? ORDER BY created_at, id""",
+				String.class, simulation);
+		assertThat(names).hasSize(51);
+		for (int i = 0; i < names.size(); i++) {
+			assertThat(names.get(i)).isEqualTo(String.format("bot-%04d", i + 1));
+		}
+		assertThat(jdbc.queryForObject("""
+				SELECT count(*) FROM account a WHERE a.simulation_id = ? AND a.kind = 'BOT'
+				    AND a.created_at = (SELECT max(created_at) FROM account WHERE simulation_id = a.simulation_id
+				                        AND kind = 'BOT' AND created_at < a.created_at) + interval '1 microsecond'""",
+				Long.class, simulation)).as("each a microsecond after the one before").isEqualTo(50);
+	}
+
+	/**
 	 * Files of bots that are not made are deleted before the answer: for a stored answer given again, a refusal, and
 	 * a transaction that rolls back. Their tokens would authenticate nothing; they would only pile up.
 	 */
