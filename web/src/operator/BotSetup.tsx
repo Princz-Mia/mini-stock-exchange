@@ -17,6 +17,7 @@ import {
   timeLeftText,
   USUAL_SHARES,
 } from './botJob';
+import { Announcer } from './Announcer';
 import { CommandStatus } from './CommandStatus';
 import { EXAMPLE_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
 import { notReadYet, useFreshRead } from './freshRead';
@@ -100,7 +101,7 @@ export function BotSetup({
           {bots.population > 0 && <p className="muted">{populationText(bots.byStrategy)}</p>}
         </div>
       )}
-      {editable && <Announcer job={job} />}
+      {editable && <Announcer said={job === undefined ? undefined : job === null ? null : milestone(job)} />}
       {editable ? (
         running ? (
           <JobProgress
@@ -159,33 +160,6 @@ export function BotSetup({
 /** Focus has fallen to the page: the control that had it was disabled or taken off the page. */
 function focusLost(): boolean {
   return document.activeElement === null || document.activeElement === document.body;
-}
-
-/**
- * Tells a screen reader how the job goes at its start, at each quarter and at its end, in a live region that is on
- * the page from the first: never on every read. The first read is the panel as it opened, so a job found running then
- * is shown, not announced; a job started after a first read that found none is announced from its start.
- */
-function Announcer({ job }: { job: BotJob | null | undefined }) {
-  // Undefined until the job has been read; null when the read found none.
-  const said = job === undefined ? undefined : job === null ? null : milestone(job);
-  const last = useRef<string | null | undefined>(undefined);
-  const [announced, setAnnounced] = useState('');
-  useEffect(() => {
-    if (said === undefined) {
-      return;
-    }
-    const before = last.current;
-    last.current = said;
-    if (before !== undefined && said !== null && said !== before) {
-      setAnnounced(said);
-    }
-  }, [said]);
-  return (
-    <p role="status" className="visually-hidden">
-      {announced}
-    </p>
-  );
 }
 
 /** A running job: the bar, the count and percentage, the time left, each strategy, and Stop. */
