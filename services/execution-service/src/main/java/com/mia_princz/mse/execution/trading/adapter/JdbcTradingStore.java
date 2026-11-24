@@ -13,6 +13,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -110,8 +111,10 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public boolean hasSimulation() {
-		return jdbc.sql("SELECT EXISTS (SELECT 1 FROM simulation)").query(Boolean.class).single();
+	public boolean hasActiveSimulation() {
+		return jdbc.sql("SELECT EXISTS (SELECT 1 FROM simulation WHERE " + ActiveSimulation.CONDITION + ")")
+			.query(Boolean.class)
+			.single();
 	}
 
 	@Override
@@ -132,7 +135,7 @@ public final class JdbcTradingStore implements TradingStore {
 	public Market lockMarket() {
 		return jdbc.sql("""
 				SELECT id, state, writer_epoch, max_open_orders_per_account, max_open_orders_total, max_fills_per_command
-				FROM simulation FOR UPDATE""")
+				FROM simulation WHERE %s FOR UPDATE""".formatted(ActiveSimulation.CONDITION))
 			.query((row, index) -> new Market(row.getObject("id", UUID.class), row.getString("state"),
 					row.getLong("writer_epoch"), row.getInt("max_open_orders_per_account"),
 					row.getInt("max_open_orders_total"), row.getInt("max_fills_per_command")))
@@ -198,8 +201,8 @@ public final class JdbcTradingStore implements TradingStore {
 		problems.addAll(jdbc.sql("""
 				SELECT i.symbol, i.last_trade_sequence, coalesce(t.newest, 0) AS newest
 				FROM instrument i
-				LEFT JOIN (SELECT instrument_id, max(trade_sequence) AS newest FROM trades GROUP BY instrument_id) t
-				    ON t.instrument_id = i.id
+				LEFT JOIN (SELECT instrument_id, max(trade_sequence) AS newest FROM trades
+				    WHERE simulation_id = :simulation GROUP BY instrument_id) t ON t.instrument_id = i.id
 				WHERE i.simulation_id = :simulation AND i.last_trade_sequence <> coalesce(t.newest, 0)""")
 			.param("simulation", simulationId)
 			.query((row, index) -> "Instrument " + row.getString("symbol") + " has last trade sequence "
@@ -492,6 +495,23 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public Set<UUID> tradingAccounts(UUID simulationId) {
+		return jdbc.sql("SELECT id FROM account WHERE simulation_id = ? AND kind <> 'ISSUANCE'")
+			.param(simulationId)
+			.query(UUID.class)
+			.set();
+	}
+
+	@Override
+	public boolean tradesIn(UUID simulationId, UUID accountId) {
+		return jdbc
+			.sql("SELECT EXISTS (SELECT 1 FROM account WHERE simulation_id = ? AND id = ? AND kind <> 'ISSUANCE')")
+			.params(simulationId, accountId)
+			.query(Boolean.class)
+			.single();
+	}
+
+	@Override
 	public int revokeApiTokens(UUID accountId, Instant at) {
 		return jdbc.sql("UPDATE api_token SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL")
 			.params(Timestamp.from(at), accountId)
@@ -613,9 +633,11 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public Optional<ExistingOrder> findOrder(UUID orderId) {
-		return jdbc.sql("SELECT id, account_id, instrument_id, state, working_quantity FROM orders WHERE id = ?")
-			.param(orderId)
+	public Optional<ExistingOrder> findOrder(UUID simulationId, UUID orderId) {
+		return jdbc.sql("""
+				SELECT id, account_id, instrument_id, state, working_quantity FROM orders
+				WHERE id = ? AND simulation_id = ?""")
+			.params(orderId, simulationId)
 			.query((row, index) -> new ExistingOrder(row.getObject("id", UUID.class),
 					row.getObject("account_id", UUID.class), row.getObject("instrument_id", UUID.class),
 					row.getString("state"), row.getLong("working_quantity")))

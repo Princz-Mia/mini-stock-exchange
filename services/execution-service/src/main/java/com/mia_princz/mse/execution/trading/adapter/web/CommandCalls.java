@@ -18,6 +18,7 @@ import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterBusy
 import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterHaltException;
 import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterStoppedException;
 import com.mia_princz.mse.execution.trading.application.IdempotencyConflictException;
+import com.mia_princz.mse.execution.trading.application.TradingEngine.UnknownAccountException;
 import com.mia_princz.mse.execution.trading.application.TradingEngine.UnknownInstrumentException;
 
 /** How every command endpoint submits to the writer and answers: keys, admission, timeouts and failures. */
@@ -67,6 +68,10 @@ final class CommandCalls {
 			// Only this exception means an unknown instrument; any other is a fault, answered below as one.
 			if (cause instanceof UnknownInstrumentException) {
 				throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_INSTRUMENT", "No such instrument");
+			}
+			// The account was the caller's when the request was authenticated but is not the active simulation's now.
+			if (cause instanceof UnknownAccountException) {
+				throw new ApiException(HttpStatus.FORBIDDEN, "NO_TRADING_ACCOUNT", "This user has no trading account");
 			}
 			if (cause instanceof WriterHaltException) {
 				// Trading stays stopped until a restart rebuilds from the database, so the reason must be on record.

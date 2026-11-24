@@ -42,6 +42,7 @@ import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import com.mia_princz.mse.execution.identity.adapter.BotTokenFilter;
 import com.mia_princz.mse.execution.identity.adapter.PasswordVersionFilter;
 import com.mia_princz.mse.execution.identity.adapter.ServiceTokenFilter;
+import com.mia_princz.mse.execution.trading.application.TradingEngine;
 
 /**
  * Three chains, each deny by default: other services by a service token, bots by bearer token, people by session.
@@ -94,7 +95,7 @@ class SecurityConfiguration {
 	 */
 	@Bean
 	@Order(1)
-	SecurityFilterChain botChain(HttpSecurity http, JdbcClient jdbc) throws Exception {
+	SecurityFilterChain botChain(HttpSecurity http, JdbcClient jdbc, TradingEngine engine) throws Exception {
 		return http.securityMatcher(BotTokenFilter::offersBearer)
 			.authorizeHttpRequests((requests) -> requests.requestMatchers(HttpMethod.GET, "/api/v1/market")
 				.permitAll()
@@ -104,7 +105,7 @@ class SecurityConfiguration {
 				.hasRole("BOT")
 				.anyRequest()
 				.denyAll())
-			.addFilterAt(new BotTokenFilter(jdbc), BasicAuthenticationFilter.class)
+			.addFilterAt(new BotTokenFilter(jdbc, engine::simulationId), BasicAuthenticationFilter.class)
 			.csrf(AbstractHttpConfigurer::disable)
 			.sessionManagement((sessions) -> sessions.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 			.securityContext((context) -> context.securityContextRepository(new RequestAttributeSecurityContextRepository()))

@@ -23,6 +23,9 @@ import org.springframework.transaction.PlatformTransactionManager;
 @SpringBootTest
 class ReferenceDataSchemaIT {
 
+	/** As the runtime role closes a simulation: the state and both times are columns it may update. */
+	private static final String CLOSE = "UPDATE simulation SET state = 'CLOSED', opened_at = now(), closed_at = now() WHERE id = ?";
+
 	@Autowired
 	JdbcTemplate jdbcTemplate;
 
@@ -48,12 +51,53 @@ class ReferenceDataSchemaIT {
 		});
 	}
 
+	/** Closed simulations pile up beside the one that is not closed, and the runtime role may close the one it runs. */
 	@Test
-	void thereIsOnlyOneSimulation() {
+	void onlyOneSimulationIsNotClosed() {
 		db.inRolledBackTransaction((f) -> {
+			f.jdbc.update(CLOSE, f.simulation());
+			f.jdbc.update(CLOSE, f.simulation());
 			f.simulation();
 			assertFails(UNIQUE_VIOLATION, f::simulation);
 		});
+		for (String state : new String[] { "OPEN", "HALTED" }) {
+			db.inRolledBackTransaction((f) -> {
+				f.jdbc.update("UPDATE simulation SET state = ?, opened_at = now() WHERE id = ?", state, f.simulation());
+				assertFails(UNIQUE_VIOLATION, f::simulation);
+			});
+		}
+	}
+
+	@Test
+	void closedAtMatchesTheStateAndOnlyAnOpenedSimulationCloses() {
+		String insert = "INSERT INTO simulation (id, state, opened_at, closed_at) VALUES (?, ?, %s, %s)";
+		db.inRolledBackTransaction((f) -> assertThat(
+				f.jdbc.update(insert.formatted("now()", "now()"), UUID.randomUUID(), "CLOSED")).isEqualTo(1));
+		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION,
+				() -> f.jdbc.update(insert.formatted("now()", "NULL"), UUID.randomUUID(), "CLOSED")));
+		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION,
+				() -> f.jdbc.update(insert.formatted("NULL", "now()"), UUID.randomUUID(), "CLOSED")));
+		for (String state : new String[] { "OPEN", "HALTED" }) {
+			db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION,
+					() -> f.jdbc.update(insert.formatted("now()", "now()"), UUID.randomUUID(), state)));
+		}
+		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION,
+				() -> f.jdbc.update(insert.formatted("NULL", "NULL"), UUID.randomUUID(), "ENDED")));
+	}
+
+	/** The catalogue is frozen in every state but SETUP, so a closed simulation's instruments are history. */
+	@Test
+	void aClosedSimulationsInstrumentsStayFrozen() {
+		for (String change : new String[] { "UPDATE instrument SET reference_price_cents = 12050 WHERE id = ?",
+				"UPDATE instrument SET display_name = 'Nova Dynamics' WHERE id = ?",
+				"DELETE FROM instrument WHERE id = ?" }) {
+			db.inRolledBackTransaction((f) -> {
+				UUID simulation = f.simulation();
+				UUID instrument = f.instrument(simulation, "NOVA");
+				f.jdbc.update(CLOSE, simulation);
+				assertFails(NOT_IN_PREREQUISITE_STATE, () -> f.jdbc.update(change, instrument));
+			});
+		}
 	}
 
 	@Test
