@@ -509,13 +509,21 @@ export interface paths {
         readonly get?: never;
         readonly put?: never;
         /**
-         * Open the market for trading, once.
+         * Open the market for trading, once, optionally for a set time.
          * @description Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
          *     key returns the first answer, even a refusal. Allowed only from SETUP.
          *
-         *     The request has no body, so its key alone says which command it is. A key that was answered in an earlier
-         *     simulation is that command sent again: it returns the answer it was first given and changes nothing in the
-         *     current market. A new transition needs a new key.
+         *     The body is optional. With a duration, the exchange closes the market by itself once it has run out:
+         *     closesAt is the opening's time on the exchange's clock plus the duration, and the close made then is the
+         *     one an operator would send, audited as scheduled under the operator who opened the market. From closesAt
+         *     on, orders and bot run starts are refused with MARKET_CLOSED, even before the close has run; cancels are
+         *     still taken, and an operator may still close the market sooner. With no body, or a body without a
+         *     duration, the market stays open until an operator closes it.
+         *
+         *     A key that was answered in an earlier simulation is that command sent again: it returns the answer it was
+         *     first given and changes nothing in the current market. The duration is part of the request, so the same
+         *     key with another duration is IDEMPOTENCY_CONFLICT; no body and a body without a duration are the same
+         *     request. A new transition needs a new key.
          */
         readonly post: operations["openMarket"];
         readonly delete?: never;
@@ -588,6 +596,10 @@ export interface paths {
          * @description Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
          *     key returns the first answer, even a refusal. Allowed from OPEN and from HALTED. CLOSED is final: no
          *     transition leads out of it, and a market still in SETUP is not closed.
+         *
+         *     A market opened with a duration is closed this way by the exchange itself at its closesAt, under a key of
+         *     its own and the operator who opened it. Only one close applies: one sent after it is refused with
+         *     MARKET_TRANSITION_NOT_ALLOWED and state CLOSED, and a close sent first means the exchange makes none.
          *
          *     From this command's sequence on, an order is rejected with MARKET_CLOSED and no bot run starts. In the
          *     same transaction every bot run that has not ended ends (endedBy MARKET_CLOSE), every bot token is revoked,
@@ -1680,8 +1692,20 @@ export interface components {
             readonly name: components["schemas"]["SimulationName"] | null;
             /** @description When the market first opened; null in SETUP. */
             readonly openedAt: components["schemas"]["Timestamp"] | null;
+            /**
+             * @description When the exchange closes the market by itself, on its own clock; null for a market opened without a
+             *     duration, and before it opens. From then on orders are refused with MARKET_CLOSED, even while the state
+             *     still says OPEN or HALTED because the close has not run yet. A closed market keeps it, as the time it
+             *     was meant to close.
+             */
+            readonly closesAt: components["schemas"]["Timestamp"] | null;
             /** @description When the market closed; null unless the state is CLOSED. */
             readonly closedAt: components["schemas"]["Timestamp"] | null;
+            /**
+             * @description True when the market closed at its closesAt, by the exchange itself; false while it is not closed and
+             *     when an operator closed it.
+             */
+            readonly closedOnSchedule: boolean;
             /** @description The last committed command's sequence. */
             readonly commandSequence: components["schemas"]["Sequence"] | null;
         };
@@ -1689,6 +1713,18 @@ export interface components {
             /** @enum {string} */
             readonly state: "OPEN" | "HALTED";
             readonly commandSequence: components["schemas"]["Sequence"];
+            /**
+             * @description When the exchange closes the market by itself: set by an opening with a duration, null for any other
+             *     transition.
+             */
+            readonly closesAt?: components["schemas"]["Timestamp"] | null;
+        };
+        readonly MarketOpenRequest: {
+            /**
+             * @description How long the market stays open before the exchange closes it, from 5 minutes to 30 days. Left out, it
+             *     stays open until an operator closes it.
+             */
+            readonly durationMinutes?: number;
         };
         /**
          * @description What an operator calls a simulation: printable characters in any language, with plain spaces between
@@ -2401,7 +2437,8 @@ export interface operations {
              * @description Rejected and committed, with the reason as code: INSUFFICIENT_CASH, INSUFFICIENT_SHARES,
              *     MARKET_NOT_OPEN, MARKET_CLOSED, ORDER_LIMIT_EXCEEDED, EXECUTION_LIMIT_EXCEEDED; plus orderId and
              *     commandSequence. MARKET_NOT_OPEN may pass (the market is being set up, or is halted); MARKET_CLOSED is
-             *     final, so trying again later gains nothing. UNKNOWN_INSTRUMENT is not committed.
+             *     final, so trying again later gains nothing. It is also the answer from the market's closesAt on, before
+             *     the exchange has closed it. UNKNOWN_INSTRUMENT is not committed.
              */
             readonly 422: {
                 headers: {
@@ -3365,8 +3402,8 @@ export interface operations {
                 content?: never;
             };
             /**
-             * @description MARKET_NOT_OPEN, MARKET_CLOSED (final: no run starts in a closed market) or RUN_ACTIVE (committed and
-             *     audited once a market exists), or IDEMPOTENCY_CONFLICT.
+             * @description MARKET_NOT_OPEN, MARKET_CLOSED (final: no run starts in a closed market, nor from its closesAt on) or
+             *     RUN_ACTIVE (committed and audited once a market exists), or IDEMPOTENCY_CONFLICT.
              */
             readonly 409: {
                 headers: {
@@ -3520,7 +3557,11 @@ export interface operations {
             readonly path?: never;
             readonly cookie?: never;
         };
-        readonly requestBody?: never;
+        readonly requestBody?: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["MarketOpenRequest"];
+            };
+        };
         readonly responses: {
             /** @description Applied. The market is OPEN from this command's sequence on. */
             readonly 200: {
@@ -3531,7 +3572,18 @@ export interface operations {
                     readonly "application/json": components["schemas"]["MarketTransition"];
                 };
             };
-            readonly 400: components["responses"]["Problem"];
+            /**
+             * @description IDEMPOTENCY_KEY_REQUIRED, or VALIDATION_FAILED for a duration out of range (OUT_OF_RANGE) or an unknown
+             *     field.
+             */
+            readonly 400: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
             /** @description No session. No body. */
             readonly 401: {
                 headers: {

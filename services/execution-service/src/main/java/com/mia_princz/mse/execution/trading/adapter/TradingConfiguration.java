@@ -2,6 +2,7 @@ package com.mia_princz.mse.execution.trading.adapter;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.List;
 
 import javax.sql.DataSource;
@@ -9,6 +10,7 @@ import javax.sql.DataSource;
 import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceProperties;
 import org.springframework.context.annotation.Bean;
@@ -96,13 +98,25 @@ class TradingConfiguration {
 	@Bean
 	TradingEngine tradingEngine(TradingStore store, WriterConnections connections, CommandWriter writer, Clock clock,
 			BotCredentials botCredentials, AccountChanges accountChanges, List<SimulationChanges> simulationChanges,
-			MeterRegistry meters,
+			ScheduledClose scheduledClose, MeterRegistry meters,
 			@Value("${mse.market.close-chunk-orders:" + TradingEngine.CLOSE_CHUNK_ORDERS + "}") int closeChunkOrders) {
 		// The store and the transactions share the writer's data source, so a command's statements join its transaction.
 		return new TradingEngine(store,
 				new SpringTransactionRunner(new JdbcTransactionManager(connections.dataSource())), writer, clock,
 				botCredentials, accountChanges, new MicrometerWriterTimings(meters), System::nanoTime,
-				new RestingOrders(), closeChunkOrders, Thread::sleep, SimulationChanges.all(simulationChanges));
+				new RestingOrders(), closeChunkOrders, Thread::sleep, SimulationChanges.all(simulationChanges),
+				scheduledClose);
+	}
+
+	/**
+	 * Closes a market opened with a duration when its time comes, on its own thread, and only while this process owns
+	 * the writer. The engine arms it, and it asks the engine back, so the engine is looked up when it first fires.
+	 */
+	@Bean(destroyMethod = "close")
+	ScheduledClose scheduledClose(Clock clock, WriterOwnership ownership, ObjectProvider<TradingEngine> engine,
+			@Value("${mse.market.close-check-interval:10s}") Duration checkInterval) {
+		return new ScheduledClose(clock, ownership::isHeld, checkInterval,
+				(simulation, closesAt) -> engine.getObject().closeOnSchedule(simulation, closesAt));
 	}
 
 	@Bean(destroyMethod = "close")

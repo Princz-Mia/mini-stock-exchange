@@ -127,7 +127,7 @@ describe('terminal', () => {
   it('pauses new orders while the market is halted, but still lets the trader cancel', async () => {
     const server = market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'HALTED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
+      json: { state: 'HALTED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '9' },
     });
     renderTerminal();
 
@@ -146,7 +146,7 @@ describe('terminal', () => {
   it("has a part for every step of the trader's tour, but the Portfolio link, which is in the top bar", async () => {
     market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
+      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '9' },
     });
     renderTerminal();
     await screen.findByRole('region', { name: 'Order · NOVA' });
@@ -158,7 +158,7 @@ describe('terminal', () => {
   it('explains a halt beside its badge, but not a market that has not opened yet', async () => {
     market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'SETUP', simulationId: 's', openedAt: null, closedAt: null, commandSequence: '2' },
+      json: { state: 'SETUP', simulationId: 's', openedAt: null, closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '2' },
     });
     renderTerminal();
     await screen.findByRole('region', { name: 'Order · NOVA' });
@@ -170,10 +170,12 @@ describe('terminal', () => {
     state: 'CLOSED',
     simulationId: 's',
     openedAt: '2026-11-04T09:00:00Z',
+    closesAt: null,
     closedAt: '2026-11-04T17:00:00Z',
+    closedOnSchedule: false,
     commandSequence: '12',
   };
-  const OPEN = { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' };
+  const OPEN = { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '9' };
   const CANCELED_BY_CLOSE = {
     ...OPEN_ORDER,
     state: 'CANCELED',
@@ -452,7 +454,7 @@ describe('terminal', () => {
   it('takes orders once the market is open', async () => {
     market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
+      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '9' },
     });
     renderTerminal();
 
@@ -469,7 +471,7 @@ describe('terminal', () => {
   it("lists the instruments of the simulation the exchange's status names, and of no other", async () => {
     const server = market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
+      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '9' },
     });
     renderTerminal();
 
@@ -639,7 +641,7 @@ describe('terminal', () => {
 
   it('falls back when the market on screen becomes another, which does not list the instrument shown', async () => {
     const VEGA = '00000000-0000-0000-0000-000000000003';
-    let status = { state: 'CLOSED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: '2026-11-04T17:00:00Z', commandSequence: '12' };
+    let status = { state: 'CLOSED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closesAt: null, closedAt: '2026-11-04T17:00:00Z', closedOnSchedule: false, commandSequence: '12' };
     const server = market()
       .on('GET /api/v1/market', () => ({ status: 200, json: status }))
       .on('GET /api/v1/instruments', (request) => ({
@@ -659,7 +661,7 @@ describe('terminal', () => {
     expect(screen.queryByText(/is not part of this market/)).toBeNull();
 
     // The tab is left open, and the next simulation is set up: the same address now names an instrument of another.
-    status = { state: 'SETUP', simulationId: 't', openedAt: '', closedAt: '', commandSequence: '1' };
+    status = { state: 'SETUP', simulationId: 't', openedAt: '', closesAt: null, closedAt: '', closedOnSchedule: false, commandSequence: '1' };
     await client.invalidateQueries({ queryKey: ['market'] });
 
     await screen.findByRole('heading', { name: 'VEGA', level: 1 });
@@ -673,7 +675,7 @@ describe('terminal', () => {
 
   it('shows a trader the next simulation being set up, with nothing of the closed one, until funded in it', async () => {
     const noAccount = { status: 403, problem: { status: 403, code: 'NO_TRADING_ACCOUNT' } };
-    let status: object = { state: 'CLOSED', simulationId: 's', name: null, openedAt: '2026-11-04T09:00:00Z', closedAt: '2026-11-04T17:00:00Z', commandSequence: '12' };
+    let status: object = { state: 'CLOSED', simulationId: 's', name: null, openedAt: '2026-11-04T09:00:00Z', closesAt: null, closedAt: '2026-11-04T17:00:00Z', closedOnSchedule: false, commandSequence: '12' };
     let next: 'closed' | 'empty' | 'funded' = 'closed';
     const VEGA = '00000000-0000-0000-0000-000000000003';
     signedIn()
@@ -700,7 +702,7 @@ describe('terminal', () => {
     expect(await screen.findByText(/the market closed/i)).toBeInTheDocument();
 
     // A new simulation has started, with no instrument yet, and this trader has no account in it.
-    status = { state: 'SETUP', simulationId: 't', name: 'Thursday seminar', openedAt: null, closedAt: null, commandSequence: '1' };
+    status = { state: 'SETUP', simulationId: 't', name: 'Thursday seminar', openedAt: null, closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '1' };
     next = 'empty';
     await client.invalidateQueries({ queryKey: ['market'] });
     expect(
@@ -730,7 +732,7 @@ describe('terminal', () => {
     market()
       .on('GET /api/v1/market', {
         status: 200,
-        json: { state: 'SETUP', simulationId: 't', name: null, openedAt: null, closedAt: null, commandSequence: '1' },
+        json: { state: 'SETUP', simulationId: 't', name: null, openedAt: null, closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '1' },
       })
       .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } });
     renderTerminal(`/terminal?instrument=${NOVA}`);
@@ -741,12 +743,12 @@ describe('terminal', () => {
 
   it('shows nothing of the closed market to a trader who comes back to the terminal once the next one has started', async () => {
     const noAccount = { status: 403, problem: { status: 403, code: 'NO_TRADING_ACCOUNT' } };
-    const closedStatus = { state: 'CLOSED', simulationId: 's', name: null, openedAt: '2026-11-04T09:00:00Z', closedAt: '2026-11-04T17:00:00Z', commandSequence: '12' };
+    const closedStatus = { state: 'CLOSED', simulationId: 's', name: null, openedAt: '2026-11-04T09:00:00Z', closesAt: null, closedAt: '2026-11-04T17:00:00Z', closedOnSchedule: false, commandSequence: '12' };
     let next = false;
     signedIn()
       .on('GET /api/v1/market', () => ({
         status: 200,
-        json: next ? { state: 'SETUP', simulationId: 't', name: null, openedAt: null, closedAt: null, commandSequence: '1' } : closedStatus,
+        json: next ? { state: 'SETUP', simulationId: 't', name: null, openedAt: null, closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '1' } : closedStatus,
       }))
       .on('GET /api/v1/instruments', () => ({
         status: 200,

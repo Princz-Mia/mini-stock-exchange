@@ -9,6 +9,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -54,13 +55,15 @@ class MarketController {
 
 	/**
 	 * {@code state} is NOT_SET_UP, with the other fields null, until a market exists. {@code name} is also null for a
-	 * simulation nobody named: one that the first setup command created.
+	 * simulation nobody named: one that the first setup command created. {@code closesAt} is null for a market with no
+	 * duration.
 	 */
-	record MarketResponse(String state, String simulationId, String name, Instant openedAt, Instant closedAt,
-			String commandSequence) {
+	record MarketResponse(String state, String simulationId, String name, Instant openedAt, Instant closesAt,
+			Instant closedAt, boolean closedOnSchedule, String commandSequence) {
 	}
 
-	record TransitionResponse(String state, String commandSequence) {
+	/** {@code closesAt} is set only by an opening with a duration. */
+	record TransitionResponse(String state, String commandSequence, Instant closesAt) {
 	}
 
 	record CloseResponse(String state, String commandSequence, int canceledOrders, int endedRuns) {
@@ -70,14 +73,26 @@ class MarketController {
 	MarketResponse market() {
 		return queries.market()
 			.map((market) -> new MarketResponse(market.state(), market.simulationId().toString(), market.name(),
-					market.openedAt(), market.closedAt(), Long.toString(market.commandSequence())))
-			.orElse(new MarketResponse("NOT_SET_UP", null, null, null, null, null));
+					market.openedAt(), market.closesAt(), market.closedAt(), market.closedOnSchedule(),
+					Long.toString(market.commandSequence())))
+			.orElse(new MarketResponse("NOT_SET_UP", null, null, null, null, null, false, null));
 	}
 
+	/**
+	 * Opens the market, with an optional body that gives it a duration, after which the exchange closes it. With no
+	 * body, or one without a duration, it stays open until an operator closes it, and the request is the one it always
+	 * was: a key sent before durations existed means the same as before. With a duration, the duration is part of the
+	 * request, so the same key with another duration is a conflict.
+	 */
 	@PostMapping("/admin/market/open")
-	TransitionResponse open(@RequestHeader(name = "Idempotency-Key", required = false) String key,
-			Authentication authentication) {
-		return control(MarketControl.Action.OPEN, OPEN_ROUTE, key, authentication);
+	TransitionResponse open(@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader,
+			@RequestBody(required = false) MarketOpenBody body, Authentication authentication) {
+		UUID key = CommandCalls.idempotencyKey(keyHeader);
+		Duration duration = body == null ? null : body.validate();
+		UUID operator = queries.userId(authentication.getName()).orElseThrow();
+		byte[] hash = CommandCalls.sha256(duration == null ? OPEN_ROUTE : OPEN_ROUTE + "|" + duration.toMinutes());
+		return control(MarketControl.Action.OPEN, key, new CommandKey(operator, key, OPEN_ROUTE, hash),
+				new MarketControl(MarketControl.Action.OPEN, operator, duration));
 	}
 
 	@PostMapping("/admin/market/halt")
@@ -122,10 +137,15 @@ class MarketController {
 		UUID operator = queries.userId(authentication.getName()).orElseThrow();
 		// No body: the route alone is the request, so reusing a key for another action is a conflict.
 		CommandKey commandKey = new CommandKey(operator, key, route, CommandCalls.sha256(route));
-		MarketTransition result = CommandCalls.await(key, timeout,
-				() -> engine.control(commandKey, new MarketControl(action, operator)));
+		return control(action, key, commandKey, new MarketControl(action, operator));
+	}
+
+	private TransitionResponse control(MarketControl.Action action, UUID key, CommandKey commandKey,
+			MarketControl command) {
+		MarketTransition result = CommandCalls.await(key, timeout, () -> engine.control(commandKey, command));
 		return switch (result.status()) {
-			case APPLIED -> new TransitionResponse(result.state(), Long.toString(result.commandSequence()));
+			case APPLIED -> new TransitionResponse(result.state(), Long.toString(result.commandSequence()),
+					result.closesAt());
 			case NOT_ALLOWED -> throw notAllowed(action, result.state(), result.commandSequence());
 			case NOT_SET_UP -> throw notSetUp();
 		};

@@ -55,7 +55,7 @@ function both(server = signedIn('operator', BOTH)) {
   return server
     .on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'SETUP', simulationId: 's', openedAt: null, closedAt: null, commandSequence: '1' },
+      json: { state: 'SETUP', simulationId: 's', openedAt: null, closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '1' },
     })
     .on('GET /api/v1/instruments', { status: 200, json: INSTRUMENTS })
     .on('GET /api/v1/admin/accounts', { status: 200, json: { accounts: [], nextCursor: null } })

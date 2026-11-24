@@ -1,5 +1,6 @@
 package com.mia_princz.mse.execution.trading.application;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -82,6 +83,12 @@ public final class TradingEngine {
 	/** The audit action of starting a simulation. */
 	static final String START = "SIMULATION_START";
 
+	/**
+	 * What a close the exchange makes at the market's close time is recorded as: its audit action, and the route of its
+	 * stored answer, which no request ever comes by.
+	 */
+	static final String SCHEDULED_CLOSE = "MARKET_CLOSE_SCHEDULED";
+
 	/** How many times a later part of a close's sweep is tried before the writer gives the close up. */
 	static final int SWEEP_ATTEMPTS = 3;
 
@@ -126,6 +133,8 @@ public final class TradingEngine {
 	private final int closeChunkOrders;
 
 	private final RetryPause retryPause;
+
+	private final CloseSchedule closeSchedule;
 
 	private final Map<UUID, OrderBook> books = new HashMap<>();
 
@@ -173,6 +182,13 @@ public final class TradingEngine {
 
 	/** Whether the market this engine holds has closed, as last committed; written by the writer only. */
 	private volatile boolean closed;
+
+	/**
+	 * When the exchange closes the market this engine holds by itself, as last committed; null for none. Read and
+	 * written by the writer, and by startup before any command: from this time on trading is refused as for a closed
+	 * market, whether or not the close has run yet.
+	 */
+	private Instant closesAt;
 
 	/**
 	 * The close this engine could not finish, once there is one: set where the writer halts for it, or where startup
@@ -236,6 +252,15 @@ public final class TradingEngine {
 	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
 			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings, LongSupplier nanoTime,
 			RestingOrders resting, int closeChunkOrders, RetryPause retryPause, SimulationChanges simulationChanges) {
+		this(store, transactions, writer, clock, botCredentials, accountChanges, timings, nanoTime, resting,
+				closeChunkOrders, retryPause, simulationChanges, CloseSchedule.NONE);
+	}
+
+	/** {@code closeSchedule} hears when the market is to be closed by the exchange itself, and when no longer. */
+	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
+			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings, LongSupplier nanoTime,
+			RestingOrders resting, int closeChunkOrders, RetryPause retryPause, SimulationChanges simulationChanges,
+			CloseSchedule closeSchedule) {
 		if (closeChunkOrders < 1) {
 			throw new IllegalArgumentException(
 					"A close cancels at least one order per transaction: " + closeChunkOrders);
@@ -250,6 +275,7 @@ public final class TradingEngine {
 		this.botCredentials = botCredentials;
 		this.accountChanges = accountChanges;
 		this.simulationChanges = simulationChanges;
+		this.closeSchedule = closeSchedule;
 		this.timings = timings;
 		this.nanoTime = nanoTime;
 	}
@@ -262,6 +288,10 @@ public final class TradingEngine {
 	 * by it, as closed. A closed market that still has resting orders was closed by a process that stopped before it
 	 * had cancelled them all; they are cancelled here, before any command is admitted. That process may also have
 	 * stopped after its last order and before it removed the bot token files, so those are removed here too.
+	 * <p>
+	 * A market whose close time passed while no process was running is closed here, before any command is admitted, by
+	 * the same close and key the schedule sends, so a close that had already run is answered from its key and nothing
+	 * is closed twice. A close time still to come is armed once commands are admitted.
 	 * <p>
 	 * Whatever this engine held before is replaced, not added to: started again in place after the current simulation
 	 * has changed, it keeps no book, instrument or tape of the one it held, and says so to whoever keeps something
@@ -298,9 +328,11 @@ public final class TradingEngine {
 				throw new ReconciliationException(problems);
 			}
 			Set<UUID> trading = store.tradingAccounts(simulation);
+			Instant closing = store.closesAt(simulation).orElse(null);
 			simulationId = simulation;
 			writerEpoch = epoch;
 			closed = "CLOSED".equals(market.state());
+			closesAt = closing;
 			books.clear();
 			books.putAll(rebuilt);
 			catalogue.clear();
@@ -314,6 +346,9 @@ public final class TradingEngine {
 		if (previous != null && !previous.equals(simulationId)) {
 			tellSimulationChanged(previous);
 		}
+		if (closeTimePassed()) {
+			closeAtStartup();
+		}
 		if (closed) {
 			if (restingOrders() > 0) {
 				finishInterruptedClose();
@@ -323,6 +358,39 @@ public final class TradingEngine {
 			discardBotTokens();
 		}
 		started = true;
+		armCloseSchedule();
+	}
+
+	/**
+	 * Closes a market whose close time passed while no process was running, on the thread that starts the engine, as
+	 * {@link #finishInterruptedClose} finishes a sweep: the books are rebuilt and reconciled, and no command runs yet.
+	 * Anything that fails here fails startup, where on a running writer it would halt it.
+	 */
+	private void closeAtStartup() {
+		Instant at = closesAt;
+		MarketClosing result;
+		try {
+			result = processScheduledClose(simulationId, at).orElseThrow(
+					() -> new IllegalStateException("The market's close time has passed, and it was not closed"));
+		}
+		catch (RuntimeException | Error ex) {
+			throw new IllegalStateException("The market's close time had passed, and it could not be closed at startup",
+					ex);
+		}
+		LOG.info("Closed the market at startup: its close time, {}, passed while the exchange was not running; the "
+				+ "close at sequence {} cancelled {} resting orders and ended {} bot runs", at, result.commandSequence(),
+				result.canceledOrders(), result.endedRuns());
+	}
+
+	/** Tells the schedule what the exchange is to close by itself now, if anything. */
+	private void armCloseSchedule() {
+		closeSchedule.arm(simulationId, closed ? null : closesAt);
+	}
+
+	/** Whether the market has not closed and its close time has come, by the service's clock. In memory only. */
+	private boolean closeTimePassed() {
+		Instant at = closesAt;
+		return at != null && !closed && !clock.instant().isBefore(at);
 	}
 
 	/**
@@ -431,9 +499,14 @@ public final class TradingEngine {
 		if (command.action() != MarketControl.Action.CLOSE) {
 			throw new IllegalArgumentException("Not a close: " + command.action());
 		}
-		CompletableFuture<MarketClosing> submitted;
+		return submitClose(() -> processClose(key, command, false));
+	}
+
+	/** A close on the writer: one sent to, or queued behind, a close that could not finish fails with that close. */
+	private <T> CompletableFuture<T> submitClose(Callable<T> close) {
+		CompletableFuture<T> submitted;
 		try {
-			submitted = submit("close", () -> processClose(key, command));
+			submitted = submit("close", close);
 		}
 		catch (CommandWriter.WriterStoppedException ex) {
 			// Read after the refusal: an unfinished close is kept before its writer stops admitting.
@@ -443,7 +516,7 @@ public final class TradingEngine {
 			}
 			return CompletableFuture.failedFuture(unfinished);
 		}
-		CompletableFuture<MarketClosing> answer = new CompletableFuture<>();
+		CompletableFuture<T> answer = new CompletableFuture<>();
 		submitted.whenComplete((result, failure) -> {
 			CloseUnfinishedException unfinished = unfinishedClose;
 			if (failure == null) {
@@ -457,6 +530,22 @@ public final class TradingEngine {
 			}
 		});
 		return answer;
+	}
+
+	/**
+	 * Closes the market because its close time has come, as the schedule asks once that time is reached: the same close
+	 * as an operator's, recorded under the operator who opened the market, with an audit action of its own. Its key is
+	 * made from the simulation and the close time, so asking twice, or asking after a restart that made the close
+	 * already, is the same command and closes once. Nothing is closed, and the answer is empty, unless
+	 * {@code simulation} is the one this engine writes for, its close time is {@code closesAt}, that time has come, and
+	 * the market has not closed: a close an operator made first stands, and a close time other than the one the
+	 * schedule was armed with is not this close's.
+	 * <p>
+	 * Decided on the writer, so nothing comes between that check and the close. A close that cannot finish halts the
+	 * writer exactly as an operator's does.
+	 */
+	public CompletableFuture<Optional<MarketClosing>> closeOnSchedule(UUID simulation, Instant closesAt) {
+		return submitClose(() -> processScheduledClose(simulation, closesAt));
 	}
 
 	/**
@@ -1134,6 +1223,8 @@ public final class TradingEngine {
 			LOG.info("Simulation {} started, named '{}'; the simulation before it: {}", started.simulationId(),
 					started.result().name(), previous == null ? "none" : previous);
 			tellSimulationChanged(previous);
+			// Nothing of the closed simulation is to be closed, and the new one has no close time until it opens.
+			armCloseSchedule();
 		}
 		return started.result();
 	}
@@ -1209,6 +1300,7 @@ public final class TradingEngine {
 		accounts.clear();
 		writerEpoch = epoch;
 		simulationId = simulation;
+		closesAt = null;
 		closed = false;
 	}
 
@@ -1651,7 +1743,8 @@ public final class TradingEngine {
 		List<UUID> instruments = command.instrumentIds().isEmpty()
 				? store.instruments(simulationId).stream().map(TradingStore.Instrument::id).toList()
 				: command.instrumentIds();
-		if ("CLOSED".equals(market.state())) {
+		if ("CLOSED".equals(market.state()) || closesAt != null && !now.isBefore(closesAt)) {
+			// Past its close time the market closes at any moment, and a run would start only to be ended.
 			refusal = BotRunResult.Status.MARKET_CLOSED;
 		}
 		else if (!"OPEN".equals(market.state()) && !"HALTED".equals(market.state())) {
@@ -1728,37 +1821,56 @@ public final class TradingEngine {
 		return remember(key, result.httpStatus(), result);
 	}
 
+	/** A transition's answer and, when this transaction opened the market with a duration, its close time. */
+	private record Controlled(MarketTransition result, Instant closesAt) {
+	}
+
 	private MarketTransition processControl(CommandKey key, MarketControl command) {
 		if (simulationId == null) {
 			return MarketTransition.notSetUp();
 		}
+		Controlled controlled;
 		try {
-			return timed("other", () -> controlInTransaction(key, command));
+			controlled = timed("other", () -> controlInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
+		if (controlled.closesAt() != null) {
+			closesAt = controlled.closesAt();
+			armCloseSchedule();
+			LOG.info("The market opened at sequence {}; the exchange closes it at {}",
+					controlled.result().commandSequence(), closesAt);
+		}
+		return controlled.result();
 	}
 
-	private MarketTransition controlInTransaction(CommandKey key, MarketControl command) {
+	private Controlled controlInTransaction(CommandKey key, MarketControl command) {
 		Optional<MarketTransition> elsewhere = answeredInAnotherSimulation(key, MarketTransition.class);
 		if (elsewhere.isPresent()) {
-			return elsewhere.get();
+			return new Controlled(elsewhere.get(), null);
 		}
 		TradingStore.Opening<MarketTransition> opening = open(key, MarketTransition.class);
 		Market market = opening.market();
 		if (opening.prior().isPresent()) {
-			return replay(key, opening.prior().get());
+			return new Controlled(replay(key, opening.prior().get()), null);
 		}
 		long sequence = opening.sequence();
 		MarketControl.Action action = command.action();
 		if (!action.allowedFrom(market.state())) {
 			store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "NOT_ALLOWED",
 					key.idempotencyKey(), sequence);
-			return remember(key, 409,
-					new MarketTransition(MarketTransition.Status.NOT_ALLOWED, market.state(), sequence));
+			return new Controlled(remember(key, 409,
+					new MarketTransition(MarketTransition.Status.NOT_ALLOWED, market.state(), sequence)), null);
 		}
 		store.updateMarketState(simulationId, action.to());
+		Instant closing = null;
+		if (command.duration() != null) {
+			// The service's clock, which the close and the refusals before it read too. To the microsecond, as the
+			// database keeps it, so the close's key is the same after a restart.
+			closing = clock.instant().truncatedTo(ChronoUnit.MICROS).plus(command.duration());
+			store.scheduleClose(simulationId, closing);
+		}
 		// Every instrument's public state carries the venue state, so each one gets a snapshot at this sequence.
 		Market changed = market.withState(action.to());
 		for (TradingStore.Instrument instrument : listed()) {
@@ -1766,7 +1878,8 @@ public final class TradingEngine {
 		}
 		store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "APPLIED", key.idempotencyKey(),
 				sequence);
-		return remember(key, 200, new MarketTransition(MarketTransition.Status.APPLIED, action.to(), sequence));
+		return new Controlled(remember(key, 200,
+				new MarketTransition(MarketTransition.Status.APPLIED, action.to(), sequence, closing)), closing);
 	}
 
 	/**
@@ -1835,7 +1948,30 @@ public final class TradingEngine {
 
 	}
 
-	private MarketClosing processClose(CommandKey key, MarketControl command) {
+	/**
+	 * The close the schedule asks for, if it is still to be made: see {@link #closeOnSchedule}. Its key is the operator
+	 * who opened the market and a name-based UUID of the simulation and the close time, so the same close time always
+	 * gives the same key, and another close time, were it ever changed, another key.
+	 */
+	private Optional<MarketClosing> processScheduledClose(UUID simulation, Instant at) {
+		if (simulationId == null || !simulationId.equals(simulation) || !at.equals(closesAt) || !closeTimePassed()) {
+			return Optional.empty();
+		}
+		UUID opener = transactions.inTransaction(() -> store.openedBy(simulationId))
+			.orElseThrow(() -> new IllegalStateException(
+					"Simulation " + simulationId + " has a close time, and no opening of it is on record"));
+		CommandKey key = new CommandKey(opener, scheduledCloseKey(simulationId, at), SCHEDULED_CLOSE, new byte[32]);
+		LOG.info("The market's close time, {}, has come; closing it under key {}", at, key.idempotencyKey());
+		return Optional.of(processClose(key, new MarketControl(MarketControl.Action.CLOSE, opener), true));
+	}
+
+	/** The idempotency key of the close the exchange makes at a simulation's close time. */
+	static UUID scheduledCloseKey(UUID simulation, Instant closesAt) {
+		return UUID.nameUUIDFromBytes(("close:" + simulation + ":" + closesAt).getBytes(StandardCharsets.UTF_8));
+	}
+
+	/** {@code scheduled} for the close the exchange makes at the market's close time, false for an operator's. */
+	private MarketClosing processClose(CommandKey key, MarketControl command, boolean scheduled) {
 		if (simulationId == null) {
 			return MarketClosing.notSetUp();
 		}
@@ -1843,7 +1979,7 @@ public final class TradingEngine {
 		Closing closing;
 		try {
 			long start = nanoTime.getAsLong();
-			closing = timed("close", () -> closeInTransaction(key, command));
+			closing = timed("close", () -> closeInTransaction(key, command, scheduled));
 			times.add(nanoTime.getAsLong() - start);
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
@@ -1857,6 +1993,7 @@ public final class TradingEngine {
 		if (closing.swept() != null) {
 			// Committed: the market is closed for good, whatever becomes of the orders that still rest.
 			closed = true;
+			armCloseSchedule();
 			try {
 				applySweep(closing.swept());
 				finishSweep(command.actorUserId(), times);
@@ -1892,7 +2029,7 @@ public final class TradingEngine {
 	 * orders may go on after it, and the holds of those not yet cancelled are still in place, so the market reconciles
 	 * between the parts.
 	 */
-	private Closing closeInTransaction(CommandKey key, MarketControl command) {
+	private Closing closeInTransaction(CommandKey key, MarketControl command, boolean scheduled) {
 		Optional<MarketClosing> elsewhere = answeredInAnotherSimulation(key, MarketClosing.class);
 		if (elsewhere.isPresent()) {
 			return new Closing(elsewhere.get(), null);
@@ -1904,9 +2041,10 @@ public final class TradingEngine {
 		}
 		long sequence = opening.sequence();
 		MarketControl.Action action = command.action();
+		String audited = scheduled ? SCHEDULED_CLOSE : action.auditName();
 		if (!action.allowedFrom(market.state())) {
-			store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "NOT_ALLOWED",
-					key.idempotencyKey(), sequence);
+			store.insertAudit(simulationId, command.actorUserId(), audited, "NOT_ALLOWED", key.idempotencyKey(),
+					sequence);
 			return new Closing(remember(key, 409,
 					new MarketClosing(MarketClosing.Status.NOT_ALLOWED, market.state(), sequence, 0, 0)), null);
 		}
@@ -1918,8 +2056,7 @@ public final class TradingEngine {
 		int resting = restingOrders();
 		// Every instrument's public state carries the venue state, so each gets a snapshot at this sequence: its last.
 		Swept swept = sweep(market.withState(action.to()), sequence, true);
-		store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "APPLIED", key.idempotencyKey(),
-				sequence);
+		store.insertAudit(simulationId, command.actorUserId(), audited, "APPLIED", key.idempotencyKey(), sequence);
 		return new Closing(remember(key, 200,
 				new MarketClosing(MarketClosing.Status.CLOSED, action.to(), sequence, resting, endedRuns)), swept);
 	}
@@ -2135,9 +2272,12 @@ public final class TradingEngine {
 	 * and its plan joins them once its rows are collected.
 	 */
 	private Ran placeInRun(RunState run, Market market, CommandKey key, PlaceOrder command, long sequence) {
-		if (!"OPEN".equals(market.state())) {
+		// From its close time on a market is as good as closed, before the close has run: nothing trades in between.
+		// Compared in memory, with no statement.
+		boolean closing = closesAt != null && !clock.instant().isBefore(closesAt);
+		if (!"OPEN".equals(market.state()) || closing) {
 			// A closed market never opens again, so its refusal has its own code: nothing is gained by trying later.
-			return reject(run, key, command, "CLOSED".equals(market.state()) ? RejectionCode.MARKET_CLOSED
+			return reject(run, key, command, closing || "CLOSED".equals(market.state()) ? RejectionCode.MARKET_CLOSED
 					: RejectionCode.MARKET_NOT_OPEN, sequence);
 		}
 		long hold = Settlement.holdAmount(command.side(), command.bound(), command.quantity().shares());

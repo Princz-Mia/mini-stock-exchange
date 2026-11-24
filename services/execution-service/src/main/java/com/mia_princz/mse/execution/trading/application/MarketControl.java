@@ -1,11 +1,15 @@
 package com.mia_princz.mse.execution.trading.application;
 
+import java.time.Duration;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
-/** An operator's market transition, sequenced on the writer like any trading command. */
-public record MarketControl(Action action, UUID actorUserId) {
+/**
+ * An operator's market transition, sequenced on the writer like any trading command. An opening may carry a duration,
+ * after which the exchange closes the market itself; null for a market that stays open until an operator closes it.
+ */
+public record MarketControl(Action action, UUID actorUserId, Duration duration) {
 
 	/**
 	 * SETUP → OPEN ↔ HALTED → CLOSED. Opening, halting and resuming are each legal from one state; closing is legal
@@ -44,6 +48,15 @@ public record MarketControl(Action action, UUID actorUserId) {
 	public MarketControl {
 		Objects.requireNonNull(action, "action");
 		Objects.requireNonNull(actorUserId, "actorUserId");
+		if (duration != null && (action != Action.OPEN || duration.isNegative() || duration.isZero())) {
+			throw new IllegalArgumentException("Only an opening has a duration, and a positive one: " + action + " "
+					+ duration);
+		}
+	}
+
+	/** A transition with no duration: every one but an opening that sets a close time. */
+	public MarketControl(Action action, UUID actorUserId) {
+		this(action, actorUserId, null);
 	}
 
 }

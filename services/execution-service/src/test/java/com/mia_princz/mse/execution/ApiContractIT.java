@@ -213,6 +213,13 @@ class ApiContractIT {
 				"POST", simulations, 409);
 		check(anonymous.get("/api/v1/market"), "GET", "/api/v1/market", 200);
 
+		// The new simulation opened for a set time: a duration out of range, the opening, and the status with its time.
+		check(operator.post(open, "{\"durationMinutes\":4}", "Idempotency-Key", UUID.randomUUID().toString()), "POST",
+				open, 400);
+		check(operator.post(open, "{\"durationMinutes\":90}", "Idempotency-Key", UUID.randomUUID().toString()), "POST",
+				open, 200);
+		check(anonymous.get("/api/v1/market"), "GET", "/api/v1/market", 200);
+
 		trader.csrfToken = null;
 		check(trader.post("/api/v1/auth/logout", ""), "POST", "/api/v1/auth/logout", 403);
 		trader.fetchCsrfToken();

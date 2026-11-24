@@ -18,7 +18,9 @@ function status(simulationId: string | null, state: MarketStatus['state'] = 'OPE
     simulationId,
     name: null,
     openedAt: '2026-11-05T09:30:00Z',
+    closesAt: null,
     closedAt: state === 'CLOSED' ? '2026-11-05T16:00:00Z' : null,
+    closedOnSchedule: false,
     commandSequence: '7',
   };
 }

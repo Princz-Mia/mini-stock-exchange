@@ -60,7 +60,9 @@ const CLOSED_MARKET = {
   state: 'CLOSED',
   simulationId: 's',
   openedAt: '2026-11-04T09:00:00Z',
+  closesAt: null,
   closedAt: '2026-11-04T17:00:00Z',
+  closedOnSchedule: false,
   commandSequence: '12',
 };
 
@@ -242,7 +244,7 @@ describe('portfolio page', () => {
       .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
       .on('GET /api/v1/market', {
         status: 200,
-        json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
+        json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '9' },
       })
       .on('GET /api/v1/instruments', {
         status: 200,
@@ -454,7 +456,7 @@ describe('portfolio page', () => {
       .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
       .on('GET /api/v1/market', {
         status: 200,
-        json: { state: 'HALTED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
+        json: { state: 'HALTED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '9' },
       })
       .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
       .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
@@ -510,7 +512,7 @@ describe('portfolio page', () => {
     expect(await screen.findByRole('table', { name: 'Executions' })).toBeInTheDocument();
 
     // The next simulation has started, and this trader has no account in it yet.
-    status = { state: 'SETUP', simulationId: 't', name: 'Thursday seminar', openedAt: null, closedAt: null, commandSequence: '1' };
+    status = { state: 'SETUP', simulationId: 't', name: 'Thursday seminar', openedAt: null, closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '1' };
     funded = 'none';
     await client.invalidateQueries({ queryKey: ['market'] });
     expect(await screen.findByRole('alert')).toHaveTextContent(
@@ -583,7 +585,7 @@ describe('portfolio page', () => {
       // The next simulation, and this trader funded in it: a new account, whose list the closed one's cursor and symbol
       // would refuse or narrow to nothing.
       const before = server.requests.length;
-      status = { state: 'OPEN', simulationId: 't', name: 'Thursday seminar', openedAt: '2026-11-05T09:00:00Z', closedAt: null, commandSequence: '4' };
+      status = { state: 'OPEN', simulationId: 't', name: 'Thursday seminar', openedAt: '2026-11-05T09:00:00Z', closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '4' };
       next = true;
       await client.invalidateQueries({ queryKey: ['market'] });
 

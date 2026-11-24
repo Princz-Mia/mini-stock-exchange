@@ -84,7 +84,7 @@ describe('signing in', () => {
       .on('GET /api/v1/me', { status: 200, json: { username: 'trader', roles: ['TRADER'] } })
       .on('GET /api/v1/market', () => ({
         status: 200,
-        json: { state: 'SETUP', simulationId: 's', name, openedAt: null, closedAt: null, commandSequence: '1' },
+        json: { state: 'SETUP', simulationId: 's', name, openedAt: null, closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '1' },
       }))
       .on('GET /api/v1/instruments', { status: 200, json: INSTRUMENTS });
     const { unmount } = openAt('/terminal');
@@ -157,7 +157,7 @@ describe('signing in', () => {
     signedIn('operator', ['OPERATOR'])
       .on('GET /api/v1/market', {
         status: 200,
-        json: { state: 'NOT_SET_UP', simulationId: null, openedAt: null, closedAt: null, commandSequence: null },
+        json: { state: 'NOT_SET_UP', simulationId: null, openedAt: null, closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: null },
       })
       .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
       .on('GET /api/v1/admin/accounts', { status: 200, json: { accounts: [], nextCursor: null } });

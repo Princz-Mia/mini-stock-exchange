@@ -144,11 +144,26 @@ public interface TradingStore {
 	 */
 	void closeMarket(UUID simulationId, Instant closedAt);
 
-	/** The close that closed a market, as its audit row has it: who sent it, and its sequence. */
+	/**
+	 * Sets when the exchange closes the market itself, in the transaction that opens it. The database refuses this for
+	 * a market that has not opened.
+	 */
+	void scheduleClose(UUID simulationId, Instant closesAt);
+
+	/** When the exchange closes the market itself; empty for a market opened without a duration, or not opened. */
+	Optional<Instant> closesAt(UUID simulationId);
+
+	/** The operator whose opening of the market applied, as its audit row has it. Empty if it never opened. */
+	Optional<UUID> openedBy(UUID simulationId);
+
+	/**
+	 * The close that closed a market, as its audit row has it: who it is recorded under, and its sequence. That is the
+	 * operator who sent it or, for a close the exchange made at the market's close time, the one who opened it.
+	 */
 	record AppliedClose(UUID actorUserId, long commandSequence) {
 	}
 
-	/** The market's applied close. Empty if it was never closed by a command. */
+	/** The market's applied close, sent or scheduled. Empty if it was never closed by a command. */
 	Optional<AppliedClose> appliedClose(UUID simulationId);
 
 	/** Records an operator action and its outcome. The correlation ID is the command's idempotency key. */
