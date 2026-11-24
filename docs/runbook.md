@@ -148,6 +148,8 @@ The closed simulation stays in the database as it closed, and nothing can write 
 3. provision the bots. They are new accounts with new tokens; the closed simulation's tokens stay revoked and its token files are gone;
 4. open the market, and start a bot run.
 
+The compatibility gate rehearses these steps through the API, after closing a market with orders resting and a bot run trading.
+
 The demo seed does none of this for a simulation an operator started: it logs one line saying so and stops. It sets up only a market with no name, which is how it makes its own on a fresh stack.
 
 The start's answers:
