@@ -158,7 +158,9 @@ export function PortfolioPage() {
   // The instruments to filter by, by symbol; the terminal reads the same list, of the same simulation.
   const market = useMarketStatus();
   const instruments = useInstruments(market);
-  // A close releases what open orders had reserved and cancels them: read at once, as the terminal does.
+  // A close releases what open orders had reserved and cancels them: read at once, as the terminal does. In another
+  // simulation the account is emptied first, so the page waits for the new one's, and its histories start again from
+  // their first pages.
   useRefreshOnMarketChange(market.data, PRIVATE_QUERIES);
   const symbolFilter: Filter = {
     name: 'instrumentId',
@@ -212,7 +214,7 @@ export function PortfolioPage() {
     return (
       <p role="alert" className="page-status">
         {noAccount
-          ? 'You have no trading account yet. An operator creates accounts when the market is set up.'
+          ? 'You have no trading account in this market yet. An operator creates accounts while a market is being set up.'
           : 'Your portfolio is not reachable right now.'}
       </p>
     );

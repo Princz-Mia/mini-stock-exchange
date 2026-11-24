@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef } from 'react';
+import { useLayoutEffect, useState } from 'react';
 
 import { api, pollEvery } from '../api/client';
 import type { Feed, Instrument, Instruments, MarketStatus } from '../api/types';
@@ -80,26 +80,41 @@ export function useInstruments(market: StatusRead, options: { refetchInterval?: 
   };
 }
 
+/** Stands for "no simulation" where one is compared with another. */
+const NO_SIMULATION = '';
+
 /**
- * Reads the given queries again when the market on screen becomes another one: when it closes, or when the exchange
- * names another simulation. Whoever closed it, here or elsewhere, what the page shows of the old state would otherwise
- * stay until each query's own next poll, or for good where there is none. Nothing is read again on the first status:
- * the page's queries are being read for the first time then.
+ * Follows the market on screen as it becomes another one: when it closes, or when the exchange names another
+ * simulation. Whoever closed it or started the next, here or elsewhere, what the page shows of the old state would
+ * otherwise stay until each query's own next poll, or for good where there is none.
+ *
+ * - A close: the given queries are read again, and what they showed stays on screen meanwhile. It is the same market.
+ * - Another simulation: the given queries are emptied before they are read again, so nothing of the simulation before
+ *   is shown as the new one's while its own is on the way. The number returned goes up by one, for a page to key what
+ *   it draws by: everything typed, answered or paged through in the simulation before goes with it.
+ *
+ * The first simulation of a market that had none is no other market: the page that created it goes on. Nothing is
+ * read again on the first status either, as the page's queries are being read for the first time then.
  */
-export function useRefreshOnMarketChange(market: MarketStatus | undefined, queryKeys: readonly (readonly string[])[]) {
+export function useRefreshOnMarketChange(market: MarketStatus | undefined, queryKeys: readonly (readonly string[])[]): number {
   const client = useQueryClient();
-  const which = market === undefined ? undefined : `${market.simulationId ?? ''}|${market.state === 'CLOSED'}`;
-  const seen = useRef(which);
-  useEffect(() => {
-    if (which === undefined || which === seen.current) {
+  const simulation = market === undefined ? undefined : (market.simulationId ?? NO_SIMULATION);
+  const closed = market?.state === 'CLOSED';
+  const [shown, setShown] = useState(simulation === undefined ? undefined : { simulation, closed, generation: 0 });
+  useLayoutEffect(() => {
+    if (simulation === undefined || (shown !== undefined && shown.simulation === simulation && shown.closed === closed)) {
       return;
     }
-    const first = seen.current === undefined;
-    seen.current = which;
-    if (!first) {
+    const another = shown !== undefined && shown.simulation !== NO_SIMULATION && shown.simulation !== simulation;
+    if (shown !== undefined) {
       for (const queryKey of queryKeys) {
-        void client.invalidateQueries({ queryKey });
+        void (another ? client.resetQueries({ queryKey }) : client.invalidateQueries({ queryKey }));
       }
     }
-  }, [client, which, queryKeys]);
+    // A layout effect, so that the queries are emptied and the page keyed anew before the browser paints: no frame
+    // shows the new market's page over the lists of the one before.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the render it causes is the point, before paint
+    setShown({ simulation, closed, generation: (shown?.generation ?? 0) + (another ? 1 : 0) });
+  }, [client, simulation, closed, shown, queryKeys]);
+  return shown?.generation ?? 0;
 }

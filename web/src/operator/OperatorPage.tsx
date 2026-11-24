@@ -1,3 +1,6 @@
+import { useEffect, useRef } from 'react';
+import { useSearchParams } from 'react-router';
+
 import { pollEvery } from '../api/client';
 import { useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
 import { groupInteger, utcDateTime } from '../format';
@@ -12,8 +15,9 @@ import type { CommandOutcome } from './useCommand';
 
 /**
  * What this page shows of one simulation and no other. All of it is read again when the market closes, whoever closed
- * it, and when the exchange names another simulation: a close ends the runs and revokes the bots' tokens, and each of
- * these lists would otherwise show the market as it was until its own next poll, or for good where it has none.
+ * it: a close ends the runs and revokes the bots' tokens, and each of these lists would otherwise show the market as it
+ * was until its own next poll, or for good where it has none. When the exchange names another simulation, all of it is
+ * dropped first: none of it is the new market's.
  */
 const PER_SIMULATION = [['instruments'], ['bot-runs'], ['bots'], ['accounts'], ['traders'], ['admin-health']] as const;
 
@@ -26,7 +30,25 @@ const PER_SIMULATION = [['instruments'], ['bot-runs'], ['bots'], ['accounts'], [
  */
 export function OperatorPage() {
   const market = useMarketStatus();
-  useRefreshOnMarketChange(market.data, PER_SIMULATION);
+  // Goes up when the exchange names another simulation. The page is drawn anew then, so that nothing typed, answered
+  // or paged through in the simulation before is left on the page of the new one.
+  const generation = useRefreshOnMarketChange(market.data, PER_SIMULATION);
+  // The runs ticked for a comparison are in the address, and are the simulation's they were ticked in.
+  const [, setParams] = useSearchParams();
+  const drawn = useRef(generation);
+  useEffect(() => {
+    if (drawn.current !== generation) {
+      drawn.current = generation;
+      setParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          next.delete('compare');
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [generation, setParams]);
   // This market's instruments only: the list is asked for by the simulation the status names.
   const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
 
@@ -47,7 +69,7 @@ export function OperatorPage() {
   const closed = market.data.state === 'CLOSED';
 
   return (
-    <div className="operator">
+    <div className="operator" key={generation}>
       <div className="operator-side">
         {market.isError && (
           <p role="alert" className="form-error">

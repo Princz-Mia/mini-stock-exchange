@@ -249,6 +249,61 @@ describe('reading again when the market changes', () => {
     await waitFor(() => expect(reads).toEqual({ orders: 4, portfolio: 4, other: 1 }));
   });
 
+  it('drops what the simulation before showed and counts a generation, but keeps a closed market on screen', async () => {
+    const { wrapper } = withClient();
+    let reads = 0;
+    // Each read of the list answers with the simulation the status named when it was asked.
+    let named = 'first';
+    const seen: { generation: number; orders: string | undefined }[] = [];
+    const { result, rerender } = renderHook(
+      ({ market }) => {
+        const orders = useQuery({ queryKey: ['orders'], queryFn: () => new Promise<string>((resolve) => {
+          reads += 1;
+          const answer = named;
+          setTimeout(() => resolve(answer), 5);
+        }) });
+        const generation = useRefreshOnMarketChange(market, KEYS);
+        seen.push({ generation, orders: orders.data });
+        return { generation, orders: orders.data };
+      },
+      { wrapper, initialProps: { market: status(FIRST) as MarketStatus | undefined } },
+    );
+    await waitFor(() => expect(result.current).toEqual({ generation: 0, orders: 'first' }));
+
+    // A close is the same market: what it showed stays while it is read again, and nothing is drawn anew.
+    seen.length = 0;
+    named = 'first, closed';
+    rerender({ market: status(FIRST, 'CLOSED') });
+    await waitFor(() => expect(result.current).toEqual({ generation: 0, orders: 'first, closed' }));
+    expect(seen.every((each) => each.orders !== undefined)).toBe(true);
+
+    // Another simulation: nothing of the one before is shown with the new generation while its own is read.
+    seen.length = 0;
+    named = 'second';
+    rerender({ market: status(SECOND, 'SETUP') });
+    await waitFor(() => expect(result.current).toEqual({ generation: 1, orders: 'second' }));
+    expect(seen.filter((each) => each.generation === 1).map((each) => each.orders)).not.toContain('first, closed');
+    expect(reads).toBe(3);
+  });
+
+  it('goes on with the same page when the first simulation of a market that had none starts', async () => {
+    const { wrapper } = withClient();
+    const { result, rerender } = renderHook(
+      ({ market }) => {
+        const orders = useQuery({ queryKey: ['orders'], queryFn: () => 'kept' });
+        return { generation: useRefreshOnMarketChange(market, KEYS), orders: orders.data };
+      },
+      { wrapper, initialProps: { market: status(null, 'NOT_SET_UP') as MarketStatus | undefined } },
+    );
+    await waitFor(() => expect(result.current.orders).toBe('kept'));
+    rerender({ market: status(FIRST, 'SETUP') });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(result.current).toEqual({ generation: 0, orders: 'kept' });
+    // The next one is another simulation, as any after it.
+    rerender({ market: status(SECOND, 'SETUP') });
+    await waitFor(() => expect(result.current.generation).toBe(1));
+  });
+
   it('reads nothing again for a page that opens on a market already closed', async () => {
     const { wrapper, reads, useWatched } = page();
     renderHook(() => useWatched(status(FIRST, 'CLOSED')), { wrapper });

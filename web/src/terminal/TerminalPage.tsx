@@ -48,7 +48,9 @@ export function TerminalPage() {
   const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
   const paused = market.data === undefined || market.data.state === 'OPEN' ? null : PAUSED[market.data.state];
   // A close cancels every open order and releases what it reserved. The trader's own lists are read again when the
-  // status says so, without waiting for their next poll or for the account's own notification.
+  // status says so, without waiting for their next poll or for the account's own notification. In another simulation
+  // none of them is the trader's any more: they are dropped, and read for that one. Nothing else of the page is kept
+  // either, as it waits for the new simulation's instruments.
   useRefreshOnMarketChange(market.data, PRIVATE_QUERIES);
   const orders = useQuery({
     queryKey: ['orders', 'active'],
@@ -118,9 +120,11 @@ export function TerminalPage() {
       />
       {selected === null ? (
         <p className="muted terminal-empty" role="status">
-          {asked === null
-            ? 'This market has no instruments yet, so there is nothing to trade.'
-            : 'The instrument in this address is not part of this market, and the market has no instruments yet.'}
+          {asked !== null
+            ? 'The instrument in this address is not part of this market, and the market has no instruments yet.'
+            : market.data?.state === 'SETUP'
+              ? 'The market is being set up and has no instruments yet, so there is nothing to trade.'
+              : 'This market has no instruments yet, so there is nothing to trade.'}
         </p>
       ) : (
         <>
@@ -194,11 +198,12 @@ function NoAccount({ operator }: { operator: boolean }) {
       <p role="status">
         {operator ? (
           <>
-            You have no trading account yet. While the market is set up, give yourself one under Accounts on the{' '}
+            You have no trading account in this market yet. While a market is being set up, give yourself one under
+            Accounts on the{' '}
             <Link to="/operator">operator screen</Link>.
           </>
         ) : (
-          'You have no trading account yet. An operator creates accounts when the market is set up.'
+          'You have no trading account in this market yet. An operator creates accounts while a market is being set up.'
         )}
       </p>
     </section>

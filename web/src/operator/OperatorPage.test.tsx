@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resetSession } from '../api/client';
@@ -3082,5 +3082,116 @@ describe('closing the market on the operator screen', () => {
     expect(await screen.findByText('Trading is halted. Cancels still work.')).toBeInTheDocument();
     await waitFor(async () => expect(await button('Close the market')).toBeEnabled());
     expect(closes(server)).toHaveLength(0);
+  });
+});
+
+describe('the operator screen when the exchange names another simulation', () => {
+  beforeEach(() => resetSession());
+
+  const NEXT = '10000000-0000-0000-0000-000000000002';
+  /** The address the page is at, so what it keeps there can be read. */
+  function Address() {
+    return <span data-testid="address">{useLocation().search}</span>;
+  }
+
+  it('shows the new one at once, with nothing of the closed market left on the page', async () => {
+    const { server, state } = exchange('OPEN');
+    const finished = (n: number) =>
+      finishedRun({ runId: `20000000-0000-0000-0000-00000000000${n}`, startedAt: `2026-11-06T0${n}:00:00Z` });
+    state.runs = [finished(2), finished(1)];
+    state.tagged = { marketMakers: 2, noise: 3, momentum: 0 };
+    const account = (username: string) => ({
+      accountId: username,
+      username,
+      kind: 'TRADER',
+      cash: '1000.00',
+      holdings: [],
+      token: null,
+      strategy: null,
+    });
+    let accounts = [account('alice')];
+    server
+      .on('GET /api/v1/instruments', (request) => ({
+        status: 200,
+        json: { instruments: request.url.endsWith(NEXT) ? [] : [NOVA], feed: { state: 'LIVE', lag: 0 } },
+      }))
+      .on('GET /api/v1/admin/accounts', () => ({ status: 200, json: { accounts, nextCursor: null } }))
+      .on('GET /api/v1/admin/health', {
+        status: 200,
+        json: {
+          writer: { available: true, queueDepth: 0, queueCapacity: 256 },
+          lastMinute: { committed: 10, failed: 0, withinBudget: 10, refused: 0 },
+          outbox: { admitting: true, pendingEvents: 0, oldestPendingMillis: 0 },
+        },
+      })
+      .on('POST /api/v1/admin/market/close', () => {
+        state.market = market('CLOSED');
+        return { status: 200, json: { state: 'CLOSED', commandSequence: '8', canceledOrders: 3, endedRuns: 1 } };
+      });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/operator?compare=20000000-0000-0000-0000-000000000002']}>
+          <OperatorPage />
+          <Address />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await button('Close the market'));
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Close the market for good' }));
+    const ended = await screen.findByRole('region', { name: 'This market has ended' });
+    expect(await within(ended).findByText('Every order that still rested was cancelled and its hold released.')).toBeInTheDocument();
+    expect(await screen.findByText('The market is closed. 3 resting orders were cancelled, and 1 bot run ended.')).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Health' })).toBeInTheDocument();
+    expect(await screen.findByRole('rowheader', { name: 'alice' })).toBeInTheDocument();
+    expect(await screen.findByRole('rowheader', { name: 'NOVA' })).toBeInTheDocument();
+    expect(await screen.findByText('5 bots')).toBeInTheDocument();
+    expect(await screen.findByRole('checkbox', { name: /started 02:00:00/ })).toBeChecked();
+    expect(screen.getByTestId('address')).toHaveTextContent('compare=');
+
+    // Another operator, or this one, starts the next simulation: it has nothing yet.
+    state.market = { ...market('SETUP'), simulationId: NEXT, commandSequence: '1' };
+    state.runs = [];
+    state.tagged = { marketMakers: 0, noise: 0, momentum: 0 };
+    accounts = [];
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    expect(await screen.findByText('Setup', { selector: '.state-badge' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'This market has ended' })).toBeNull();
+    // Neither the close's answer, kept for its own market, nor anything the closed market listed.
+    expect(screen.queryByText(/^The market is closed\./)).toBeNull();
+    expect(screen.queryByText(/cancelled and its hold released/)).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Health' })).toBeNull();
+    expect(screen.queryByRole('rowheader', { name: 'NOVA' })).toBeNull();
+    expect(screen.queryByRole('rowheader', { name: 'alice' })).toBeNull();
+    expect(screen.queryByText('5 bots')).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /started 0/ })).toBeNull();
+    expect(screen.getByTestId('address')).not.toHaveTextContent('compare=');
+    // The new market's own, read for it: its setup forms, and its empty lists.
+    expect(await screen.findByText('No instruments yet.')).toBeInTheDocument();
+    expect(await screen.findByText('No accounts yet.')).toBeInTheDocument();
+    expect(await screen.findByText('No bots yet')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Start run' })).toBeDisabled();
+    expect(screen.queryByRole('table', { name: 'Recent runs' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Add instrument' })).toBeEnabled();
+    expect(await button('Open market')).toHaveAccessibleDescription('Add at least one instrument first.');
+  });
+
+  it('drops what was typed in the simulation before, and keeps it through a close', async () => {
+    const { state } = exchange('SETUP');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+    const symbol = await screen.findByRole('textbox', { name: 'Symbol' });
+    fireEvent.change(symbol, { target: { value: 'KEPT' } });
+
+    // The same simulation, read again: what is being typed stays.
+    state.market = { ...market('SETUP'), commandSequence: '9' };
+    await client.invalidateQueries({ queryKey: ['market'] });
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Symbol' })).toHaveValue('KEPT'));
+
+    state.market = { ...market('SETUP'), simulationId: NEXT, commandSequence: '1' };
+    await client.invalidateQueries({ queryKey: ['market'] });
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Symbol' })).toHaveValue(''));
   });
 });
