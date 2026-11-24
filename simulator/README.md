@@ -48,6 +48,10 @@ same public and authenticated API as people use.
     within twenty basis points of the price and rests otherwise, one order at a time with a cooldown.
   - **Noise:** limit orders on the run's instruments, a random side, up to thirty basis points either side of
     a centre: the market's price moved a quarter of the way toward the bot's idea of the value.
+- **Market view:** one view of the public market for all of a run's bots, polled every second: the phase and the
+  simulation from Execution, then that simulation's instruments and quotes from Market Data. It asks for the
+  simulation by its id, so a new simulation's bots see its instruments as soon as Market Data has them, even while
+  Market Data still takes the one before for current.
 - **Stop:** once the run is stopped or out of time, no new orders; every command in flight gets its final
   answer, every open order of the run's bots is cancelled (each one that can't be is reported), and the
   worker confirms the stop. A worker that stops without that leaves the run to the next one.

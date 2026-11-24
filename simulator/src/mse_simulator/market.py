@@ -101,11 +101,18 @@ class MarketView:
 UNSEEN = MarketView(state="UNKNOWN", live=False, instruments=(), fetched_at=float("-inf"))
 
 
-async def phase(http: httpx.AsyncClient, execution_url: str) -> str:
-    """The market's phase, which only Execution decides."""
+async def status(http: httpx.AsyncClient, execution_url: str) -> tuple[str, str | None]:
+    """The market's phase, which only Execution decides, and the simulation it is of: none before
+    the first setup."""
     answer = await http.get(f"{execution_url}/api/v1/market")
     answer.raise_for_status()
-    return answer.json()["state"]
+    body = answer.json()
+    return body["state"], body.get("simulationId")
+
+
+async def phase(http: httpx.AsyncClient, execution_url: str) -> str:
+    state, _ = await status(http, execution_url)
+    return state
 
 
 async def fetch(
@@ -114,11 +121,16 @@ async def fetch(
     """The authoritative phase from Execution, quotes from Market Data. Public, no credentials.
     Stamped by ``clock`` once both have answered: stamped when the poll began, a slow poll would
     make fresh data look old and pause the bots."""
-    state = await phase(http, execution_url)
+    state, simulation = await status(http, execution_url)
     if state == CLOSED:
         # Nothing is quoted any more, and the end of the market must not wait for Market Data.
         return MarketView(state=state, live=False, instruments=(), fetched_at=clock())
-    listing = await http.get(f"{market_data_url}/api/v1/instruments")
+    # The simulation Execution names, not the one Market Data takes for current: that is the one
+    # whose instrument changed last, which early in a new simulation can still be the old one.
+    listing = await http.get(
+        f"{market_data_url}/api/v1/instruments",
+        params=None if simulation is None else {"simulationId": simulation},
+    )
     listing.raise_for_status()
     body = listing.json()
 

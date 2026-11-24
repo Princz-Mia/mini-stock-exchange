@@ -22,6 +22,9 @@ from mse_simulator.strategy import Holdings
 
 INSTRUMENT = str(uuid4())
 OTHER = str(uuid4())
+# The simulation the market is of, and an instrument of the one before it.
+SIMULATION = str(uuid4())
+EARLIER = str(uuid4())
 CONTROL = "test-control-token"
 
 
@@ -149,6 +152,11 @@ class Exchange:
         self.bot_calls = 0
         self.refused: list[tuple[str, str]] = []
         self.order_attempts = 0
+        # The simulation Execution names, and each listing's simulationId, None when not given.
+        # With ``earlier_current``, Market Data still takes the previous simulation for current.
+        self.simulation: str | None = SIMULATION
+        self.listed_for: list[str | None] = []
+        self.earlier_current = False
 
     def close(self) -> None:
         """Closes the market as Execution does: for good, every bot token revoked, the run ended
@@ -222,13 +230,24 @@ class Exchange:
             await asyncio.sleep(self.phase_delay)
             if self.phase_down:
                 return httpx.Response(503)
-            return httpx.Response(200, json={"state": self.state})
+            return httpx.Response(200, json={"state": self.state, "simulationId": self.simulation})
         if path == "/api/v1/instruments":
             if self.listing_down:
                 return httpx.Response(503)
             self.polls += 1
+            asked = request.url.params.get("simulationId")
+            self.listed_for.append(asked)
             if self.market_stall is not None and self.polls > 1:
                 await self.market_stall.wait()
+            if asked is None and self.earlier_current:
+                return httpx.Response(
+                    200,
+                    json={"feed": {"state": self.live, "lag": 0}, "instruments": [quote(EARLIER)]},
+                )
+            if asked not in (None, self.simulation):
+                return httpx.Response(
+                    200, json={"feed": {"state": self.live, "lag": 0}, "instruments": []}
+                )
             last = None
             if self.trend is not None:
                 cents = 10_000 + self.trend * self.polls
@@ -842,6 +861,47 @@ def test_the_view_is_as_old_as_its_answers_not_as_old_as_the_poll(tmp_path) -> N
     assert market.fetched_at == 3.0
     assert market.tradable(4.0, 2.0)
     assert polled.fetched_at == 6.0, "the worker's poll too"
+
+
+def test_the_instruments_are_those_of_the_simulation_execution_names() -> None:
+    """Market Data takes for current the simulation whose instrument changed last, which early in
+    a new simulation can still be the one before. The view asks for the one Execution names."""
+    exchange = Exchange()
+    exchange.earlier_current = True
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            named = await fetch(http, "http://execution", "http://market", lambda: 0.0)
+            exchange.simulation = None
+            unset = await fetch(http, "http://execution", "http://market", lambda: 0.0)
+            return named, unset
+
+    named, unset = asyncio.run(scenario())
+    assert {str(item.instrument_id) for item in named.instruments} == {INSTRUMENT, OTHER}
+    assert exchange.listed_for == [SIMULATION, None], "no simulation yet: nothing to name"
+    assert [str(item.instrument_id) for item in unset.instruments] == [EARLIER]
+
+
+def test_a_run_in_a_new_simulation_trades_before_market_data_takes_it_for_current(
+    tmp_path,
+) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 2)
+    exchange = Exchange()
+    exchange.earlier_current = True
+    exchange.run = run_body(accounts, ["NOISE", "NOISE"])
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            await follow_until(
+                Runner(settings(tmp_path / "tokens"), http),
+                exchange,
+                lambda: len(exchange.placed) >= 4,
+                lambda: setattr(exchange, "desired", "STOPPED"),
+            )
+
+    asyncio.run(scenario())
+    assert placed_instruments(exchange) == {INSTRUMENT}
+    assert set(exchange.listed_for) == {SIMULATION}
 
 
 def test_each_bot_draws_from_its_own_generator_seeded_by_the_run(tmp_path) -> None:
