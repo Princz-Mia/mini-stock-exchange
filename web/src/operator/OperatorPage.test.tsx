@@ -2167,6 +2167,8 @@ describe('bot runs on the operator screen', () => {
     await waitFor(() => expect(within(form).getByLabelText('Market makers')).toHaveValue('2'));
     expect(within(form).getByLabelText('Noise')).toHaveValue('6');
     expect(within(form).getByLabelText('Momentum')).toHaveValue('2');
+    // A tenth of the bots asked for, at least one a second.
+    expect(within(form).getByLabelText('Commands per second')).toHaveValue('1.00');
     expect(within(form).getByRole('checkbox', { name: 'ORBT' })).toBeChecked();
     expect(
       within(form).getByText(/11 bots exist: 2 market makers · 6 noise · 2 momentum · 1 untagged\. Each strategy is run by/),
@@ -2181,11 +2183,39 @@ describe('bot runs on the operator screen', () => {
       marketMakers: 2,
       noise: 6,
       momentum: 2,
-      commandsPerSecond: '4.00',
+      commandsPerSecond: '1.00',
       maxOrderQuantity: 10,
       maxPosition: 100,
       durationMinutes: 60,
     });
+  });
+
+  it('starts from a rate that follows the bots asked for until one is typed, and says how the run will pace itself', async () => {
+    const { state } = exchange('OPEN');
+    state.tagged = { marketMakers: 200, noise: 600, momentum: 200 };
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    const rate = within(form).getByLabelText('Commands per second');
+    await waitFor(() => expect(rate).toHaveValue('100.00'));
+    expect(rate).toHaveAccessibleDescription(
+      'Each bot acts about every 10 s; first trades in about 2 s, once every market maker has had its first turn.',
+    );
+    fireEvent.change(within(form).getByLabelText('Noise'), { target: { value: '0' } });
+    expect(rate).toHaveValue('40.00');
+    expect(rate).toHaveAccessibleDescription(
+      'Each bot acts about every 10 s; first trades in about 5 s, once every market maker has had its first turn.',
+    );
+
+    // A rate typed is the operator's: it stays as the counts change, and the words follow it.
+    fireEvent.change(rate, { target: { value: '4.00' } });
+    fireEvent.change(within(form).getByLabelText('Noise'), { target: { value: '600' } });
+    expect(rate).toHaveValue('4.00');
+    expect(rate).toHaveAccessibleDescription(
+      'Each bot acts about every 4 min 10 s; first trades in about 50 s, once every market maker has had its first turn.',
+    );
+    fireEvent.change(rate, { target: { value: '' } });
+    expect(rate).not.toHaveAccessibleDescription();
   });
 
   it('starts a run for an hour unless told otherwise, and never reads an empty duration as no end', async () => {
@@ -2224,7 +2254,7 @@ describe('bot runs on the operator screen', () => {
       marketMakers: 1,
       noise: 1,
       momentum: 0,
-      commandsPerSecond: '4.00',
+      commandsPerSecond: '1.00',
       maxOrderQuantity: 10,
       maxPosition: 100,
       durationMinutes: 15,
@@ -2265,7 +2295,7 @@ describe('bot runs on the operator screen', () => {
       marketMakers: 1,
       noise: 1,
       momentum: 0,
-      commandsPerSecond: '4.00',
+      commandsPerSecond: '1.00',
       maxOrderQuantity: 10,
       maxPosition: 100,
     });
@@ -2305,7 +2335,7 @@ describe('bot runs on the operator screen', () => {
       marketMakers: 1,
       noise: 1,
       momentum: 0,
-      commandsPerSecond: '4.00',
+      commandsPerSecond: '1.00',
       maxOrderQuantity: 10,
       maxPosition: 100,
       durationMinutes: 15,

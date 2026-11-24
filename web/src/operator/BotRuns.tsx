@@ -20,8 +20,11 @@ import { groupInteger, utcTime } from '../format';
 import {
   activeRun,
   averageRate,
+  botsAskedFor,
+  defaultRate,
   elapsedSeconds,
   leftRunning,
+  paceText,
   ranForSeconds,
   ranForText,
   type RunForm,
@@ -46,10 +49,10 @@ import { SimulatorSettings } from './SimulatorSettings';
 type Typed = Partial<Omit<RunForm, 'instrumentIds'>> & { instrumentIds?: readonly string[] };
 type TextField = Exclude<keyof RunForm, 'instrumentIds' | 'untilStopped'>;
 
-// A run ends by itself after an hour unless the operator says otherwise: one with no end is easy to forget.
+// A run ends by itself after an hour unless the operator says otherwise: one with no end is easy to forget. Its rate
+// follows the bots asked for until one is typed.
 const DEFAULTS = {
   seed: '',
-  commandsPerSecond: '4.00',
   maxOrderQuantity: '10',
   maxPosition: '100',
   durationMinutes: '60',
@@ -432,12 +435,15 @@ function StartForm({
 }) {
   const [typed, setTyped] = useState<Typed>({});
   const [invalid, setInvalid] = useState<string | null>(null);
+  const counts = { ...taggedSplit(population?.byStrategy), ...typed };
   const form: RunForm = {
     ...taggedSplit(population?.byStrategy),
     ...DEFAULTS,
+    commandsPerSecond: defaultRate(botsAskedFor(counts)),
     instrumentIds: instruments.map((item) => item.instrumentId),
     ...typed,
   };
+  const pace = paceText(form);
   const blocked =
     unavailable ?? startBlocked(market, undefined, population?.byStrategy) ?? shortfallText(form, population?.byStrategy);
   const field = (name: TextField) => ({
@@ -484,7 +490,11 @@ function StartForm({
         <div className="field-row">
           <label>
             Commands per second
-            <input {...field('commandsPerSecond')} inputMode="decimal" />
+            <input
+              {...field('commandsPerSecond')}
+              inputMode="decimal"
+              aria-describedby={pace === null ? undefined : 'run-pace'}
+            />
           </label>
           <label>
             Largest order
@@ -495,6 +505,11 @@ function StartForm({
             <input {...field('maxPosition')} inputMode="numeric" />
           </label>
         </div>
+        {pace !== null && (
+          <p id="run-pace" className="muted hint">
+            {pace}
+          </p>
+        )}
         <div className="field-row">
           <label>
             Seed
