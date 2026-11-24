@@ -105,7 +105,14 @@ describe('the instrument list', () => {
     // At the same time as the status, not after it; and nothing of it shown while whose it is is not known.
     await waitFor(() => expect(server.requests.map((request) => request.url)).toEqual(['/api/v1/instruments']));
     await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
-    expect(result.current).toEqual({ instruments: [], feed: undefined, isPending: true, isError: false });
+    expect(result.current).toEqual({
+      instruments: [],
+      feed: undefined,
+      isPending: true,
+      isError: false,
+      updatedAt: undefined,
+      refused: false,
+    });
     expect(seen.every((each) => each.length === 0)).toBe(true);
 
     // The status names that very simulation: its list is on screen at once, and read again by id.
@@ -199,7 +206,14 @@ describe('the instrument list', () => {
 
     await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
     expect(server.requests).toHaveLength(0);
-    expect(result.current).toEqual({ instruments: [], feed: undefined, isPending: false, isError: false });
+    expect(result.current).toEqual({
+      instruments: [],
+      feed: undefined,
+      isPending: false,
+      isError: false,
+      updatedAt: undefined,
+      refused: false,
+    });
   });
 
   it("asks Market Data for its own current simulation when the exchange's status could not be read", async () => {

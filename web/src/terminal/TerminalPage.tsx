@@ -6,6 +6,7 @@ import { ApiError, api, pollEvery } from '../api/client';
 import type { MarketStatus } from '../api/types';
 import { CloseTime, closesWhileTrading, useTimeHasCome } from '../app/closeTime';
 import { FeedStatus } from '../app/FeedStatus';
+import { LastUpdated } from '../app/LastUpdated';
 import {
   useAskAgainWhenFunded,
   useForgetInAddress,
@@ -134,13 +135,19 @@ export function TerminalPage() {
             bid: selected.bestBid?.price,
             ask: selected.bestAsk?.price,
           };
+  const behind =
+    instruments.isError && instruments.updatedAt !== undefined ? (
+      <LastUpdated updatedAt={instruments.updatedAt} retrying={!instruments.refused} />
+    ) : null;
   // The snapshot's last price, or the trade feed's while the snapshot has none yet.
   const lastPrice = latest === null ? null : (latest.lastPrice ?? latest.session.last);
 
   if (instruments.isPending) {
     return <p className="page-status">Loading markets…</p>;
   }
-  if (instruments.isError) {
+  // Only when nothing was ever read: a failed refresh after a good one keeps the page, and the order being typed on it,
+  // with the list as last read and when that was.
+  if (instruments.isError && instruments.updatedAt === undefined) {
     return (
       <p role="alert" className="page-status">
         Market data is not reachable right now.
@@ -163,13 +170,16 @@ export function TerminalPage() {
         }
       />
       {selected === null ? (
-        <p className="muted terminal-empty" role="status">
-          {market.data?.state === 'SETUP'
-            ? 'The market is being set up and has no instruments yet, so there is nothing to trade.'
-            : asked !== null
-              ? 'The instrument in this address is not part of this market, and the market has no instruments yet.'
-              : 'This market has no instruments yet, so there is nothing to trade.'}
-        </p>
+        <div className="terminal-empty">
+          <p className="muted" role="status">
+            {market.data?.state === 'SETUP'
+              ? 'The market is being set up and has no instruments yet, so there is nothing to trade.'
+              : asked !== null
+                ? 'The instrument in this address is not part of this market, and the market has no instruments yet.'
+                : 'This market has no instruments yet, so there is nothing to trade.'}
+          </p>
+          {behind}
+        </div>
       ) : (
         <>
           <div className="terminal-market">
@@ -186,6 +196,7 @@ export function TerminalPage() {
                 </>
               )}
               {feed !== undefined && <FeedStatus feed={feed} />}
+              {behind}
               <span className={`transport transport-${stream.transport}`} role="status">
                 {TRANSPORT_LABELS[stream.transport]}
               </span>

@@ -974,7 +974,9 @@ describe('the operator screen', () => {
     await client.refetchQueries({ queryKey: ['market'] });
 
     expect(
-      await screen.findByText('The exchange is not answering, so the market state shown may be out of date.'),
+      await screen.findByText(
+        /^The exchange is not answering, so the market state shown may be out of date\. Last updated \d\d:\d\d:\d\d UTC, retrying\.$/,
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByText('The exchange is not reachable right now.')).toBeNull();
     expect(within(screen.getByRole('form', { name: 'Edit NOVA' })).getByLabelText('Reference price')).toHaveValue('110.00');

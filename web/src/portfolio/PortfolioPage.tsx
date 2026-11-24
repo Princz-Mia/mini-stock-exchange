@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 
-import { ApiError, api, pollEvery } from '../api/client';
+import { ApiError, api, isRefusal, pollEvery } from '../api/client';
 import type { Holding, OrderDetail, OwnTrade } from '../api/types';
 import {
   useAskAgainWhenFunded,
@@ -10,6 +10,7 @@ import {
   useRefreshOnMarketChange,
 } from '../app/market';
 import { CloseTime, closedPhrase } from '../app/closeTime';
+import { LastUpdated } from '../app/LastUpdated';
 import { type Column, PagedTable } from '../app/PagedTable';
 import { type Filter, filterParam, usePagedList } from '../app/paging';
 import { PRIVATE_QUERIES } from '../app/useAccountEvents';
@@ -221,7 +222,9 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
   if (portfolio.isPending) {
     return <p className="page-status">Loading portfolio…</p>;
   }
-  if (portfolio.isError) {
+  // A refresh that went unanswered after a good read keeps the page, with when it was read. A refusal does not: the
+  // account is not the trader's to see any more, or never was.
+  if (portfolio.data === undefined || (portfolio.isError && isRefusal(portfolio.error))) {
     const noAccount = portfolio.error instanceof ApiError && portfolio.error.code === 'NO_TRADING_ACCOUNT';
     // How to get an account is setup advice, and a closed market is past setting up: none is ever created in it.
     if (noAccount && market.data?.state === 'CLOSED') {
@@ -247,6 +250,7 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
 
   return (
     <div className="stack">
+      {portfolio.isError && <LastUpdated updatedAt={portfolio.dataUpdatedAt} retrying />}
       {market.data?.state === 'CLOSED' && (
         <section className="panel ended" aria-labelledby="portfolio-closed-title">
           <h2 id="portfolio-closed-title">Market closed</h2>

@@ -420,6 +420,11 @@ tbody th {
   box-shadow: inset 0 0 0 1px var(--warn-line);
 }
 
+/* As wide as its words wherever it sits, in a header's row or at the top of a page's column. */
+.last-updated {
+  justify-self: start;
+}
+
 /* Login */
 /* Border-box, so the padding is inside the full height and the card's padding and border inside its width: without
    it the card overflowed a phone's width by its padding. */
@@ -469,6 +474,11 @@ tbody th {
 .terminal > .ticket,
 .terminal-empty {
   grid-area: ticket;
+}
+
+.terminal-empty {
+  display: grid;
+  justify-items: start;
 }
 
 .terminal-orders {

@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { isRefusal } from '../api/client';
 import type { Instruments } from '../api/types';
 import { closedPhrase } from '../app/closeTime';
+import { lastUpdatedText } from '../app/LastUpdated';
 import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
 import { groupInteger } from '../format';
 import { AccountSetup } from './AccountSetup';
@@ -111,7 +112,8 @@ export function OperatorPage() {
         <div className="operator-side">
           {market.isError && (
             <p role="alert" className="form-error">
-              The exchange is not answering, so the market state shown may be out of date.
+              The exchange is not answering, so the market state shown may be out of date.{' '}
+              {lastUpdatedText(market.dataUpdatedAt, !isRefusal(market.error))}.
             </p>
           )}
           <MarketControl
@@ -137,6 +139,7 @@ export function OperatorPage() {
           {instruments.isError && (
             <p role="alert" className="form-error">
               Market data is not reachable, so the instrument list may be incomplete.
+              {instruments.updatedAt !== undefined && <> {lastUpdatedText(instruments.updatedAt, !instruments.refused)}.</>}
             </p>
           )}
           {market.data.simulationId === null && (

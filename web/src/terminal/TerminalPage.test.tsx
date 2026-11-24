@@ -957,6 +957,52 @@ describe('terminal', () => {
     expect(keys[1]).toBe(keys[0]);
   });
 
+  it('keeps the page and the order being typed when a refresh of the list fails, saying when it was read', async () => {
+    let down = false;
+    signedIn()
+      .on('GET /api/v1/market', { status: 200, json: OPEN })
+      .on('GET /api/v1/instruments', () =>
+        down
+          ? { status: 502, problem: { status: 502, code: 'BAD_GATEWAY' } }
+          : { status: 200, json: { simulationId: 's', instruments: [instrument(NOVA, 'NOVA', null)], feed: { state: 'LIVE', lag: 0 } } },
+      )
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderTerminal('/terminal', null, client);
+    const ticket = await screen.findByRole('region', { name: 'Order · NOVA' });
+    fireEvent.change(within(ticket).getByLabelText('Shares'), { target: { value: '7' } });
+    const read = client.getQueryState(['instruments', 's'])?.dataUpdatedAt ?? 0;
+
+    down = true;
+    await client.refetchQueries({ queryKey: ['instruments'] });
+
+    const note = await screen.findByText(/^Last updated \d\d:\d\d:\d\d UTC, retrying$/);
+    expect(note).toHaveAttribute('role', 'status');
+    expect(note).toHaveTextContent(new Date(read).toISOString().slice(11, 19));
+    expect(screen.queryByText('Market data is not reachable right now.')).toBeNull();
+    expect(screen.getByRole('region', { name: 'Order · NOVA' })).toBe(ticket);
+    expect(within(ticket).getByLabelText('Shares')).toHaveValue('7');
+    expect(screen.getByRole('heading', { name: 'NOVA', level: 1 })).toBeInTheDocument();
+
+    down = false;
+    await client.refetchQueries({ queryKey: ['instruments'] });
+    await waitFor(() => expect(screen.queryByText(/^Last updated/)).toBeNull());
+    expect(within(ticket).getByLabelText('Shares')).toHaveValue('7');
+  });
+
+  it('says market data is not reachable when no list was ever read, rather than an empty market', async () => {
+    signedIn()
+      .on('GET /api/v1/market', { status: 200, json: OPEN })
+      .on('GET /api/v1/instruments', { status: 502, problem: { status: 502, code: 'BAD_GATEWAY' } })
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    renderTerminal();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Market data is not reachable right now.');
+    expect(screen.queryByText(/^Last updated/)).toBeNull();
+  });
+
   it('says there is nothing to trade when the market lists no instrument, instead of showing nothing', async () => {
     signedIn()
       .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
