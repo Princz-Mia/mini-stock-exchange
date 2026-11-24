@@ -291,7 +291,7 @@ public final class TradingEngine {
 	 * <p>
 	 * A market whose close time passed while no process was running is closed here, before any command is admitted, by
 	 * the same close and key the schedule sends, so a close that had already run is answered from its key and nothing
-	 * is closed twice. A close time still to come is armed once commands are admitted.
+	 * is closed twice. A close time still to come is armed just before commands are admitted.
 	 * <p>
 	 * Whatever this engine held before is replaced, not added to: started again in place after the current simulation
 	 * has changed, it keeps no book, instrument or tape of the one it held, and says so to whoever keeps something
@@ -357,8 +357,11 @@ public final class TradingEngine {
 			// would tidy up, is then not sent again. One read and a delete for each file, most of them gone already.
 			discardBotTokens();
 		}
-		started = true;
+		// Before commands are admitted: from then on only the writer arms the schedule, and an arm from this thread
+		// after an opening the writer had just armed would put back the close time it read before that opening. A
+		// check that comes before admission is refused as not started and looks again after the interval.
 		armCloseSchedule();
+		started = true;
 	}
 
 	/**

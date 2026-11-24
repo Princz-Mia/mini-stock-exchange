@@ -593,6 +593,31 @@ class ScheduledCloseIT {
 	}
 
 	/**
+	 * A start arms the close time it loaded before it takes a command. From then on only the writer arms the schedule:
+	 * an opening the writer arms right after admission is not overwritten by what the start read before it.
+	 */
+	@Test
+	void aStartArmsTheCloseTimeBeforeItTakesACommand() throws Exception {
+		UUID a = funded();
+		TradingEngine engine = engine(CloseSchedule.NONE);
+		engine.start();
+		open(engine, HOUR);
+
+		List<String> atArming = new CopyOnWriteArrayList<>();
+		TradingEngine next = restarted((simulation, closesAt) -> {
+			try {
+				current.place(key(a, "POST /api/v1/orders"), order(a, first, Side.BUY, "90.00", 1));
+				atArming.add(closesAt + " admitted");
+			}
+			catch (WriterStoppedException ex) {
+				atArming.add(closesAt + " " + ex.getMessage());
+			}
+		});
+		next.start();
+		assertThat(atArming).containsExactly(NOW.plus(HOUR) + " Trading has not started");
+	}
+
+	/**
 	 * A process that does not own the writer never asks for the close, though its time has come; orders are refused all
 	 * the same, since the time is the market's. Once it owns the writer, the close is made.
 	 */
