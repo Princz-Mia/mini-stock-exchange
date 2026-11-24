@@ -13,10 +13,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 
 import org.junit.jupiter.api.AfterEach;
@@ -41,11 +45,18 @@ class MarketStreamTest {
 
 	private volatile CountDownLatch nextSendBlocks;
 
+	private volatile boolean nextLocksLikeSpring;
+
+	private final AtomicBoolean nextReadFails = new AtomicBoolean();
+
 	private final MarketStream stream = new MarketStream(new MarketStream.Frames() {
 
 		@Override
 		public Optional<Object> frame(UUID instrumentId) {
 			frameReads.incrementAndGet();
+			if (nextReadFails.getAndSet(false)) {
+				throw new IllegalStateException("database not answering");
+			}
 			return Optional.of("frame-" + versions.computeIfAbsent(instrumentId, (id) -> new AtomicInteger()).get());
 		}
 
@@ -55,8 +66,9 @@ class MarketStreamTest {
 		}
 
 	}, () -> {
-		RecordingEmitter emitter = new RecordingEmitter(nextSendBlocks);
+		RecordingEmitter emitter = new RecordingEmitter(nextSendBlocks, nextLocksLikeSpring);
 		nextSendBlocks = null;
+		nextLocksLikeSpring = false;
 		emitters.add(emitter);
 		return emitter;
 	}, SETTINGS, clock);
@@ -114,11 +126,11 @@ class MarketStreamTest {
 		waitUntil(() -> emitter.events().size() == 1);
 
 		clock.advance(Duration.ofSeconds(9));
-		stream.tick();
+		stream.beat();
 		assertThat(emitter.events()).as("not idle long enough").hasSize(1);
 
 		clock.advance(Duration.ofSeconds(1));
-		stream.tick();
+		stream.beat();
 		waitUntil(() -> emitter.events().size() == 2);
 		assertThat(emitter.events().getLast()).isEqualTo("heartbeat:beat");
 
@@ -126,7 +138,7 @@ class MarketStreamTest {
 		stream.changed(instrument);
 		stream.tick();
 		clock.advance(Duration.ofSeconds(2));
-		stream.tick();
+		stream.beat();
 		waitUntil(() -> emitter.events().size() == 3);
 		assertThat(emitter.events().getLast()).as("a frame resets the idle time").startsWith("market:");
 	}
@@ -159,17 +171,124 @@ class MarketStreamTest {
 		waitUntil(() -> stuck.sending && healthy.events().size() == 1);
 
 		clock.advance(Duration.ofSeconds(15));
-		stream.tick();
-		assertThat(stuck.completed).as("exactly at the limit is not yet stuck").isFalse();
+		stream.beat();
+		assertThat(stream.openStreams()).as("exactly at the limit is not yet stuck").isEqualTo(2);
 
 		clock.advance(Duration.ofMillis(1));
-		stream.tick();
+		stream.beat();
 
-		assertThat(stuck.completed).isTrue();
 		assertThat(stream.openStreams()).isEqualTo(1);
+		waitUntil(() -> stuck.completed);
 		stream.changed(instrument);
 		stream.tick();
 		waitUntil(() -> healthy.events().size() >= 2);
+	}
+
+	@Test
+	void heartbeatsCarryOnWhileAFrameReadIsSlow() throws Exception {
+		CountDownLatch readStarted = new CountDownLatch(1);
+		CountDownLatch databaseAnswers = new CountDownLatch(1);
+		List<RecordingEmitter> own = new CopyOnWriteArrayList<>();
+		// Real threads and the real clock: this checks how the two rounds are scheduled, not just what each does.
+		MarketStream scheduled = new MarketStream(new MarketStream.Frames() {
+
+			@Override
+			public Optional<Object> frame(UUID instrumentId) {
+				readStarted.countDown();
+				try {
+					databaseAnswers.await();
+				}
+				catch (InterruptedException ex) {
+					Thread.currentThread().interrupt();
+				}
+				return Optional.of("frame-1");
+			}
+
+			@Override
+			public Object heartbeat() {
+				return "beat";
+			}
+
+		}, () -> {
+			RecordingEmitter emitter = new RecordingEmitter(null, false);
+			own.add(emitter);
+			return emitter;
+		}, new MarketStream.Settings(Duration.ofMillis(20), Duration.ofMillis(100), Duration.ofSeconds(30), 3),
+				Clock.systemUTC());
+		try {
+			UUID instrument = UUID.randomUUID();
+			scheduled.subscribe(instrument, "frame-0");
+			RecordingEmitter emitter = own.getLast();
+			scheduled.start();
+			waitUntil(() -> emitter.events().size() == 1);
+
+			scheduled.changed(instrument);
+			assertThat(readStarted.await(10, TimeUnit.SECONDS)).isTrue();
+
+			waitUntil(() -> emitter.events().stream().filter("heartbeat:beat"::equals).count() >= 2);
+			assertThat(databaseAnswers.getCount()).as("the frame read is still waiting").isEqualTo(1);
+			databaseAnswers.countDown();
+			waitUntil(() -> emitter.events().contains("market:frame-1"));
+		}
+		finally {
+			databaseAnswers.countDown();
+			scheduled.close();
+		}
+	}
+
+	@Test
+	void aHeartbeatNeverReplacesAFrameNotYetSent() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		CountDownLatch release = new CountDownLatch(1);
+		nextSendBlocks = release;
+		RecordingEmitter slow = subscribe(instrument, "frame-0");
+		waitUntil(() -> slow.sending);
+		versions.computeIfAbsent(instrument, (id) -> new AtomicInteger()).set(1);
+		stream.changed(instrument);
+		stream.tick();
+
+		clock.advance(Duration.ofSeconds(10));
+		stream.beat();
+		release.countDown();
+
+		waitUntil(() -> slow.events().size() == 2);
+		assertThat(slow.events()).containsExactly("market:frame-0", "market:frame-1");
+	}
+
+	@Test
+	void aFailedFrameReadIsTriedAgainOnTheNextTick() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		RecordingEmitter emitter = subscribe(instrument, "frame-0");
+		waitUntil(() -> emitter.events().size() == 1);
+		versions.computeIfAbsent(instrument, (id) -> new AtomicInteger()).set(1);
+		stream.changed(instrument);
+
+		nextReadFails.set(true);
+		assertThatThrownBy(stream::tick).isInstanceOf(IllegalStateException.class);
+		stream.tick();
+
+		waitUntil(() -> emitter.events().size() == 2);
+		assertThat(emitter.events().getLast()).as("no new trade was needed to send it").isEqualTo("market:frame-1");
+	}
+
+	@Test
+	void closingAStuckClientDoesNotHoldUpTheOthersHeartbeats() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		CountDownLatch writeEnds = new CountDownLatch(1);
+		nextSendBlocks = writeEnds;
+		nextLocksLikeSpring = true;
+		RecordingEmitter stuck = subscribe(instrument, "frame-0");
+		RecordingEmitter healthy = subscribe(UUID.randomUUID(), "frame-0");
+		waitUntil(() -> stuck.sending && healthy.events().size() == 1);
+
+		clock.advance(Duration.ofSeconds(15).plusMillis(1));
+		CompletableFuture.runAsync(stream::beat).get(5, TimeUnit.SECONDS);
+
+		waitUntil(() -> healthy.events().size() == 2);
+		assertThat(healthy.events().getLast()).isEqualTo("heartbeat:beat");
+		assertThat(stuck.completed).as("still waiting for its write to end").isFalse();
+		writeEnds.countDown();
+		waitUntil(() -> stuck.completed);
 	}
 
 	@Test
@@ -196,32 +315,47 @@ class MarketStreamTest {
 		}
 	}
 
-	/** Records each event as {@code name:data}; the first send can be made to block, like a client that stopped reading. */
+	/**
+	 * Records each event as {@code name:data}; the first send can be made to block, like a client that stopped reading.
+	 * Locking like Spring, send and complete share one lock and the blocked write ignores interrupts, as a socket write
+	 * can.
+	 */
 	private static final class RecordingEmitter extends SseEmitter {
 
 		private final List<String> events = new CopyOnWriteArrayList<>();
 
 		private final CountDownLatch blockFirst;
 
+		private final ReentrantLock lock;
+
 		private volatile boolean sending;
 
 		private volatile boolean completed;
 
-		RecordingEmitter(CountDownLatch blockFirst) {
+		RecordingEmitter(CountDownLatch blockFirst, boolean locksLikeSpring) {
 			this.blockFirst = blockFirst;
+			this.lock = locksLikeSpring ? new ReentrantLock() : null;
 		}
 
 		@Override
 		public void send(SseEventBuilder builder) throws IOException {
+			if (lock == null) {
+				record(builder);
+				return;
+			}
+			lock.lock();
+			try {
+				record(builder);
+			}
+			finally {
+				lock.unlock();
+			}
+		}
+
+		private void record(SseEventBuilder builder) throws IOException {
 			sending = true;
 			if (blockFirst != null && events.isEmpty()) {
-				try {
-					blockFirst.await();
-				}
-				catch (InterruptedException ex) {
-					Thread.currentThread().interrupt();
-					throw new IOException("interrupted", ex);
-				}
+				awaitWrite();
 			}
 			String name = null;
 			Object data = null;
@@ -238,8 +372,27 @@ class MarketStreamTest {
 			sending = false;
 		}
 
+		private void awaitWrite() throws IOException {
+			while (true) {
+				try {
+					blockFirst.await();
+					return;
+				}
+				catch (InterruptedException ex) {
+					if (lock == null) {
+						Thread.currentThread().interrupt();
+						throw new IOException("interrupted", ex);
+					}
+				}
+			}
+		}
+
 		@Override
 		public void complete() {
+			if (lock != null) {
+				lock.lock();
+				lock.unlock();
+			}
 			completed = true;
 		}
 
