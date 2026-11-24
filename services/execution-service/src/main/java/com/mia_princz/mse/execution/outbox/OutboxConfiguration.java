@@ -17,24 +17,34 @@ import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.jdbc.autoconfigure.DataSourceProperties;
 import org.springframework.boot.kafka.autoconfigure.KafkaConnectionDetails;
 import org.springframework.boot.kafka.autoconfigure.KafkaProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.jdbc.core.simple.JdbcClient;
 
 import com.mia_princz.mse.execution.trading.adapter.WriterOwnership;
 
 @Configuration(proxyBeanMethods = false)
 class OutboxConfiguration {
 
+	/** The relay's thread and the admission check each hold at most one at a time. */
+	@Bean(destroyMethod = "close")
+	OutboxConnections outboxConnections(DataSourceProperties properties, MeterRegistry meters,
+			@Value("${mse.outbox.pool-size:2}") int size,
+			@Value("${mse.outbox.socket-timeout:60s}") Duration socketTimeout) {
+		OutboxConnections connections = OutboxConnections.create(properties, size, socketTimeout);
+		connections.pool().setMetricRegistry(meters);
+		return connections;
+	}
+
 	/** Independent of the relay, so admission holds even while the relay is down or switched off. */
 	@Bean
-	OutboxAdmission outboxAdmission(JdbcClient jdbcClient, Clock clock, MeterRegistry meters,
+	OutboxAdmission outboxAdmission(OutboxConnections connections, Clock clock, MeterRegistry meters,
 			@Value("${mse.outbox.admission.max-events:50000}") long maxEvents,
 			@Value("${mse.outbox.admission.max-bytes:268435456}") long maxBytes,
 			@Value("${mse.outbox.admission.refresh:1s}") Duration refresh) {
-		OutboxAdmission admission = new OutboxAdmission(new JdbcOutbox(jdbcClient),
+		OutboxAdmission admission = new OutboxAdmission(new JdbcOutbox(connections.jdbc()),
 				new OutboxAdmission.Limits(maxEvents, maxBytes, refresh), clock);
 		Gauge.builder("mse.outbox.admission.open", admission, (a) -> a.isOpen() ? 1 : 0)
 			.description("1 while new orders are admitted, 0 while the publication backlog stops them")
@@ -55,7 +65,7 @@ class OutboxConfiguration {
 
 	@Bean(initMethod = "start", destroyMethod = "close")
 	@ConditionalOnProperty(name = "mse.outbox.relay.enabled", matchIfMissing = true)
-	OutboxRelay outbox(JdbcClient jdbcClient, KafkaProperties kafka, KafkaConnectionDetails connection,
+	OutboxRelay outbox(OutboxConnections connections, KafkaProperties kafka, KafkaConnectionDetails connection,
 			WriterOwnership ownership, Clock clock, MeterRegistry meters,
 			@Value("${mse.outbox.batch-size:200}") int batchSize,
 			@Value("${mse.outbox.poll-interval:50ms}") Duration pollInterval,
@@ -80,7 +90,7 @@ class OutboxConfiguration {
 			.minimumExpectedValue(1.0)
 			.maximumExpectedValue((double) batchSize)
 			.register(meters);
-		OutboxRelay relay = new OutboxRelay(new JdbcOutbox(jdbcClient),
+		OutboxRelay relay = new OutboxRelay(new JdbcOutbox(connections.jdbc()),
 				() -> new KafkaProducer<>(producerConfig, new StringSerializer(), new ByteArraySerializer()),
 				ownership::isHeld, new OutboxRelay.Settings(batchSize, pollInterval, ackTimeout, maxBackoff), clock,
 				(nanos, events, waits) -> {

@@ -17,7 +17,7 @@ public class TestcontainersConfiguration {
 	// Digests match compose.yaml (apache/kafka:4.3.2, postgres:18.6).
 	static final String KAFKA_IMAGE = "apache/kafka@sha256:852a0d49fc4e656b022e7f23785411802c9a088c78a7c5e39f33969de9c227a7";
 
-	static final String POSTGRES_IMAGE = "postgres@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81";
+	public static final String POSTGRES_IMAGE = "postgres@sha256:3a4264520e121176619f54ff867d12774bc81e95e7b84db58d63bccdb6144b81";
 
 	public static final String EXECUTION_OWNER_PASSWORD = "test-execution-owner";
 
