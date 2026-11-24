@@ -1342,6 +1342,18 @@ button.primary.sell:enabled {
   color: var(--warn-text);
 }
 
+/* A command's button with what became of it beside it, wrapping under it where the panel is narrow. */
+.command-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.command-row > .outcome {
+  flex: 1 1 16rem;
+}
+
 .tabs {
   display: flex;
   gap: var(--space-1);

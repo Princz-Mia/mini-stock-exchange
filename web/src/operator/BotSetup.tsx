@@ -18,10 +18,11 @@ import {
 } from './botJob';
 import { CommandStatus } from './CommandStatus';
 import { EXAMPLE_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
+import { notReadYet, useFreshRead } from './freshRead';
+import { useOperatorCommand } from './operatorCommands';
 import { refusedFields, refusedHoldings, useFocusOnRefusal } from './refusals';
 import { populationText, STRATEGIES } from './strategies';
 import { useBotJob, useRefreshOnJobChange } from './useBotJob';
-import { useCommand } from './useCommand';
 
 /**
  * The bot population by strategy and, during setup, one form that creates any number of bots, as a job the exchange
@@ -33,11 +34,14 @@ export function BotSetup({
   instruments,
   editable,
   closed = false,
+  simulationId = null,
 }: {
   instruments: readonly Instrument[];
   editable: boolean;
   /** The market has closed: its bots are listed, and trade no more. */
   closed?: boolean;
+  /** The simulation on screen, whose job commands are kept for it. */
+  simulationId?: string | null;
 }) {
   const client = useQueryClient();
   const population = useQuery({ queryKey: ['bots'], queryFn: api.botPopulation });
@@ -45,9 +49,11 @@ export function BotSetup({
   const read = useBotJob(editable);
   const job = editable ? read.data : undefined;
   useRefreshOnJobChange(job);
+  // A job as cached may be from before this page opened: the form is offered once the job has been read since.
+  const unread = notReadYet(useFreshRead(read));
   const running = job?.state === 'RUNNING';
   const bots = population.data;
-  const start = useStartJob(job?.jobId ?? null);
+  const start = useStartJob(simulationId ?? '', job?.jobId ?? null);
   const { outcome, retry, forget } = start.command;
   const outcomeId = useId();
   const outcomeLine = useRef<HTMLParagraphElement>(null);
@@ -101,6 +107,7 @@ export function BotSetup({
             unreachable={read.isError}
             focusOnOpen={ownJob}
             onStopped={(stopped) => client.setQueryData(['bot-job'], stopped)}
+            simulationId={simulationId ?? ''}
           />
         ) : (
           <>
@@ -113,7 +120,13 @@ export function BotSetup({
                 {outcomeText(job)}
               </p>
             )}
-            <CreateBots instruments={instruments} start={start} outcomeId={outcomeId} />
+            {unread === null ? (
+              <CreateBots instruments={instruments} start={start} outcomeId={outcomeId} />
+            ) : (
+              <p className="muted" role="status">
+                {unread}
+              </p>
+            )}
           </>
         )
       ) : (
@@ -133,7 +146,7 @@ export function BotSetup({
             </p>
           ) : (
             outcome.kind !== 'done' && (
-              <CommandStatus outcome={outcome} action="Starting the bot job" done={() => ''} onRetry={() => void retry()} />
+              <CommandStatus outcome={outcome} action="Starting the bot job" done={() => ''} onRetry={() => retry()} />
             )
           )}
         </div>
@@ -180,12 +193,14 @@ function JobProgress({
   unreachable,
   focusOnOpen,
   onStopped,
+  simulationId,
 }: {
   job: BotJob;
   unreachable: boolean;
   /** This page started the job, or was refused by it: focus, lost with the form, goes to its heading once. */
   focusOnOpen: boolean;
   onStopped: (job: BotJob) => void;
+  simulationId: string;
 }) {
   const heading = useRef<HTMLHeadingElement>(null);
   const focused = useRef(false);
@@ -198,14 +213,18 @@ function JobProgress({
     }
   }, [focusOnOpen]);
   const send = useCallback(
-    async (_: null, key: string) => {
-      const stopped = await api.stopBotJob(job.jobId, key);
+    async (jobId: string, key: string) => {
+      const stopped = await api.stopBotJob(jobId, key);
       onStopped(stopped);
       return stopped;
     },
-    [job.jobId, onStopped],
+    [onStopped],
   );
-  const stop = useCommand(send);
+  // A stop with no answer for a job that is no longer the one running has nothing left to stop.
+  const stop = useOperatorCommand<string, BotJob>('bot-job-stop', simulationId, send, {
+    reached: (jobId) => jobId !== job.jobId,
+  });
+  const stopOutcome = stop.args === job.jobId ? stop.outcome : { kind: 'idle' as const };
   const titleId = useId();
   const stopHint = useId();
   const percent = percentMade(job);
@@ -256,8 +275,8 @@ function JobProgress({
         <button
           type="button"
           className="quiet"
-          onClick={() => void stop.run(null)}
-          disabled={stop.outcome.kind === 'sending'}
+          onClick={() => stop.run(job.jobId)}
+          disabled={stopOutcome.kind === 'sending'}
           aria-describedby={stopHint}
         >
           Stop creating bots
@@ -266,12 +285,12 @@ function JobProgress({
           The bots made so far stay.
         </span>
       </div>
-      {stop.outcome.kind !== 'done' && (
+      {stopOutcome.kind !== 'done' && (
         <CommandStatus
-          outcome={stop.outcome}
+          outcome={stopOutcome}
           action="Stopping the bot job"
           done={() => ''}
-          onRetry={() => void stop.retry()}
+          onRetry={() => stop.retry()}
         />
       )}
     </div>
@@ -292,7 +311,7 @@ function CreateBots({
   start: ReturnType<typeof useStartJob>;
   outcomeId: string;
 }) {
-  const { command, sent, setSent, send } = start;
+  const { command, sent, send } = start;
   const { count, setCount, makers, setMakers, momentum, setMomentum, cash, setCash, shares, setShares } = start.fields;
   const form = useRef<HTMLFormElement>(null);
   const mixId = useId();
@@ -315,7 +334,6 @@ function CreateBots({
       return;
     }
     const holdings = holdingsFrom(instruments, shares);
-    setSent(holdings);
     send({ count: resolved.total, strategies: resolved.mix, cash: cash.trim(), holdings });
   };
 
@@ -422,10 +440,10 @@ function CreateBots({
  * operator started gets the refusal it would have had. Never a second job: one runs at a time, and the key is the
  * same.
  */
-function useStartJob(shownId: string | null) {
+function useStartJob(simulationId: string, shownId: string | null) {
   const client = useQueryClient();
   const startJob = useCallback(
-    async (request: BotJobRequest, key: string) => {
+    async ({ job: request }: JobStart, key: string) => {
       try {
         const started = await api.startBotJob(request, key);
         client.setQueryData(['bot-job'], started);
@@ -437,32 +455,34 @@ function useStartJob(shownId: string | null) {
     },
     [client],
   );
-  const command = useCommand(startJob);
-  const [sent, setSent] = useState<readonly { instrumentId: string }[]>([]);
-  const shownAtSend = useRef<string | null>(null);
+  // Kept beside the cached queries, with the job shown when it was sent, so that leaving the page and coming back
+  // finds it on its way or with its answer, under the same key.
+  const command = useOperatorCommand<JobStart, BotJob>('bot-job-start', simulationId, startJob);
+  // The holdings last sent, for the fields a refusal names.
+  const sent = command.args?.job.holdings ?? NOTHING_SENT;
   const { unresolved, retry, run } = command;
+  const over = command.args?.over;
   useEffect(() => {
-    if (unresolved && shownId !== null && shownId !== shownAtSend.current) {
-      shownAtSend.current = shownId;
-      void retry();
+    if (unresolved && shownId !== null && shownId !== over) {
+      retry((before) => ({ ...before, over: shownId }));
     }
-  }, [unresolved, shownId, retry]);
-  const send = useCallback(
-    (job: BotJobRequest) => {
-      // A start sent again while unresolved is the same one, sent over the job shown then. One sent before the job
-      // was first read counts as sent over none: whatever job appears, sending it again under its key is safe.
-      if (!unresolved) {
-        shownAtSend.current = shownId;
-      }
-      void run(job);
-    },
-    [unresolved, shownId, run],
-  );
+  }, [unresolved, shownId, over, retry]);
+  // A start sent again while unresolved is the same one, sent over the job shown then. One sent before the job was
+  // first read counts as sent over none: whatever job appears, sending it again under its key is safe.
+  const send = useCallback((job: BotJobRequest) => run({ job, over: shownId }), [shownId, run]);
   const [count, setCount] = useState('');
   const [makers, setMakers] = useState<string>(USUAL_SHARES.marketMakers);
   const [momentum, setMomentum] = useState<string>(USUAL_SHARES.momentum);
   const [cash, setCash] = useState('');
   const [shares, setShares] = useState<ShareInputs>({});
   const fields = { count, setCount, makers, setMakers, momentum, setMomentum, cash, setCash, shares, setShares };
-  return { command, send, sent, setSent, fields };
+  return { command, send, sent, fields };
 }
+
+/** A job's start as kept: what was sent, and the job the panel showed when it was sent, if any. */
+interface JobStart {
+  job: BotJobRequest;
+  over: string | null;
+}
+
+const NOTHING_SENT: readonly { instrumentId: string }[] = [];
