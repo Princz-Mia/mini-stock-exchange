@@ -7,6 +7,7 @@ from uuid import UUID
 import numpy as np
 
 from mse_simulator.market import Instrument, MarketView
+from mse_simulator.prices import limit_price
 from mse_simulator.strategy import (
     Cancel,
     Holdings,
@@ -15,7 +16,6 @@ from mse_simulator.strategy import (
     Place,
     Positions,
     affordable,
-    clamp,
     oldest_stale,
 )
 
@@ -103,13 +103,18 @@ class MarketMaker:
     def quotes(
         self, instrument: Instrument, holdings: Holdings, instruments: tuple[Instrument, ...]
     ) -> tuple[int, int]:
-        """The bid and ask the maker wants now, on the tick grid and inside the price band."""
+        """The bid and ask the maker wants now, on the tick grid and inside the price band. The
+        reservation price itself is not rounded: only the two quotes are, each away from the other,
+        so the pair stays centred on it."""
         tick = instrument.tick
         moved = self._positions.moved(instrument.instrument_id, holdings, instruments)
-        lean = round(self._config.skew_ticks * moved / self._config.quote_size)
-        reservation = round(instrument.anchor() / tick) * tick - lean * tick
+        lean = self._config.skew_ticks * moved / self._config.quote_size
+        reservation = instrument.anchor() - lean * tick
         half = self._config.half_spread_ticks * tick
-        return clamp(reservation - half, instrument), clamp(reservation + half, instrument)
+        return (
+            limit_price(reservation - half, "BUY", instrument),
+            limit_price(reservation + half, "SELL", instrument),
+        )
 
     def _off(self, order: OpenOrder, bid: int, ask: int, tick: int) -> bool:
         if order.limit is None:

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from mse_simulator.market import MarketView
+from mse_simulator.prices import limit_price
 from mse_simulator.strategy import (
     Cancel,
     Holdings,
@@ -13,7 +14,6 @@ from mse_simulator.strategy import (
     Place,
     Positions,
     affordable,
-    clamp,
     oldest_stale,
 )
 
@@ -54,7 +54,7 @@ class NoiseBot:
         instrument = market.instruments[int(self._rng.integers(len(market.instruments)))]
         side = "BUY" if self._rng.random() < 0.5 else "SELL"
         offset = int(self._rng.integers(-self._config.spread_ticks, self._config.spread_ticks + 1))
-        limit = clamp(instrument.anchor() + offset * instrument.tick, instrument)
+        limit = limit_price(instrument.anchor() + offset * instrument.tick, side, instrument)
         wanted = int(self._rng.integers(1, self._config.max_quantity + 1))
         quantity = min(
             wanted,

@@ -29,14 +29,16 @@ class Instrument:
     min_quantity: int
     max_quantity: int
 
-    def anchor(self) -> int:
-        """Where noise centres: the mid if both sides quote, else the last trade, else the
-        reference."""
+    def anchor(self) -> float:
+        """Where the market stands, in cents: the mid if both sides quote, else the last trade,
+        else the reference. The mid is exact, so it may lie half a tick off the grid: rounding it
+        here, one way for every order, would push prices that way. ``prices.limit_price`` rounds
+        each order's limit instead."""
         if self.bid is not None and self.ask is not None:
-            return (self.bid + self.ask) // 2
+            return (self.bid + self.ask) / 2
         if self.last is not None:
-            return self.last
-        return self.reference
+            return float(self.last)
+        return float(self.reference)
 
 
 @dataclass(frozen=True)
