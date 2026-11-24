@@ -446,6 +446,8 @@ describe('the operator screen', () => {
     expect(lastAdd()).toEqual({ symbol: 'ORBT', referencePrice: '50.00' });
 
     fireEvent.change(within(form).getByLabelText('Name (optional)'), { target: { value: ' Orbit Labs ' } });
+    // The refusal was about the form as it was.
+    expect(screen.queryByText('An instrument with symbol ORBT already exists')).toBeNull();
     fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
     expect(await screen.findByText(/Added ORBT \(Orbit Labs\) at 50.00/)).toBeInTheDocument();
     expect(lastAdd()).toEqual({ symbol: 'ORBT', referencePrice: '50.00', displayName: 'Orbit Labs' });
@@ -550,6 +552,95 @@ describe('the operator screen', () => {
       renderWith(client);
       expect(await screen.findByText('Added, waiting for market data')).toBeInTheDocument();
       expect(rowOf('ORBT')).toHaveTextContent('50.00');
+    });
+
+    it('is checked against before sending, as listed symbols are, and nothing is sent for either', async () => {
+      const { server } = exchange('SETUP');
+      let listed = [NOVA];
+      server.on('GET /api/v1/instruments', () => listOf(listed));
+      server.on('POST /api/v1/admin/instruments', { status: 201, json: ORBT_ADDED });
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      renderWith(client);
+      const form = await screen.findByRole('form', { name: 'Add an instrument' });
+      await screen.findByRole('table', { name: 'Instruments' });
+      const symbol = within(form).getByLabelText('Symbol');
+      const add = () => fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
+      const posts = () => server.requests.filter((request) => request.method === 'POST').length;
+
+      fireEvent.change(symbol, { target: { value: ' nova ' } });
+      fireEvent.change(within(form).getByLabelText('Reference price'), { target: { value: '1.00' } });
+      add();
+      const said = (await screen.findByText(/NOVA is already in this market/)).closest('[role="alert"]');
+      expect(said).toHaveTextContent('NOVA is already in this market, and a symbol is listed only once. Nothing was sent.');
+      expect(symbol).toHaveAttribute('aria-invalid', 'true');
+      expect(symbol).toHaveAccessibleDescription(/NOVA is already in this market/);
+      expect(posts()).toBe(0);
+      // Changing the form puts it away.
+      fireEvent.change(symbol, { target: { value: 'NOV' } });
+      expect(screen.queryByText(/already in this market/)).toBeNull();
+      expect(symbol).not.toHaveAttribute('aria-invalid');
+
+      fireEvent.click(within(form).getByRole('button', { name: 'ORBT 50.00' }));
+      add();
+      await screen.findByText('Added, waiting for market data');
+      fireEvent.change(symbol, { target: { value: 'ORBT' } });
+      fireEvent.change(within(form).getByLabelText('Reference price'), { target: { value: '50.00' } });
+      add();
+      expect(await screen.findByText(/ORBT was just added, and is waiting for market data to list it\. Nothing was sent\./)).toBeInTheDocument();
+      expect(posts()).toBe(1);
+      // Once listed, it is said as listed.
+      listed = [NOVA, ORBT];
+      await act(() => client.invalidateQueries({ queryKey: ['instruments'] }));
+      expect(await screen.findByText(/ORBT is already in this market/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      expect(screen.queryByText(/already in this market/)).toBeNull();
+      expect(symbol).toHaveFocus();
+      expect(posts()).toBe(1);
+    });
+
+    it('lets a refused add go when the form changes, a chip is picked, it is dismissed, or the list shows the symbol', async () => {
+      const { server } = exchange('SETUP');
+      let listed = [NOVA];
+      server.on('GET /api/v1/instruments', () => listOf(listed));
+      // Another operator added each of these a moment ago, and market data does not list them yet.
+      server.on('POST /api/v1/admin/instruments', (request) => ({
+        status: 409,
+        problem: {
+          status: 409,
+          code: 'SYMBOL_TAKEN',
+          detail: `An instrument with symbol ${(request.body as { symbol: string }).symbol} already exists`,
+        },
+      }));
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      renderWith(client);
+      const form = await screen.findByRole('form', { name: 'Add an instrument' });
+      await screen.findByRole('table', { name: 'Instruments' });
+      const add = () => fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
+
+      fireEvent.click(within(form).getByRole('button', { name: 'HELI 200.00' }));
+      add();
+      expect(await screen.findByText('An instrument with symbol HELI already exists')).toBeInTheDocument();
+      fireEvent.change(within(form).getByLabelText('Reference price'), { target: { value: '201.00' } });
+      expect(screen.queryByText('An instrument with symbol HELI already exists')).toBeNull();
+
+      add();
+      expect(await screen.findByText('An instrument with symbol HELI already exists')).toBeInTheDocument();
+      fireEvent.click(within(form).getByRole('button', { name: 'QUAD 25.00' }));
+      expect(screen.queryByText('An instrument with symbol HELI already exists')).toBeNull();
+
+      add();
+      expect(await screen.findByText('An instrument with symbol QUAD already exists')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      expect(screen.queryByText('An instrument with symbol QUAD already exists')).toBeNull();
+      expect(within(form).getByLabelText('Symbol')).toHaveFocus();
+
+      fireEvent.click(within(form).getByRole('button', { name: 'VELO 80.00' }));
+      add();
+      expect(await screen.findByText('An instrument with symbol VELO already exists')).toBeInTheDocument();
+      listed = [NOVA, { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000005', symbol: 'VELO' }];
+      await act(() => client.invalidateQueries({ queryKey: ['instruments'] }));
+      expect(await screen.findByRole('button', { name: 'Edit VELO' })).toBeInTheDocument();
+      await waitFor(() => expect(screen.queryByText('An instrument with symbol VELO already exists')).toBeNull());
     });
   });
 

@@ -370,6 +370,17 @@ function WaitingRow({ added, editable }: { added: AddedInstrument; editable: boo
   );
 }
 
+/** Why an add is not sent: the symbol is listed already, or was just added and waits for market data. */
+export function duplicateText(symbol: string, listed: ReadonlySet<string>, waiting: ReadonlySet<string>): string | null {
+  if (listed.has(symbol)) {
+    return `${symbol} is already in this market, and a symbol is listed only once.`;
+  }
+  if (waiting.has(symbol)) {
+    return `${symbol} was just added, and is waiting for market data to list it.`;
+  }
+  return null;
+}
+
 /** The catalogue and, while the market is being set up, a form to add to it and a way to edit or delete each entry. */
 export function InstrumentSetup({
   instruments,
@@ -404,8 +415,13 @@ export function InstrumentSetup({
     [client, add, simulationId],
   );
   const command = useCommand(send);
+  const { forget } = command;
   const symbolField = useRef<HTMLInputElement>(null);
   useFocusOnAnswer(command.outcome.kind, symbolField);
+  // The symbol last sent, and the one last stopped before sending as a duplicate.
+  const [sentSymbol, setSentSymbol] = useState<string | null>(null);
+  const [duplicate, setDuplicate] = useState<string | null>(null);
+  const duplicateId = useId();
   // Said here rather than in the row, which goes once market data drops it. The row loses its controls, and focus with
   // them, so focus goes to the add form, the next thing to do here, unless the user has moved it meanwhile.
   const [deletedSymbol, setDeletedSymbol] = useState<string | null>(null);
@@ -420,13 +436,54 @@ export function InstrumentSetup({
   const suggestions = DEFAULT_INSTRUMENTS.filter(
     (suggestion) => !listed.has(suggestion.symbol) && !waitingSymbols.has(suggestion.symbol),
   );
+  // Worked out as it is now: a symbol that was waiting is said to be listed once it is, and one deleted since is fine.
+  const stopped = duplicate === null ? null : duplicateText(duplicate, listed, waitingSymbols);
+
+  // A refusal of a symbol already taken is out of date once the list shows that symbol: the row says it all.
+  const refusedNowListed =
+    command.outcome.kind === 'refused' &&
+    command.outcome.code === 'SYMBOL_TAKEN' &&
+    sentSymbol !== null &&
+    listed.has(sentSymbol);
+  useEffect(() => {
+    if (refusedNowListed) {
+      forget();
+    }
+  }, [refusedNowListed, forget]);
+
+  /** What was said of the last attempt goes once the form is changed: it was about what the form held then. */
+  const changed = () => {
+    setDuplicate(null);
+    if (command.outcome.kind === 'refused') {
+      forget();
+    }
+  };
+  /** Dismissed by hand: focus, lost with the button, goes back to the symbol. */
+  const dismiss = () => {
+    setDuplicate(null);
+    if (command.outcome.kind === 'refused') {
+      forget();
+    }
+    symbolField.current?.focus();
+  };
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
+    const wanted = symbol.trim().toUpperCase();
+    // Checked against what is listed and what was just added before anything is sent: the exchange would refuse it.
+    if (duplicateText(wanted, listed, waitingSymbols) !== null) {
+      if (command.outcome.kind === 'refused') {
+        forget();
+      }
+      setDuplicate(wanted);
+      return;
+    }
+    setDuplicate(null);
+    setSentSymbol(wanted);
     const trimmed = name.trim();
     // Without a name, the request is the one it was before names existed, so its key's answer is too.
     void command.run({
-      symbol: symbol.trim().toUpperCase(),
+      symbol: wanted,
       referencePrice: price.trim(),
       ...(trimmed === '' ? {} : { displayName: trimmed }),
     });
@@ -488,17 +545,36 @@ export function InstrumentSetup({
                 <input
                   ref={symbolField}
                   value={symbol}
-                  onChange={(event) => setSymbol(event.target.value)}
+                  onChange={(event) => {
+                    changed();
+                    setSymbol(event.target.value);
+                  }}
+                  aria-invalid={stopped !== null || undefined}
+                  aria-describedby={stopped !== null ? duplicateId : undefined}
                   autoComplete="off"
                 />
               </label>
               <label>
                 Reference price
-                <input value={price} onChange={(event) => setPrice(event.target.value)} inputMode="decimal" />
+                <input
+                  value={price}
+                  onChange={(event) => {
+                    changed();
+                    setPrice(event.target.value);
+                  }}
+                  inputMode="decimal"
+                />
               </label>
               <label>
                 Name (optional)
-                <input value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" />
+                <input
+                  value={name}
+                  onChange={(event) => {
+                    changed();
+                    setName(event.target.value);
+                  }}
+                  autoComplete="off"
+                />
               </label>
               <button type="submit" className="primary">
                 Add instrument
@@ -514,6 +590,7 @@ export function InstrumentSetup({
                   type="button"
                   className="chip"
                   onClick={() => {
+                    changed();
                     setSymbol(suggestion.symbol);
                     setPrice(suggestion.referencePrice);
                   }}
@@ -531,15 +608,25 @@ export function InstrumentSetup({
             : 'The catalogue is frozen once the market opens.'}
         </p>
       )}
-      <CommandStatus
-        outcome={command.outcome}
-        action="Adding the instrument"
-        done={(created) =>
-          `Added ${created.symbol}${created.displayName ? ` (${created.displayName})` : ''} at ` +
-          `${groupDigits(created.referencePrice)}. The list shows it as waiting until market data has it.`
-        }
-        onRetry={() => void command.retry()}
-      />
+      {stopped !== null ? (
+        <div id={duplicateId} role="alert" className="outcome outcome-rejected">
+          <p>{stopped} Nothing was sent.</p>
+          <button type="button" className="quiet" onClick={dismiss}>
+            Dismiss
+          </button>
+        </div>
+      ) : (
+        <CommandStatus
+          outcome={command.outcome}
+          action="Adding the instrument"
+          done={(created) =>
+            `Added ${created.symbol}${created.displayName ? ` (${created.displayName})` : ''} at ` +
+            `${groupDigits(created.referencePrice)}. The list shows it as waiting until market data has it.`
+          }
+          onRetry={() => void command.retry()}
+          onDismiss={dismiss}
+        />
+      )}
     </section>
   );
 }

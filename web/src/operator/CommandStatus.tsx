@@ -40,18 +40,20 @@ export function unresolvedText(outcome: Extract<CommandOutcome<unknown>, { kind:
 /**
  * What happened to the last command, in words, with a retry when its outcome is unknown. Retrying resends the same
  * request under the same key, so it never applies twice. `action` names the command while it is on its way, as
- * "Starting the run".
+ * "Starting the run". With `onDismiss`, a refusal can be put away by hand rather than stay until the next command.
  */
 export function CommandStatus<T>({
   outcome,
   action,
   done,
   onRetry,
+  onDismiss,
 }: {
   outcome: CommandOutcome<T>;
   action: string;
   done: (result: T) => string;
   onRetry: () => void;
+  onDismiss?: () => void;
 }) {
   switch (outcome.kind) {
     case 'idle':
@@ -65,10 +67,17 @@ export function CommandStatus<T>({
         </p>
       );
     case 'refused':
-      return (
+      return onDismiss === undefined ? (
         <p role="alert" className="outcome outcome-rejected">
           {outcome.message}
         </p>
+      ) : (
+        <div role="alert" className="outcome outcome-rejected">
+          <p>{outcome.message}</p>
+          <button type="button" className="quiet" onClick={onDismiss}>
+            Dismiss
+          </button>
+        </div>
       );
     case 'unresolved':
       return (

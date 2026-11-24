@@ -91,7 +91,7 @@ export function useCommand<A, T>(send: (args: A, key: string) => Promise<T>, new
 
   /**
    * Lets go of an unresolved command, so that the next one gets a new key: only for one the caller knows has been
-   * settled since, one way or the other. A command on its way is kept.
+   * settled since, one way or the other. Also puts away a refusal that no longer applies. A command on its way is kept.
    */
   const forget = useCallback(() => {
     if (!inFlight.current) {
