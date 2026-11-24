@@ -11,6 +11,7 @@ import { useCloseCommand } from './closeCommand';
 import { HealthPanel, useHealthSummary } from './HealthPanel';
 import { InstrumentSetup } from './InstrumentSetup';
 import { MarketControl } from './MarketControl';
+import { StartNotice, StartSimulation, useStartCommand } from './StartSimulation';
 import type { CommandOutcome } from './useCommand';
 
 /**
@@ -25,8 +26,9 @@ const PER_SIMULATION = [['instruments'], ['bot-runs'], ['bots'], ['accounts'], [
  * The operator's screen: the authoritative trading phase with its controls and, once open, how trading is keeping
  * up; bot runs, and the SETUP editor for
  * instruments, bots and endowments. Once the market opens, bot runs come first. A market that has closed is shown as
- * ended: what it left is listed read-only, and nothing is offered that a closed market would refuse. Everything shown
- * is what the exchange committed, refetched after each command and every five seconds.
+ * ended: what it left is listed read-only, nothing is offered that a closed market would refuse, and a new simulation
+ * can be started, as the first one can on a stack with none. Everything shown is what the exchange committed,
+ * refetched after each command and every five seconds.
  */
 export function OperatorPage() {
   const market = useMarketStatus();
@@ -49,6 +51,8 @@ export function OperatorPage() {
       );
     }
   }, [generation, setParams]);
+  // Above the page drawn for each simulation, so that the new one's page can say what became of it.
+  const start = useStartCommand();
   // This market's instruments only: the list is asked for by the simulation the status names.
   const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
 
@@ -96,7 +100,10 @@ export function OperatorPage() {
             Market data is not reachable, so the instrument list may be incomplete.
           </p>
         )}
+        {market.data.simulationId === null && <StartSimulation start={start} market={market.data} />}
+        <StartNotice start={start} market={market.data} />
         {closed && <Ended closedAt={market.data.closedAt} simulationId={market.data.simulationId} />}
+        {closed && <StartSimulation start={start} market={market.data} />}
         {!editable && <BotRuns market={market.data.state} closedAt={market.data.closedAt} instruments={listed} />}
         <InstrumentSetup instruments={listed} editable={editable} closed={closed} />
         <BotSetup instruments={listed} editable={editable} closed={closed} />

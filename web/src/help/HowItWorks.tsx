@@ -28,7 +28,8 @@ export function HowItWorks() {
         <h2 id="how-market">A simulated market</h2>
         <p>
           Everything here uses virtual funds: no real money or shares change hands. An operator sets up a market with
-          instruments and starting balances, opens it, can halt and resume it, and in the end closes it for good. People
+          instruments and starting balances, opens it, can halt and resume it, and in the end closes it for good, then
+          starts a new one if there is more to trade. People
           and bots trade in it at the same time, under the same rules.
         </p>
       </section>
@@ -61,6 +62,11 @@ export function HowItWorks() {
       <section className="panel" aria-labelledby="how-closed">
         <h2 id="how-closed">When the market has closed</h2>
         <p>{GLOSSARY.closed.definition}</p>
+      </section>
+
+      <section className="panel" aria-labelledby="how-new">
+        <h2 id="how-new">Starting again</h2>
+        <p>{GLOSSARY.simulation.definition}</p>
       </section>
 
       <section className="panel" aria-labelledby="how-glossary">

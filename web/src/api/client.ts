@@ -33,6 +33,8 @@ import type {
   PasswordChangeRequest,
   Portfolio,
   Problem,
+  SimulationRequest,
+  SimulationStarted,
   TokenRevoked,
   TourSeen,
   TraderAdded,
@@ -220,6 +222,13 @@ export const api = {
    */
   closeMarket: (idempotencyKey: string) =>
     request<MarketClosed>('POST', '/api/v1/admin/market/close', { idempotencyKey }),
+
+  /**
+   * Starts a new simulation, in setup, once the current one has closed, or the first one when there is none. A refusal
+   * is its key's answer for good; a wait that runs out is answered 504, and the same key then returns the start's answer.
+   */
+  startSimulation: (simulation: SimulationRequest, idempotencyKey: string) =>
+    request<SimulationStarted>('POST', '/api/v1/admin/simulations', { body: simulation, idempotencyKey }),
 
   addInstrument: (instrument: InstrumentRequest, idempotencyKey: string) =>
     request<InstrumentCreated>('POST', '/api/v1/admin/instruments', { body: instrument, idempotencyKey }),

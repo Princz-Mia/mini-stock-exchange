@@ -63,7 +63,7 @@ export function closedText(closed: MarketClosed): string {
 function blocked(action: Action, state: MarketStatus['state'], instruments: number | undefined): string | null {
   switch (action) {
     case 'open':
-      if (state === 'NOT_SET_UP') return 'Add an instrument first; that creates the market.';
+      if (state === 'NOT_SET_UP') return 'Start a simulation or add an instrument first; either creates the market.';
       if (state !== 'SETUP') return 'The market has already opened. It opens only once.';
       if (instruments === undefined) return 'Reading the instruments…';
       return instruments === 0 ? 'Add at least one instrument first.' : null;

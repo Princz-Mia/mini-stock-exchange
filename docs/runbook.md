@@ -140,7 +140,7 @@ A close can also halt the writer in its very first transaction, when the outcome
 
 Two ways lead to a market that can trade again, and they keep very different things.
 
-**A new simulation** keeps everything. Close the market, then, signed in as the operator, send `POST /api/v1/admin/simulations` with a name, `{"name": "Thursday seminar"}`, and an `Idempotency-Key`, as for the other operator commands. The operator screen has no form for it yet.
+**A new simulation** keeps everything. Close the market, then, signed in as the operator, send `POST /api/v1/admin/simulations` with a name, `{"name": "Thursday seminar"}`, and an `Idempotency-Key`, as for the other operator commands. On the operator screen it is the **Start a new simulation** form under the panel that says the market has ended.
 
 The closed simulation stays in the database as it closed, and nothing can write into it again. The new one is empty and in setup. What the operator does next, on the operator screen or through the API, in this order:
 1. add the instruments (the symbols the closed simulation used are free again);
@@ -153,7 +153,7 @@ The demo seed does none of this for a simulation an operator started: it logs on
 The start's answers:
 - **`409 SIMULATION_NOT_CLOSED`**, with the state: a simulation that has not closed exists. In `SETUP` it is set up further instead; `OPEN` or `HALTED`, close it first. The refusal is that key's answer for good, so start again with a new key.
 - **`409 SIMULATION_NAME_TAKEN`:** names differ, whatever their case. Choose another, with a new key.
-- **`504 COMMAND_OUTCOME_UNKNOWN`:** send the same key again. No lookup by key serves a start; the same key returns its first answer, even after later starts.
+- **`504 COMMAND_OUTCOME_UNKNOWN`:** send the same key again; on the operator screen, **Ask again**. No lookup by key serves a start; the same key returns its first answer, even after later starts.
 - **`503 TRADING_UNAVAILABLE`** after a start: Execution could not learn whether the start committed, and stopped. Restart it; it loads whichever simulation is current, and the same key then returns the start's answer or starts the simulation.
 
 **Keys from the simulation before.** Every command of the new simulation needs a new `Idempotency-Key`. What an old key does when it is sent again after the start:
