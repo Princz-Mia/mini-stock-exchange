@@ -86,9 +86,9 @@ function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout
   // just the simulation.
   const market = useMarketStatus().data;
   const name = market?.name ?? null;
-  // The trader's own change notifications while trading; each may bring a fill to tell them about. A stream refused
-  // for want of an account in the market is opened again once one may have been created.
-  useAccountEvents(trading, undefined, notices.check, fundingMoment(market));
+  // The trader's own change notifications while trading; each may bring a fill to tell them about. A stream that
+  // failed is opened again, and at once when an account may have been created.
+  const account = useAccountEvents(trading, undefined, notices.check, fundingMoment(market));
   const help = useRef<HTMLButtonElement>(null);
   const shown = useRef(tour.showing);
   // When a tour closes, focus goes to Help, where it can be found again, rather than to the top of the page.
@@ -135,6 +135,12 @@ function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout
         </button>
       </header>
       <main className="content">
+        {account.reconnecting && (
+          <p className="chart-note stream-note" role="status">
+            Live updates to your account were interrupted. Reconnecting… Your balances and orders still refresh every
+            five seconds.
+          </p>
+        )}
         <FillWatch.Provider value={trading ? notices.placed : null}>
           <Outlet />
         </FillWatch.Provider>

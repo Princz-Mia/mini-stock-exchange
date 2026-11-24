@@ -1004,6 +1004,11 @@ button.chip {
   font-size: 13px;
 }
 
+/* Above the page, when the trader's live account updates are being reconnected. */
+.stream-note {
+  margin: 0 0 var(--space-4);
+}
+
 .chart-legend {
   display: flex;
   flex-wrap: wrap;
