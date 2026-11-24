@@ -150,6 +150,47 @@ describe('a bot run on its way', () => {
   });
 });
 
+describe('the time left of a run loading its bots', () => {
+  /** A loading run at a heartbeat `seconds` after its start. */
+  const at = (seconds: number, botsLoaded: number, overrides: Partial<BotRun> = {}) => {
+    const time = new Date(START + seconds * 1000).toISOString().replace('.000', '');
+    const worker = { workerId: 'sim-1', heartbeatAt: time, leaseExpiresAt: time };
+    return loading(botsLoaded, 20_000, { worker, ...overrides });
+  };
+  const figures = () => screen.getByText(/bots loaded/).closest('p') as HTMLElement;
+
+  it('is worked out once two heartbeats are seen, and goes by the pace between the last two', () => {
+    const view = render(<RunProgress run={at(5, 4_000)} now={START + 5_000} />);
+    expect(figures()).toHaveTextContent('Step 2 of 3 · 4,000 of 20,000 bots loaded (20%) · Working out the time left…');
+
+    // 4,000 more in 5 s: the 12,000 left take 15 s.
+    view.rerender(<RunProgress run={at(10, 8_000)} now={START + 10_000} />);
+    expect(figures()).toHaveTextContent('8,000 of 20,000 bots loaded (40%) · About 15 s left');
+
+    // A poll that brings no new heartbeat keeps what the last two said.
+    view.rerender(<RunProgress run={at(10, 8_000)} now={START + 12_000} />);
+    expect(figures()).toHaveTextContent('About 15 s left');
+
+    // Slower now: 1,000 in 5 s leaves 11,000 for 55 s.
+    view.rerender(<RunProgress run={at(15, 9_000)} now={START + 15_000} />);
+    expect(figures()).toHaveTextContent('About 55 s left');
+
+    // Nothing loaded between two heartbeats: no pace to go by.
+    view.rerender(<RunProgress run={at(20, 9_000)} now={START + 20_000} />);
+    expect(figures()).toHaveTextContent('Working out the time left…');
+  });
+
+  it('goes on while a stop waits for the loading, and is gone once the heartbeats stop', () => {
+    const view = render(<RunProgress run={at(5, 4_000)} now={START + 5_000} />);
+    const stopping = { status: 'STOPPING', desiredState: 'STOPPED', stopRequestedAt: '2026-11-06T10:00:07Z' } as const;
+    view.rerender(<RunProgress run={at(10, 8_000, stopping)} now={START + 10_000} />);
+    expect(figures()).toHaveTextContent('Still loading: 8,000 of 20,000 bots loaded (40%) · About 15 s left');
+
+    view.rerender(<RunProgress run={at(10, 8_000, { status: 'STALE' })} now={START + 40_000} />);
+    expect(figures()).toHaveTextContent(/^Last reported: 8,000 of 20,000 bots loaded \(40%\)$/);
+  });
+});
+
 describe('a bot run that places nothing', () => {
   const note = () => screen.queryByRole('status');
 

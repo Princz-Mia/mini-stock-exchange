@@ -1,10 +1,12 @@
 import { useId, useState } from 'react';
 
 import type { BotRun } from '../api/types';
+import { timeLeftText } from './botJob';
 import { durationText } from './compare';
 import {
   loadedPercent,
   loadedText,
+  loadingSecondsLeft,
   PAUSE_TEXTS,
   PHASE_TITLES,
   pauseReason,
@@ -17,7 +19,12 @@ import {
 } from './runPhase';
 import { elapsedSeconds, workerText } from './runView';
 
-type Activity = BotRun['activity'];
+/** A heartbeat this page saw: when it came, and what the worker reported with it. */
+interface Beat {
+  at: string | null;
+  activity: BotRun['activity'];
+  progress: BotRun['progress'];
+}
 
 /** A bar with a value, or one that only says the phase is under way: a wait or a stop has no amount to show. */
 type Bar = { value: number; max: number; percent: number; text: string } | { text: string } | null;
@@ -92,24 +99,22 @@ function detailFor(run: BotRun, phase: RunPhase): string {
   return workerText(run);
 }
 
+function beatOf(run: BotRun): Beat {
+  return { at: run.worker.heartbeatAt, activity: run.activity, progress: run.progress };
+}
+
 /**
- * The run's activity at the heartbeat before the latest one this page saw, or null until it has seen two. A run's
- * counts move only with its heartbeats, so the difference between the two says what the bots did in between.
+ * The heartbeat before the latest one this page saw, or null until it has seen two. A run's counts and its loading
+ * move only with its heartbeats, so the difference between the two says what the worker did in between.
  * Kept as state and moved on during render when a new heartbeat arrives, so it needs no effect of its own.
  */
-function usePreviousBeat(run: BotRun): Activity | null {
-  const [beats, setBeats] = useState({
-    runId: run.runId,
-    at: run.worker.heartbeatAt,
-    activity: run.activity,
-    previous: null as Activity | null,
-  });
-  if (beats.runId !== run.runId || beats.at !== run.worker.heartbeatAt) {
+function usePreviousBeat(run: BotRun): Beat | null {
+  const [beats, setBeats] = useState({ runId: run.runId, latest: beatOf(run), previous: null as Beat | null });
+  if (beats.runId !== run.runId || beats.latest.at !== run.worker.heartbeatAt) {
     const next = {
       runId: run.runId,
-      at: run.worker.heartbeatAt,
-      activity: run.activity,
-      previous: beats.runId === run.runId ? beats.activity : null,
+      latest: beatOf(run),
+      previous: beats.runId === run.runId ? beats.latest : null,
     };
     setBeats(next);
     return next.previous;
@@ -118,18 +123,22 @@ function usePreviousBeat(run: BotRun): Activity | null {
 }
 
 /**
- * Where a run that is not over stands, with a bar like the bot job's: waiting for a worker, loading its bots n of N,
- * then trading with its counts and, for a timed run, its time gone of its length. A run whose heartbeats stopped says
- * so, with where it had got to, and a stop asked for during loading keeps the loading's bar until the worker has
- * finished it. While a trading run places nothing and its paused steps say why, that is said too.
- * Everything comes from the worker's last heartbeat as the exchange keeps it, so it is the same after a reload and on
- * every operator's screen; it moves when a heartbeat arrives, every few seconds.
+ * Where a run that is not over stands, with a bar like the bot job's: waiting for a worker, loading its bots n of N
+ * with the time left, then trading with its counts and, for a timed run, its time gone of its length. A run whose
+ * heartbeats stopped says so, with where it had got to, and a stop asked for during loading keeps the loading's bar
+ * until the worker has finished it. While a trading run places nothing and its paused steps say why, that is said too.
+ * Everything comes from the worker's heartbeats as the exchange keeps them, so it is the same after a reload and on
+ * every operator's screen; it moves when a heartbeat arrives, every few seconds. The time left and the paused reason
+ * go by the difference between the last two heartbeats this page saw, so a page just opened waits one heartbeat for
+ * them.
  */
 export function RunProgress({ run, now }: { run: BotRun; now: number }) {
   const phase = runPhase(run);
   const titleId = useId();
   const previous = usePreviousBeat(run);
-  const reason = phase === 'TRADING' || phase === 'HELD' ? pauseReason(run.activity, previous) : null;
+  const reason = phase === 'TRADING' || phase === 'HELD' ? pauseReason(run.activity, previous?.activity ?? null) : null;
+  // A worker still loading, a stop asked for or not, has a time left; one whose heartbeats stopped has none.
+  const loads = (phase === 'LOADING' || phase === 'STOPPING') && run.progress?.phase === 'LOADING';
   const bar = barFor(run, phase, now);
   const measured = bar !== null && 'value' in bar;
   return (
@@ -150,6 +159,7 @@ export function RunProgress({ run, now }: { run: BotRun; now: number }) {
       )}
       <p className="job-figures">
         <span className="num">{figuresFor(run, phase, now)}</span>
+        {loads && <> · {timeLeftText(loadingSecondsLeft(beatOf(run), previous))}</>}
       </p>
       <p className={phase === 'LOST' ? 'form-error' : 'muted'}>{detailFor(run, phase)}</p>
       {/* The words never change while it lasts, so a screen reader says it once, not with every refetch. */}

@@ -4,6 +4,8 @@ import { botRun } from '../test/botRun';
 import { seeded } from '../test/seeded';
 import {
   loadedPercent,
+  type LoadingBeat,
+  loadingSecondsLeft,
   pausedByReasonText,
   pausedTotal,
   pauseReason,
@@ -47,6 +49,47 @@ describe('loadedPercent', () => {
       expect(percent).toBeGreaterThanOrEqual(0);
       expect(percent).toBeLessThan(100);
       expect(loadedPercent({ phase: 'LOADING', botsLoaded: loaded + 1, botsTotal: total })).toBeGreaterThanOrEqual(percent);
+    }
+  });
+});
+
+describe('loadingSecondsLeft', () => {
+  const beat = (seconds: number, botsLoaded: number, botsTotal = 20_000): LoadingBeat => ({
+    at: new Date(Date.parse('2026-11-06T10:00:00Z') + seconds * 1000).toISOString(),
+    progress: { phase: 'LOADING', botsLoaded, botsTotal },
+  });
+
+  it('goes by the pace between the two heartbeats, rounded up', () => {
+    // 4,000 bots in 5 s: the 12,000 left take 15 s.
+    expect(loadingSecondsLeft(beat(10, 8_000), beat(5, 4_000))).toBe(15);
+    // 3 bots in 5 s: the 19,994 left take 33,323.3 s, said as 33,324.
+    expect(loadingSecondsLeft(beat(10, 6), beat(5, 3))).toBe(33_324);
+    expect(loadingSecondsLeft(beat(10, 20_000), beat(5, 19_000))).toBe(0);
+  });
+
+  it('has no pace to go by before two heartbeats of the same loading, or when none loaded between them', () => {
+    expect(loadingSecondsLeft(beat(5, 4_000), null)).toBeNull();
+    expect(loadingSecondsLeft(beat(10, 4_000), beat(5, 4_000))).toBeNull();
+    // A worker that took the run over loads it again from none.
+    expect(loadingSecondsLeft(beat(10, 500), beat(5, 9_000))).toBeNull();
+    expect(loadingSecondsLeft(beat(10, 8_000), beat(10, 4_000))).toBeNull();
+    expect(loadingSecondsLeft(beat(10, 8_000), beat(5, 4_000, 10_000))).toBeNull();
+    expect(loadingSecondsLeft(beat(10, 8_000), { at: null, progress: beat(5, 4_000).progress })).toBeNull();
+    const trading = { at: beat(10, 0).at, progress: { phase: 'TRADING', botsLoaded: 20_000, botsTotal: 20_000 } } as const;
+    expect(loadingSecondsLeft(trading, beat(5, 4_000))).toBeNull();
+  });
+
+  it('is enough for the bots left at that pace, and less than a second more, for drawn loadings', () => {
+    const random = seeded(1411);
+    for (let draw = 0; draw < 500; draw++) {
+      const total = 2 + random(2_000_000);
+      const before = random(total - 1);
+      const now = before + 1 + random(total - before - 1);
+      const gap = 1 + random(30);
+      const left = loadingSecondsLeft(beat(gap, now, total), beat(0, before, total)) as number;
+      const pace = (now - before) / gap;
+      expect(left * pace).toBeGreaterThanOrEqual(total - now - 1e-6);
+      expect((left - 1) * pace).toBeLessThan(total - now);
     }
   });
 });

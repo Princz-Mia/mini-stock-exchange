@@ -40,6 +40,28 @@ export function loadedText(progress: Progress): string {
   return `${groupInteger(progress.botsLoaded)} of ${groupInteger(progress.botsTotal)} bots loaded (${loadedPercent(progress)}%)`;
 }
 
+/** A heartbeat of the run as this page saw it: when it came, and how far the loading had got then. */
+export interface LoadingBeat {
+  at: string | null;
+  progress: BotRun['progress'];
+}
+
+/**
+ * Seconds until every bot is loaded at the pace between two heartbeats of the loading, rounded up. Null with no pace
+ * to go by: until two heartbeats of the same loading have been seen, or when no bot was loaded between them, as a
+ * worker that took the run over starts its loading again from none.
+ */
+export function loadingSecondsLeft(current: LoadingBeat, previous: LoadingBeat | null): number | null {
+  const now = current.progress;
+  const before = previous?.progress ?? null;
+  if (now?.phase !== 'LOADING' || before?.phase !== 'LOADING' || before.botsTotal !== now.botsTotal) return null;
+  if (current.at === null || previous?.at == null) return null;
+  const seconds = (Date.parse(current.at) - Date.parse(previous.at)) / 1000;
+  const loaded = now.botsLoaded - before.botsLoaded;
+  if (seconds <= 0 || loaded <= 0) return null;
+  return Math.ceil(((now.botsTotal - Math.min(now.botsLoaded, now.botsTotal)) * seconds) / loaded);
+}
+
 /** The phase's heading, which also names its bar. */
 export const PHASE_TITLES: Record<RunPhase, string> = {
   WAITING: 'Waiting for a simulator worker',
