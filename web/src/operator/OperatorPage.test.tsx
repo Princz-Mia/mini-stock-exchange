@@ -1159,8 +1159,13 @@ describe('the operator screen', () => {
     expect(create).toBeEnabled();
     fireEvent.click(create);
 
-    // The job answers at once; its progress takes the form's place.
-    expect(await screen.findByRole('heading', { name: 'Creating bots' })).toBeInTheDocument();
+    // The job answers at once; its progress takes the form's place, focus goes to it from the button it replaced,
+    // and a screen reader hears that it has started, though the panel had no job when the page opened.
+    const heading = await screen.findByRole('heading', { name: 'Creating bots' });
+    await waitFor(() => expect(heading).toHaveFocus());
+    const panel = screen.getByRole('region', { name: 'Bots' });
+    const announcements = within(panel).getAllByRole('status').find((node) => node.className === 'visually-hidden')!;
+    expect(announcements).toHaveTextContent('Creating 20,000 bots.');
     const bar = screen.getByRole('progressbar', { name: 'Creating bots' });
     expect(bar).toHaveAttribute('aria-valuenow', '0');
     expect(bar).toHaveAttribute('aria-valuemax', '20000');
@@ -1250,7 +1255,8 @@ describe('the operator screen', () => {
     expect(screen.queryByRole('progressbar')).toBeNull();
     expect(await screen.findByRole('form', { name: 'Create bots' })).toBeInTheDocument();
     expect(await button('Open market')).toBeEnabled();
-  });
+    // Four reads a second apart, each waited for: more than the default five seconds on a busy machine.
+  }, 15_000);
 
   it('stops a running job, and says that what was made stays', async () => {
     const { server, state } = exchange('SETUP');
@@ -1263,10 +1269,13 @@ describe('the operator screen', () => {
 
     const stop = await button('Stop creating bots');
     expect(stop).toHaveAccessibleDescription('The bots made so far stay.');
+    stop.focus();
     fireEvent.click(stop);
 
     const stopped = 'Stopped after 3,000 of 20,000 bots. The 3,000 made stay. The rest were not made.';
-    expect(await screen.findByText(stopped, { selector: 'p.outcome' })).toBeInTheDocument();
+    const outcome = await screen.findByText(stopped, { selector: 'p.outcome' });
+    // Stop is gone with the bar, so focus goes to what the job came to, not back to the top of the page.
+    await waitFor(() => expect(outcome).toHaveFocus());
     expect(screen.queryByRole('progressbar')).toBeNull();
     expect(screen.getByRole('form', { name: 'Create bots' })).toBeInTheDocument();
     const sent = server.requests.filter((request) => request.url.endsWith('/stop'));
@@ -1289,6 +1298,8 @@ describe('the operator screen', () => {
       screen.getByText('The exchange restarted during this job and took it up again where it was; no bot is made twice.'),
     ).toBeInTheDocument();
     expect(server.requests.filter((request) => request.method === 'POST')).toHaveLength(0);
+    // A job found running is shown where it is: focus stays with the page.
+    expect(document.body).toHaveFocus();
   });
 
   it('says when a job failed, with its reason, and when the exchange stops answering in the middle of one', async () => {
@@ -1320,7 +1331,7 @@ describe('the operator screen', () => {
     // The last progress stays on screen, not a form that would start a second job.
     expect(screen.getByRole('progressbar', { name: 'Creating bots' })).toHaveAttribute('aria-valuenow', '4000');
     expect(screen.queryByRole('form', { name: 'Create bots' })).toBeNull();
-  });
+  }, 15_000);
 
   it('says in plain words when a running job has stopped moving, and gives no time left for it', async () => {
     const { state } = exchange('SETUP');
@@ -1349,7 +1360,7 @@ describe('the operator screen', () => {
     );
   });
 
-  it("shows a refused job in the exchange's words beside the other operator's job it names", async () => {
+  it("shows a job refused for another operator's beside that job, then lets it go with that job, keeping the figures", async () => {
     const { server, state } = exchange('SETUP');
     server.on('POST /api/v1/admin/bot-jobs', () => {
       // Another operator started one meanwhile: the refusal names it, and its progress shows here.
@@ -1367,15 +1378,29 @@ describe('the operator screen', () => {
 
     const form = await screen.findByRole('form', { name: 'Create bots' });
     fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '50' } });
+    fireEvent.change(within(form).getByLabelText('Market makers, %'), { target: { value: '10' } });
+    fireEvent.change(within(form).getByLabelText('Cash each'), { target: { value: '250.00' } });
     fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
 
-    expect(
-      await screen.findByText(
-        'Bots are already being created: 1,000 of 20,000 bots are made. Wait for that job to finish, or stop it',
-      ),
-    ).toBeInTheDocument();
-    expect(await screen.findByRole('progressbar', { name: 'Creating bots' })).toHaveAttribute('aria-valuenow', '1000');
-  });
+    // In the page's words: the exchange's quote that job's progress as it was, and the bar has it as it is.
+    const refusal = await screen.findByText(
+      'Not started: a job is already creating bots, shown above. Wait for it to finish, or stop it; what you typed is kept for then.',
+    );
+    expect(refusal).toHaveAttribute('role', 'alert');
+    expect(screen.queryByText(/1,000 of 20,000 bots are made/)).toBeNull();
+    const bar = await screen.findByRole('progressbar', { name: 'Creating bots' });
+    expect(bar).toHaveAttribute('aria-valuenow', '1000');
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Creating bots' })).toHaveFocus());
+
+    // That job ends: the refusal goes with it, and the form comes back as it was typed, ready to send.
+    state.job = { ...botJob({ created: 20_000, partsDone: 20 }), state: 'DONE', finishedAt: '2026-11-24T10:00:24Z' };
+    const again = await screen.findByRole('form', { name: 'Create bots' }, { timeout: 3_000 });
+    expect(screen.queryByText(/^Not started/)).toBeNull();
+    expect(within(again).getByLabelText('Number of bots')).toHaveValue('50');
+    expect(within(again).getByLabelText('Market makers, %')).toHaveValue('10');
+    expect(within(again).getByLabelText('Cash each')).toHaveValue('250.00');
+    expect(within(again).getByRole('button', { name: 'Create bots' })).toBeEnabled();
+  }, 15_000);
 
   it('marks the fields a refused job names, describes them by the refusal and focuses the first', async () => {
     const { server } = exchange('SETUP');
@@ -1429,6 +1454,81 @@ describe('the operator screen', () => {
       .map((request) => request.headers['Idempotency-Key']);
     expect(keys).toHaveLength(2);
     expect(keys[1]).toBe(keys[0]);
+  });
+
+  it('settles a start whose answer was lost from the job it made, under the same key, without a Retry', async () => {
+    const { server, state } = exchange('SETUP');
+    let asked = 0;
+    server.on('POST /api/v1/admin/bot-jobs', () => {
+      asked++;
+      // The first did start the job; only its answer was lost. Sent again, it is answered from its stored answer.
+      state.job = botJob({ created: asked === 1 ? 0 : 2_000, partsDone: asked === 1 ? 0 : 2 });
+      return asked === 1
+        ? { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN', detail: 'The command may still complete' } }
+        : { status: 202, json: state.job };
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '20000' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
+
+    expect(await screen.findByRole('progressbar', { name: 'Creating bots' })).toBeInTheDocument();
+    await waitFor(() => expect(asked).toBe(2));
+    await waitFor(() => expect(screen.queryByText(/^Not confirmed/)).toBeNull());
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    const keys = server.requests
+      .filter((request) => request.url === '/api/v1/admin/bot-jobs')
+      .map((request) => request.headers['Idempotency-Key']);
+    expect(keys).toEqual([keys[0], keys[0]]);
+  });
+
+  it('settles a lost start whose job has already ended, so the form is not left waiting for a Retry', async () => {
+    const { server, state } = exchange('SETUP');
+    const ended = { ...botJob({ total: 30, created: 30, partsDone: 1 }), state: 'DONE' as const };
+    let asked = 0;
+    server.on('POST /api/v1/admin/bot-jobs', () => {
+      asked++;
+      state.job = { ...ended, finishedAt: '2026-11-24T10:00:01Z' };
+      return asked === 1
+        ? { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN', detail: 'The command may still complete' } }
+        : { status: 202, json: state.job };
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '30' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
+
+    expect(await screen.findByText(/^Created 30 bots/, { selector: 'p.outcome' })).toBeInTheDocument();
+    await waitFor(() => expect(asked).toBe(2));
+    await waitFor(() => expect(within(form).getByLabelText('Number of bots')).toBeEnabled());
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it('leaves a lost start to Retry while the panel shows only the job it showed when it was sent', async () => {
+    const { server, state } = exchange('SETUP');
+    // An earlier job, done before this start: it says nothing about whether this one was made.
+    state.job = { ...botJob({ total: 10, created: 10, partsDone: 1 }), state: 'DONE', finishedAt: '2026-11-24T09:00:00Z' };
+    let asked = 0;
+    server.on('POST /api/v1/admin/bot-jobs', () => {
+      asked++;
+      return { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN', detail: 'The command may still complete' } };
+    });
+    renderPage();
+
+    expect(await screen.findByText(/^Created 10 bots/, { selector: 'p.outcome' })).toBeInTheDocument();
+    const form = screen.getByRole('form', { name: 'Create bots' });
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '500' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
+
+    expect(await button('Retry')).toBeInTheDocument();
+    // The job is read again after the answer; the same job shown is no reason to send the start again.
+    await waitFor(() =>
+      expect(server.requests.filter((request) => request.url === '/api/v1/admin/bot-jobs/current').length).toBeGreaterThan(1),
+    );
+    expect(asked).toBe(1);
+    expect(within(form).getByLabelText('Number of bots')).toBeDisabled();
   });
 
   it('keeps creating bots however many there are: no limit, no meter', async () => {

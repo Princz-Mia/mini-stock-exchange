@@ -51,8 +51,32 @@ export function BotSetup({
   const job = read.job;
   const running = job?.state === 'RUNNING';
   const bots = population.data;
-  const start = useStartJob();
+  const start = useStartJob(job?.jobId ?? null);
+  const { outcome, retry, forget } = start.command;
   const outcomeId = useId();
+  const outcomeLine = useRef<HTMLParagraphElement>(null);
+
+  // When a job ends, a refusal that named it is out of date, and focus lost with its Stop button goes to what the job
+  // came to, so a keyboard goes on from there. Focus the user has moved elsewhere stays where it is.
+  const wasRunning = useRef(running);
+  useEffect(() => {
+    const ended = wasRunning.current && !running;
+    wasRunning.current = running;
+    if (!ended) {
+      return;
+    }
+    if (outcome.kind === 'refused' && outcome.code === 'BOT_JOB_RUNNING') {
+      forget();
+    }
+    if (focusLost()) {
+      outcomeLine.current?.focus();
+    }
+  }, [running, outcome, forget]);
+
+  // The page's own start, or its refusal by the job that took the form's place: focus goes to that job's heading.
+  const ownJob =
+    (outcome.kind === 'done' && outcome.result.jobId === job?.jobId) ||
+    (outcome.kind === 'refused' && outcome.code === 'BOT_JOB_RUNNING');
 
   return (
     <section className="panel" aria-labelledby="bots-title">
@@ -79,12 +103,19 @@ export function BotSetup({
           <JobProgress
             job={job}
             unreachable={read.unreachable}
+            focusOnOpen={ownJob}
             onStopped={(stopped) => client.setQueryData(['bot-job'], stopped)}
           />
         ) : (
           <>
             {job != null && (
-              <p className={`outcome ${job.state === 'DONE' ? 'outcome-ok' : 'outcome-rejected'}`}>{outcomeText(job)}</p>
+              <p
+                ref={outcomeLine}
+                tabIndex={-1}
+                className={`outcome ${job.state === 'DONE' ? 'outcome-ok' : 'outcome-rejected'}`}
+              >
+                {outcomeText(job)}
+              </p>
             )}
             <CreateBots instruments={instruments} start={start} outcomeId={outcomeId} />
           </>
@@ -98,12 +129,14 @@ export function BotSetup({
       )}
       {editable && (
         <div id={outcomeId}>
-          {start.command.outcome.kind !== 'done' && (
-            <CommandStatus
-              outcome={start.command.outcome}
-              done={() => ''}
-              onRetry={() => void start.command.retry()}
-            />
+          {outcome.kind === 'refused' && outcome.code === 'BOT_JOB_RUNNING' ? (
+            // The exchange's words quote that job's progress as it was then; the bar above has it as it is now.
+            <p role="alert" className="outcome outcome-rejected">
+              Not started: a job is already creating bots, shown above. Wait for it to finish, or stop it; what you
+              typed is kept for then.
+            </p>
+          ) : (
+            outcome.kind !== 'done' && <CommandStatus outcome={outcome} done={() => ''} onRetry={() => void retry()} />
           )}
         </div>
       )}
@@ -111,23 +144,28 @@ export function BotSetup({
   );
 }
 
+/** Focus has fallen to the page: the control that had it was disabled or taken off the page. */
+function focusLost(): boolean {
+  return document.activeElement === null || document.activeElement === document.body;
+}
+
 /**
  * Tells a screen reader how the job goes at its start, at each quarter and at its end, in a live region that is on
- * the page from the first: never on every read, and nothing for a job found as it was on opening the page.
+ * the page from the first: never on every read. The first read is the panel as it opened, so a job found running then
+ * is shown, not announced; a job started after a first read that found none is announced from its start.
  */
 function Announcer({ job }: { job: BotJob | null | undefined }) {
-  const said = job == null ? null : milestone(job);
-  const first = useRef<string | null | undefined>(undefined);
+  // Undefined until the job has been read; null when the read found none.
+  const said = job === undefined ? undefined : job === null ? null : milestone(job);
+  const last = useRef<string | null | undefined>(undefined);
   const [announced, setAnnounced] = useState('');
   useEffect(() => {
-    if (first.current === undefined) {
-      if (said !== null) {
-        first.current = said;
-      }
+    if (said === undefined) {
       return;
     }
-    if (said !== null && said !== first.current) {
-      first.current = said;
+    const before = last.current;
+    last.current = said;
+    if (before !== undefined && said !== null && said !== before) {
       setAnnounced(said);
     }
   }, [said]);
@@ -142,12 +180,25 @@ function Announcer({ job }: { job: BotJob | null | undefined }) {
 function JobProgress({
   job,
   unreachable,
+  focusOnOpen,
   onStopped,
 }: {
   job: BotJob;
   unreachable: boolean;
+  /** This page started the job, or was refused by it: focus, lost with the form, goes to its heading once. */
+  focusOnOpen: boolean;
   onStopped: (job: BotJob) => void;
 }) {
+  const heading = useRef<HTMLHeadingElement>(null);
+  const focused = useRef(false);
+  useEffect(() => {
+    if (focusOnOpen && !focused.current) {
+      focused.current = true;
+      if (focusLost()) {
+        heading.current?.focus();
+      }
+    }
+  }, [focusOnOpen]);
   const send = useCallback(
     async (_: null, key: string) => {
       const stopped = await api.stopBotJob(job.jobId, key);
@@ -162,7 +213,9 @@ function JobProgress({
   const percent = percentMade(job);
   return (
     <div className="bot-job">
-      <h3 id={titleId}>Creating bots</h3>
+      <h3 id={titleId} ref={heading} tabIndex={-1}>
+        Creating bots
+      </h3>
       <div
         role="progressbar"
         aria-labelledby={titleId}
@@ -236,12 +289,8 @@ function CreateBots({
   start: ReturnType<typeof useStartJob>;
   outcomeId: string;
 }) {
-  const { command, sent, setSent } = start;
-  const [count, setCount] = useState('');
-  const [makers, setMakers] = useState<string>(USUAL_SHARES.marketMakers);
-  const [momentum, setMomentum] = useState<string>(USUAL_SHARES.momentum);
-  const [cash, setCash] = useState('');
-  const [shares, setShares] = useState<ShareInputs>({});
+  const { command, sent, setSent, send } = start;
+  const { count, setCount, makers, setMakers, momentum, setMomentum, cash, setCash, shares, setShares } = start.fields;
   const form = useRef<HTMLFormElement>(null);
   const mixId = useId();
   const invalid = refusedFields(command.outcome);
@@ -264,7 +313,7 @@ function CreateBots({
     }
     const holdings = holdingsFrom(instruments, shares);
     setSent(holdings);
-    void command.run({ count: resolved.total, strategies: resolved.mix, cash: cash.trim(), holdings });
+    send({ count: resolved.total, strategies: resolved.mix, cash: cash.trim(), holdings });
   };
 
   return (
@@ -361,12 +410,18 @@ function CreateBots({
 }
 
 /**
- * Starting a job, kept above the form: a refusal for a job another operator started shows beside that job's progress,
- * which takes the form's place. The holdings last sent are kept for the fields a refusal names.
+ * Starting a job, kept above the form with what was typed in it: a job that takes the form's place, another
+ * operator's that refused this one among them, leaves the figures as they were for when the form comes back. The
+ * holdings last sent are kept for the fields a refusal names.
+ *
+ * A start whose answer was lost is settled by sending it again under its key once a job other than the one
+ * `shownId` named when it was sent appears: its own job is answered from its stored answer, and one another
+ * operator started gets the refusal it would have had. Never a second job: one runs at a time, and the key is the
+ * same.
  */
-function useStartJob() {
+function useStartJob(shownId: string | null) {
   const client = useQueryClient();
-  const send = useCallback(
+  const startJob = useCallback(
     async (request: BotJobRequest, key: string) => {
       try {
         const started = await api.startBotJob(request, key);
@@ -379,7 +434,32 @@ function useStartJob() {
     },
     [client],
   );
-  const command = useCommand(send);
+  const command = useCommand(startJob);
   const [sent, setSent] = useState<readonly { instrumentId: string }[]>([]);
-  return { command, sent, setSent };
+  const shownAtSend = useRef<string | null>(null);
+  const { unresolved, retry, run } = command;
+  useEffect(() => {
+    if (unresolved && shownId !== null && shownId !== shownAtSend.current) {
+      shownAtSend.current = shownId;
+      void retry();
+    }
+  }, [unresolved, shownId, retry]);
+  const send = useCallback(
+    (job: BotJobRequest) => {
+      // A start sent again while unresolved is the same one, sent over the job shown then. One sent before the job
+      // was first read counts as sent over none: whatever job appears, sending it again under its key is safe.
+      if (!unresolved) {
+        shownAtSend.current = shownId;
+      }
+      void run(job);
+    },
+    [unresolved, shownId, run],
+  );
+  const [count, setCount] = useState('');
+  const [makers, setMakers] = useState<string>(USUAL_SHARES.marketMakers);
+  const [momentum, setMomentum] = useState<string>(USUAL_SHARES.momentum);
+  const [cash, setCash] = useState('');
+  const [shares, setShares] = useState<ShareInputs>({});
+  const fields = { count, setCount, makers, setMakers, momentum, setMomentum, cash, setCash, shares, setShares };
+  return { command, send, sent, setSent, fields };
 }
