@@ -38,9 +38,11 @@ import {
   strategiesText,
   taggedSplit,
   timeLeftText,
-  workerText,
 } from './runView';
+import { pausedByReasonText, pausedTotal, runMilestone } from './runPhase';
+import { RunProgress } from './RunProgress';
 import { populationText } from './strategies';
+import { Announcer } from './Announcer';
 import { CommandStatus } from './CommandStatus';
 import { type Freshness, notReadYet, useFreshRead } from './freshRead';
 import { useOperatorCommand } from './operatorCommands';
@@ -159,6 +161,7 @@ export function BotRuns({
   return (
     <section className="panel" aria-labelledby="runs-title">
       <h2 id="runs-title">Bot runs</h2>
+      <Announcer said={runs.data === undefined ? undefined : active === undefined ? null : runMilestone(active)} />
       {runs.isError && (
         <p role="alert" className="form-error">
           The bot runs could not be loaded.
@@ -370,7 +373,7 @@ function ActiveRun({
           run shows Stopped once the worker confirms.
         </p>
       )}
-      <p className={run.status === 'STALE' ? 'form-error' : 'muted'}>{workerText(run)}</p>
+      <RunProgress run={run} now={now} />
       <dl className="balances">
         <dt>Bots</dt>
         <dd>{strategiesText(config.strategies)}</dd>
@@ -423,15 +426,20 @@ function ActiveRun({
           <dd>{groupInteger(activity.inFlight)}</dd>
         </div>
         <div>
+          <dt>Paused</dt>
+          <dd>{groupInteger(pausedTotal(activity))}</dd>
+        </div>
+        <div>
           <dt>Per second</dt>
           <dd>
             {rate ?? '—'} <span className="muted">of {config.commandsPerSecond}</span>
           </dd>
         </div>
       </dl>
+      {pausedTotal(activity) > 0 && <p className="muted">Paused steps by reason: {pausedByReasonText(activity)}.</p>}
       <p className="muted hint">
         Counts are what the worker last reported. Per second is the average since the start, against the run&apos;s
-        budget.
+        budget. Paused counts the bots&apos; steps that could place nothing new, such as while market data was stale.
       </p>
       {run.manifest !== null && <RunSettings manifest={run.manifest} />}
       {activity.stopFailures > 0 && (

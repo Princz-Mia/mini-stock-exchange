@@ -1557,6 +1557,33 @@ main.content:focus {
   font-weight: 600;
 }
 
+/* A phase with no amount to show, such as waiting for a worker: a short fill sweeps across, and with reduced
+   motion the whole bar is filled faintly and stays still, so it still reads as under way. */
+.job-bar-waiting .job-bar-fill {
+  width: 30%;
+  animation: job-bar-sweep 1.6s ease-in-out infinite;
+}
+
+@keyframes job-bar-sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(340%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .job-bar-waiting .job-bar-fill {
+    width: 100%;
+    opacity: 0.35;
+  }
+}
+
+.run-progress {
+  margin-top: 0;
+}
+
 .job-actions {
   display: flex;
   flex-wrap: wrap;
