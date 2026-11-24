@@ -227,7 +227,7 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
     if (noAccount && market.data?.state === 'CLOSED') {
       return (
         <p role="status" className="page-status">
-          The market {closedPhrase(market.data.closedAt, market.data.closedOnSchedule)}. You had no
+          The market {closedPhrase(market.data.closedAt, market.data.closedOnSchedule, market.data.closesAt)}. You had no
           trading account in it, so there is no portfolio to show.
         </p>
       );
@@ -251,7 +251,7 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
         <section className="panel ended" aria-labelledby="portfolio-closed-title">
           <h2 id="portfolio-closed-title">Market closed</h2>
           <p role="status">
-            The market {closedPhrase(market.data.closedAt, market.data.closedOnSchedule)}.{' '}
+            The market {closedPhrase(market.data.closedAt, market.data.closedOnSchedule, market.data.closesAt)}.{' '}
             {reserved
               ? 'Nothing trades any more, but some of your orders are still open, with what they reserve. The close cancels them and releases it: it is doing so now, or does when the exchange is restarted if it has stopped. Your balances are final once nothing is reserved.'
               : 'Nothing trades any more, so this is where your account ended: no order is open and nothing is reserved.'}{' '}

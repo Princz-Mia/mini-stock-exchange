@@ -3806,4 +3806,33 @@ describe('a market opened for a set time, on the operator screen', () => {
     expect(screen.queryByText(/the close has not given its answer here/)).toBeNull();
     expect(screen.queryByRole('button', { name: "Ask for the close's answer" })).toBeNull();
   });
+
+  it('names both times when the exchange closed the market well after its set time', async () => {
+    const { state } = exchange('CLOSED');
+    // Down from before its set time until three hours after it: closed at the start.
+    state.market = { ...market('CLOSED'), closesAt: '2026-11-05T13:00:00Z', closedOnSchedule: true };
+    renderPage();
+
+    const ended = await screen.findByRole('region', { name: 'This market has ended' });
+    expect(ended).toHaveTextContent(
+      'It closed on 5 Nov 2026, 16:00:00 UTC (its set time, 5 Nov 2026, 13:00:00 UTC, had passed). Trading is over for good',
+    );
+    expect(ended).not.toHaveTextContent('at its set time');
+    const panel = await marketPanel();
+    expect(within(panel).getByText('Set time')).toBeInTheDocument();
+    expect(within(panel).getByText('5 Nov 2026, 13:00:00 UTC')).toBeInTheDocument();
+    expect(within(panel).getByText(/· after its set time had passed/)).toBeInTheDocument();
+    expect(panel).toHaveTextContent('The market closed after its set time had passed. Closing is final');
+    expect(panel).not.toHaveTextContent('at its set time');
+  });
+
+  it('keeps calling a close a minute after its set time a close at that time', async () => {
+    const { state } = exchange('CLOSED');
+    state.market = { ...market('CLOSED'), closesAt: '2026-11-05T15:59:00Z', closedOnSchedule: true };
+    renderPage();
+
+    const ended = await screen.findByRole('region', { name: 'This market has ended' });
+    expect(ended).toHaveTextContent('It closed at its set time on 5 Nov 2026, 16:00:00 UTC.');
+    expect(within(await marketPanel()).getByText(/· at its set time/)).toBeInTheDocument();
+  });
 });

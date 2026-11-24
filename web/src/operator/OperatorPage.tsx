@@ -91,6 +91,7 @@ export function OperatorPage() {
         {closed && (
           <Ended
             closedAt={market.data.closedAt}
+            closesAt={market.data.closesAt}
             onSchedule={market.data.closedOnSchedule}
             simulationId={market.data.simulationId}
           />
@@ -154,11 +155,14 @@ export function restingOrdersText(known: {
  */
 function Ended({
   closedAt,
+  closesAt,
   onSchedule,
   simulationId,
 }: {
   closedAt: string | null;
-  /** The exchange closed it at its set time, and no operator. */
+  /** The time it was set to close at, if it had one. */
+  closesAt: string | null;
+  /** The exchange closed it because its set time had come, and no operator. */
   onSchedule: boolean;
   simulationId: string | null;
 }) {
@@ -168,7 +172,7 @@ function Ended({
     <section className="panel ended" aria-labelledby="ended-title">
       <h2 id="ended-title">This market has ended</h2>
       <p>
-        It {closedPhrase(closedAt, onSchedule)}. Trading is over for good: every bot run
+        It {closedPhrase(closedAt, onSchedule, closesAt)}. Trading is over for good: every bot run
         ended, and every bot&apos;s token stopped working.
       </p>
       <p>

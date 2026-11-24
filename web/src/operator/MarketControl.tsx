@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api } from '../api/client';
 import type { MarketClosed, MarketStatus, MarketTransition } from '../api/types';
-import { CloseTime, closedPhrase } from '../app/closeTime';
+import { CloseTime, scheduledCloseWords } from '../app/closeTime';
 import { groupInteger, utcDateTime, utcTime } from '../format';
 import { TermTip } from '../help/TermTip';
 import { useCloseCommand } from './closeCommand';
@@ -240,15 +240,15 @@ export function unfinishedText(stillResting: number | null): string {
  */
 function closeRefusal(
   outcome: Extract<CommandOutcome<MarketClosed>, { kind: 'refused' }>,
-  closedOnSchedule: boolean,
+  scheduled: string | null,
 ): string {
   if (outcome.code !== 'MARKET_TRANSITION_NOT_ALLOWED') {
     return outcome.message;
   }
   switch (outcome.problem?.state) {
     case 'CLOSED':
-      return closedOnSchedule
-        ? 'The market had already closed at its set time, so this close changed nothing.'
+      return scheduled !== null
+        ? `The market had already closed ${scheduled}, so this close changed nothing.`
         : 'The market had already closed, so this close changed nothing.';
     case 'SETUP':
       return 'The market has not opened yet, and only a market that has opened can be closed. Nothing was changed.';
@@ -266,15 +266,18 @@ function closeRefusal(
 function CloseStatus({
   outcome,
   state,
-  closedOnSchedule,
+  scheduled,
   stillResting,
   askedBefore,
   onRetry,
 }: {
   outcome: CommandOutcome<MarketClosed>;
   state: MarketStatus['state'];
-  /** The exchange closed the market at its set time: then no close sent from here closed it. */
-  closedOnSchedule: boolean;
+  /**
+   * When the exchange closed the market because its set time had come, how that is put ("at its set time"); then no
+   * close sent from here closed it. Null otherwise.
+   */
+  scheduled: string | null;
   /** Set once the exchange has said the close is unfinished: how many orders still rested, if it said. */
   stillResting: number | null | undefined;
   /** The key has been sent before, so what is on its way asks for an answer rather than closing. */
@@ -306,7 +309,7 @@ function CloseStatus({
     case 'refused':
       return (
         <p role="alert" className="outcome outcome-rejected">
-          {closeRefusal(outcome, closedOnSchedule)}
+          {closeRefusal(outcome, scheduled)}
         </p>
       );
     case 'unresolved': {
@@ -322,12 +325,12 @@ function CloseStatus({
           </div>
         );
       }
-      if (state === 'CLOSED' && closedOnSchedule) {
-        // Only one close applies, and the status says it was the exchange's own at the set time: this one, whatever
+      if (state === 'CLOSED' && scheduled !== null) {
+        // Only one close applies, and the status says it was the exchange's own for the set time: this one, whatever
         // became of it, closed nothing, and nothing is left to ask it.
         return (
           <p role="status" className="outcome outcome-ok">
-            The market closed at its set time, so this close changed nothing.
+            The market closed {scheduled}, so this close changed nothing.
           </p>
         );
       }
@@ -448,6 +451,7 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
   const closed = market.state === 'CLOSED';
   // A closed market may be read days later, so its times carry their dates.
   const when = closed ? utcDateTime : utcTime;
+  const scheduled = closed ? scheduledCloseWords(market) : null;
 
   return (
     <section className="panel market-control" aria-labelledby="market-title">
@@ -467,9 +471,10 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
         <dd>{marketName(market)}</dd>
         <dt>Opened</dt>
         <dd>{market.openedAt === null ? 'Not yet' : when(market.openedAt)}</dd>
-        {typeof market.closesAt === 'string' && !closed && (
+        {typeof market.closesAt === 'string' && (
           <>
-            <dt>Closes</dt>
+            {/* Kept once closed: the time it was set to close, beside the time it did. */}
+            <dt>{closed ? 'Set time' : 'Closes'}</dt>
             <dd>{utcDateTime(market.closesAt)}</dd>
           </>
         )}
@@ -478,7 +483,7 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
             <dt>Closed</dt>
             <dd>
               {when(market.closedAt)}
-              {market.closedOnSchedule && ' · at its set time'}
+              {scheduled !== null && ` · ${scheduled}`}
             </dd>
           </>
         )}
@@ -491,7 +496,7 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
       )}
       {closed ? (
         <p className="muted">
-          {market.closedOnSchedule ? `The market ${closedPhrase(null, true)}. ` : ''}Closing is final: this market cannot
+          {scheduled !== null ? `The market closed ${scheduled}. ` : ''}Closing is final: this market cannot
           be opened, halted or resumed again.
         </p>
       ) : (
@@ -543,7 +548,7 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
         <CloseStatus
           outcome={close.outcome}
           state={market.state}
-          closedOnSchedule={market.closedOnSchedule}
+          scheduled={scheduledCloseWords(market)}
           stillResting={close.stillResting}
           askedBefore={close.askedBefore}
           onRetry={close.run}

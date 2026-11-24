@@ -132,13 +132,16 @@ export function closedOrdersText(stillOpen: number | undefined): string {
 export function ClosedTicket({
   closedAt,
   onSchedule = false,
+  closesAt = null,
   account = true,
   stillOpen,
   children,
 }: {
   closedAt: string | null;
-  /** The exchange closed it at its set time, and no operator. */
+  /** The exchange closed it because its set time had come, and no operator. */
   onSchedule?: boolean;
+  /** The time it was set to close at, if it had one. */
+  closesAt?: string | null;
   /** Whether the user traded in this market; one who never had an account has no orders or balances to hear of. */
   account?: boolean;
   /** How many of the trader's orders are still listed as open, in any instrument; undefined until the list is read. */
@@ -149,7 +152,7 @@ export function ClosedTicket({
     <section className="panel ticket ended" aria-labelledby="ticket-closed-title">
       <h2 id="ticket-closed-title">Market closed</h2>
       <p role="status">
-        The market {closedPhrase(closedAt, onSchedule)} and takes no more orders.
+        The market {closedPhrase(closedAt, onSchedule, closesAt)} and takes no more orders.
       </p>
       {account ? (
         <p className="muted">
@@ -178,7 +181,12 @@ export function OrderTicket({
    * Set once the market has closed, with when. The ticket then gives way to a statement of that, unless an order sent
    * before is still unresolved: that one keeps its Retry, which finds out what became of it.
    */
-  closed?: { closedAt: string | null; onSchedule?: boolean; stillOpen?: number | undefined } | null;
+  closed?: {
+    closedAt: string | null;
+    onSchedule?: boolean;
+    closesAt?: string | null;
+    stillOpen?: number | undefined;
+  } | null;
 }) {
   const client = useQueryClient();
   const watch = useFillWatch();
@@ -237,7 +245,12 @@ export function OrderTicket({
 
   if (closed !== null && !unresolved && !sending) {
     return (
-      <ClosedTicket closedAt={closed.closedAt} onSchedule={closed.onSchedule ?? false} stillOpen={closed.stillOpen}>
+      <ClosedTicket
+        closedAt={closed.closedAt}
+        onSchedule={closed.onSchedule ?? false}
+        closesAt={closed.closesAt ?? null}
+        stillOpen={closed.stillOpen}
+      >
         {/* What became of the order the close caught unanswered, and of no order before it. */}
         {caughtByClose && <OutcomeMessage outcome={intent.outcome} />}
       </ClosedTicket>

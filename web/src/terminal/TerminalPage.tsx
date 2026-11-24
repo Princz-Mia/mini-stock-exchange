@@ -74,7 +74,12 @@ export function TerminalPage() {
   // statement goes by the orders still listed as open: the market is closed before the last of them is cancelled.
   const closed =
     market.data?.state === 'CLOSED'
-      ? { closedAt: market.data.closedAt, onSchedule: market.data.closedOnSchedule, stillOpen: orders.data?.orders.length }
+      ? {
+          closedAt: market.data.closedAt,
+          onSchedule: market.data.closedOnSchedule,
+          closesAt: market.data.closesAt,
+          stillOpen: orders.data?.orders.length,
+        }
       : null;
   // A trader login without an account yet, such as an operator who also trades before funding itself: the market is
   // shown, the ticket is not.
@@ -180,7 +185,12 @@ export function TerminalPage() {
           {noAccount ? (
             // Getting an account is setup advice, and a closed market is past setting up.
             closed !== null ? (
-              <ClosedTicket closedAt={closed.closedAt} onSchedule={closed.onSchedule} account={false} />
+              <ClosedTicket
+                closedAt={closed.closedAt}
+                onSchedule={closed.onSchedule}
+                closesAt={closed.closesAt}
+                account={false}
+              />
             ) : (
               <NoAccount operator={operator} />
             )

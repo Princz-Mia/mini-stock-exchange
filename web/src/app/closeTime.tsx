@@ -67,11 +67,49 @@ export function closeTimeText(closesAt: string, now: number): string {
 }
 
 /**
- * How a closed market is said to have closed: at its set time when the exchange closed it then, and when, if known.
- * Read as "The market closed …".
+ * How much later than its set time a close the exchange made for it may come and still be said to be at that time: the
+ * close is asked for at the time itself, and one the writer was too busy for is asked again within seconds. A close
+ * made at a start after the exchange was down then is later than this.
  */
-export function closedPhrase(closedAt: string | null, onSchedule: boolean): string {
-  return `closed${onSchedule ? ' at its set time' : ''}${closedAt === null ? '' : ` on ${utcDateTime(closedAt)}`}`;
+const AT_SET_TIME_MS = 60_000;
+
+/** What closed a market is said to have, by the status: who and when, in the few words each screen fits it into. */
+type ClosedMarket = Pick<MarketStatus, 'closedAt' | 'closesAt' | 'closedOnSchedule'>;
+
+/**
+ * How a close the exchange made because the market's set time had come is put: "at its set time", or, when it closed
+ * clearly later, as at a start after the exchange was down then, "after its set time had passed". Null for a close an
+ * operator made.
+ */
+export function scheduledCloseWords(market: ClosedMarket): string | null {
+  if (!market.closedOnSchedule) {
+    return null;
+  }
+  return late(market) ? 'after its set time had passed' : 'at its set time';
+}
+
+function late({ closedAt, closesAt }: ClosedMarket): boolean {
+  return (
+    typeof closedAt === 'string' &&
+    typeof closesAt === 'string' &&
+    Date.parse(closedAt) - Date.parse(closesAt) > AT_SET_TIME_MS
+  );
+}
+
+/**
+ * How a closed market is said to have closed, read as "The market closed …": when, if known, and when the exchange
+ * closed it because its set time had come, that too. A close clearly after that time names both times, so the time it
+ * closed is never passed off as the time it was set to.
+ */
+export function closedPhrase(closedAt: string | null, onSchedule: boolean, closesAt: string | null = null): string {
+  const when = closedAt === null ? '' : ` on ${utcDateTime(closedAt)}`;
+  if (!onSchedule) {
+    return `closed${when}`;
+  }
+  if (late({ closedAt, closesAt, closedOnSchedule: true }) && closesAt !== null) {
+    return `closed${when} (its set time, ${utcDateTime(closesAt)}, had passed)`;
+  }
+  return `closed at its set time${when}`;
 }
 
 /**

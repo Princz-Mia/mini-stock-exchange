@@ -2,7 +2,15 @@ import { act, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { MarketStatus } from '../api/types';
-import { CloseTime, closedPhrase, closeTimeText, countdownText, exchangeNow, heardFromExchange } from './closeTime';
+import {
+  CloseTime,
+  closedPhrase,
+  closeTimeText,
+  countdownText,
+  exchangeNow,
+  heardFromExchange,
+  scheduledCloseWords,
+} from './closeTime';
 
 const CLOSES_AT = '2026-11-05T11:00:00Z';
 
@@ -50,6 +58,21 @@ describe('the market close time', () => {
     expect(closedPhrase(CLOSES_AT, true)).toBe('closed at its set time on 5 Nov 2026, 11:00:00 UTC');
     expect(closedPhrase(CLOSES_AT, false)).toBe('closed on 5 Nov 2026, 11:00:00 UTC');
     expect(closedPhrase(null, false)).toBe('closed');
+  });
+
+  it('does not pass off a close well after the set time as one at it', () => {
+    const minuteLater = '2026-11-05T11:01:00Z';
+    const later = '2026-11-05T11:01:01Z';
+    expect(closedPhrase(minuteLater, true, CLOSES_AT)).toBe('closed at its set time on 5 Nov 2026, 11:01:00 UTC');
+    expect(closedPhrase(later, true, CLOSES_AT)).toBe(
+      'closed on 5 Nov 2026, 11:01:01 UTC (its set time, 5 Nov 2026, 11:00:00 UTC, had passed)',
+    );
+    expect(closedPhrase(later, false, CLOSES_AT)).toBe('closed on 5 Nov 2026, 11:01:01 UTC');
+    const closed = market('CLOSED');
+    expect(scheduledCloseWords(closed)).toBe('at its set time');
+    expect(scheduledCloseWords({ ...closed, closedAt: minuteLater })).toBe('at its set time');
+    expect(scheduledCloseWords({ ...closed, closedAt: later })).toBe('after its set time had passed');
+    expect(scheduledCloseWords({ ...closed, closedOnSchedule: false })).toBeNull();
   });
 
   it('keeps the exchange’s clock from its answers, not the browser’s', () => {

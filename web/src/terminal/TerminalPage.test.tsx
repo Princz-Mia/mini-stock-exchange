@@ -195,6 +195,27 @@ describe('terminal', () => {
     expect(screen.queryByText(/closes at its set time/)).toBeNull();
   });
 
+  it('names both times when the market closed well after its set time', async () => {
+    market().on('GET /api/v1/market', {
+      status: 200,
+      json: {
+        state: 'CLOSED',
+        simulationId: 's',
+        openedAt: '2026-11-04T09:00:00Z',
+        closesAt: '2026-11-04T17:00:00Z',
+        closedAt: '2026-11-04T20:00:00Z',
+        closedOnSchedule: true,
+        commandSequence: '12',
+      },
+    });
+    renderTerminal();
+    const ticket = await screen.findByRole('region', { name: 'Market closed' });
+    expect(ticket).toHaveTextContent(
+      'The market closed on 4 Nov 2026, 20:00:00 UTC (its set time, 4 Nov 2026, 17:00:00 UTC, had passed) and takes no more orders.',
+    );
+    expect(ticket).not.toHaveTextContent('at its set time');
+  });
+
   it('explains a halt beside its badge, but not a market that has not opened yet', async () => {
     market().on('GET /api/v1/market', {
       status: 200,
