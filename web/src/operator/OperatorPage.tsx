@@ -5,7 +5,6 @@ import { groupInteger } from '../format';
 import { AccountSetup } from './AccountSetup';
 import { BotRuns } from './BotRuns';
 import { BotSetup } from './BotSetup';
-import { useBotJob } from './useBotJob';
 import { useCloseCommand } from './closeCommand';
 import { HealthPanel, useHealthSummary } from './HealthPanel';
 import { InstrumentSetup } from './InstrumentSetup';
@@ -50,9 +49,6 @@ export function OperatorPage() {
   const start = useStartCommand();
   // This market's instruments only: the list is asked for by the simulation the status names.
   const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
-  // Read only while bots can be created; the same job on every operator's screen.
-  const state = market.data?.state;
-  const botJob = useBotJob(state === 'SETUP' || state === 'NOT_SET_UP');
 
   if (market.isPending) {
     return <p className="page-status">Loading the market…</p>;
@@ -78,11 +74,7 @@ export function OperatorPage() {
             The exchange is not answering, so the market state shown may be out of date.
           </p>
         )}
-        <MarketControl
-          market={market.data}
-          instruments={instruments.isPending ? undefined : listed.length}
-          botJob={editable ? botJob.data : undefined}
-        />
+        <MarketControl market={market.data} instruments={instruments.isPending ? undefined : listed.length} />
         {!editable && (
           <HealthPanel
             instruments={listed}
@@ -115,12 +107,7 @@ export function OperatorPage() {
         {closed && <StartSimulation start={start} market={market.data} />}
         {!editable && <BotRuns market={market.data.state} closedAt={market.data.closedAt} instruments={listed} />}
         <InstrumentSetup instruments={listed} editable={editable} closed={closed} />
-        <BotSetup
-          instruments={listed}
-          editable={editable}
-          closed={closed}
-          read={{ job: botJob.data, unreachable: botJob.isError }}
-        />
+        <BotSetup instruments={listed} editable={editable} closed={closed} />
         <AccountSetup instruments={listed} editable={editable} closed={closed} />
         {editable && <BotRuns market={market.data.state} closedAt={null} instruments={listed} />}
       </div>

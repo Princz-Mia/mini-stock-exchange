@@ -1244,8 +1244,8 @@ describe('the operator screen', () => {
     state.job = going(10_000, 20);
     state.tagged = { marketMakers: 2_000, noise: 6_000, momentum: 2_000 };
     await waitFor(() => expect(announcements).toHaveTextContent('50% of the 20,000 bots are made.'), { timeout: 3_000 });
-    // The population follows the bots made.
-    expect(await screen.findByText('10,000 bots', {}, { timeout: 3_000 })).toBeInTheDocument();
+    // The bar has the count while the job runs; the population is read again once it ends, not with every part.
+    expect(screen.getByText('5,000 bots')).toBeInTheDocument();
 
     state.job = { ...going(20_000, null), state: 'DONE', finishedAt: '2026-11-24T10:00:24Z' };
     state.tagged = { marketMakers: 4_000, noise: 12_000, momentum: 4_000 };
@@ -1255,8 +1255,27 @@ describe('the operator screen', () => {
     expect(screen.queryByRole('progressbar')).toBeNull();
     expect(await screen.findByRole('form', { name: 'Create bots' })).toBeInTheDocument();
     expect(await button('Open market')).toBeEnabled();
+    expect(await screen.findByText('20,000 bots')).toBeInTheDocument();
     // Four reads a second apart, each waited for: more than the default five seconds on a busy machine.
   }, 15_000);
+
+  it('reads the bots and accounts once more when a job ends, not with each part it makes', async () => {
+    const { server, state } = exchange('SETUP');
+    state.job = botJob({ total: 3_000, created: 1_000, partsDone: 1 });
+    renderPage();
+    const reads = (url: string) => server.requests.filter((request) => request.url.split('?')[0] === url).length;
+    const bar = await screen.findByRole('progressbar', { name: 'Creating bots' });
+    await waitFor(() => expect(reads('/api/v1/admin/accounts')).toBe(1));
+    const bots = reads('/api/v1/admin/bots');
+
+    state.job = botJob({ total: 3_000, created: 2_000, partsDone: 2 });
+    await waitFor(() => expect(bar).toHaveAttribute('aria-valuenow', '2000'), { timeout: 3_000 });
+    state.job = { ...botJob({ total: 3_000, created: 3_000, partsDone: 3 }), state: 'DONE', finishedAt: '2026-11-24T10:00:03Z' };
+    expect(await screen.findByRole('form', { name: 'Create bots' }, { timeout: 3_000 })).toBeInTheDocument();
+
+    await waitFor(() => expect(reads('/api/v1/admin/accounts')).toBe(2));
+    expect(reads('/api/v1/admin/bots')).toBe(bots + 1);
+  }, 10_000);
 
   it('stops a running job, and says that what was made stays', async () => {
     const { server, state } = exchange('SETUP');

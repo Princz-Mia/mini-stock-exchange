@@ -10,6 +10,7 @@ import { progressText } from './botJob';
 import { useCloseCommand } from './closeCommand';
 import { CloseMarketDialog } from './CloseMarketDialog';
 import { CommandStatus } from './CommandStatus';
+import { useBotJob } from './useBotJob';
 import { type CommandOutcome, useCommand } from './useCommand';
 
 type Transition = 'open' | 'halt' | 'resume';
@@ -399,17 +400,12 @@ function CloseStatus({
  * while one is on its way, or its outcome is not known, none of the others is offered. Closing asks first, since it
  * cannot be undone. A closed market has no transition left, so none is shown.
  */
-export function MarketControl({
-  market,
-  instruments,
-  botJob,
-}: {
-  market: MarketStatus;
-  instruments: number | undefined;
-  /** The newest bot job, while the market is in setup: an opening waits for one that is running. */
-  botJob?: BotJob | null | undefined;
-}) {
+export function MarketControl({ market, instruments }: { market: MarketStatus; instruments: number | undefined }) {
   const client = useQueryClient();
+  // The newest bot job, while the market is in setup: an opening waits for one that is running.
+  const settingUp = market.state === 'SETUP' || market.state === 'NOT_SET_UP';
+  const job = useBotJob(settingUp);
+  const botJob = settingUp ? job.data : undefined;
   const send = useCallback(
     async ({ action, durationMinutes }: Sent, key: string): Promise<Done> => {
       try {

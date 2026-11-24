@@ -20,13 +20,8 @@ import { CommandStatus } from './CommandStatus';
 import { EXAMPLE_CASH, holdingsFrom, ShareFields, type ShareInputs } from './Endowment';
 import { refusedFields, refusedHoldings, useFocusOnRefusal } from './refusals';
 import { populationText, STRATEGIES } from './strategies';
+import { useBotJob, useRefreshOnJobChange } from './useBotJob';
 import { useCommand } from './useCommand';
-
-/** The job as the page last read it: none yet, none at all, or the newest, and whether the last read failed. */
-export interface JobRead {
-  job: BotJob | null | undefined;
-  unreachable: boolean;
-}
 
 /**
  * The bot population by strategy and, during setup, one form that creates any number of bots, as a job the exchange
@@ -38,17 +33,18 @@ export function BotSetup({
   instruments,
   editable,
   closed = false,
-  read = { job: undefined, unreachable: false },
 }: {
   instruments: readonly Instrument[];
   editable: boolean;
   /** The market has closed: its bots are listed, and trade no more. */
   closed?: boolean;
-  read?: JobRead;
 }) {
   const client = useQueryClient();
   const population = useQuery({ queryKey: ['bots'], queryFn: api.botPopulation });
-  const job = read.job;
+  // The job as the page last read it: none yet, none at all, or the newest. Read only while bots can be created.
+  const read = useBotJob(editable);
+  const job = editable ? read.data : undefined;
+  useRefreshOnJobChange(job);
   const running = job?.state === 'RUNNING';
   const bots = population.data;
   const start = useStartJob(job?.jobId ?? null);
@@ -102,7 +98,7 @@ export function BotSetup({
         running ? (
           <JobProgress
             job={job}
-            unreachable={read.unreachable}
+            unreachable={read.isError}
             focusOnOpen={ownJob}
             onStopped={(stopped) => client.setQueryData(['bot-job'], stopped)}
           />
