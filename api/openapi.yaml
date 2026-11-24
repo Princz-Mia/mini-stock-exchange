@@ -2581,7 +2581,7 @@ components:
       type: object
       additionalProperties: false
       required: [runId, status, desiredState, startedAt, endsAt, stopRequestedAt, stoppedAt, config, worker, activity,
-        window, manifest]
+        progress, window, manifest]
       properties:
         runId: { $ref: '#/components/schemas/Uuid' }
         status:
@@ -2632,7 +2632,8 @@ components:
         activity:
           type: object
           additionalProperties: false
-          required: [placed, canceled, rejected, errors, inFlight, stopFailures]
+          required: [placed, canceled, rejected, errors, inFlight, stopFailures, pausedStaleData, pausedMarketNotOpen,
+            pausedOther]
           properties:
             placed: { type: integer, format: int64, minimum: 0 }
             canceled: { type: integer, format: int64, minimum: 0 }
@@ -2640,6 +2641,30 @@ components:
             errors: { type: integer, format: int64, minimum: 0 }
             inFlight: { type: integer, minimum: 0 }
             stopFailures: { type: integer, minimum: 0 }
+            pausedStaleData:
+              type: integer
+              format: int64
+              minimum: 0
+              description: |
+                The bots' steps that could place nothing new because the market data was too old or not live;
+                pausedMarketNotOpen because the market was not open; pausedOther for another reason, such as none of
+                the run's instruments listed yet. As the worker last reported them; 0 from a worker that reports
+                none.
+            pausedMarketNotOpen: { type: integer, format: int64, minimum: 0 }
+            pausedOther: { type: integer, format: int64, minimum: 0 }
+        progress:
+          description: |
+            Where the worker is with the run, as its last heartbeat said: LOADING while it reads the bots' token
+            files and builds the bots, botsLoaded of botsTotal so far, then TRADING. Null until a worker reports it.
+          oneOf:
+            - type: object
+              additionalProperties: false
+              required: [phase, botsLoaded, botsTotal]
+              properties:
+                phase: { type: string, enum: [LOADING, TRADING] }
+                botsLoaded: { type: integer, minimum: 0 }
+                botsTotal: { type: integer, minimum: 0 }
+            - type: 'null'
         window:
           type: object
           additionalProperties: false
@@ -2846,12 +2871,16 @@ components:
                 totals:
                   type: object
                   additionalProperties: false
-                  required: [placed, canceled, rejected, errors]
+                  description: The run's cumulative totals, which a worker taking it over continues from.
+                  required: [placed, canceled, rejected, errors, pausedStaleData, pausedMarketNotOpen, pausedOther]
                   properties:
                     placed: { type: integer, format: int64, minimum: 0 }
                     canceled: { type: integer, format: int64, minimum: 0 }
                     rejected: { type: integer, format: int64, minimum: 0 }
                     errors: { type: integer, format: int64, minimum: 0 }
+                    pausedStaleData: { type: integer, format: int64, minimum: 0 }
+                    pausedMarketNotOpen: { type: integer, format: int64, minimum: 0 }
+                    pausedOther: { type: integer, format: int64, minimum: 0 }
     SimulatorBotPage:
       type: object
       additionalProperties: false
@@ -2892,6 +2921,29 @@ components:
           default: false
           description: Confirms the stop; only with inFlight 0, once desiredState is STOPPED.
         manifest: { $ref: '#/components/schemas/SimulatorManifest' }
+        phase:
+          type: string
+          enum: [LOADING, TRADING]
+          description: |
+            Where the worker is with the run: LOADING while it reads the bots' token files and builds the bots,
+            then TRADING. Given with botsLoaded and botsTotal. Optional: a heartbeat without it still holds the run,
+            which then shows no progress.
+        botsLoaded:
+          type: integer
+          minimum: 0
+          description: The bots built so far, at most botsTotal.
+        botsTotal: { type: integer, minimum: 0, description: The bots the worker has to build. }
+        pausedStaleData:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Cumulative for the run, like the totals: the bots' steps that could place nothing new because the
+            market data was too old or not live. pausedMarketNotOpen counts those because the market was not open,
+            and pausedOther those for any other reason, such as none of the run's instruments listed yet. Each is
+            optional, and one left out is taken as unchanged.
+        pausedMarketNotOpen: { type: integer, format: int64, minimum: 0 }
+        pausedOther: { type: integer, format: int64, minimum: 0 }
     SimulatorHeartbeat:
       type: object
       additionalProperties: false

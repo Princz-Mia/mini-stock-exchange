@@ -167,7 +167,16 @@ class BotRunController {
 	record Worker(String workerId, Instant heartbeatAt, Instant leaseExpiresAt) {
 	}
 
-	record Activity(long placed, long canceled, long rejected, long errors, int inFlight, int stopFailures) {
+	/** The paused counts are the bots' steps that could place nothing new, by why, as the worker reports them. */
+	record Activity(long placed, long canceled, long rejected, long errors, int inFlight, int stopFailures,
+			long pausedStaleData, long pausedMarketNotOpen, long pausedOther) {
+	}
+
+	/**
+	 * Where the worker is with the run, as its last heartbeat said: LOADING while it reads the bots' token files and
+	 * builds the bots, then TRADING.
+	 */
+	record Progress(String phase, int botsLoaded, int botsTotal) {
 	}
 
 	/**
@@ -190,12 +199,12 @@ class BotRunController {
 
 	/**
 	 * {@code status}: STARTING before a worker has taken it, RUNNING while a worker holds a live lease, STALE when the
-	 * lease ran out while it should run, STOPPING until the worker confirms, then STOPPED. {@code manifest} is null
-	 * until a worker reports one.
+	 * lease ran out while it should run, STOPPING until the worker confirms, then STOPPED. {@code progress} and
+	 * {@code manifest} are null until a worker reports them.
 	 */
 	record RunView(String runId, String status, String desiredState, Instant startedAt, Instant endsAt,
-			Instant stopRequestedAt, Instant stoppedAt, Config config, Worker worker, Activity activity, Window window,
-			Manifest manifest) {
+			Instant stopRequestedAt, Instant stoppedAt, Config config, Worker worker, Activity activity,
+			Progress progress, Window window, Manifest manifest) {
 	}
 
 	record RunList(List<RunView> runs, String nextCursor) {
@@ -266,13 +275,13 @@ class BotRunController {
 		Instant now = clock.instant();
 		record Row(UUID id, String desired, Instant startedAt, Instant endsAt, Instant stopRequestedAt,
 				Instant stoppedAt, long seed, BigDecimal rate, int maxOrderQuantity, int maxPosition, String workerId,
-				Instant heartbeatAt, Instant leaseExpiresAt, Activity activity, Window window) {
+				Instant heartbeatAt, Instant leaseExpiresAt, Activity activity, Progress progress, Window window) {
 		}
 		List<Row> rows = jdbc.sql("""
 				SELECT id, desired_state, started_at, ends_at, stop_requested_at, stopped_at, seed, commands_per_second,
 				    max_order_quantity, max_position, worker_id, heartbeat_at, lease_expires_at, placed, canceled,
-				    rejected, errors, in_flight, stop_failures, start_sequence, stop_sequence, end_sequence, ended_by,
-				    ended_at
+				    rejected, errors, in_flight, stop_failures, paused_stale_data, paused_market_not_open, paused_other,
+				    phase, bots_loaded, bots_total, start_sequence, stop_sequence, end_sequence, ended_by, ended_at
 				FROM bot_run WHERE simulation_id = %3$s%1$s
 				ORDER BY started_at %2$s, id %2$s LIMIT :limit""".formatted(
 				only != null ? " AND id = :only"
@@ -289,7 +298,11 @@ class BotRunController {
 					row.getInt("max_position"), row.getString("worker_id"), instant(row.getTimestamp("heartbeat_at")),
 					instant(row.getTimestamp("lease_expires_at")),
 					new Activity(row.getLong("placed"), row.getLong("canceled"), row.getLong("rejected"),
-							row.getLong("errors"), row.getInt("in_flight"), row.getInt("stop_failures")),
+							row.getLong("errors"), row.getInt("in_flight"), row.getInt("stop_failures"),
+							row.getLong("paused_stale_data"), row.getLong("paused_market_not_open"),
+							row.getLong("paused_other")),
+					row.getString("phase") == null ? null
+							: new Progress(row.getString("phase"), row.getInt("bots_loaded"), row.getInt("bots_total")),
 					new Window(row.getString("start_sequence"), row.getString("stop_sequence"),
 							row.getString("end_sequence"), row.getString("ended_by"), instant(row.getTimestamp("ended_at")))))
 			.list();
@@ -338,8 +351,8 @@ class BotRunController {
 					new Config(Long.toString(row.seed()), row.rate().setScale(2).toPlainString(), row.maxOrderQuantity(),
 							row.maxPosition(), instruments.getOrDefault(row.id(), List.of()),
 							new Strategies(counts[0], counts[1], counts[2])),
-					new Worker(row.workerId(), row.heartbeatAt(), row.leaseExpiresAt()), row.activity(), row.window(),
-					manifests.get(row.id()));
+					new Worker(row.workerId(), row.heartbeatAt(), row.leaseExpiresAt()), row.activity(), row.progress(),
+					row.window(), manifests.get(row.id()));
 		}).toList();
 	}
 
