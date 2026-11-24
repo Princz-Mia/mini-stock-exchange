@@ -316,12 +316,12 @@ for (const size of SIZES) {
       await capture(page, size, 'terminal-feed-stale');
       await page.context().close();
 
-      // The live stream can't connect.
+      // The live stream can't connect: the page says it is trying again, and keeps trying.
       const offline = await at(browser, size, 'trader', async (fresh) => {
         await fresh.route('**/api/v1/market-events*', (route) => route.abort());
       });
       await openTerminal(offline);
-      await expect(offline.getByRole('status').filter({ hasText: 'Connecting' })).toBeVisible();
+      await expect(offline.getByRole('status').filter({ hasText: 'Reconnecting' })).toBeVisible();
       await expect(offline.getByText('Waiting for the live market…')).toHaveCount(2);
       await capture(offline, size, 'terminal-stream-lost');
       await offline.context().close();

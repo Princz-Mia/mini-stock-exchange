@@ -641,6 +641,28 @@ describe('terminal', () => {
     expect(screen.getByText('Connected')).toBeInTheDocument();
   });
 
+  it('says the live market is reconnecting once its stream fails, and connected again once it is back', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      market();
+      const streams = renderTerminal();
+      await screen.findByRole('heading', { name: 'NOVA', level: 1 });
+      act(() => streams.latest()?.emit('market', frame(NOVA, '5')));
+      expect(screen.getByText('Connected')).toBeInTheDocument();
+
+      // Market data restarts and the proxy answers 502: the browser gives the stream up, the page opens it again.
+      act(() => streams.latest()?.fail('refused'));
+      expect(screen.getByText('Reconnecting…')).toHaveAttribute('role', 'status');
+      expect(within(screen.getByRole('table', { name: 'Bids' })).getByText('99.50')).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(streams.opened).toHaveLength(2);
+      act(() => streams.latest()?.emit('market', frame(NOVA, '6')));
+      expect(screen.getByText('Connected')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('shows the session figures from the instrument list, then from the live frame once it comes', async () => {
     market();
     const streams = renderTerminal();

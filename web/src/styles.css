@@ -972,7 +972,8 @@ button.chip {
 }
 
 .transport-stale,
-.transport-connecting {
+.transport-connecting,
+.transport-reconnecting {
   color: var(--warn-text);
 }
 

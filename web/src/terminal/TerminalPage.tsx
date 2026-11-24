@@ -29,7 +29,12 @@ import { Watchlist } from './Watchlist';
 /** How live streams are opened; tests swap in a fake, the browser uses EventSource. */
 export const StreamContext = createContext<StreamFactory | undefined>(undefined);
 
-const TRANSPORT_LABELS = { connecting: 'Connecting…', open: 'Connected', stale: 'No updates for 15 s' } as const;
+const TRANSPORT_LABELS = {
+  connecting: 'Connecting…',
+  open: 'Connected',
+  reconnecting: 'Reconnecting…',
+  stale: 'No updates for 15 s',
+} as const;
 
 /** Why new orders cannot be placed right now. Cancels are never paused. */
 const PAUSED: Record<Exclude<MarketStatus['state'], 'OPEN'>, { badge: string; reason: string }> = {
