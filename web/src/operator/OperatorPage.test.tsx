@@ -3511,7 +3511,8 @@ describe('the operator screen when the exchange names another simulation', () =>
     expect(screen.queryByRole('rowheader', { name: 'alice' })).toBeNull();
     expect(screen.queryByText('5 bots')).toBeNull();
     expect(screen.queryByRole('checkbox', { name: /started 0/ })).toBeNull();
-    expect(screen.getByTestId('address')).not.toHaveTextContent('compare=');
+    // Taken out of the address by an effect once the new market's page is drawn, so in the moment after it.
+    await waitFor(() => expect(screen.getByTestId('address')).not.toHaveTextContent('compare='));
     // The new market's own, read for it: its setup forms, and its empty lists.
     expect(await screen.findByText('No instruments yet.')).toBeInTheDocument();
     expect(await screen.findByText('No accounts yet.')).toBeInTheDocument();
