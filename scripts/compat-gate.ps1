@@ -189,7 +189,14 @@ function Invoke-ApiCommand {
     }
     catch {
         if ($null -eq $_.Exception.Response) { throw }
-        return @{ Status = [int]$_.Exception.Response.StatusCode; Body = [string]$_.ErrorDetails.Message }
+        # Windows PowerShell 5.1 leaves ErrorDetails empty for these answers; the body is still in the response stream.
+        $body = [string]$_.ErrorDetails.Message
+        if (-not $body) {
+            $stream = $_.Exception.Response.GetResponseStream()
+            if ($stream.CanSeek) { $stream.Position = 0 }
+            $body = (New-Object System.IO.StreamReader($stream)).ReadToEnd()
+        }
+        return @{ Status = [int]$_.Exception.Response.StatusCode; Body = $body }
     }
 }
 
