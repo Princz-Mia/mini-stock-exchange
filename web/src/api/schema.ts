@@ -1702,8 +1702,9 @@ export interface components {
             /** @description When the market closed; null unless the state is CLOSED. */
             readonly closedAt: components["schemas"]["Timestamp"] | null;
             /**
-             * @description True when the market closed at its closesAt, by the exchange itself; false while it is not closed and
-             *     when an operator closed it.
+             * @description True when the exchange itself closed the market because its closesAt had come: at that time, or later
+             *     when it was not running then or could not close it at once (closedAt says when it did). False while it
+             *     is not closed, and when an operator closed it.
              */
             readonly closedOnSchedule: boolean;
             /** @description The last committed command's sequence. */
@@ -3573,8 +3574,9 @@ export interface operations {
                 };
             };
             /**
-             * @description IDEMPOTENCY_KEY_REQUIRED, or VALIDATION_FAILED for a duration out of range (OUT_OF_RANGE) or an unknown
-             *     field.
+             * @description IDEMPOTENCY_KEY_REQUIRED, or VALIDATION_FAILED for a duration out of range (OUT_OF_RANGE). A body that
+             *     cannot be read as this request (not JSON, a duration that is not a whole number, or an unknown field) is
+             *     refused by the framework, with no code.
              */
             readonly 400: {
                 headers: {

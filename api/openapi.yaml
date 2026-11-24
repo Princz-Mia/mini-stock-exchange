@@ -960,8 +960,9 @@ paths:
               schema: { $ref: '#/components/schemas/MarketTransition' }
         '400':
           description: |
-            IDEMPOTENCY_KEY_REQUIRED, or VALIDATION_FAILED for a duration out of range (OUT_OF_RANGE) or an unknown
-            field.
+            IDEMPOTENCY_KEY_REQUIRED, or VALIDATION_FAILED for a duration out of range (OUT_OF_RANGE). A body that
+            cannot be read as this request (not JSON, a duration that is not a whole number, or an unknown field) is
+            refused by the framework, with no code.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -2718,8 +2719,9 @@ components:
         closedOnSchedule:
           type: boolean
           description: |
-            True when the market closed at its closesAt, by the exchange itself; false while it is not closed and
-            when an operator closed it.
+            True when the exchange itself closed the market because its closesAt had come: at that time, or later
+            when it was not running then or could not close it at once (closedAt says when it did). False while it
+            is not closed, and when an operator closed it.
         commandSequence:
           oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }]
           description: The last committed command's sequence.
