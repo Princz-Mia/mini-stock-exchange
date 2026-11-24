@@ -120,7 +120,7 @@ Find what changed the database outside Execution. If it can't be explained, rest
 
 **It stopped while the market was closing.** Nothing to do. A close cancels resting orders 5,000 to a transaction, and the market is closed from the first one. If Execution stops before the last, the next start cancels the rest before it takes commands, and logs `Finished the market's close at startup` with how many. A start that finds none left to cancel logs no such line. Every start on a closed market also removes its bots' token files, in case the close stopped before it had.
 
-**A close answered `504 COMMAND_OUTCOME_UNKNOWN`.** The request waited 45 seconds and the close had not answered. No lookup by key serves a close, so send the same key again. The key stays that close's for good: sent after a new simulation has started, it still returns the close of the market it closed and leaves the new one alone. On the operator screen that is **Ask again**, under the note that the close is taking longer than the exchange waits. The answers:
+**A close answered `504 COMMAND_OUTCOME_UNKNOWN`.** The request waited 45 seconds and the close had not answered. No lookup by key serves a close, so send the same key again. On the operator screen that is **Ask again**, under the note that the close is taking longer than the exchange waits. The key stays that close's for good: sent after a new simulation has started, it still returns the close of the market it closed and leaves the new one alone. The answers:
 - **`200`:** the close is done, and this is its answer.
 - **`504` again:** it is still going on.
 - **`503 MARKET_CLOSE_UNFINISHED` or `503 TRADING_UNAVAILABLE`:** Execution stopped trading meanwhile. Restart it, as the next entry says.
