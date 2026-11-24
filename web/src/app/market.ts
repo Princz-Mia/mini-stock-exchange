@@ -1,5 +1,6 @@
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useLayoutEffect, useState } from 'react';
+import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect, useLayoutEffect, useState } from 'react';
+import { useSearchParams } from 'react-router';
 
 import { api, pollEvery } from '../api/client';
 import type { Feed, Instrument, Instruments, MarketStatus } from '../api/types';
@@ -84,6 +85,42 @@ export function useInstruments(market: StatusRead, options: { refetchInterval?: 
 const NO_SIMULATION = '';
 
 /**
+ * For each query client, the simulation each per-simulation query was last shown for, by its key. It outlives the page
+ * that showed it, as the cached queries do, so a page opened after a change of simulation, from help say, still knows
+ * that what is cached for it is of the simulation before: the status it opens on, which the top bar keeps current, is
+ * already the new one's.
+ */
+const lastShown = new WeakMap<QueryClient, Map<string, string>>();
+
+function recall(client: QueryClient, queryKeys: readonly (readonly string[])[]): string | undefined {
+  const shown = lastShown.get(client);
+  for (const queryKey of queryKeys) {
+    const simulation = shown?.get(JSON.stringify(queryKey));
+    if (simulation !== undefined) {
+      return simulation;
+    }
+  }
+  return undefined;
+}
+
+function remember(client: QueryClient, queryKeys: readonly (readonly string[])[], simulation: string) {
+  let shown = lastShown.get(client);
+  if (shown === undefined) {
+    shown = new Map();
+    lastShown.set(client, shown);
+  }
+  for (const queryKey of queryKeys) {
+    shown.set(JSON.stringify(queryKey), simulation);
+  }
+}
+
+interface Shown {
+  simulation: string;
+  closed: boolean;
+  generation: number;
+}
+
+/**
  * Follows the market on screen as it becomes another one: when it closes, or when the exchange names another
  * simulation. Whoever closed it or started the next, here or elsewhere, what the page shows of the old state would
  * otherwise stay until each query's own next poll, or for good where there is none.
@@ -93,20 +130,31 @@ const NO_SIMULATION = '';
  *   is shown as the new one's while its own is on the way. The number returned goes up by one, for a page to key what
  *   it draws by: everything typed, answered or paged through in the simulation before goes with it.
  *
- * The first simulation of a market that had none is no other market: the page that created it goes on. Nothing is
- * read again on the first status either, as the page's queries are being read for the first time then.
+ * Another simulation is also one the page opens on when its queries were last shown, here or on another page, for the
+ * one before. The first simulation of a market that had none is no other market: the page that created it goes on.
+ * Nothing is read again on the first status otherwise, as the page's queries are being read for the first time then.
  */
 export function useRefreshOnMarketChange(market: MarketStatus | undefined, queryKeys: readonly (readonly string[])[]): number {
   const client = useQueryClient();
   const simulation = market === undefined ? undefined : (market.simulationId ?? NO_SIMULATION);
   const closed = market?.state === 'CLOSED';
-  const [shown, setShown] = useState(simulation === undefined ? undefined : { simulation, closed, generation: 0 });
+  const [shown, setShown] = useState<Shown | undefined>(() =>
+    simulation === undefined ? undefined : { simulation: recall(client, queryKeys) ?? simulation, closed, generation: 0 },
+  );
   useLayoutEffect(() => {
-    if (simulation === undefined || (shown !== undefined && shown.simulation === simulation && shown.closed === closed)) {
+    if (simulation === undefined) {
       return;
     }
-    const another = shown !== undefined && shown.simulation !== NO_SIMULATION && shown.simulation !== simulation;
-    if (shown !== undefined) {
+    // A page that had no status yet goes by what its queries were last shown for, if anything.
+    const recalled = recall(client, queryKeys);
+    const before = shown ?? (recalled === undefined ? undefined : { simulation: recalled, closed, generation: 0 });
+    remember(client, queryKeys, simulation);
+    if (shown !== undefined && shown.simulation === simulation && shown.closed === closed) {
+      return;
+    }
+    const changed = before !== undefined && (before.simulation !== simulation || before.closed !== closed);
+    const another = changed && before.simulation !== NO_SIMULATION && before.simulation !== simulation;
+    if (changed) {
       for (const queryKey of queryKeys) {
         void (another ? client.resetQueries({ queryKey }) : client.invalidateQueries({ queryKey }));
       }
@@ -114,7 +162,37 @@ export function useRefreshOnMarketChange(market: MarketStatus | undefined, query
     // A layout effect, so that the queries are emptied and the page keyed anew before the browser paints: no frame
     // shows the new market's page over the lists of the one before.
     // eslint-disable-next-line react-hooks/set-state-in-effect -- the render it causes is the point, before paint
-    setShown({ simulation, closed, generation: (shown?.generation ?? 0) + (another ? 1 : 0) });
+    setShown({ simulation, closed, generation: (before?.generation ?? 0) + (another ? 1 : 0) });
   }, [client, simulation, closed, shown, queryKeys]);
   return shown?.generation ?? 0;
+}
+
+/**
+ * Takes the given parameters out of the address when the page is drawn for another simulation: they name what was the
+ * simulation before's, such as its instruments or its runs, and would otherwise be asked for in the new one. False
+ * until the address is clear of them, for a page that would ask for them as soon as it is drawn.
+ */
+export function useForgetInAddress(generation: number, names: readonly string[]): boolean {
+  const [params, setParams] = useSearchParams();
+  // The generation the address is clear for: state that follows the address, so updated during render.
+  const [clearFor, setClearFor] = useState(generation);
+  if (clearFor !== generation && !names.some((name) => params.has(name))) {
+    setClearFor(generation);
+  }
+  const clearing = clearFor !== generation;
+  useEffect(() => {
+    if (clearing) {
+      setParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          for (const name of names) {
+            next.delete(name);
+          }
+          return next;
+        },
+        { replace: true },
+      );
+    }
+  }, [clearing, names, setParams]);
+  return !clearing;
 }

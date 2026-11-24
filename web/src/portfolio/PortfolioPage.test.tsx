@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter, useLocation } from 'react-router';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { App } from '../App';
@@ -528,6 +528,77 @@ describe('portfolio page', () => {
     expect(within(summary).getAllByText('5,000.00').length).toBeGreaterThan(0);
     expect(await screen.findByText('No executions yet.')).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Market closed' })).toBeNull();
+  });
+
+  it('starts the histories again from their first pages, with no symbol of the closed market, in the next one', async () => {
+    const NOVA = '00000000-0000-0000-0000-000000000001';
+    // Paged with no symbol, whose cursor alone is the closed list's; and with one, which names its instrument.
+    for (const at of ['/portfolio?executionsSide=SELL', `/portfolio?ordersInstrumentId=${NOVA}&executionsSide=SELL`]) {
+      cleanup();
+      let status: object = { ...CLOSED_MARKET, name: null };
+      let next = false;
+      const server = signedIn()
+        .on('GET /api/v1/market', () => ({ status: 200, json: status }))
+        .on('GET /api/v1/instruments', () => ({
+          status: 200,
+          json: { instruments: next ? [] : [{ instrumentId: NOVA, symbol: 'NOVA' }], feed: { state: 'LIVE', lag: 0 } },
+        }))
+        .on('GET /api/v1/portfolio', () => ({ status: 200, json: next ? { ...SETTLED, holdings: [] } : SETTLED }))
+        .on('GET /api/v1/portfolio/trades', (request) =>
+          next
+            ? // The new account's list: the closed list's cursor is refused, and NOVA is no instrument of this market.
+              request.url.includes('cursor=') || request.url.includes('instrumentId=')
+              ? { status: 400, problem: { status: 400, code: 'VALIDATION_FAILED', detail: 'Not this list' } }
+              : { status: 200, json: { trades: [trade(9)], nextCursor: null } }
+            : request.url.includes('cursor=next')
+              ? { status: 200, json: { trades: [trade(3)], nextCursor: null } }
+              : { status: 200, json: { trades: [trade(1), trade(2)], nextCursor: 'next' } },
+        )
+        .on('GET /api/v1/orders', (request) =>
+          next && request.url.includes('instrumentId=')
+            ? { status: 400, problem: { status: 400, code: 'VALIDATION_FAILED', detail: 'No such instrument' } }
+            : { status: 200, json: { orders: [], nextCursor: null } },
+        );
+      function Address() {
+        return <span data-testid="address">{useLocation().search}</span>;
+      }
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      render(
+        <QueryClientProvider client={client}>
+          <MemoryRouter initialEntries={[at]}>
+            <PortfolioPage />
+            <Address />
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+      // The closed market's sells, on their second page, and maybe its orders in NOVA.
+      const panel = await screen.findByRole('region', { name: 'Executions' });
+      await within(panel).findByRole('table', { name: 'Executions' });
+      fireEvent.click(within(panel).getByRole('button', { name: 'Next' }));
+      expect(await within(panel).findByText('Showing 3–3')).toBeInTheDocument();
+      expect(server.requests.some((request) => request.url.includes('cursor=next'))).toBe(true);
+
+      // The next simulation, and this trader funded in it: a new account, whose list the closed one's cursor and symbol
+      // would refuse or narrow to nothing.
+      const before = server.requests.length;
+      status = { state: 'OPEN', simulationId: 't', name: 'Thursday seminar', openedAt: '2026-11-05T09:00:00Z', closedAt: null, commandSequence: '4' };
+      next = true;
+      await client.invalidateQueries({ queryKey: ['market'] });
+
+      // The page is drawn anew for it, so the region is found again.
+      await waitFor(() => expect(screen.getByRole('region', { name: 'Executions' })).toHaveTextContent('Showing 1–1'));
+      const executions = screen.getByRole('region', { name: 'Executions' });
+      expect(within(executions).getByRole('button', { name: 'Previous' })).toBeDisabled();
+      expect(within(executions).queryByRole('alert')).toBeNull();
+      const asked = server.requests.slice(before).filter((request) => request.url.startsWith('/api/v1/portfolio/trades'));
+      expect(asked.at(-1)?.url).not.toMatch(/cursor=/);
+      // The side is no symbol of the closed market's: it stays, as the page size and order would.
+      expect(asked.at(-1)?.url).toContain('side=SELL');
+      expect(await screen.findByText('No orders yet.')).toBeInTheDocument();
+      const orders = server.requests.slice(before).filter((request) => request.url.startsWith('/api/v1/orders'));
+      expect(orders.at(-1)?.url).not.toContain('instrumentId=');
+      expect(screen.getByTestId('address')).toHaveTextContent('?executionsSide=SELL');
+    }
   });
 
   it('explains a missing trading account instead of calling it an outage', async () => {

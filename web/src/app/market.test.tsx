@@ -310,4 +310,41 @@ describe('reading again when the market changes', () => {
     await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
     expect(reads).toEqual({ orders: 1, portfolio: 1, other: 1 });
   });
+
+  it('drops what was cached of the simulation before for a page opened after the next one started', async () => {
+    const { wrapper } = withClient();
+    let named = 'first';
+    const seen: { generation: number; orders: string | undefined }[] = [];
+    const usePage = (market: MarketStatus) => {
+      const orders = useQuery({
+        queryKey: ['orders'],
+        queryFn: () => {
+          const answer = named;
+          return new Promise<string>((resolve) => setTimeout(() => resolve(answer), 5));
+        },
+      });
+      const generation = useRefreshOnMarketChange(market, KEYS);
+      seen.push({ generation, orders: orders.data });
+      return { generation, orders: orders.data };
+    };
+    const first = renderHook(() => usePage(status(FIRST, 'CLOSED')), { wrapper });
+    await waitFor(() => expect(first.result.current.orders).toBe('first'));
+    first.unmount();
+
+    // On another page meanwhile, help say, while the top bar reads the next simulation's status: the page opens on it,
+    // so it sees no change of its own, but what is cached for it is still the closed market's.
+    named = 'second';
+    seen.length = 0;
+    const second = renderHook(() => usePage(status(SECOND, 'SETUP')), { wrapper });
+    await waitFor(() => expect(second.result.current).toEqual({ generation: 1, orders: 'second' }));
+    expect(seen.filter((each) => each.generation === 1).map((each) => each.orders)).not.toContain('first');
+    second.unmount();
+
+    // Opened again on the same simulation: what is cached is its own, and stays on screen while it is read again.
+    seen.length = 0;
+    const third = renderHook(() => usePage(status(SECOND, 'SETUP')), { wrapper });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(seen.every((each) => each.generation === 0 && each.orders === 'second')).toBe(true);
+    third.unmount();
+  });
 });

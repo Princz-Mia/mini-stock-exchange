@@ -42,7 +42,7 @@ export interface Paging {
 }
 
 /** Where a filter's value lives in the address: `executions` and `side` give `executionsSide`. */
-function filterParam(table: string, name: string): string {
+export function filterParam(table: string, name: string): string {
   return `${table}${name.charAt(0).toUpperCase()}${name.slice(1)}`;
 }
 

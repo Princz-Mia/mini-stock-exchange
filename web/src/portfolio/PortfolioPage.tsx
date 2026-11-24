@@ -2,9 +2,9 @@ import { useQuery } from '@tanstack/react-query';
 
 import { ApiError, api, pollEvery } from '../api/client';
 import type { Holding, OrderDetail, OwnTrade } from '../api/types';
-import { useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
+import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
 import { type Column, PagedTable } from '../app/PagedTable';
-import { type Filter, usePagedList } from '../app/paging';
+import { type Filter, filterParam, usePagedList } from '../app/paging';
 import { PRIVATE_QUERIES } from '../app/useAccountEvents';
 import { useKeyboardScroll } from '../app/useKeyboardScroll';
 import { groupDigits, groupInteger, utcDateTime, utcTime } from '../format';
@@ -153,15 +153,27 @@ const STATES: readonly { value: OrderDetail['state']; label: string }[] = [
 
 const STATE_FILTER: Filter = { name: 'state', label: 'Status', options: STATES, complete: true };
 
+/** The symbol filters name instruments, which are the simulation's they were chosen in. */
+const SYMBOL_FILTERS = [filterParam('executions', 'instrumentId'), filterParam('orders', 'instrumentId')] as const;
+
 export function PortfolioPage() {
+  const market = useMarketStatus();
+  // A close releases what open orders had reserved and cancels them: read at once, as the terminal does. In another
+  // simulation the account is emptied first, and the page is drawn anew: it waits for the new account, and its
+  // histories start again from their first pages, with no symbol of the simulation before as a filter.
+  const generation = useRefreshOnMarketChange(market.data, PRIVATE_QUERIES);
+  const clear = useForgetInAddress(generation, SYMBOL_FILTERS);
+  if (!clear) {
+    return <p className="page-status">Loading portfolio…</p>;
+  }
+  return <Portfolio key={generation} market={market} />;
+}
+
+/** The page for one simulation: its paged histories keep the cursors of the pages passed, which are that one's. */
+function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
   const portfolio = useQuery({ queryKey: ['portfolio'], queryFn: api.portfolio, ...REFRESH });
   // The instruments to filter by, by symbol; the terminal reads the same list, of the same simulation.
-  const market = useMarketStatus();
   const instruments = useInstruments(market);
-  // A close releases what open orders had reserved and cancels them: read at once, as the terminal does. In another
-  // simulation the account is emptied first, so the page waits for the new one's, and its histories start again from
-  // their first pages.
-  useRefreshOnMarketChange(market.data, PRIVATE_QUERIES);
   const symbolFilter: Filter = {
     name: 'instrumentId',
     label: 'Symbol',

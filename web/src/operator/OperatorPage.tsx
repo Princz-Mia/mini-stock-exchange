@@ -1,8 +1,5 @@
-import { useEffect, useRef } from 'react';
-import { useSearchParams } from 'react-router';
-
 import { pollEvery } from '../api/client';
-import { useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
+import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
 import { groupInteger, utcDateTime } from '../format';
 import { AccountSetup } from './AccountSetup';
 import { BotRuns } from './BotRuns';
@@ -22,6 +19,9 @@ import type { CommandOutcome } from './useCommand';
  */
 const PER_SIMULATION = [['instruments'], ['bot-runs'], ['bots'], ['accounts'], ['traders'], ['admin-health']] as const;
 
+/** The runs ticked for a comparison are in the address, and are the simulation's they were ticked in. */
+const TICKED = ['compare'] as const;
+
 /**
  * The operator's screen: the authoritative trading phase with its controls and, once open, how trading is keeping
  * up; bot runs, and the SETUP editor for
@@ -35,22 +35,7 @@ export function OperatorPage() {
   // Goes up when the exchange names another simulation. The page is drawn anew then, so that nothing typed, answered
   // or paged through in the simulation before is left on the page of the new one.
   const generation = useRefreshOnMarketChange(market.data, PER_SIMULATION);
-  // The runs ticked for a comparison are in the address, and are the simulation's they were ticked in.
-  const [, setParams] = useSearchParams();
-  const drawn = useRef(generation);
-  useEffect(() => {
-    if (drawn.current !== generation) {
-      drawn.current = generation;
-      setParams(
-        (current) => {
-          const next = new URLSearchParams(current);
-          next.delete('compare');
-          return next;
-        },
-        { replace: true },
-      );
-    }
-  }, [generation, setParams]);
+  useForgetInAddress(generation, TICKED);
   // Above the page drawn for each simulation, so that the new one's page can say what became of it.
   const start = useStartCommand();
   // This market's instruments only: the list is asked for by the simulation the status names.

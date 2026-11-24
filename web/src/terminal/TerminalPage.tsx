@@ -5,7 +5,7 @@ import { Link, useSearchParams } from 'react-router';
 import { ApiError, api, pollEvery } from '../api/client';
 import type { MarketStatus } from '../api/types';
 import { FeedStatus } from '../app/FeedStatus';
-import { useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
+import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
 import { PRIVATE_QUERIES } from '../app/useAccountEvents';
 import { isOperator, useSession } from '../auth/session';
 import { groupDigits } from '../format';
@@ -32,6 +32,9 @@ const PAUSED: Record<Exclude<MarketStatus['state'], 'OPEN'>, { badge: string; re
   CLOSED: { badge: 'Market closed', reason: 'The market has closed and takes no more orders.' },
 };
 
+/** The instrument chosen is in the address, and is the simulation's it was chosen in. */
+const CHOSEN = ['instrument'] as const;
+
 /**
  * The trading terminal: the selected instrument's live book, tape and chart from the market stream, the order
  * ticket beside them, and the trader's open and recently finished orders. Public market data and private balances are separate sources
@@ -50,8 +53,9 @@ export function TerminalPage() {
   // A close cancels every open order and releases what it reserved. The trader's own lists are read again when the
   // status says so, without waiting for their next poll or for the account's own notification. In another simulation
   // none of them is the trader's any more: they are dropped, and read for that one. Nothing else of the page is kept
-  // either, as it waits for the new simulation's instruments.
-  useRefreshOnMarketChange(market.data, PRIVATE_QUERIES);
+  // either, as it waits for the new simulation's instruments, and the instrument chosen in the one before is let go.
+  const generation = useRefreshOnMarketChange(market.data, PRIVATE_QUERIES);
+  useForgetInAddress(generation, CHOSEN);
   const orders = useQuery({
     queryKey: ['orders', 'active'],
     queryFn: () => api.orders('active'),
@@ -120,10 +124,10 @@ export function TerminalPage() {
       />
       {selected === null ? (
         <p className="muted terminal-empty" role="status">
-          {asked !== null
-            ? 'The instrument in this address is not part of this market, and the market has no instruments yet.'
-            : market.data?.state === 'SETUP'
-              ? 'The market is being set up and has no instruments yet, so there is nothing to trade.'
+          {market.data?.state === 'SETUP'
+            ? 'The market is being set up and has no instruments yet, so there is nothing to trade.'
+            : asked !== null
+              ? 'The instrument in this address is not part of this market, and the market has no instruments yet.'
               : 'This market has no instruments yet, so there is nothing to trade.'}
         </p>
       ) : (
