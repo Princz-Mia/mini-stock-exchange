@@ -4,7 +4,7 @@ import { Link, useSearchParams } from 'react-router';
 
 import { ApiError, api, pollEvery } from '../api/client';
 import type { MarketStatus } from '../api/types';
-import { CloseTime } from '../app/closeTime';
+import { CloseTime, closesWhileTrading, useTimeHasCome } from '../app/closeTime';
 import { FeedStatus } from '../app/FeedStatus';
 import {
   useAskAgainWhenFunded,
@@ -39,6 +39,16 @@ const PAUSED: Record<Exclude<MarketStatus['state'], 'OPEN'>, { badge: string; re
   CLOSED: { badge: 'Market closed', reason: 'The market has closed and takes no more orders.' },
 };
 
+/**
+ * The market's set time has come and the status still says it trades, or is halted, because the exchange has not run
+ * its close yet. The exchange refuses new orders from that time on, so the ticket does too, rather than send each one
+ * to be rejected.
+ */
+const CLOSING = {
+  badge: 'Closing',
+  reason: "The market's set time has come: the exchange is closing it and takes no new orders. You can still cancel open orders.",
+};
+
 /** The instrument chosen is in the address, and is the simulation's it was chosen in. */
 const CHOSEN = ['instrument'] as const;
 
@@ -56,7 +66,16 @@ export function TerminalPage() {
   const market = useMarketStatus();
   // The current simulation's instruments, as that status names it: never the list of a simulation before it.
   const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
-  const paused = market.data === undefined || market.data.state === 'OPEN' ? null : PAUSED[market.data.state];
+  // Turns when the countdown does, on the exchange's clock.
+  const timeHasCome = useTimeHasCome(closesWhileTrading(market.data) ? market.data.closesAt : null);
+  const paused =
+    market.data === undefined
+      ? null
+      : timeHasCome
+        ? CLOSING
+        : market.data.state === 'OPEN'
+          ? null
+          : PAUSED[market.data.state];
   // A close cancels every open order and releases what it reserved. The trader's own lists are read again when the
   // status says so, without waiting for their next poll or for the account's own notification. In another simulation
   // none of them is the trader's any more: they are dropped, and read for that one. Nothing else of the page is kept
@@ -157,8 +176,8 @@ export function TerminalPage() {
               {paused !== null && (
                 <>
                   <span className="state-badge state-halted">{paused.badge}</span>
-                  {market.data?.state === 'HALTED' && <TermTip terms={['halted']} />}
-                  {closed !== null && <TermTip terms={['closed']} />}
+                  {market.data?.state === 'HALTED' && !timeHasCome && <TermTip terms={['halted']} />}
+                  {(closed !== null || timeHasCome) && <TermTip terms={['closed']} />}
                 </>
               )}
               {feed !== undefined && <FeedStatus feed={feed} />}

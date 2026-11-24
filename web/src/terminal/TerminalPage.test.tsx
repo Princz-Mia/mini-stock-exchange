@@ -195,6 +195,41 @@ describe('terminal', () => {
     expect(screen.queryByText(/closes at its set time/)).toBeNull();
   });
 
+  it('takes no new order once the set time has come, before the close has run, but still lets the trader cancel', async () => {
+    // The exchange's clock two seconds before the close time: the ticket turns when the countdown does.
+    const server = market().on('GET /api/v1/market', () => ({
+      status: 200,
+      json: {
+        state: 'OPEN',
+        simulationId: 's',
+        openedAt: '2026-11-04T09:00:00Z',
+        closesAt: '2026-11-04T17:00:00Z',
+        closedAt: null,
+        closedOnSchedule: false,
+        commandSequence: '9',
+      },
+      headers: { Date: new Date('2026-11-04T16:59:58Z').toUTCString() },
+    }));
+    renderTerminal();
+
+    const ticket = await screen.findByRole('region', { name: 'Order · NOVA' });
+    const buy = within(ticket).getByRole('button', { name: 'Buy NOVA' });
+    await waitFor(() => expect(buy).toBeEnabled());
+    expect(screen.queryByText('Closing')).toBeNull();
+    await waitFor(() => expect(buy).toBeDisabled(), { timeout: 4_000 });
+    expect(buy).toHaveAccessibleDescription(
+      "The market's set time has come: the exchange is closing it and takes no new orders. You can still cancel open orders.",
+    );
+    expect(screen.getByText('Closing', { selector: '.state-badge' })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'Its set time, 4 Nov 2026, 17:00:00 UTC, has come: the exchange is closing the market, and new orders are refused.',
+      ),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Cancel sell NOVA at 105.00' })).toBeEnabled();
+    expect(server.requests.some((request) => request.method === 'POST')).toBe(false);
+  });
+
   it('names both times when the market closed well after its set time', async () => {
     market().on('GET /api/v1/market', {
       status: 200,

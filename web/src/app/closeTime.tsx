@@ -44,6 +44,34 @@ export function countdownText(milliseconds: number): string {
   return `${seconds} s`;
 }
 
+/**
+ * The exchange's time, read again every second while a page shows it, but only to say whether `closesAt` has come: a
+ * page that changes only then is not drawn again each second. False with no close time.
+ */
+export function useTimeHasCome(closesAt: string | null): boolean {
+  // The close time found to have come, so that another close time starts out not come.
+  const [came, setCame] = useState(() =>
+    closesAt !== null && Date.parse(closesAt) <= exchangeNow() ? closesAt : null,
+  );
+  useEffect(() => {
+    if (closesAt === null) {
+      return undefined;
+    }
+    const check = () => {
+      if (Date.parse(closesAt) <= exchangeNow()) {
+        setCame(closesAt);
+      }
+    };
+    const first = setTimeout(check, 0);
+    const timer = setInterval(check, 1_000);
+    return () => {
+      clearTimeout(first);
+      clearInterval(timer);
+    };
+  }, [closesAt]);
+  return closesAt !== null && came === closesAt;
+}
+
 /** The market is trading, or halted, and has a close time: a countdown applies. */
 export function closesWhileTrading(market: MarketStatus | undefined): market is MarketStatus & { closesAt: string } {
   return (
