@@ -69,7 +69,8 @@ def test_the_toy_market_keeps_what_an_order_cannot_pay_for_and_a_bot_from_tradin
 def noise_market(seed: int, commands: int) -> ToyMarket:
     """Twelve noise bots with ample means, trading one instrument with each other."""
     market = ToyMarket([10_000])
-    config = NoiseConfig(max_quantity=10, spread_ticks=5, max_open_orders=5, quote_lifetime=10.0)
+    # Five basis points of 100.00: five ticks either side. No value to go by: the market alone.
+    config = NoiseConfig(max_quantity=10, spread_bp=5.0, max_open_orders=5, quote_lifetime=10.0)
     for bot in range(12):
         market.join(NoiseBot(np.random.default_rng([seed, bot]), config), cash=10**12, shares=10**6)
     market.run(commands, rate=4.0)

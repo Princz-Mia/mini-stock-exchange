@@ -3,10 +3,12 @@ from uuid import uuid4
 
 import numpy as np
 import pytest
+from test_noise import Worth
 
 from mse_simulator.market import Instrument, MarketView
 from mse_simulator.market_maker import MarketMaker, MarketMakerConfig
 from mse_simulator.momentum import MomentumBot, MomentumConfig, PriceSignal
+from mse_simulator.prices import BASIS_POINT
 from mse_simulator.strategy import Cancel, Holdings, OpenOrder, Place
 
 
@@ -59,16 +61,37 @@ def test_the_signal_needs_a_full_window_and_samples_only_open_live_data() -> Non
     signal.observe(view(item))  # no trade yet: the anchor, which is the reference
     item = trending(signal, item, [10_100, 10_200])
     assert signal.strength(item.instrument_id) is None
-    signal.observe(view(replace(item, last=99_999), live=False))
-    signal.observe(view(replace(item, last=99_999), open=False))
-    assert signal.strength(item.instrument_id) is None, "a frozen or closed feed isn't sampled"
     trending(signal, item, [10_300])
     long, short = (10_000 + 10_100 + 10_200 + 10_300) / 4, (10_200 + 10_300) / 2
     assert signal.strength(item.instrument_id) == pytest.approx((short - long) / long)
+    assert signal.averages(item.instrument_id) == (short, long)
     trending(signal, item, [10_300, 10_300, 10_300, 10_300])
     assert signal.strength(item.instrument_id) == 0.0, "old samples leave the long window"
     with pytest.raises(ValueError):
         PriceSignal(3, 3)
+
+
+@pytest.mark.parametrize("gap", [{"open": False}, {"live": False}])
+def test_a_halt_or_a_frozen_feed_empties_the_signal(gap: dict) -> None:
+    """Prices from before a halt are not compared with prices after it: the windows start over."""
+    signal = PriceSignal(2, 4)
+    item = trending(signal, instrument(), [10_000, 10_100, 10_200, 10_300])
+    assert signal.strength(item.instrument_id) is not None
+    signal.observe(view(replace(item, last=99_999), **gap))
+    assert signal.strength(item.instrument_id) is None
+    trending(signal, item, [10_300, 10_300, 10_300])
+    assert signal.strength(item.instrument_id) is None, "not yet a full window again"
+    trending(signal, item, [10_300])
+    assert signal.strength(item.instrument_id) == 0.0, "99,999 was never sampled"
+
+
+def test_the_signal_samples_the_mid_not_the_last_trade() -> None:
+    """The last trade alternates between the bid and the ask while nothing moves."""
+    signal = PriceSignal(1, 2)
+    item = instrument(bid=9_990, ask=10_010)
+    for last in (9_990, 10_010):
+        signal.observe(view(replace(item, last=last)))
+    assert signal.strength(item.instrument_id) == 0.0
 
 
 def momentum(seed: int, signal: PriceSignal, config: MomentumConfig = MOMENTUM) -> MomentumBot:
@@ -103,22 +126,46 @@ def test_momentum_leans_with_the_trend(direction: int) -> None:
         intent = momentum(seed, signal).decide(view(item), True, rich(item, position=25), [], 0.0)
         assert isinstance(intent, Place)
         sides.append(intent.side)
-    assert sides.count(with_trend) >= 390
+    # However strong the trend, three orders in four follow it and one in four does not.
+    assert 270 <= sides.count(with_trend) <= 330
 
 
-def test_momentum_bias_follows_the_signal_strength() -> None:
-    """At the threshold, about three in four orders follow the trend; with no bias it'd be half."""
-    signal = PriceSignal(1, 2)
-    item = trending(signal, instrument(), [10_000, 10_020])  # strength 0.001 / 1.001
-    config = replace(MOMENTUM, threshold=0.000999)
-    buys = sum(
+def buys_of_2000(signal: PriceSignal, item: Instrument, config: MomentumConfig) -> int:
+    return sum(
         momentum(seed, signal, config)
         .decide(view(item), True, rich(item, position=25), [], 0.0)
         .side
         == "BUY"
         for seed in range(2_000)
     )
-    assert 1_350 <= buys <= 1_570
+
+
+def test_momentum_bias_follows_the_signal_strength() -> None:
+    """At the threshold, about 69 orders in 100 follow the trend; with no bias it'd be half, and
+    at most it is ``0.5 + follow``."""
+    signal = PriceSignal(1, 2)
+    item = trending(signal, instrument(), [10_000, 10_020])  # strength 0.001 / 1.001
+    config = replace(MOMENTUM, threshold=0.000999)
+    assert 1_310 <= buys_of_2000(signal, item, config) <= 1_450
+    assert 1_470 <= buys_of_2000(signal, item, replace(config, follow=0.35)) <= 1_600
+    assert 940 <= buys_of_2000(signal, item, replace(config, follow=0.0)) <= 1_060
+
+
+def test_a_move_of_a_tick_or_two_on_a_cheap_instrument_is_no_trend() -> None:
+    """At 1.00 one tick is 1% of the price, far past the threshold as a fraction, yet it is only
+    the grid: the averages must also be ``min_ticks`` apart."""
+    signal = PriceSignal(1, 2)
+    cheap = trending(signal, instrument(reference=100), [100, 102])  # averages one tick apart
+    assert signal.strength(cheap.instrument_id) > 5 * MOMENTUM.threshold
+    assert momentum(1, signal).decide(view(cheap), True, rich(cheap), [], 0.0) is None
+    moved = trending(signal, cheap, [106])  # 102 then 106: two ticks apart
+    assert isinstance(momentum(1, signal).decide(view(moved), True, rich(moved), [], 0.0), Place)
+    assert (
+        momentum(1, signal, replace(MOMENTUM, min_ticks=3)).decide(
+            view(moved), True, rich(moved), [], 0.0
+        )
+        is None
+    )
 
 
 def test_momentum_stays_out_of_flat_markets_until_the_window_fills_and_while_paused() -> None:
@@ -127,7 +174,10 @@ def test_momentum_stays_out_of_flat_markets_until_the_window_fills_and_while_pau
     bot = momentum(1, signal)
     assert bot.decide(view(item), True, rich(item), [], 0.0) is None, "window not full"
     flat = PriceSignal(2, 4)
-    level = trending(flat, instrument(), [10_000, 10_005, 10_005, 10_005])
+    # The averages end 6 ticks apart, well past the tick floor, but only 0.06% of the price.
+    level = trending(flat, instrument(), [10_000, 10_024, 10_024, 10_024])
+    short, long = flat.averages(level.instrument_id)
+    assert short - long > 2 * MOMENTUM.min_ticks
     assert abs(flat.strength(level.instrument_id)) < MOMENTUM.threshold
     assert momentum(1, flat).decide(view(level), True, rich(level), [], 0.0) is None
     item = trending(signal, item, [10_400])
@@ -151,16 +201,23 @@ def test_momentum_keeps_one_order_at_a_time_and_a_cooldown() -> None:
     assert isinstance(bot.decide(view(item), True, holdings, [], 110.0), Place)
 
 
-def test_momentum_takes_the_opposite_quote_or_a_tick_through_the_anchor() -> None:
+def test_momentum_takes_the_opposite_quote_only_within_its_reach() -> None:
+    """Twenty basis points of 101.00 is 20.2 ticks: a quote nearer than that is taken; past it,
+    or with nothing quoted, the order rests at the edge of the reach, a buy rounded down and a
+    sell up. A lone far quote can't pull a momentum order after it."""
     signal = PriceSignal(1, 2)
-    up = trending(signal, instrument(bid=10_090, ask=10_110, tick=5), [10_000, 10_100])
-    for seed in range(50):
-        intent = momentum(seed, signal).decide(view(up), True, rich(up, position=25), [], 0.0)
-        assert intent.limit == (10_110 if intent.side == "BUY" else 10_090)
-    bare = trending(signal, instrument(tick=5), [10_200, 10_300])
-    for seed in range(50):
-        intent = momentum(seed, signal).decide(view(bare), True, rich(bare, position=25), [], 0.0)
-        assert intent.limit == (10_305 if intent.side == "BUY" else 10_295)
+    bare = trending(signal, instrument(tick=5), [10_000, 10_100])
+    near = replace(bare, bid=10_090, ask=10_110)
+    far = replace(bare, bid=9_900, ask=10_300)
+    for item, buy, sell in [(near, 10_110, 10_090), (far, 10_120, 10_080), (bare, 10_120, 10_080)]:
+        sides = set()
+        for seed in range(50):
+            intent = momentum(seed, signal).decide(
+                view(item), True, rich(item, position=25), [], 0.0
+            )
+            assert intent.limit == (buy if intent.side == "BUY" else sell)
+            sides.add(intent.side)
+        assert sides == {"BUY", "SELL"}
 
 
 def test_momentum_never_moves_a_position_past_the_cap_or_spends_what_it_lacks() -> None:
@@ -199,18 +256,19 @@ def test_momentum_never_moves_a_position_past_the_cap_or_spends_what_it_lacks() 
 # Market maker
 
 
+# In basis points; at 100.00, the tests' usual price, one basis point is one tick.
 MAKER = MarketMakerConfig(
     quote_size=10,
     max_position=100,
-    half_spread_ticks=2,
-    skew_ticks=1,
-    requote_ticks=2,
+    half_spread_bp=2.0,
+    skew_bp=1.0,
+    requote_bp=2.0,
     quote_lifetime=30.0,
 )
 
 
-def maker(seed: int, config: MarketMakerConfig = MAKER) -> MarketMaker:
-    return MarketMaker(np.random.default_rng([seed, 7]), config)
+def maker(seed: int, config: MarketMakerConfig = MAKER, **more) -> MarketMaker:
+    return MarketMaker(np.random.default_rng([seed, 7]), config, **more)
 
 
 def quote(item: Instrument, side: str, limit: int, at: float = 0.0, order_id=None) -> OpenOrder:
@@ -218,16 +276,38 @@ def quote(item: Instrument, side: str, limit: int, at: float = 0.0, order_id=Non
 
 
 def test_a_maker_quotes_a_bid_then_an_ask_around_the_mid_then_rests() -> None:
+    # Two basis points of 100.00 is less than this instrument's tick of 5: one tick each side.
     item = instrument(bid=9_990, ask=10_010, tick=5)
     bot = maker(1)
     holdings = rich(item)
     bid = bot.decide(view(item), True, holdings, [], 0.0)
-    assert bid == Place(item.instrument_id, "BUY", 10, 9_990)
-    resting = [quote(item, "BUY", 9_990)]
+    assert bid == Place(item.instrument_id, "BUY", 10, 9_995)
+    resting = [quote(item, "BUY", 9_995)]
     ask = bot.decide(view(item), True, holdings, resting, 0.0)
-    assert ask == Place(item.instrument_id, "SELL", 10, 10_010)
-    resting.append(quote(item, "SELL", 10_010))
+    assert ask == Place(item.instrument_id, "SELL", 10, 10_005)
+    resting.append(quote(item, "SELL", 10_005))
     assert bot.decide(view(item), True, holdings, resting, 1.0) is None
+
+
+def test_a_maker_quotes_around_what_it_thinks_the_instrument_is_worth() -> None:
+    """Not around the market's price: with the market at 100.00 and the value at 102.00, it bids
+    and asks around 102.00, so it buys from anyone selling below that."""
+    item = instrument(bid=9_990, ask=10_010)
+    bot = maker(1, view=Worth(10_200.0))
+    assert bot.quotes(item, rich(item), (item,)) == (10_197, 10_203)
+    assert maker(1).quotes(item, rich(item), (item,)) == (9_998, 10_002), "no value: the market"
+
+
+def test_makers_spread_evenly_over_the_instruments_by_their_place() -> None:
+    items = tuple(instrument() for _ in range(5))
+    ordered = sorted(item.instrument_id for item in items)
+
+    def picked(place: int, market: MarketView) -> object:
+        return maker(place, place=place).decide(market, True, rich(*items), [], 0.0).instrument_id
+
+    assert [picked(place, view(*items)) for place in range(5)] == ordered
+    assert picked(5, view(*items)) == ordered[0], "more makers than instruments: round again"
+    assert picked(2, view(*reversed(items))) == ordered[2], "whatever order the view lists them in"
 
 
 def test_the_same_seed_and_observations_give_the_same_maker_intents() -> None:
@@ -254,7 +334,7 @@ def test_inventory_leans_both_quotes_against_the_position() -> None:
     bot = maker(1)
     bot.quotes(item, rich(item, position=500), (item,))  # the start: 500 shares
     assert bot.quotes(item, rich(item, position=530), (item,)) == (9_995, 9_999), "long: lower"
-    assert bot.quotes(item, rich(item, position=480), (item,)) == (10_000, 10_004), "short: up"
+    assert bot.quotes(item, rich(item, position=480), (item,)) == (9_999, 10_005), "short: up"
     odd = instrument(bid=10_000, ask=10_003)
     assert maker(1).quotes(odd, rich(odd), (odd,)) == (9_999, 10_004), "centred on the exact mid"
     draws = np.random.default_rng(2026)
@@ -263,8 +343,8 @@ def test_inventory_leans_both_quotes_against_the_position() -> None:
         anchor = int(draws.integers(2_000, 50_000))
         config = replace(
             MAKER,
-            half_spread_ticks=int(draws.integers(1, 6)),
-            skew_ticks=int(draws.integers(0, 4)),
+            half_spread_bp=float(draws.uniform(1, 60)),
+            skew_bp=float(draws.uniform(0, 4)),
             quote_size=int(draws.integers(1, 20)),
         )
         item = instrument(reference=anchor, tick=tick)
@@ -273,13 +353,13 @@ def test_inventory_leans_both_quotes_against_the_position() -> None:
         previous = None
         for position in sorted(int(p) for p in draws.integers(900, 1_100, 8)):
             bid, ask = bot.quotes(item, rich(item, position=position), (item,))
-            lean = config.skew_ticks * (position - 1_000) / config.quote_size
-            reservation = anchor - lean * tick
+            lean = config.skew_bp * BASIS_POINT * (position - 1_000) / config.quote_size
+            reservation = anchor * (1 - lean)
             # Each quote at least the half spread from the reservation price, and less than a tick
-            # further: rounded away from it, never toward.
-            half = config.half_spread_ticks * tick
-            assert half <= reservation - bid < half + tick
-            assert half <= ask - reservation < half + tick
+            # further: rounded away from it, never toward. The half spread is at least a tick.
+            half = max(config.half_spread_bp * BASIS_POINT * reservation, tick)
+            assert half - 1e-6 <= reservation - bid < half + tick
+            assert half - 1e-6 <= ask - reservation < half + tick
             assert bid % tick == 0 and ask % tick == 0, "on the tick grid"
             if previous is not None:
                 assert bid <= previous, "more inventory never raises the quotes"
@@ -297,7 +377,7 @@ def test_old_quotes_are_cancelled_before_new_ones_are_placed() -> None:
     off = [quote(item, "BUY", 9_996, order_id="bid")]
     assert bot.decide(view(item), True, holdings, off, 0.0) == Cancel("bid")
     # A wide threshold keeps these near enough to stay, but each crosses the other side's target.
-    wide = maker(1, replace(MAKER, requote_ticks=10))
+    wide = maker(1, replace(MAKER, requote_bp=10.0))
     low_ask = [quote(item, "SELL", 9_998, order_id="ask")]
     assert wide.decide(view(item), True, holdings, low_ask, 0.0) == Cancel("ask")
     high_bid = [quote(item, "BUY", 10_002, order_id="bid")]

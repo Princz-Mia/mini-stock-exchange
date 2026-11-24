@@ -12,6 +12,7 @@ from mse_simulator.control import Assignment
 from mse_simulator.credentials import load_token
 from mse_simulator.manifest import manifest
 from mse_simulator.market import fetch
+from mse_simulator.market_maker import MarketMaker
 from mse_simulator.pacing import Pacer
 from mse_simulator.runner import Runner
 from mse_simulator.settings import Settings
@@ -763,10 +764,12 @@ def test_market_makers_take_the_first_turns_and_quote_both_sides(tmp_path) -> No
     # The maker is assigned last here; it still trades first.
     exchange.run = run_body(accounts, ["NOISE", "NOISE", "MARKET_MAKER"])
     maker = f"Bearer {list(accounts.values())[2]}"
+    # A value that stands still and a maker that sees it as it is, so the quotes are exact.
+    still = settings(tmp_path / "tokens", fair_value_volatility=0.0, view_spread_bp=0.0)
 
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
-            runner = Runner(settings(tmp_path / "tokens"), http)
+            runner = Runner(still, http)
             await follow_until(
                 runner,
                 exchange,
@@ -782,8 +785,8 @@ def test_market_makers_take_the_first_turns_and_quote_both_sides(tmp_path) -> No
     assert exchange.placed[0].headers["Authorization"] == maker, "liquidity goes first"
     quotes = [json.loads(r.content) for r in exchange.placed if r.headers["Authorization"] == maker]
     sides = {quote["side"]: quote["limitPrice"] for quote in quotes[:2]}
-    # Reference 100.00 with no trade or ask yet: two ticks either side.
-    assert sides == {"BUY": "99.98", "SELL": "100.02"}
+    # Reference 100.00 with no trade or ask yet: the value starts there, ten basis points each side.
+    assert sides == {"BUY": "99.90", "SELL": "100.10"}
     assert len(quotes) == 2, "resting quotes on target aren't replaced"
 
 
@@ -800,6 +803,8 @@ def test_momentum_bots_trade_on_the_signal_the_market_polls_feed(tmp_path) -> No
         momentum_long_polls=3,
         momentum_threshold=0.0001,
         momentum_cooldown_seconds=0.0,
+        # Always with the trend, so the first order's side is certain.
+        momentum_follow=0.5,
     )
 
     async def scenario() -> None:
@@ -818,11 +823,52 @@ def test_momentum_bots_trade_on_the_signal_the_market_polls_feed(tmp_path) -> No
     assert order["instrumentId"] == INSTRUMENT
 
 
+def test_each_run_has_its_own_fair_values_from_its_seed_and_numbers_its_makers_afresh(
+    tmp_path,
+) -> None:
+    accounts = write_tokens(tmp_path / "tokens", 3)
+    exchange = Exchange()
+
+    async def values_and_places(runner: Runner, seed: str) -> tuple[list[float], list[int]]:
+        runner.start_run(assigned(run_body(accounts, ["MARKET_MAKER"] * 2 + ["NOISE"], seed=seed)))
+        assert runner._values.of(UUID(INSTRUMENT)) is None, "a new run starts its values over"
+        await runner.load_bots()
+        path = []
+        for _ in range(5):
+            await runner.refresh_market()
+            path.append(runner._values.of(UUID(INSTRUMENT)))
+        places = [
+            bot.strategy._place
+            for bot in runner._bots.values()
+            if isinstance(bot.strategy, MarketMaker)
+        ]
+        return path, places
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            first, places = await values_and_places(runner, "7")
+            assert places == [0, 1]
+            assert first[0] == pytest.approx(10_000) and len(set(first)) == 5, "it moves per poll"
+            other, places = await values_and_places(runner, "8")
+            assert places == [0, 1], "numbered from the start again"
+            assert other[0] == pytest.approx(10_000) and other != first, "another seed's path"
+            again, _ = await values_and_places(runner, "7")
+            assert again == first, "the same seed repeats it"
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("strategy", ["MARKET_MAKER", "MOMENTUM", "NOISE"])
 def test_every_strategy_is_seeded_by_the_run(tmp_path, strategy) -> None:
     accounts = write_tokens(tmp_path / "tokens", 2)
     exchange = Exchange()
-    quick = settings(tmp_path / "tokens", momentum_short_polls=1, momentum_long_polls=2)
+    quick = settings(
+        tmp_path / "tokens",
+        momentum_short_polls=1,
+        momentum_long_polls=2,
+        momentum_threshold=0.001,
+    )
 
     async def decisions(seed: str):
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
