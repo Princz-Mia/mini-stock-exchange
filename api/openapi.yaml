@@ -2344,7 +2344,7 @@ components:
       type: object
       additionalProperties: false
       required: [jobId, state, total, created, strategies, cash, holdings, partSize, partsDone, startedAt, finishedAt,
-                 secondsLeft, failure, resumed]
+                 secondsLeft, lastProgressAt, stalled, failure, resumed]
       properties:
         jobId: { $ref: '#/components/schemas/Uuid' }
         state:
@@ -2383,8 +2383,21 @@ components:
           type: [integer, 'null']
           minimum: 0
           description: |
-            An estimate from the rate since the process that has the job took it up, rounded up; null until a part
-            has committed since then, and once the job no longer runs.
+            An estimate from the rate since the process that has the job took it up, counted down to the time of the
+            read and rounded up; at least 1 while the job runs. Null until a part has committed since then, while the
+            job is stalled, and once it no longer runs.
+        lastProgressAt:
+          $ref: '#/components/schemas/Timestamp'
+          description: |
+            When the job last moved: when its last part committed, or when the exchange last took it up if no part
+            has committed since.
+        stalled:
+          type: boolean
+          description: |
+            True while the job is RUNNING but no part has committed for well over the time a part takes, tried again
+            included (15 seconds by default): nothing is making the rest, for example because the exchange has
+            stopped taking commands, until a restart takes the job up again or an operator stops it. False in a job
+            carried by a refusal, which shows the job as it was.
         failure:
           type: [string, 'null']
           description: Why a FAILED job could not go on; null otherwise.

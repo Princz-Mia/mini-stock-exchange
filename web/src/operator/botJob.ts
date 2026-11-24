@@ -1,5 +1,5 @@
 import type { BotJob } from '../api/types';
-import { groupInteger } from '../format';
+import { groupInteger, utcTime } from '../format';
 
 /** The most bots one job asks for: what a count holds at the exchange. */
 export const MAX_BOTS = 2_147_483_647;
@@ -76,6 +76,14 @@ export function timeLeftText(secondsLeft: number | null): string {
   }
   const rest = minutes % 60;
   return `About ${Math.floor(minutes / 60)} h${rest === 0 ? '' : ` ${rest} min`} left`;
+}
+
+/**
+ * What a job the exchange says has stopped moving shows in place of its time left: since when nothing has been made.
+ * A time left would say it is still going.
+ */
+export function stalledText(job: Pick<BotJob, 'lastProgressAt'>): string {
+  return `No progress since ${utcTime(job.lastProgressAt)}`;
 }
 
 /** "4,000 of 20,000 bots made (20%)": the bar's value in words, and what the panel says beside it. */

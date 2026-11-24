@@ -1322,6 +1322,33 @@ describe('the operator screen', () => {
     expect(screen.queryByRole('form', { name: 'Create bots' })).toBeNull();
   });
 
+  it('says in plain words when a running job has stopped moving, and gives no time left for it', async () => {
+    const { state } = exchange('SETUP');
+    state.job = botJob({
+      created: 12_000,
+      partsDone: 12,
+      secondsLeft: null,
+      lastProgressAt: '2026-11-24T10:00:12Z',
+      stalled: true,
+    });
+    renderPage();
+
+    const bar = await screen.findByRole('progressbar', { name: 'Creating bots' });
+    expect(bar).toHaveAttribute('aria-valuetext', '12,000 of 20,000 bots made (60%)');
+    expect(screen.getByText('No progress since 10:00:12 UTC', { exact: false })).toBeInTheDocument();
+    expect(screen.queryByText(/About .* left/)).toBeNull();
+    expect(screen.queryByText(/Working out the time left/)).toBeNull();
+    expect(
+      screen.getByText(
+        'Interrupted: no bots have been made since 10:00:12 UTC, so the time left is unknown. The exchange may have stopped taking commands. Restarting the exchange takes the job up again where it was, and no bot is made twice; Stop keeps the bots made so far.',
+      ),
+    ).toHaveAttribute('role', 'alert');
+    expect(await button('Stop creating bots')).toBeEnabled();
+    expect(await button('Open market')).toHaveAccessibleDescription(
+      'Bots are still being created, but nothing has moved since 10:00:12 UTC: 12,000 of 20,000 bots made (60%). The market can open once the job is done or stopped.',
+    );
+  });
+
   it("shows a refused job in the exchange's words beside the other operator's job it names", async () => {
     const { server, state } = exchange('SETUP');
     server.on('POST /api/v1/admin/bot-jobs', () => {

@@ -21,6 +21,8 @@ import org.junit.jupiter.api.Test;
  */
 class BotJobTest {
 
+	private static final Duration STALLED_AFTER = Duration.ofSeconds(15);
+
 	private static final long SEED = 20261124L;
 
 	private static final Instant START = Instant.parse("2026-11-24T10:00:00Z");
@@ -99,22 +101,67 @@ class BotJobTest {
 	void theTimeLeftIsTheRateSinceTheJobWasTakenUpAppliedToWhatIsLeft() {
 		BotJob job = BotJob.start(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1_000,
 				new BotJob.Counts(0, 10_000, 0), 100, List.of(), START);
-		assertThat(job.secondsLeft()).as("nothing to go on yet").isEmpty();
+		assertThat(job.secondsLeft(START, STALLED_AFTER)).as("nothing to go on yet").isEmpty();
 		job = job.afterPart(job.nextPart().orElseThrow(), START.plusMillis(500));
 		// 1,000 in half a second; 9,000 left.
-		assertThat(job.secondsLeft()).hasValue(5);
+		assertThat(job.secondsLeft(START.plusMillis(500), STALLED_AFTER)).hasValue(5);
 		job = job.afterPart(job.nextPart().orElseThrow(), START.plus(Duration.ofMillis(1_100)));
 		// 2,000 in 1.1 s; 8,000 left: 4.4 s, rounded up.
-		assertThat(job.secondsLeft()).hasValue(5);
+		assertThat(job.secondsLeft(START.plusMillis(1_100), STALLED_AFTER)).hasValue(5);
 
 		// A restart takes it up again: the rate counts only what this process made, from when it took the job up.
 		BotJob resumed = job.resumedAt(START.plusSeconds(60));
 		assertThat(resumed.resumed()).isEqualTo(1);
-		assertThat(resumed.secondsLeft()).as("nothing made since it was taken up").isEmpty();
+		assertThat(resumed.secondsLeft(START.plusSeconds(60), STALLED_AFTER)).as("nothing made since it was taken up")
+			.isEmpty();
 		resumed = resumed.afterPart(resumed.nextPart().orElseThrow(), START.plusSeconds(62));
 		// 1,000 in 2 s; 7,000 left.
-		assertThat(resumed.secondsLeft()).hasValue(14);
-		assertThat(resumed.stopped(START.plusSeconds(63)).secondsLeft()).as("not running").isEmpty();
+		assertThat(resumed.secondsLeft(START.plusSeconds(62), STALLED_AFTER)).hasValue(14);
+		assertThat(resumed.stopped(START.plusSeconds(63)).secondsLeft(START.plusSeconds(63), STALLED_AFTER))
+			.as("not running").isEmpty();
+	}
+
+	/**
+	 * The estimate is read at the time of the read: it counts down between parts, never below one second while bots
+	 * are left, and once no part has committed for longer than the job may take between parts, the job is stalled and
+	 * has no estimate at all. A frozen "about 10 s left" on a job nothing makes any more would say it is moving.
+	 */
+	@Test
+	void theTimeLeftCountsDownToTheReadAndAJobThatStopsMovingIsStalled() {
+		BotJob job = BotJob.start(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), 1_000,
+				new BotJob.Counts(0, 20_000, 0), 100, List.of(), START);
+		assertThat(job.progressAt()).as("taken up, nothing made yet").isEqualTo(START);
+		assertThat(job.stalled(START.plus(STALLED_AFTER), STALLED_AFTER)).as("exactly at the limit").isFalse();
+		assertThat(job.stalled(START.plus(STALLED_AFTER).plusMillis(1), STALLED_AFTER))
+			.as("a job taken up that never makes a part").isTrue();
+
+		Instant firstPart = START.plusSeconds(1);
+		job = job.afterPart(job.nextPart().orElseThrow(), firstPart);
+		assertThat(job.progressAt()).isEqualTo(firstPart);
+		// 1,000 a second; 19,000 left.
+		assertThat(job.secondsLeft(firstPart, STALLED_AFTER)).hasValue(19);
+		assertThat(job.secondsLeft(firstPart.plusMillis(4_500), STALLED_AFTER)).as("4.5 s on: 14.5, rounded up")
+			.hasValue(15);
+		assertThat(job.secondsLeft(firstPart.minusMillis(300), STALLED_AFTER))
+			.as("a clock read just before the part counts nothing off").hasValue(19);
+		assertThat(job.stalled(firstPart.plusSeconds(14), STALLED_AFTER)).isFalse();
+		assertThat(job.secondsLeft(firstPart.plus(STALLED_AFTER), STALLED_AFTER)).as("at least a second while running")
+			.hasValue(4);
+
+		Instant later = firstPart.plus(STALLED_AFTER).plusSeconds(1);
+		assertThat(job.stalled(later, STALLED_AFTER)).isTrue();
+		assertThat(job.secondsLeft(later, STALLED_AFTER)).as("no estimate for a job that does not move").isEmpty();
+		BotJob nearlyDone = BotJob.start(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID(),
+				1_000, new BotJob.Counts(0, 2_000, 0), 100, List.of(), START);
+		nearlyDone = nearlyDone.afterPart(nearlyDone.nextPart().orElseThrow(), firstPart);
+		assertThat(nearlyDone.secondsLeft(firstPart.plusSeconds(5), STALLED_AFTER))
+			.as("overdue but not stalled: still a second, never none").hasValue(1);
+
+		BotJob resumed = job.resumedAt(later.plusSeconds(30));
+		assertThat(resumed.progressAt()).as("taken up again: moving from then").isEqualTo(later.plusSeconds(30));
+		assertThat(resumed.stalled(later.plusSeconds(31), STALLED_AFTER)).isFalse();
+		assertThat(job.stopped(later).stalled(later.plusSeconds(60), STALLED_AFTER)).as("only a running job stalls")
+			.isFalse();
 	}
 
 	@Test

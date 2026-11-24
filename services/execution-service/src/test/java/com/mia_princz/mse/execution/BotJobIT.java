@@ -48,7 +48,7 @@ import com.mia_princz.mse.execution.trading.application.TradingEngine;
  */
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT,
-		properties = { "mse.test.database=bot-jobs", "mse.bots.job-part-size=7",
+		properties = { "mse.test.database=bot-jobs", "mse.bots.job-part-size=7", "mse.bots.job-stalled-after=3s",
 				"mse.dev-users.trader-password=" + BotJobIT.PASSWORD,
 				"mse.dev-users.operator-password=" + BotJobIT.PASSWORD })
 class BotJobIT {
@@ -182,6 +182,7 @@ class BotJobIT {
 		assertThat(progress.get("strategies").get("marketMakers").get("created").asInt()).isEqualTo(7);
 		assertThat(progress.get("strategies").get("noise").get("requested").asInt()).isEqualTo(24);
 		assertThat(progress.get("secondsLeft").isNumber()).as("estimated from the first part: %s", progress).isTrue();
+		assertThat(progress.get("stalled").asBoolean()).isFalse();
 		assertThat(progress.get("finishedAt").isNull()).isTrue();
 		HttpResponse<String> byId = operator.get(JOBS + "/" + jobId);
 		CONTRACT.assertResponse("GET", JOBS + "/{jobId}", 200, byId.headers().firstValue("Content-Type").orElse(null),
@@ -218,12 +219,23 @@ class BotJobIT {
 		assertThat(orbt).isNotNull();
 		assertThat(population(operator)).isEqualTo("7: 7 0 0");
 
+		// Held after its part with nothing making the rest, as when the writer halts: once no part has committed for
+		// longer than a part may take, the job says it has stopped moving, since when, and gives no estimate.
+		JsonNode stalled = awaitStalled(operator);
+		CONTRACT.assertResponse("GET", CURRENT, 200, "application/json", stalled.toString());
+		assertThat(stalled.get("state").asString()).isEqualTo("RUNNING");
+		assertThat(stalled.get("created").asInt()).isEqualTo(7);
+		assertThat(stalled.get("secondsLeft").isNull()).as("no estimate for a job that does not move").isTrue();
+		assertThat(stalled.get("lastProgressAt").asString()).as("when its first part committed")
+			.isEqualTo(progress.get("lastProgressAt").asString());
+
 		GATE.release();
 		JsonNode done = awaitState(operator, "DONE");
 		CONTRACT.assertResponse("GET", CURRENT, 200, "application/json", done.toString());
 		assertThat(done.get("created").asInt()).isEqualTo(40);
 		assertThat(done.get("partsDone").asInt()).as("2 + 4 + 2 parts of up to 7").isEqualTo(8);
 		assertThat(done.get("secondsLeft").isNull()).isTrue();
+		assertThat(done.get("stalled").asBoolean()).as("only a running job stalls").isFalse();
 		assertThat(done.get("finishedAt").isNull()).isFalse();
 		assertThat(population(operator)).isEqualTo("40: 8 24 8");
 
@@ -353,6 +365,20 @@ class BotJobIT {
 		}
 		while (System.nanoTime() < until);
 		throw new AssertionError("The job did not become " + state + ": " + job);
+	}
+
+	private JsonNode awaitStalled(TestBrowser operator) throws Exception {
+		long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+		JsonNode job;
+		do {
+			job = JSON.readTree(operator.get(CURRENT).body());
+			if (job.get("stalled").asBoolean()) {
+				return job;
+			}
+			Thread.sleep(100);
+		}
+		while (System.nanoTime() < until);
+		throw new AssertionError("The job never said it had stopped moving: " + job);
 	}
 
 	private static void awaitTrue(BooleanSupplier condition) throws InterruptedException {

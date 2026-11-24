@@ -1,8 +1,10 @@
 package com.mia_princz.mse.execution.trading.adapter.web;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
+import java.util.OptionalLong;
 
 import com.mia_princz.mse.execution.trading.application.BotJob;
 import com.mia_princz.mse.execution.trading.domain.Money;
@@ -20,15 +22,22 @@ final class BotJobViews {
 	}
 
 	/**
-	 * {@code secondsLeft} is null until a part has committed since the process took the job up, and once the job no
-	 * longer runs; {@code failure} is null unless it failed; {@code finishedAt} is null while it runs.
+	 * {@code secondsLeft} is null until a part has committed since the process took the job up, once the job no
+	 * longer runs, and while it is {@code stalled}; {@code failure} is null unless it failed; {@code finishedAt} is
+	 * null while it runs. {@code lastProgressAt} is when it last moved.
 	 */
 	record BotJobView(String jobId, String state, int total, int created, Strategies strategies, String cash,
 			List<SetupController.HoldingResponse> holdings, int partSize, int partsDone, Instant startedAt,
-			Instant finishedAt, Long secondsLeft, String failure, int resumed) {
+			Instant finishedAt, Long secondsLeft, Instant lastProgressAt, boolean stalled, String failure,
+			int resumed) {
 	}
 
-	static BotJobView of(BotJob job) {
+	/**
+	 * The job as read at {@code now}: stalled once it has not moved for longer than {@code stalledAfter}, and the time
+	 * left counted down to {@code now}.
+	 */
+	static BotJobView of(BotJob job, Instant now, Duration stalledAfter) {
+		OptionalLong left = job.secondsLeft(now, stalledAfter);
 		return new BotJobView(job.id().toString(), job.state().name(), job.total(), job.createdTotal(),
 				new Strategies(new StrategyProgress(job.requested().marketMakers(), job.created().marketMakers()),
 						new StrategyProgress(job.requested().noise(), job.created().noise()),
@@ -40,7 +49,16 @@ final class BotJobViews {
 							holding.quantity()))
 					.toList(),
 				job.partSize(), job.partsDone(), job.startedAt(), job.finishedAt(),
-				job.secondsLeft().isPresent() ? job.secondsLeft().getAsLong() : null, job.failure(), job.resumed());
+				left.isPresent() ? left.getAsLong() : null, job.progressAt(), job.stalled(now, stalledAfter),
+				job.failure(), job.resumed());
+	}
+
+	/**
+	 * The job as it was when an answer was stored with it, such as a refused opening, which a replay repeats: read at
+	 * the moment it last moved, so it is never stalled and its time left is the estimate it had then.
+	 */
+	static BotJobView asItWas(BotJob job) {
+		return of(job, job.progressAt(), Duration.ZERO);
 	}
 
 	/** "4,000 of 20,000 bots are made", for a refusal that names the running job. */

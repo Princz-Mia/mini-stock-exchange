@@ -207,7 +207,8 @@ function blocked(
       if (state === 'NOT_SET_UP') return 'Start a simulation or add an instrument first; either creates the market.';
       if (state !== 'SETUP') return 'The market has already opened. It opens only once.';
       if (job?.state === 'RUNNING') {
-        return `Bots are still being created: ${progressText(job)}. The market can open once the job is done or stopped.`;
+        const moving = job.stalled ? `, but nothing has moved since ${utcTime(job.lastProgressAt)}` : '';
+        return `Bots are still being created${moving}: ${progressText(job)}. The market can open once the job is done or stopped.`;
       }
       if (instruments === undefined) return 'Reading the instruments…';
       return instruments === 0 ? 'Add at least one instrument first.' : null;

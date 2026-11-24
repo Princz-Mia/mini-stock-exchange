@@ -1421,10 +1421,23 @@ export interface components {
             /** @description When it became DONE, STOPPED or FAILED; null while it runs. */
             readonly finishedAt: components["schemas"]["Timestamp"] | null;
             /**
-             * @description An estimate from the rate since the process that has the job took it up, rounded up; null until a part
-             *     has committed since then, and once the job no longer runs.
+             * @description An estimate from the rate since the process that has the job took it up, counted down to the time of the
+             *     read and rounded up; at least 1 while the job runs. Null until a part has committed since then, while the
+             *     job is stalled, and once it no longer runs.
              */
             readonly secondsLeft: number | null;
+            /**
+             * @description When the job last moved: when its last part committed, or when the exchange last took it up if no part
+             *     has committed since.
+             */
+            readonly lastProgressAt: components["schemas"]["Timestamp"];
+            /**
+             * @description True while the job is RUNNING but no part has committed for well over the time a part takes, tried again
+             *     included (15 seconds by default): nothing is making the rest, for example because the exchange has
+             *     stopped taking commands, until a restart takes the job up again or an operator stops it. False in a job
+             *     carried by a refusal, which shows the job as it was.
+             */
+            readonly stalled: boolean;
             /** @description Why a FAILED job could not go on; null otherwise. */
             readonly failure: string | null;
             /** @description How many times a restart took the job up again. */

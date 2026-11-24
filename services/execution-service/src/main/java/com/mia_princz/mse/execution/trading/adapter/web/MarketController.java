@@ -166,7 +166,7 @@ class MarketController {
 							+ ". The market can open once the job is done or stopped")
 				.with("state", result.state())
 				.with("commandSequence", Long.toString(result.commandSequence()))
-				.with("botJob", BotJobViews.of(result.botJob()));
+				.with("botJob", BotJobViews.asItWas(result.botJob()));
 		};
 	}
 

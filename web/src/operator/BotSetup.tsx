@@ -3,7 +3,7 @@ import { type FormEvent, useCallback, useEffect, useId, useRef, useState } from 
 
 import { api } from '../api/client';
 import type { BotJob, BotJobRequest, Instrument } from '../api/types';
-import { groupInteger } from '../format';
+import { groupInteger, utcTime } from '../format';
 import {
   milestone,
   mixText,
@@ -11,6 +11,7 @@ import {
   percentMade,
   progressText,
   resolveMix,
+  stalledText,
   strategiesText,
   timeLeftText,
   USUAL_SHARES,
@@ -174,12 +175,20 @@ function JobProgress({
         <div className="job-bar-fill" style={{ width: `${percent}%` }} />
       </div>
       <p className="job-figures">
-        <span className="num">{progressText(job)}</span> · {timeLeftText(job.secondsLeft)}
+        <span className="num">{progressText(job)}</span> ·{' '}
+        {job.stalled ? stalledText(job) : timeLeftText(job.secondsLeft)}
       </p>
       <p className="muted">{strategiesText(job)}</p>
       {job.resumed > 0 && (
         <p className="muted">
           The exchange restarted during this job and took it up again where it was; no bot is made twice.
+        </p>
+      )}
+      {job.stalled && !unreachable && (
+        <p role="alert" className="form-error">
+          Interrupted: no bots have been made since {utcTime(job.lastProgressAt)}, so the time left is unknown. The
+          exchange may have stopped taking commands. Restarting the exchange takes the job up again where it was, and
+          no bot is made twice; Stop keeps the bots made so far.
         </p>
       )}
       {unreachable && (

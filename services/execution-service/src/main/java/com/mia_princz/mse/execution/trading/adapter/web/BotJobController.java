@@ -1,5 +1,6 @@
 package com.mia_princz.mse.execution.trading.adapter.web;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.util.UUID;
 
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.mia_princz.mse.execution.trading.application.BotJob;
 import com.mia_princz.mse.execution.trading.application.BotJobResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.StartBotJob;
@@ -40,11 +42,22 @@ class BotJobController {
 
 	private final Duration timeout;
 
-	BotJobController(TradingEngine engine, TradingQueries queries,
-			@Value("${mse.trading.command-timeout:5s}") Duration timeout) {
+	private final Clock clock;
+
+	private final Duration stalledAfter;
+
+	/**
+	 * {@code stalledAfter} is how long a running job may go without a part committing before its progress says it
+	 * has stopped moving: by default three part waits, longer than a part that is tried again takes.
+	 */
+	BotJobController(TradingEngine engine, TradingQueries queries, Clock clock,
+			@Value("${mse.trading.command-timeout:5s}") Duration timeout,
+			@Value("${mse.bots.job-stalled-after:15s}") Duration stalledAfter) {
 		this.engine = engine;
 		this.queries = queries;
+		this.clock = clock;
 		this.timeout = timeout;
+		this.stalledAfter = stalledAfter;
 	}
 
 	/**
@@ -65,7 +78,7 @@ class BotJobController {
 		String sequence = Long.toString(result.commandSequence());
 		return switch (result.status()) {
 			case STARTED -> ResponseEntity.status(HttpStatus.ACCEPTED)
-				.body(BotJobViews.of(queries.botJob(result.job().id()).orElse(result.job())));
+				.body(view(queries.botJob(result.job().id()).orElse(result.job())));
 			case NOT_IN_SETUP -> throw new ApiException(HttpStatus.CONFLICT, "MARKET_NOT_IN_SETUP",
 					"Bots can only be created before the market opens")
 				.with("commandSequence", sequence);
@@ -73,7 +86,7 @@ class BotJobController {
 					"Bots are already being created: " + BotJobViews.progress(result.job())
 							+ ". Wait for that job to finish, or stop it")
 				.with("commandSequence", sequence)
-				.with("botJob", BotJobViews.of(queries.botJob(result.job().id()).orElse(result.job())));
+				.with("botJob", view(queries.botJob(result.job().id()).orElse(result.job())));
 			case UNKNOWN_INSTRUMENT -> throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_INSTRUMENT",
 					"A holding names an instrument this market does not have")
 				.with("commandSequence", sequence);
@@ -85,13 +98,13 @@ class BotJobController {
 	@GetMapping("/current")
 	ResponseEntity<BotJobViews.BotJobView> current() {
 		return queries.currentBotJob()
-			.map((job) -> ResponseEntity.ok(BotJobViews.of(job)))
+			.map((job) -> ResponseEntity.ok(view(job)))
 			.orElse(ResponseEntity.noContent().build());
 	}
 
 	@GetMapping("/{jobId}")
 	BotJobViews.BotJobView job(@PathVariable UUID jobId) {
-		return BotJobViews.of(queries.botJob(jobId).orElseThrow(BotJobController::notFound));
+		return view(queries.botJob(jobId).orElseThrow(BotJobController::notFound));
 	}
 
 	/** Stops the job after the part being made, if any: the bots made stay, and the rest are not made. */
@@ -105,14 +118,19 @@ class BotJobController {
 				() -> engine.stopBotJob(commandKey, new StopBotJob(jobId, operator)));
 		String sequence = Long.toString(result.commandSequence());
 		return switch (result.status()) {
-			case STOPPED -> BotJobViews.of(result.job());
+			case STOPPED -> view(result.job());
 			case NOT_RUNNING -> throw new ApiException(HttpStatus.CONFLICT, "BOT_JOB_NOT_RUNNING",
 					"The job is " + result.job().state().name().toLowerCase() + "; only a running job can be stopped")
 				.with("commandSequence", sequence)
-				.with("botJob", BotJobViews.of(result.job()));
+				.with("botJob", view(result.job()));
 			case NOT_FOUND -> throw notFound().with("commandSequence", sequence);
 			default -> throw new IllegalStateException("Not an answer to stopping a job: " + result.status());
 		};
+	}
+
+	/** The job as read now. */
+	private BotJobViews.BotJobView view(BotJob job) {
+		return BotJobViews.of(job, clock.instant(), stalledAfter);
 	}
 
 	private static ApiException notFound() {

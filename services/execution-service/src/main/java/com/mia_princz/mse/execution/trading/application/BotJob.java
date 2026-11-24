@@ -155,11 +155,31 @@ public record BotJob(UUID id, UUID simulationId, UUID startedBy, UUID idempotenc
 	}
 
 	/**
-	 * Seconds left at the rate this process has made bots since it took the job up, rounded up; empty unless the job
-	 * runs and a part has committed since then.
+	 * When the job last moved: when its last part committed, or when this process took it up if no part has committed
+	 * since.
 	 */
-	public OptionalLong secondsLeft() {
-		if (state != State.RUNNING || lastPartAt == null || !lastPartAt.isAfter(runStartedAt)) {
+	public Instant progressAt() {
+		return lastPartAt != null && lastPartAt.isAfter(runStartedAt) ? lastPartAt : runStartedAt;
+	}
+
+	/**
+	 * Whether the job is RUNNING in its row but has not moved for longer than {@code stalledAfter} at {@code now}: the
+	 * process making it has stopped, or its writer has halted, and nothing makes the rest until a start takes it up
+	 * again or an operator stops it. The row alone cannot say so; only the time of the read can.
+	 */
+	public boolean stalled(Instant now, Duration stalledAfter) {
+		return state == State.RUNNING && Duration.between(progressAt(), now).compareTo(stalledAfter) > 0;
+	}
+
+	/**
+	 * Seconds left at {@code now}, rounded up: the rate this process has made bots at since it took the job up,
+	 * applied to what is left after the last part, less the time since that part. At least one while the job runs,
+	 * since something is left. Empty unless the job runs and a part has committed since it was taken up, and empty
+	 * once it has {@linkplain #stalled stalled}, since a rate it no longer moves at says nothing about when it ends.
+	 */
+	public OptionalLong secondsLeft(Instant now, Duration stalledAfter) {
+		if (state != State.RUNNING || lastPartAt == null || !lastPartAt.isAfter(runStartedAt)
+				|| stalled(now, stalledAfter)) {
 			return OptionalLong.empty();
 		}
 		long made = (long) createdTotal() - createdAtRunStart;
@@ -168,9 +188,10 @@ public record BotJob(UUID id, UUID simulationId, UUID startedBy, UUID idempotenc
 		}
 		long nanos = Duration.between(runStartedAt, lastPartAt).toNanos();
 		long left = (long) total() - createdTotal();
-		// left / (made / nanos), in seconds, rounded up.
+		// left / (made / nanos), in seconds, less the time since the last part; a read before it counts nothing off.
 		double seconds = (double) left * nanos / made / 1e9;
-		return OptionalLong.of((long) Math.ceil(seconds));
+		double since = Math.max(0, Duration.between(lastPartAt, now).toNanos()) / 1e9;
+		return OptionalLong.of(Math.max(1, (long) Math.ceil(seconds - since)));
 	}
 
 	/**

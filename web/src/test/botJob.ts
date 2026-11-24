@@ -19,6 +19,8 @@ export function botJob(overrides: Partial<BotJob> = {}): BotJob {
     startedAt: '2026-11-24T10:00:00Z',
     finishedAt: null,
     secondsLeft: null,
+    lastProgressAt: '2026-11-24T10:00:00Z',
+    stalled: false,
     failure: null,
     resumed: 0,
     ...overrides,
