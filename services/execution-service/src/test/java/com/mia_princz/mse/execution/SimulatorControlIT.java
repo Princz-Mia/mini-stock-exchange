@@ -122,6 +122,10 @@ class SimulatorControlIT {
 		assertThat(run.get("instruments").get(0).get("symbol").asString()).isEqualTo("NOVA");
 		assertThat(run.has("bots")).as("bots come in pages").isFalse();
 		assertThat(run.get("botCount").asInt()).isEqualTo(3);
+		assertThat(jdbc.queryForObject("""
+				SELECT count(*) FROM bot_assignment b JOIN account a ON a.id = b.account_id
+				WHERE b.run_id = ? AND b.account_created_at = a.created_at""", Integer.class, first))
+			.as("each assignment keeps its account's creation time, which orders the pages").isEqualTo(3);
 		List<String> assigned = new ArrayList<>();
 		JsonNode page = botPage(simulator, first, null, 2, 200);
 		assertThat(page.get("bots")).hasSize(2);

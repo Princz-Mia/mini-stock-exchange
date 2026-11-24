@@ -155,7 +155,8 @@ class SimulatorControlController {
 
 	/**
 	 * A page of a run's bots, oldest first, as they were assigned. A cursor belongs to its run, and is refused for
-	 * another.
+	 * another. Each assignment keeps its account's creation time, so a page is one range of an index, however large
+	 * the run.
 	 */
 	@GetMapping("/runs/{runId}/bots")
 	BotPage bots(@PathVariable UUID runId, @RequestParam(required = false) String cursor,
@@ -172,16 +173,16 @@ class SimulatorControlController {
 			throw new ApiException(HttpStatus.NOT_FOUND, "RUN_NOT_FOUND", "No such bot run");
 		}
 		List<AssignedBot> page = jdbc.sql("""
-				SELECT b.account_id, b.strategy, a.created_at FROM bot_assignment b JOIN account a ON a.id = b.account_id
-				WHERE b.run_id = :run%s
-				ORDER BY a.created_at, a.id LIMIT :limit""".formatted(
-				after == null ? "" : " AND (a.created_at, a.id) > (:afterAt, :afterId)"))
+				SELECT account_id, strategy, account_created_at FROM bot_assignment
+				WHERE run_id = :run%s
+				ORDER BY account_created_at, account_id LIMIT :limit""".formatted(
+				after == null ? "" : " AND (account_created_at, account_id) > (:afterAt, :afterId)"))
 			.param("run", runId)
 			.param("afterAt", after == null ? null : Timestamp.from(after.createdAt()))
 			.param("afterId", after == null ? null : after.id())
 			.param("limit", limit + 1)
 			.query((row, index) -> new AssignedBot(row.getObject("account_id", UUID.class), row.getString("strategy"),
-					row.getTimestamp("created_at").toInstant()))
+					row.getTimestamp("account_created_at").toInstant()))
 			.list();
 		List<Bot> bots = page.stream()
 			.limit(limit)
