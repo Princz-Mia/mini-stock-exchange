@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { type FormEvent, useCallback, useId, useRef, useState } from 'react';
+import { type FormEvent, type RefObject, useCallback, useEffect, useId, useRef, useState } from 'react';
 
 import { api } from '../api/client';
 import type { MarketStatus, SimulationStarted } from '../api/types';
@@ -12,35 +12,51 @@ export interface StartCommand {
   outcome: CommandOutcome<SimulationStarted>;
   /** The simulation on screen when the start was sent: null for none, undefined before one was sent. */
   sentFrom: string | null | undefined;
-  /** A new start, unless one is unresolved: then that one is sent again, unchanged. */
+  /**
+   * A new start, unless one is unresolved: then that one is sent again, unchanged. An unresolved start sent from the
+   * page of another market is let go of instead, and the new one sent under a new key.
+   */
   run: (name: string, from: string | null) => void;
   retry: () => void;
+  /**
+   * True the first time it is asked about this answer, and then only once what took focus to it has left the page:
+   * whichever panel shows an answer first takes focus to it, and another takes it only from one drawn anew or gone.
+   */
+  claimFocus: (answer: CommandOutcome<SimulationStarted>, by: Element | null) => boolean;
+}
+
+interface StartArgs {
+  name: string;
+  from: string | null;
 }
 
 /**
  * The start of a new simulation, kept by the operator page rather than by the panel it was sent from: that panel goes
  * with the closed market's page as soon as the new simulation is on screen, and the start's answer is said on the new
  * one. Its key is kept until the exchange gives a final answer, as for every operator command, but not through a
- * change of page, as a close's is: at most one simulation is not closed, so a start sent again under a new key after
- * one has gone through is refused, and two can never start.
+ * change of page, as a close's is, nor once the page has shown another simulation: at most one simulation is not
+ * closed, so a start sent again under a new key after one has gone through is refused, and two can never start.
  */
 export function useStartCommand(): StartCommand {
   const client = useQueryClient();
   const send = useCallback(
-    async (name: string, key: string) => {
+    async ({ name, from }: StartArgs, key: string) => {
       try {
         const started = await api.startSimulation({ name }, key);
         // The page becomes the new simulation's at once, not at the status's next read. A read already on its way
-        // could only bring the closed market back.
+        // could only bring the closed market back. A page that has shown another simulation since the start was sent
+        // is left as it is: its status is newer than an answer given again for an earlier start.
         await client.cancelQueries({ queryKey: ['market'] });
-        client.setQueryData<MarketStatus>(['market'], {
-          state: started.state,
-          simulationId: started.simulationId,
-          name: started.name,
-          openedAt: null,
-          closedAt: null,
-          commandSequence: started.commandSequence,
-        });
+        if (client.getQueryData<MarketStatus>(['market'])?.simulationId === from) {
+          client.setQueryData<MarketStatus>(['market'], {
+            state: started.state,
+            simulationId: started.simulationId,
+            name: started.name,
+            openedAt: null,
+            closedAt: null,
+            commandSequence: started.commandSequence,
+          });
+        }
         return started;
       } finally {
         void client.invalidateQueries({ queryKey: ['market'] });
@@ -50,19 +66,55 @@ export function useStartCommand(): StartCommand {
   );
   const command = useCommand(send);
   const [sentFrom, setSentFrom] = useState<string | null | undefined>(undefined);
-  const { run: runCommand, retry: retryCommand } = command;
+  const { outcome, run: runCommand, retry: retryCommand, forget } = command;
   const run = useCallback(
     (name: string, from: string | null) => {
-      if (command.outcome.kind !== 'unresolved' && command.outcome.kind !== 'sending') {
+      // The page has shown another simulation since that start was sent, so it is settled: it is the simulation that
+      // started, or it was refused for it. Sent again, it would start nothing, or something under the name typed then.
+      const settled = outcome.kind === 'unresolved' && from !== sentFrom;
+      if (settled) {
+        forget();
+      }
+      if (settled || (outcome.kind !== 'unresolved' && outcome.kind !== 'sending')) {
         setSentFrom(from);
       }
-      void runCommand(name);
+      void runCommand({ name, from });
     },
-    [command.outcome.kind, runCommand],
+    [outcome.kind, sentFrom, forget, runCommand],
   );
   const retry = useCallback(() => void retryCommand(), [retryCommand]);
-  return { outcome: command.outcome, sentFrom, run, retry };
+  const claimed = useRef<{ answer: CommandOutcome<SimulationStarted>; by: Element | null } | null>(null);
+  const claimFocus = useCallback((answer: CommandOutcome<SimulationStarted>, by: Element | null) => {
+    const last = claimed.current;
+    if (last !== null && last.answer === answer && last.by?.isConnected === true) {
+      return false;
+    }
+    claimed.current = { answer, by };
+    return true;
+  }, []);
+  return { outcome, sentFrom, run, retry, claimFocus };
 }
+
+/** Focus was lost to the page, as when what had it was disabled or taken away; focus the user moved stays. */
+function focusLost(): boolean {
+  return document.activeElement === null || document.activeElement === document.body;
+}
+
+/** Once an answer leaves nothing to do but ask again, focus goes to that button, unless another panel took it there. */
+function useFocusOnAskAgain(
+  start: StartCommand,
+  outcome: CommandOutcome<SimulationStarted>,
+  status: RefObject<HTMLElement | null>,
+) {
+  const { claimFocus } = start;
+  useEffect(() => {
+    if (outcome.kind === 'unresolved' && claimFocus(outcome, status.current) && focusLost()) {
+      status.current?.querySelector('button')?.focus();
+    }
+  }, [outcome, claimFocus, status]);
+}
+
+const IDLE: CommandOutcome<SimulationStarted> = { kind: 'idle' };
 
 const NOT_CLOSED: Record<string, string> = {
   SETUP:
@@ -94,10 +146,13 @@ export function startRefusal(outcome: Extract<CommandOutcome<SimulationStarted>,
 function StartStatus({
   outcome,
   elsewhere,
+  settingUp = false,
   onRetry,
 }: {
   outcome: CommandOutcome<SimulationStarted>;
   elsewhere: boolean;
+  /** The simulation on screen is still being set up. */
+  settingUp?: boolean;
   onRetry: () => void;
 }) {
   switch (outcome.kind) {
@@ -112,9 +167,11 @@ function StartStatus({
     case 'done':
       return (
         <p role="status" className="outcome outcome-ok">
-          {elsewhere
-            ? `${outcome.result.name} has started, in setup. Nothing was copied from the market before: add its instruments, fund the traders again and create its bots. Trader logins are kept.`
-            : `Started ${outcome.result.name}.`}
+          {!elsewhere
+            ? `Started ${outcome.result.name}.`
+            : settingUp
+              ? `${outcome.result.name} has started, in setup. Nothing was copied from the market before: add its instruments, fund the traders again and create its bots. Trader logins are kept.`
+              : `The start sent from here started this simulation, ${outcome.result.name}.`}
         </p>
       );
     case 'refused':
@@ -159,10 +216,12 @@ export function StartSimulation({ start, market }: { start: StartCommand; market
   const hintId = useId();
   const outcomeId = useId();
   // Only what was sent from this market's page: a start sent from another is not this one's to answer.
-  const outcome: CommandOutcome<SimulationStarted> = start.sentFrom === market.simulationId ? start.outcome : { kind: 'idle' };
+  const outcome: CommandOutcome<SimulationStarted> = start.sentFrom === market.simulationId ? start.outcome : IDLE;
   const invalid =
     refusedFields(outcome).has('name') || (outcome.kind === 'refused' && outcome.code === 'SIMULATION_NAME_TAKEN');
   useFocusOnRefusal(outcome.kind, form);
+  const status = useRef<HTMLDivElement>(null);
+  useFocusOnAskAgain(start, outcome, status);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -189,7 +248,8 @@ export function StartSimulation({ start, market }: { start: StartCommand; market
         </>
       )}
       <form ref={form} onSubmit={submit} className="setup-form" aria-label={title}>
-        <fieldset disabled={outcome.kind === 'sending' || outcome.kind === 'unresolved'}>
+        {/* One start at a time: also while one sent from another market's page is on its way. */}
+        <fieldset disabled={start.outcome.kind === 'sending' || outcome.kind === 'unresolved'}>
           <div className="field-row">
             <label>
               Name
@@ -212,7 +272,7 @@ export function StartSimulation({ start, market }: { start: StartCommand; market
           </button>
         </fieldset>
       </form>
-      <div id={outcomeId}>
+      <div id={outcomeId} ref={status}>
         <StartStatus outcome={outcome} elsewhere={false} onRetry={start.retry} />
       </div>
     </section>
@@ -220,13 +280,17 @@ export function StartSimulation({ start, market }: { start: StartCommand; market
 }
 
 /**
- * At the top of a simulation's setup page when it started while this page was on the market before: whether it is the
- * start sent from here, and what is to be set up again.
+ * At the top of the page of a simulation that started while this page was on the market before: whether it is the
+ * start sent from here, and what is to be set up again. Also when that start was refused because a simulation that has
+ * not closed exists, or has no answer yet: on that simulation's page, whatever its state.
  */
 export function StartNotice({ start, market }: { start: StartCommand; market: MarketStatus }) {
-  const { outcome } = start;
+  const { outcome, claimFocus } = start;
+  const heading = useRef<HTMLHeadingElement>(null);
+  const status = useRef<HTMLDivElement>(null);
+  const statusId = useId();
   const shown =
-    market.state === 'SETUP' &&
+    market.state !== 'CLOSED' &&
     start.sentFrom !== undefined &&
     start.sentFrom !== market.simulationId &&
     (outcome.kind === 'done'
@@ -234,13 +298,25 @@ export function StartNotice({ start, market }: { start: StartCommand; market: Ma
       : outcome.kind === 'refused'
         ? outcome.code === 'SIMULATION_NOT_CLOSED'
         : outcome.kind !== 'idle');
+  // The page was drawn anew for this simulation, so focus was lost with the button that sent the start: it goes to
+  // the answer, which the heading reads out with it.
+  useEffect(() => {
+    if (shown && (outcome.kind === 'done' || outcome.kind === 'refused') && claimFocus(outcome, heading.current) && focusLost()) {
+      heading.current?.focus();
+    }
+  }, [shown, outcome, claimFocus]);
+  useFocusOnAskAgain(start, shown ? outcome : IDLE, status);
   if (!shown) {
     return null;
   }
   return (
     <section className="panel" aria-labelledby="started-title">
-      <h2 id="started-title">A new simulation</h2>
-      <StartStatus outcome={outcome} elsewhere onRetry={start.retry} />
+      <h2 id="started-title" ref={heading} tabIndex={-1} aria-describedby={statusId}>
+        A new simulation
+      </h2>
+      <div id={statusId} ref={status}>
+        <StartStatus outcome={outcome} elsewhere settingUp={market.state === 'SETUP'} onRetry={start.retry} />
+      </div>
     </section>
   );
 }

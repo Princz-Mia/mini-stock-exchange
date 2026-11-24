@@ -75,5 +75,16 @@ export function useCommand<A, T>(send: (args: A, key: string) => Promise<T>, new
     [attempt],
   );
 
-  return { outcome, run, retry, unresolved: outcome.kind === 'unresolved' };
+  /**
+   * Lets go of an unresolved command, so that the next one gets a new key: only for one the caller knows has been
+   * settled since, one way or the other. A command on its way is kept.
+   */
+  const forget = useCallback(() => {
+    if (!inFlight.current) {
+      pending.current = null;
+      setOutcome({ kind: 'idle' });
+    }
+  }, []);
+
+  return { outcome, run, retry, forget, unresolved: outcome.kind === 'unresolved' };
 }
