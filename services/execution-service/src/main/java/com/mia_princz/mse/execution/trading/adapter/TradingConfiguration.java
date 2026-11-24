@@ -85,9 +85,12 @@ class TradingConfiguration {
 		return writer;
 	}
 
-	/** Plaintext bot tokens go to the simulator's secret directory, once, and nowhere else. */
-	@Bean
-	BotCredentials botCredentials(@Value("${mse.bots.token-directory}") Path directory) {
+	/**
+	 * Plaintext bot tokens go to the simulator's secret directory, once, and nowhere else. Closing it stops the threads
+	 * that sync the files.
+	 */
+	@Bean(destroyMethod = "close")
+	FileBotCredentials botCredentials(@Value("${mse.bots.token-directory}") Path directory) {
 		return new FileBotCredentials(directory);
 	}
 

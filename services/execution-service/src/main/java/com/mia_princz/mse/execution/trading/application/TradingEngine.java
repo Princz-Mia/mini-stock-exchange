@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -603,9 +604,69 @@ public final class TradingEngine {
 		return submit(() -> processAddTrader(key, command));
 	}
 
-	/** Creates funded bot accounts, each with its own API token, while the market is in SETUP. */
+	/**
+	 * Creates funded bot accounts, each with its own API token, while the market is in SETUP. The tokens are handed
+	 * over on the calling thread, before the command is queued, so the writer holds only the database work: each file
+	 * is durable before the commit that creates its bot, as before. Files whose bots are then not made (a stored answer
+	 * given again, a refusal, a transaction that rolled back, or a command that was never queued) are deleted before
+	 * the answer is given; files of a commit whose outcome is unknown are kept, since their bots may exist.
+	 */
 	public CompletableFuture<BotsResult> provisionBots(CommandKey key, ProvisionBots command) {
-		return submit(() -> processBots(key, command));
+		return withTokens(command.count(), (issued) -> () -> processBots(key, command, issued));
+	}
+
+	/** Bot accounts chosen, and their tokens handed over, before the command that creates them is queued. */
+	private record IssuedBots(List<UUID> accounts, List<byte[]> hashes) {
+
+		TradingStore.NewBot bot(int index, String name) {
+			return new TradingStore.NewBot(accounts.get(index), name, hashes.get(index));
+		}
+
+	}
+
+	/** A command's answer and, when its transaction made bots, their accounts; none for a refusal or a stored answer. */
+	private record Made<T>(T result, List<UUID> accounts) {
+	}
+
+	/**
+	 * Issues {@code count} tokens here, then queues the command built with them, and answers once the files of bots
+	 * that were not made are gone. A failure to hand the tokens over fails the answer, as a command that rolled back.
+	 */
+	private <T> CompletableFuture<T> withTokens(int count, Function<IssuedBots, Callable<Made<T>>> command) {
+		if (!started) {
+			throw new CommandWriter.WriterStoppedException("Trading has not started");
+		}
+		IssuedBots issued;
+		try {
+			List<UUID> accounts = new ArrayList<>(count);
+			for (int i = 0; i < count; i++) {
+				accounts.add(UUID.randomUUID());
+			}
+			List<byte[]> hashes = botCredentials.issueAll(accounts);
+			if (hashes.size() != count) {
+				throw new IllegalStateException("Asked for " + count + " tokens and got " + hashes.size());
+			}
+			issued = new IssuedBots(List.copyOf(accounts), List.copyOf(hashes));
+		}
+		catch (RuntimeException ex) {
+			return CompletableFuture.failedFuture(ex);
+		}
+		CompletableFuture<Made<T>> made;
+		try {
+			made = submit(command.apply(issued));
+		}
+		catch (RuntimeException ex) {
+			botCredentials.discard(issued.accounts());
+			throw ex;
+		}
+		return made.handleAsync((done, failure) -> {
+			boolean unused = failure == null ? done.accounts().isEmpty() : !(failure instanceof WriterHaltException);
+			if (unused) {
+				botCredentials.discard(issued.accounts());
+			}
+			return failure == null ? CompletableFuture.completedFuture(done.result())
+					: CompletableFuture.<T>failedFuture(failure);
+		}).thenCompose((answer) -> answer);
 	}
 
 	/** Revokes a bot's tokens, in any market state; the bot's next request is refused. */
@@ -1601,21 +1662,17 @@ public final class TradingEngine {
 				command.accountId(), cash, command.holdings(), sequence));
 	}
 
-	/** The answer and, when this transaction made the bots, their accounts; none for a refusal or a stored answer. */
-	private record ProvisionedBots(BotsResult result, List<UUID> accounts) {
-	}
-
-	private BotsResult processBots(CommandKey key, ProvisionBots command) {
-		ProvisionedBots provisioned;
+	private Made<BotsResult> processBots(CommandKey key, ProvisionBots command, IssuedBots issued) {
+		Made<BotsResult> provisioned;
 		try {
 			ensureMarket();
-			provisioned = timed("other", () -> botsInTransaction(key, command));
+			provisioned = timed("other", () -> botsInTransaction(key, command, issued));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
 		knownToTrade(provisioned.accounts());
-		return provisioned.result();
+		return provisioned;
 	}
 
 	/**
@@ -1632,14 +1689,14 @@ public final class TradingEngine {
 	}
 
 	/**
-	 * Each bot gets its own genesis batch and token. Tokens are handed over before commit; if the transaction then
-	 * fails, the stray tokens belong to accounts that never existed, so they authenticate nothing.
+	 * Each bot gets its own genesis batch and token. Its token was handed over before this transaction began; if the
+	 * transaction then fails, the stray tokens belong to accounts that never existed, so they authenticate nothing.
 	 */
-	private ProvisionedBots botsInTransaction(CommandKey key, ProvisionBots command) {
+	private Made<BotsResult> botsInTransaction(CommandKey key, ProvisionBots command, IssuedBots issued) {
 		TradingStore.Opening<BotsResult> opening = open(key, BotsResult.class);
 		Market market = opening.market();
 		if (opening.prior().isPresent()) {
-			return new ProvisionedBots(replay(key, opening.prior().get()), List.of());
+			return new Made<>(replay(key, opening.prior().get()), List.of());
 		}
 		long sequence = opening.sequence();
 		int population = store.botCount(simulationId);
@@ -1654,22 +1711,26 @@ public final class TradingEngine {
 			store.insertAudit(simulationId, command.actorUserId(), "BOT_PROVISION", "NOT_ALLOWED", key.idempotencyKey(),
 					sequence);
 			int status = refusal == BotsResult.Status.UNKNOWN_INSTRUMENT ? 422 : 409;
-			return new ProvisionedBots(remember(key, status,
+			return new Made<>(remember(key, status,
 					new BotsResult(refusal, 0, null, null, population, command.strategy().name(), sequence)), List.of());
 		}
-		List<UUID> created = new ArrayList<>(command.count());
-		for (int number = population + 1; number <= population + command.count(); number++) {
-			UUID account = UUID.randomUUID();
-			created.add(account);
-			store.insertBotAccount(simulationId, account, ProvisionBots.name(number), command.strategy());
-			store.insertGenesis(simulationId, account, "BOT", sequence, command.cashCents(), command.holdings());
-			store.insertApiToken(UUID.randomUUID(), account, botCredentials.issue(account));
-		}
+		int last = Math.addExact(population, command.count());
+		insertBots(command.strategy(), command.cashCents(), command.holdings(), population, issued, sequence);
 		store.insertAudit(simulationId, command.actorUserId(), "BOT_PROVISION", "APPLIED", key.idempotencyKey(),
 				sequence);
-		return new ProvisionedBots(remember(key, 201, new BotsResult(BotsResult.Status.CREATED, command.count(),
-				ProvisionBots.name(population + 1), ProvisionBots.name(population + command.count()),
-				population + command.count(), command.strategy().name(), sequence)), created);
+		return new Made<>(remember(key, 201, new BotsResult(BotsResult.Status.CREATED, command.count(),
+				ProvisionBots.name(population + 1), ProvisionBots.name(last), last, command.strategy().name(),
+				sequence)), issued.accounts());
+	}
+
+	/** The issued bots, named in order after the {@code population} that exists, in one set of statements. */
+	private void insertBots(BotStrategy strategy, long cashCents, List<ProvisionAccount.Holding> holdings,
+			int population, IssuedBots issued, long sequence) {
+		List<TradingStore.NewBot> bots = new ArrayList<>(issued.accounts().size());
+		for (int i = 0; i < issued.accounts().size(); i++) {
+			bots.add(issued.bot(i, ProvisionBots.name(population + 1 + i)));
+		}
+		store.insertBots(simulationId, sequence, strategy, cashCents, holdings, bots);
 	}
 
 	private TokenRevocation processRevoke(CommandKey key, RevokeBotToken command) {

@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -623,22 +624,103 @@ public final class JdbcTradingStore implements TradingStore {
 		return ended.size();
 	}
 
+	/**
+	 * One statement for every bot of the command, its arrays sent once, in place of a dozen statements for each bot:
+	 * the round trips, not the rows, were nearly all of the cost, and a statement with large arrays costs a round trip
+	 * of its own on top (seven such statements measured three times as long as this one). Each table is written by its
+	 * own part of the statement; the foreign keys between them are checked once the whole statement has run, and each
+	 * genesis batch's balance at the commit, as for any batch. The cash and every holding are one list of assets, cash
+	 * first, as one bot's genesis batch lists them.
+	 * <p>
+	 * The creation times start just after the newest bot of the simulation, read through its index for each strategy,
+	 * or at the clock if that is later: the clock alone would give hundreds of bots made by one statement the same
+	 * time, and they would then list in id order, not in the order they were made and named.
+	 */
 	@Override
-	public void insertBotAccount(UUID simulationId, UUID accountId, String displayName, BotStrategy strategy) {
-		// clock_timestamp, not the transaction's now(): bots made by one command then list in the order they were made.
-		expectOne(jdbc.sql("""
-				INSERT INTO account (id, simulation_id, kind, display_name, bot_strategy, created_at)
-				VALUES (?, ?, 'BOT', ?, ?, clock_timestamp())""")
-			.params(accountId, simulationId, displayName, strategy.name())
-			.update(), "insert bot account");
-	}
-
-	@Override
-	public void insertApiToken(UUID tokenId, UUID accountId, byte[] tokenHash) {
-		expectOne(jdbc.sql("""
-				INSERT INTO api_token (id, account_id, account_kind, token_hash, scope) VALUES (?, ?, 'BOT', ?, 'TRADE')""")
-			.params(tokenId, accountId, tokenHash)
-			.update(), "insert api token");
+	public void insertBots(UUID simulationId, long commandSequence, BotStrategy strategy, long cashCents,
+			List<ProvisionAccount.Holding> holdings, List<NewBot> bots) {
+		if (bots.isEmpty()) {
+			return;
+		}
+		int count = bots.size();
+		String[] accounts = new String[count];
+		String[] names = new String[count];
+		String[] hashes = new String[count];
+		HexFormat hex = HexFormat.of();
+		for (int i = 0; i < count; i++) {
+			NewBot bot = bots.get(i);
+			accounts[i] = bot.accountId().toString();
+			names[i] = bot.displayName();
+			hashes[i] = hex.formatHex(bot.tokenHash());
+		}
+		String[] instruments = holdings.stream().map((holding) -> holding.instrumentId().toString()).toArray(String[]::new);
+		String[] quantities = holdings.stream().map((holding) -> Long.toString(holding.quantity())).toArray(String[]::new);
+		int assets = holdings.size() + (cashCents > 0 ? 1 : 0);
+		List<Integer> written = jdbc.sql("""
+				WITH newest AS (
+				    SELECT (SELECT max(created_at) FROM account
+				            WHERE simulation_id = ? AND kind = 'BOT' AND bot_strategy = s.strategy) AS at
+				    FROM unnest(ARRAY['MARKET_MAKER', 'NOISE', 'MOMENTUM']) AS s(strategy)
+				    UNION ALL
+				    SELECT max(created_at) FROM account WHERE simulation_id = ? AND kind = 'BOT' AND bot_strategy IS NULL),
+				first AS (SELECT GREATEST(clock_timestamp(), max(at) + interval '1 microsecond') AS at FROM newest),
+				bot AS MATERIALIZED (
+				    SELECT b.account_id, b.name, b.hash, b.n, gen_random_uuid() AS batch_id
+				    FROM unnest(?::uuid[], ?::text[], ?::text[]) WITH ORDINALITY AS b(account_id, name, hash, n)),
+				asset AS MATERIALIZED (
+				    SELECT NULL::uuid AS instrument_id, ?::bigint AS amount, 0::bigint AS k WHERE ?::bigint > 0
+				    UNION ALL
+				    SELECT * FROM unnest(?::uuid[], ?::bigint[]) WITH ORDINALITY AS h(instrument_id, amount, k)),
+				issuance AS (SELECT id FROM account WHERE simulation_id = ? AND kind = 'ISSUANCE'),
+				accounts AS (
+				    INSERT INTO account (id, simulation_id, kind, display_name, bot_strategy, created_at)
+				    SELECT bot.account_id, ?, 'BOT', bot.name, ?, first.at + (bot.n - 1) * interval '1 microsecond'
+				    FROM first, bot ORDER BY bot.n
+				    RETURNING 1),
+				batches AS (
+				    INSERT INTO journal_batch (id, simulation_id, cause, command_sequence)
+				    SELECT bot.batch_id, ?, 'GENESIS', ? FROM bot ORDER BY bot.n
+				    RETURNING 1),
+				postings AS (
+				    INSERT INTO ledger_entry (batch_id, account_id, instrument_id, bucket, delta)
+				    SELECT bot.batch_id, p.account_id, asset.instrument_id, 'AVAILABLE', p.delta
+				    FROM bot CROSS JOIN asset CROSS JOIN issuance
+				    CROSS JOIN LATERAL (VALUES (1, issuance.id, -asset.amount), (2, bot.account_id, asset.amount))
+				        AS p(side, account_id, delta)
+				    ORDER BY bot.n, asset.k, p.side
+				    RETURNING 1),
+				allocations AS (
+				    INSERT INTO initial_allocation (account_id, instrument_id, amount, journal_batch_id)
+				    SELECT bot.account_id, asset.instrument_id, asset.amount, bot.batch_id
+				    FROM bot CROSS JOIN asset ORDER BY bot.n, asset.k
+				    RETURNING 1),
+				cash AS (
+				    INSERT INTO cash_balance (account_id, account_kind, total_cents, reserved_cents)
+				    SELECT bot.account_id, 'BOT', ?, 0 FROM bot ORDER BY bot.n
+				    RETURNING 1),
+				positions AS (
+				    INSERT INTO position (account_id, account_kind, instrument_id, total_quantity, reserved_quantity)
+				    SELECT bot.account_id, 'BOT', asset.instrument_id, asset.amount, 0
+				    FROM bot CROSS JOIN asset WHERE asset.instrument_id IS NOT NULL ORDER BY bot.n, asset.k
+				    RETURNING 1),
+				tokens AS (
+				    INSERT INTO api_token (id, account_id, account_kind, token_hash, scope)
+				    SELECT gen_random_uuid(), bot.account_id, 'BOT', decode(bot.hash, 'hex'), 'TRADE' FROM bot ORDER BY bot.n
+				    RETURNING 1)
+				SELECT unnest(ARRAY[(SELECT count(*) FROM accounts), (SELECT count(*) FROM batches),
+				    (SELECT count(*) FROM postings), (SELECT count(*) FROM allocations), (SELECT count(*) FROM cash),
+				    (SELECT count(*) FROM positions), (SELECT count(*) FROM tokens), (SELECT count(*) FROM issuance)])""")
+			.params(simulationId, simulationId, accounts, names, hashes, cashCents, cashCents, instruments, quantities,
+					simulationId, simulationId, strategy.name(), simulationId, commandSequence, cashCents)
+			.query(Integer.class)
+			.list();
+		List<Integer> expected = List.of(count, count, count * assets * 2, count * assets, count,
+				count * holdings.size(), count, 1);
+		if (!written.equals(expected)) {
+			throw new IllegalStateException("Inserting " + count + " bots wrote " + written
+					+ " rows (accounts, batches, postings, allocations, cash, positions, tokens, issuance accounts); "
+					+ "expected " + expected);
+		}
 	}
 
 	@Override

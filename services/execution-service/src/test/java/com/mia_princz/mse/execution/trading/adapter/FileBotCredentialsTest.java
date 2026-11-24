@@ -73,6 +73,55 @@ class FileBotCredentialsTest {
 		assertThat(temporary.resolve("never-made")).doesNotExist();
 	}
 
+	/**
+	 * A batch: each account's file holds the token whose hash comes back in the same place, every file is under its
+	 * final name, and no temporary file is left. Fewer threads than files, so that some threads write several.
+	 */
+	@Test
+	void aBatchGetsOneCompleteFileForEachAccountInOrder() throws Exception {
+		Path directory = temporary.resolve("secrets");
+		List<UUID> accounts = Stream.generate(UUID::randomUUID).limit(50).toList();
+		List<byte[]> hashes;
+		try (FileBotCredentials credentials = new FileBotCredentials(directory, 4)) {
+			hashes = credentials.issueAll(accounts);
+		}
+
+		assertThat(hashes).hasSize(50);
+		for (int i = 0; i < accounts.size(); i++) {
+			String token = Files.readString(directory.resolve(accounts.get(i) + ".token"), StandardCharsets.US_ASCII)
+				.strip();
+			assertThat(ApiTokens.wellFormed(token)).isTrue();
+			assertThat(hashes.get(i)).as("the hash of account %d's own token", i).isEqualTo(ApiTokens.hash(token));
+		}
+		try (Stream<Path> files = Files.list(directory)) {
+			assertThat(files.map((file) -> file.getFileName().toString()))
+				.containsExactlyInAnyOrderElementsOf(accounts.stream().map((account) -> account + ".token").toList());
+		}
+	}
+
+	/**
+	 * One file of a batch that cannot be put in place fails the whole batch, naming that account, and the files
+	 * already written are deleted: nothing is committed for any of them, so none of their tokens is wanted.
+	 */
+	@Test
+	void aBatchThatFailsLeavesNoFileBehind() throws Exception {
+		Path directory = temporary.resolve("secrets");
+		List<UUID> accounts = Stream.generate(UUID::randomUUID).limit(10).toList();
+		UUID blocked = accounts.get(6);
+		// A directory with something in it where the seventh file goes: nothing can be renamed over it.
+		Files.createDirectories(directory.resolve(blocked + ".token").resolve("inside"));
+
+		try (FileBotCredentials credentials = new FileBotCredentials(directory, 3)) {
+			assertThatThrownBy(() -> credentials.issueAll(accounts)).isInstanceOf(UncheckedIOException.class)
+				.hasMessageContaining(blocked.toString())
+				.hasMessageNotContaining(ApiTokens.PREFIX);
+		}
+
+		try (Stream<Path> files = Files.list(directory)) {
+			assertThat(files.map((file) -> file.getFileName().toString())).containsExactly(blocked + ".token");
+		}
+	}
+
 	@Test
 	void aFailureNamesTheAccountButNoToken() throws Exception {
 		Path notADirectory = Files.writeString(temporary.resolve("file"), "x");
