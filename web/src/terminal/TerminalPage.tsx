@@ -7,6 +7,7 @@ import type { MarketStatus } from '../api/types';
 import { CloseTime, closesWhileTrading, useTimeHasCome } from '../app/closeTime';
 import { FeedStatus } from '../app/FeedStatus';
 import { LastUpdated } from '../app/LastUpdated';
+import { MarketSkeleton } from '../app/Skeleton';
 import {
   useAskAgainWhenFunded,
   useForgetInAddress,
@@ -142,9 +143,6 @@ export function TerminalPage() {
   // The snapshot's last price, or the trade feed's while the snapshot has none yet.
   const lastPrice = latest === null ? null : (latest.lastPrice ?? latest.session.last);
 
-  if (instruments.isPending) {
-    return <p className="page-status">Loading markets…</p>;
-  }
   // Only when nothing was ever read: a failed refresh after a good one keeps the page, and the order being typed on it,
   // with the list as last read and when that was.
   if (instruments.isError && instruments.updatedAt === undefined) {
@@ -156,20 +154,27 @@ export function TerminalPage() {
   }
 
   return (
-    <div className="terminal">
-      <Watchlist
-        instruments={list}
-        selected={selectedId}
-        onSelect={(instrumentId) =>
-          setParams((current) => {
-            // The chart's settings stay as they are when another instrument is chosen.
-            const next = new URLSearchParams(current);
-            next.set('instrument', instrumentId);
-            return next;
-          })
-        }
-      />
-      {selected === null ? (
+    // Drawn anew for another simulation: nothing chosen, typed or answered in the one before stays on its page.
+    <div className="terminal" key={generation}>
+      {/* The layout is drawn at once. What waits for the instrument list stands as bars in its place until the list
+          comes; the trader's own orders are read on their own and fill their panel as they come. */}
+      {instruments.isPending ? (
+        <MarketSkeleton />
+      ) : (
+        <Watchlist
+          instruments={list}
+          selected={selectedId}
+          onSelect={(instrumentId) =>
+            setParams((current) => {
+              // The chart's settings stay as they are when another instrument is chosen.
+              const next = new URLSearchParams(current);
+              next.set('instrument', instrumentId);
+              return next;
+            })
+          }
+        />
+      )}
+      {instruments.isPending ? null : selected === null ? (
         <div className="terminal-empty">
           <p className="muted" role="status">
             {market.data?.state === 'SETUP'
@@ -244,6 +249,7 @@ export function TerminalPage() {
         <OwnOrders
           orders={orders.data?.orders ?? []}
           read={orders.data !== undefined}
+          failed={orders.isError && orders.data === undefined}
           instrument={selected === null ? null : { instrumentId: selected.instrumentId, symbol: selected.symbol }}
           closed={closed !== null}
         />

@@ -5,6 +5,7 @@ import { isRefusal } from '../api/client';
 import type { Instruments } from '../api/types';
 import { closedPhrase } from '../app/closeTime';
 import { lastUpdatedText } from '../app/LastUpdated';
+import { OperatorSkeleton } from '../app/Skeleton';
 import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
 import { groupInteger } from '../format';
 import { AccountSetup } from './AccountSetup';
@@ -90,8 +91,9 @@ export function OperatorPage() {
     refetchInterval: instrumentPace(client, market.data?.simulationId ?? null, market.data?.state === 'CLOSED'),
   });
 
+  // Every panel here waits for the market's status, so the page's layout is drawn as bars until it comes.
   if (market.isPending) {
-    return <p className="page-status">Loading the market…</p>;
+    return <OperatorSkeleton />;
   }
   // Only when there is nothing to show: a failed poll after a good read keeps the page, and every form's unconfirmed
   // command with its key and Retry, on screen with the last known state.

@@ -3,6 +3,7 @@ import { useQueries, useQuery } from '@tanstack/react-query';
 import { api, pollEvery } from '../api/client';
 import type { Candles, Feed, HealthSummary, Instrument } from '../api/types';
 import { FEED_LABELS } from '../app/FeedStatus';
+import { SkeletonRows } from '../app/Skeleton';
 import { groupInteger } from '../format';
 
 /** One line of the panel: what it measures, its value, and a warning in words when it needs attention. */
@@ -203,7 +204,7 @@ export function HealthPanel({
           Trading health is not reachable: Execution may be down.
         </p>
       ) : summary.data === undefined ? (
-        <p className="muted">Loading…</p>
+        <SkeletonRows rows={5} />
       ) : (
         <dl className="health">
           {healthFigures(summary.data, feed, analytics).map((figure) => (

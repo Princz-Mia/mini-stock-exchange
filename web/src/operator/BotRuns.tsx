@@ -14,6 +14,7 @@ import type {
   MarketStatus,
 } from '../api/types';
 import { type Column, PagedTable } from '../app/PagedTable';
+import { SkeletonRows } from '../app/Skeleton';
 import { usePagedList } from '../app/paging';
 import { useKeyboardScroll } from '../app/useKeyboardScroll';
 import { groupInteger, utcTime } from '../format';
@@ -164,7 +165,7 @@ export function BotRuns({
         </p>
       )}
       {runs.isPending ? (
-        <p className="muted">Loading…</p>
+        <SkeletonRows />
       ) : active !== undefined ? (
         <>
           {/* The start's answer stays in sight once its form has given way to the run. */}

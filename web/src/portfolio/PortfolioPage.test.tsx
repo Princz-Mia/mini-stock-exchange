@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -700,6 +700,40 @@ describe('portfolio page', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('no trading account in this market yet');
     expect(screen.queryByRole('region', { name: 'Summary' })).toBeNull();
+  });
+
+  it('draws its layout at once while the balances are read, and fills the executions as soon as they come', async () => {
+    let balances: (reply: { status: number; json: unknown }) => void = () => undefined;
+    signedIn()
+      .on('GET /api/v1/portfolio', () => new Promise((resolve) => (balances = resolve)))
+      .on('GET /api/v1/market', { status: 200, json: { ...CLOSED_MARKET, state: 'OPEN', closedAt: null } })
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [trade(1)], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/portfolio']}>
+          <PortfolioPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByText('Loading portfolio…')).toHaveAttribute('role', 'status');
+    expect(view.container.querySelector('.page-status')).toBeNull();
+    expect(view.container.querySelectorAll('.summary[aria-busy="true"] .figure')).toHaveLength(5);
+    const executions = await screen.findByRole('table', { name: 'Executions' });
+    const panel = screen.getByRole('region', { name: 'Executions' });
+    expect(screen.queryByRole('region', { name: 'Summary' })).toBeNull();
+
+    act(() => balances({ status: 200, json: PORTFOLIO }));
+    const summary = await screen.findByRole('region', { name: 'Summary' });
+    expect(within(summary).getByText('22,100.00')).toBeInTheDocument();
+    expect(view.container.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(screen.queryByText('Loading portfolio…')).toBeNull();
+    // The histories are not drawn again when the balances come.
+    expect(screen.getByRole('region', { name: 'Executions' })).toBe(panel);
+    expect(screen.getByRole('table', { name: 'Executions' })).toBe(executions);
   });
 
   it('explains a missing trading account instead of calling it an outage', async () => {

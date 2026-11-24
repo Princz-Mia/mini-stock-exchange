@@ -205,6 +205,64 @@ input[aria-invalid='true'] {
   padding: var(--space-6);
 }
 
+/*
+ * Loading: bars where words and figures will be, in the panels they will fill and at their size, so nothing moves when
+ * the data comes. They pulse gently, and stand still for anyone who asks for less motion.
+ */
+.skeleton {
+  display: block;
+  height: 0.9em;
+  border-radius: var(--space-1);
+  background: var(--line);
+  animation: skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+/* As tall as a panel's heading, a figure, and a table row with its padding. */
+.skeleton-title {
+  height: 15px;
+}
+
+.skeleton-figure {
+  height: 24px;
+}
+
+.skeleton-row {
+  height: calc(1.45em + 2 * var(--space-2) - var(--space-3));
+}
+
+/* Rows inside a panel spaced as the panel spaces its own lines. */
+.skeleton-rows {
+  display: grid;
+  gap: var(--space-3);
+  position: relative;
+}
+
+/* Where the navigation and the account will be, once it is known who is signed in: as tall as a button there. */
+.topbar-skeleton {
+  flex-grow: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: calc(1.45em + 2 * var(--space-2) + 2px);
+}
+
+/* The chart's own height under its controls. */
+.skeleton-chart {
+  min-height: 376px;
+}
+
+@keyframes skeleton-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+}
+
 /* Shell */
 .topbar {
   display: flex;

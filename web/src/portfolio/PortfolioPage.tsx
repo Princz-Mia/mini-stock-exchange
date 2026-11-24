@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 
 import { ApiError, api, isRefusal, pollEvery } from '../api/client';
-import type { Holding, OrderDetail, OwnTrade } from '../api/types';
+import type { Holding, MarketStatus, OrderDetail, OwnTrade, Portfolio as PortfolioRead } from '../api/types';
 import {
   useAskAgainWhenFunded,
   useForgetInAddress,
@@ -11,6 +11,7 @@ import {
 } from '../app/market';
 import { CloseTime, closedPhrase } from '../app/closeTime';
 import { LastUpdated } from '../app/LastUpdated';
+import { LoadingStatus, PortfolioSkeleton, SkeletonPanel, SummarySkeleton } from '../app/Skeleton';
 import { type Column, PagedTable } from '../app/PagedTable';
 import { type Filter, filterParam, usePagedList } from '../app/paging';
 import { PRIVATE_QUERIES } from '../app/useAccountEvents';
@@ -174,7 +175,7 @@ export function PortfolioPage() {
   // An account created for a trader who had none is seen once the status says one may have been.
   useAskAgainWhenFunded(market.data, PRIVATE_QUERIES);
   if (!clear) {
-    return <p className="page-status">Loading portfolio…</p>;
+    return <PortfolioSkeleton />;
   }
   return <Portfolio key={generation} market={market} />;
 }
@@ -214,17 +215,45 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
     filters: [symbolFilter, SIDE_FILTER, STATE_FILTER],
     refetchInterval: REFRESH.refetchInterval,
   });
-  // The three tables are wider than a phone, so their panels scroll; the keyboard has to reach them too.
-  const holdingsPanel = useKeyboardScroll<HTMLElement>();
+  // The history tables are wider than a phone, so their panels scroll; the keyboard has to reach them too.
   const tradesPanel = useKeyboardScroll<HTMLElement>();
   const ordersPanel = useKeyboardScroll<HTMLElement>();
 
-  if (portfolio.isPending) {
-    return <p className="page-status">Loading portfolio…</p>;
-  }
+  // Read on their own: each fills its panel as its own page of rows comes, whatever the balances are doing.
+  const histories = (
+    <>
+      <section ref={tradesPanel} className="panel" aria-labelledby="trades-title">
+        <h2 id="trades-title">Executions</h2>
+        <PagedTable
+          label="Executions"
+          list={trades}
+          columns={EXECUTION_COLUMNS}
+          rowKey={(trade) => trade.tradeId}
+          empty="No executions yet."
+          noun="executions"
+        />
+      </section>
+
+      <section ref={ordersPanel} className="panel" aria-labelledby="orders-title">
+        <div className="heading-row">
+          <h2 id="orders-title">Orders</h2>
+          <TermTip terms={['partial']} />
+        </div>
+        <PagedTable
+          label="Orders"
+          list={orders}
+          columns={ORDER_COLUMNS}
+          rowKey={(order) => order.orderId}
+          empty="No orders yet."
+          noun="orders"
+        />
+      </section>
+    </>
+  );
+
   // A refresh that went unanswered after a good read keeps the page, with when it was read. A refusal does not: the
   // account is not the trader's to see any more, or never was.
-  if (portfolio.data === undefined || (portfolio.isError && isRefusal(portfolio.error))) {
+  if (portfolio.isError && (portfolio.data === undefined || isRefusal(portfolio.error))) {
     const noAccount = portfolio.error instanceof ApiError && portfolio.error.code === 'NO_TRADING_ACCOUNT';
     // How to get an account is setup advice, and a closed market is past setting up: none is ever created in it.
     if (noAccount && market.data?.state === 'CLOSED') {
@@ -243,19 +272,42 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
       </p>
     );
   }
-  const { cash, holdings, equity, costBasis, unrealized, unrealizedPercent } = portfolio.data;
+  return (
+    <div className="stack">
+      {portfolio.isError && <LastUpdated updatedAt={portfolio.dataUpdatedAt} retrying />}
+      {portfolio.data === undefined ? (
+        // The page's layout at once, the balances as bars until they come. The histories after them are the same
+        // panels either way, so they are not drawn again when the balances come.
+        <>
+          <CloseTime market={market.data} />
+          <SummarySkeleton />
+          <SkeletonPanel lines={3} kind="row" />
+          <LoadingStatus what="Loading portfolio…" />
+        </>
+      ) : (
+        <Balances portfolio={portfolio.data} market={market.data} />
+      )}
+      {histories}
+    </div>
+  );
+}
+
+/** The trader's balances and holdings, and what a close has done to them. */
+function Balances({ portfolio, market }: { portfolio: PortfolioRead; market: MarketStatus | undefined }) {
+  // The holdings table is wider than a phone, so its panel scrolls; the keyboard has to reach it too.
+  const holdingsPanel = useKeyboardScroll<HTMLElement>();
+  const { cash, holdings, equity, costBasis, unrealized, unrealizedPercent } = portfolio;
   // An open order reserves cash or shares, so while anything is reserved in a closed market, the close has not
   // cancelled every order yet: it is still at it, or the exchange stopped half way and finishes when restarted.
   const reserved = toCents(cash.reserved) > 0n || holdings.some((holding) => holding.reserved > 0);
 
   return (
-    <div className="stack">
-      {portfolio.isError && <LastUpdated updatedAt={portfolio.dataUpdatedAt} retrying />}
-      {market.data?.state === 'CLOSED' && (
+    <>
+      {market?.state === 'CLOSED' && (
         <section className="panel ended" aria-labelledby="portfolio-closed-title">
           <h2 id="portfolio-closed-title">Market closed</h2>
           <p role="status">
-            The market {closedPhrase(market.data.closedAt, market.data.closedOnSchedule, market.data.closesAt)}.{' '}
+            The market {closedPhrase(market.closedAt, market.closedOnSchedule, market.closesAt)}.{' '}
             {reserved
               ? 'Nothing trades any more, but some of your orders are still open, with what they reserve. The close cancels them and releases it: it is doing so now, or does when the exchange is restarted if it has stopped. Your balances are final once nothing is reserved.'
               : 'Nothing trades any more, so this is where your account ended: no order is open and nothing is reserved.'}{' '}
@@ -263,7 +315,7 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
           </p>
         </section>
       )}
-      <CloseTime market={market.data} />
+      <CloseTime market={market} />
       <section className="summary" aria-label="Summary">
         <div className="figure">
           <span className="figure-label">
@@ -387,33 +439,6 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
           </>
         )}
       </section>
-
-      <section ref={tradesPanel} className="panel" aria-labelledby="trades-title">
-        <h2 id="trades-title">Executions</h2>
-        <PagedTable
-          label="Executions"
-          list={trades}
-          columns={EXECUTION_COLUMNS}
-          rowKey={(trade) => trade.tradeId}
-          empty="No executions yet."
-          noun="executions"
-        />
-      </section>
-
-      <section ref={ordersPanel} className="panel" aria-labelledby="orders-title">
-        <div className="heading-row">
-          <h2 id="orders-title">Orders</h2>
-          <TermTip terms={['partial']} />
-        </div>
-        <PagedTable
-          label="Orders"
-          list={orders}
-          columns={ORDER_COLUMNS}
-          rowKey={(order) => order.orderId}
-          empty="No orders yet."
-          noun="orders"
-        />
-      </section>
-    </div>
+    </>
   );
 }

@@ -128,6 +128,24 @@ const button = (name: string) => screen.findByRole('button', { name });
 describe('the operator screen', () => {
   beforeEach(() => resetSession());
 
+  it("draws the page's layout as bars until the market's status comes, and no words in its place", async () => {
+    const { server, state } = exchange('SETUP');
+    let answer: (reply: { status: number; json: unknown }) => void = () => undefined;
+    server.on('GET /api/v1/market', () => new Promise((resolve) => (answer = resolve)));
+    const view = renderPage();
+
+    expect(screen.getByText('Loading the market…')).toHaveAttribute('role', 'status');
+    expect(screen.getByText('Loading the market…')).toHaveClass('visually-hidden');
+    expect(view.container.querySelector('.page-status')).toBeNull();
+    expect(view.container.querySelectorAll('.operator-side [aria-busy="true"]')).toHaveLength(1);
+    expect(view.container.querySelectorAll('.operator-setup [aria-busy="true"]')).toHaveLength(3);
+    expect(screen.queryByRole('heading', { name: 'Market' })).toBeNull();
+
+    act(() => answer({ status: 200, json: state.market }));
+    expect(await screen.findByRole('heading', { name: 'Market' })).toBeInTheDocument();
+    expect(screen.queryByText('Loading the market…')).toBeNull();
+  });
+
   it('offers only the transition the exchange would allow, and says why the others are not', async () => {
     exchange('SETUP');
     renderPage();

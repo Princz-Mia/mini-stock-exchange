@@ -3,6 +3,7 @@ import { type KeyboardEvent, useId, useRef, useState } from 'react';
 
 import { ApiError, api, pollEvery } from '../api/client';
 import type { OrderDetail } from '../api/types';
+import { SkeletonRows } from '../app/Skeleton';
 import { groupDigits, groupInteger, utcTime } from '../format';
 import { TermTip } from '../help/TermTip';
 
@@ -49,6 +50,7 @@ type Tab = 'open' | 'recent';
 export function OwnOrders({
   orders,
   read = true,
+  failed = false,
   instrument,
   closed = false,
 }: {
@@ -56,6 +58,8 @@ export function OwnOrders({
   orders: readonly OrderDetail[];
   /** Whether the open orders have been read at all. Until they are, an empty list says nothing of what a close did. */
   read?: boolean;
+  /** No read of the open orders has worked yet: they are unknown, rather than still on their way. */
+  failed?: boolean;
   /** The instrument on screen, to narrow the lists to. */
   instrument: { instrumentId: string; symbol: string } | null;
   /**
@@ -175,7 +179,14 @@ export function OwnOrders({
                 : 'The cancel did not go through. Try again; it will not cancel twice.'}
           </p>
         )}
-        {open.length === 0 ? (
+        {/* Not read yet is not none open: the rows stand as bars until the list comes, or say it could not be read. */}
+        {!read && failed ? (
+          <p role="alert" className="form-error">
+            Your open orders could not be loaded.
+          </p>
+        ) : !read ? (
+          <SkeletonRows />
+        ) : open.length === 0 ? (
           <p className="muted">
             {narrowTo === null ? 'No open orders.' : `No open orders in ${narrowTo.symbol}.`}
             {/* Only once none is known to be open in any instrument: one narrowed away may still wait for the close. */}
@@ -257,7 +268,7 @@ export function OwnOrders({
         )}
         {tab === 'recent' &&
           (recent.isPending ? (
-            <p className="muted">Loading…</p>
+            <SkeletonRows />
           ) : recent.isError && recent.data === undefined ? (
             <p role="alert" className="form-error">
               Recent orders could not be loaded.

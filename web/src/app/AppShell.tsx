@@ -8,6 +8,7 @@ import { Tour } from '../help/Tour';
 import { TOURS } from '../help/tours';
 import { useTour } from '../help/useTour';
 import { FillNotice, FillWatch, useFillNotices } from './FillNotice';
+import { PageSkeleton, SkeletonLine } from './Skeleton';
 import { fundingMoment, useMarketStatus } from './market';
 import { ThemeSwitch } from './ThemeSwitch';
 import { useAccountEvents } from './useAccountEvents';
@@ -18,8 +19,21 @@ export function AppShell() {
   const logout = useLogout();
   const location = useLocation();
 
+  // Who is signed in decides the navigation, so the frame is drawn without it, around the layout of the page asked for.
   if (session.isPending) {
-    return <p className="page-status">Loading…</p>;
+    return (
+      <div className="shell">
+        <header className="topbar">
+          <span className="brand">Mini Stock Exchange</span>
+          <span className="topbar-skeleton" aria-hidden="true">
+            <SkeletonLine width="8em" />
+          </span>
+        </header>
+        <main className="content">
+          <PageSkeleton path={location.pathname} />
+        </main>
+      </div>
+    );
   }
   if (session.isError) {
     return (

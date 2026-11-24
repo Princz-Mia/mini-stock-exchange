@@ -374,7 +374,8 @@ describe('terminal', () => {
     expect(closed).toHaveTextContent(
       'The close cancels any order of yours that was still open, and releases what it had reserved.',
     );
-    expect(await screen.findByText('No open orders.')).toBeInTheDocument();
+    expect(await screen.findByText('Your open orders could not be loaded.')).toHaveAttribute('role', 'alert');
+    expect(screen.queryByText('No open orders.')).toBeNull();
     await waitFor(() =>
       expect(screen.queryByText(/was cancelled|still open, with what/)).toBeNull(),
     );
@@ -1001,6 +1002,57 @@ describe('terminal', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Market data is not reachable right now.');
     expect(screen.queryByText(/^Last updated/)).toBeNull();
+  });
+
+  it('draws its layout at once while the list is read, and fills the orders panel as soon as its own read comes', async () => {
+    let listed: (reply: { status: number; json: unknown }) => void = () => undefined;
+    signedIn()
+      .on('GET /api/v1/market', { status: 200, json: OPEN })
+      .on('GET /api/v1/instruments', () => new Promise((resolve) => (listed = resolve)))
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [OPEN_ORDER], nextCursor: null } });
+    const view = renderTerminal();
+    const terminal = view.container.querySelector('.terminal');
+
+    // No page-wide words in place of the page: its panels, as bars, in their places, and the orders filled meanwhile.
+    expect(screen.getByText('Loading markets…')).toHaveAttribute('role', 'status');
+    expect(screen.getByText('Loading markets…')).toHaveClass('visually-hidden');
+    expect(view.container.querySelector('.page-status')).toBeNull();
+    expect(terminal?.querySelector('.watchlist[aria-busy="true"]')).not.toBeNull();
+    expect(terminal?.querySelector('.ticket[aria-busy="true"]')).not.toBeNull();
+    expect(terminal?.querySelector('.terminal-market[aria-busy="true"]')).not.toBeNull();
+    const orders = await screen.findByRole('table', { name: 'Open orders' });
+    expect(within(orders).getByText('105.00')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'NOVA', level: 1 })).toBeNull();
+
+    // The list comes: each panel is filled in its place, and the orders panel is the very same.
+    act(() =>
+      listed({
+        status: 200,
+        json: { simulationId: 's', instruments: [instrument(NOVA, 'NOVA', null)], feed: { state: 'LIVE', lag: 0 } },
+      }),
+    );
+    expect(await screen.findByRole('heading', { name: 'NOVA', level: 1 })).toBeInTheDocument();
+    expect(view.container.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(screen.queryByText('Loading markets…')).toBeNull();
+    expect(screen.getByRole('table', { name: 'Open orders' })).toBe(orders);
+    expect(view.container.querySelector('.terminal')).toBe(terminal);
+  });
+
+  it('shows the open orders as bars until they are read, rather than saying none is open', async () => {
+    let read: (reply: { status: number; json: unknown }) => void = () => undefined;
+    market()
+      .on('GET /api/v1/market', { status: 200, json: OPEN })
+      .on('GET /api/v1/orders', () => new Promise((resolve) => (read = resolve)));
+    renderTerminal();
+    const panel = await screen.findByRole('tabpanel', { name: /^Open orders/ });
+
+    expect(within(panel).queryByText('No open orders.')).toBeNull();
+    expect(panel.querySelector('[aria-busy="true"]')).not.toBeNull();
+    expect(within(panel).getByText('Loading…')).toHaveClass('visually-hidden');
+    act(() => read({ status: 200, json: { orders: [], nextCursor: null } }));
+    expect(await within(panel).findByText('No open orders.')).toBeInTheDocument();
+    expect(panel.querySelector('[aria-busy="true"]')).toBeNull();
   });
 
   it('says there is nothing to trade when the market lists no instrument, instead of showing nothing', async () => {
