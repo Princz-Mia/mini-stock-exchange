@@ -63,6 +63,8 @@ def test_one_far_order_on_each_side_does_not_set_the_value() -> None:
     assert start(replace(far, last=10_200)) == pytest.approx(10_200)
     assert start(replace(far, bid=None)) == pytest.approx(10_000), "the offer alone"
     assert start(replace(far, ask=None)) == pytest.approx(10_000), "the bid alone"
+    # Someone sold one share into the far bid: a trade, however far, which a run starts from.
+    assert start(replace(far, bid=None, last=100)) == pytest.approx(100)
 
 
 def test_a_value_starts_at_the_last_trade_then_a_narrow_mid_then_the_reference() -> None:

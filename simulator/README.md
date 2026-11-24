@@ -24,6 +24,8 @@ same public and authenticated API as people use.
   - **Where a value starts:** at the first poll of an open market, at a price the market supports: the last
     trade, which two accounts agreed on; with no trade yet, the mid of a narrow book; otherwise the reference
     price. A second run on a market that has traded, or a restarted worker, starts again from the last trade.
+    A trade counts however far from the reference it is, so a market that collapsed climbs back rather than
+    jumps; one share traded far away starts a run there just the same.
   - **The market's price:** where the bots take an instrument to trade now is the mid only of a narrow book,
     whose two sides are at most 100 basis points of the mid apart, or one tick; otherwise the last trade, else
     the reference price. A wide book's mid is no price anyone offered: one order left far away, such as a bid

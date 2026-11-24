@@ -70,7 +70,11 @@ def starting_price(item: Instrument, narrow: float) -> float:
     """Where a run's value for an instrument starts, in cents: the last trade; else the mid of a
     narrow book (``Instrument.mid``); else the reference. The last trade comes first because two
     accounts agreed on it, where one account alone can quote both sides of a book, and a value
-    lasts for hours: it closes half of its gap to the reference only every half-life."""
+    lasts for hours: it closes half of its gap to the reference only every half-life.
+
+    A trade counts however far from the reference it is, so a market that collapsed climbs back
+    rather than jumps. The bots cannot tell that from one share traded far away, which starts a
+    run there just the same."""
     if item.last is not None:
         return float(item.last)
     mid = item.mid(narrow)
