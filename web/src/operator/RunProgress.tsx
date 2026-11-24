@@ -28,7 +28,8 @@ function barFor(run: BotRun, phase: RunPhase, now: number): Bar {
     case 'WAITING':
       return { text: PHASE_TITLES.WAITING };
     case 'STOPPING':
-      return { text: PHASE_TITLES.STOPPING };
+      // A stop asked for during loading waits for the worker to finish it, so the loading still has an amount to show.
+      return run.progress?.phase === 'LOADING' ? loadingBar(run.progress) : { text: PHASE_TITLES.STOPPING };
     case 'LOADING':
       // In this phase, so present.
       return loadingBar(run.progress as NonNullable<BotRun['progress']>);
@@ -72,6 +73,10 @@ function figuresFor(run: BotRun, phase: RunPhase, now: number): string {
       return run.progress?.phase === 'LOADING'
         ? `Last reported: ${loadedText(run.progress)}`
         : `Last reported: ${tradingText(run.activity)}`;
+    case 'STOPPING':
+      return run.progress?.phase === 'LOADING'
+        ? `Still loading: ${loadedText(run.progress)}`
+        : tradingText(run.activity);
     default:
       return `${lead}${tradingText(run.activity)}`;
   }
@@ -80,6 +85,9 @@ function figuresFor(run: BotRun, phase: RunPhase, now: number): string {
 function detailFor(run: BotRun, phase: RunPhase): string {
   if (phase === 'LOADING') {
     return `${run.worker.workerId ?? 'The worker'} is reading the bots' token files and building them; nothing trades until every bot is loaded.`;
+  }
+  if (phase === 'STOPPING' && run.progress?.phase === 'LOADING') {
+    return `${run.worker.workerId ?? 'The worker'} finishes loading the bots before it stops; then it places nothing and cancels their quotes.`;
   }
   return workerText(run);
 }
@@ -112,7 +120,8 @@ function usePreviousBeat(run: BotRun): Activity | null {
 /**
  * Where a run that is not over stands, with a bar like the bot job's: waiting for a worker, loading its bots n of N,
  * then trading with its counts and, for a timed run, its time gone of its length. A run whose heartbeats stopped says
- * so, with where it had got to. While a trading run places nothing and its paused steps say why, that is said too.
+ * so, with where it had got to, and a stop asked for during loading keeps the loading's bar until the worker has
+ * finished it. While a trading run places nothing and its paused steps say why, that is said too.
  * Everything comes from the worker's last heartbeat as the exchange keeps it, so it is the same after a reload and on
  * every operator's screen; it moves when a heartbeat arrives, every few seconds.
  */

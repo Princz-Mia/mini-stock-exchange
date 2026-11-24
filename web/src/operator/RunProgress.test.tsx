@@ -127,6 +127,27 @@ describe('a bot run on its way', () => {
     expect(progress).not.toHaveAttribute('aria-valuenow');
     expect(screen.getByText(/sim-1 is settling/)).toBeInTheDocument();
   });
+
+  it('keeps the loading bar when a stop comes during loading, as the worker finishes loading before it settles', () => {
+    const run = loading(6_000, 20_000, {
+      status: 'STOPPING',
+      desiredState: 'STOPPED',
+      stopRequestedAt: '2026-11-06T10:01:00Z',
+    });
+    render(<RunProgress run={run} now={START + 70_000} />);
+
+    expect(screen.getByRole('heading', { name: 'Stopping' })).toBeInTheDocument();
+    const progress = screen.getByRole('progressbar', { name: 'Stopping' });
+    expect(progress).toHaveAttribute('aria-valuemax', '20000');
+    expect(progress).toHaveAttribute('aria-valuenow', '6000');
+    expect(progress).toHaveAttribute('aria-valuetext', '6,000 of 20,000 bots loaded (30%)');
+    expect(fill()).toHaveStyle({ width: '30%' });
+    expect(screen.getByText('Still loading: 6,000 of 20,000 bots loaded (30%)')).toBeInTheDocument();
+    expect(
+      screen.getByText('sim-1 finishes loading the bots before it stops; then it places nothing and cancels their quotes.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/settling/)).toBeNull();
+  });
 });
 
 describe('a bot run that places nothing', () => {

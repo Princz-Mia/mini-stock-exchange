@@ -9,7 +9,7 @@ import { durationText } from './compare';
  * - TRADING: every bot is built and the run trades;
  * - HELD: a worker holds it but reports no phase, as one built before phases were reported;
  * - LOST: its heartbeats stopped while it should run;
- * - STOPPING: a stop was asked for and the worker is settling.
+ * - STOPPING: a stop was asked for; the worker finishes loading the bots, if it still is, then settles.
  */
 export type RunPhase = 'WAITING' | 'LOADING' | 'TRADING' | 'HELD' | 'LOST' | 'STOPPING' | 'STOPPED';
 
