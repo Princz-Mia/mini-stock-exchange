@@ -77,6 +77,8 @@ On first start, the full profile sets up a demo market: NOVA, ORBT, HELI, QUAD a
 
 `init-env` also warns when a host port in `.env` is already taken on this machine; change that port in `.env` before starting.
 
+To run a second stack beside the first, from another checkout, give its `.env` its own `COMPOSE_PROJECT_NAME`, its own host ports and its own `MSE_SESSION_COOKIE`, such as `MSE_TEST_SESSION`. Browsers share cookies between the ports of one host, so two stacks on `localhost` with the same cookie name sign each other out: a sign-in to one ends the session in the other, whose reads then answer 401 and whose commands answer 403.
+
 | Command | Starts |
 | --- | --- |
 | `docker compose up -d --build --wait` | Services, proxy, PostgreSQL and Kafka |

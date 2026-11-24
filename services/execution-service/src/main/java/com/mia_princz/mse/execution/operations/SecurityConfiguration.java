@@ -119,7 +119,8 @@ class SecurityConfiguration {
 	@Bean
 	@Order(2)
 	SecurityFilterChain securityFilterChain(HttpSecurity http, CsrfTokenRepository csrfTokens,
-			SecurityContextRepository contexts, List<LogoutHandler> logoutHandlers, JdbcClient jdbc) throws Exception {
+			SecurityContextRepository contexts, List<LogoutHandler> logoutHandlers, JdbcClient jdbc,
+			@Value("${server.servlet.session.cookie.name:SESSION}") String sessionCookie) throws Exception {
 		return http
 			// A session signed in with a password that has since changed goes on signed out.
 			.addFilterBefore(new PasswordVersionFilter(jdbc), AuthorizationFilter.class)
@@ -173,7 +174,8 @@ class SecurityConfiguration {
 				.accessDeniedHandler((request, response, denied) -> response.setStatus(HttpServletResponse.SC_FORBIDDEN)))
 			.logout((logout) -> {
 				logout.logoutUrl("/api/v1/auth/logout")
-					.deleteCookies("SESSION")
+					// The configured name: another stack on this host may own a cookie called SESSION.
+					.deleteCookies(sessionCookie)
 					.logoutSuccessHandler(new HttpStatusReturningLogoutSuccessHandler(HttpStatus.NO_CONTENT));
 				// Such as closing the session's private streams.
 				logoutHandlers.forEach(logout::addLogoutHandler);

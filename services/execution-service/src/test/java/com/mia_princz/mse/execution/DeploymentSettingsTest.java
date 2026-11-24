@@ -20,8 +20,8 @@ import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 /**
- * The settings around this service that its own tests can't reach, such as the reverse proxy in front of it. Each is
- * read as text, and the proxy's locations are matched in nginx's own order.
+ * The settings around this service that its own tests can't reach: the reverse proxy in front of it and the Compose
+ * file that starts it. Each is read as text, and the proxy's locations are matched in nginx's own order.
  */
 class DeploymentSettingsTest {
 
@@ -61,12 +61,32 @@ class DeploymentSettingsTest {
 		}
 	}
 
+	@Test
+	void composeAndTheEnvironmentTemplateKeepTheUsualCookieName() throws IOException {
+		assertThat(applicationProperties().getProperty("server.servlet.session.cookie.name"))
+			.isEqualTo("${MSE_SESSION_COOKIE:SESSION}");
+		assertThat(composeService("execution-service"))
+			.contains("      MSE_SESSION_COOKIE: ${MSE_SESSION_COOKIE:-SESSION}");
+		assertThat(Files.readAllLines(ROOT.resolve(".env.example"))).contains("MSE_SESSION_COOKIE=SESSION");
+	}
+
 	private static Properties applicationProperties() throws IOException {
 		Properties properties = new Properties();
 		try (Reader reader = Files.newBufferedReader(Path.of("src/main/resources/application.properties"))) {
 			properties.load(reader);
 		}
 		return properties;
+	}
+
+	private static List<String> composeService(String name) throws IOException {
+		List<String> lines = Files.readAllLines(ROOT.resolve("compose.yaml"));
+		int start = lines.indexOf("  " + name + ":");
+		assertThat(start).as(name + " in compose.yaml").isNotNegative();
+		int end = start + 1;
+		while (end < lines.size() && (lines.get(end).isBlank() || lines.get(end).startsWith("   "))) {
+			end++;
+		}
+		return lines.subList(start, end);
 	}
 
 	/** nginx's value, or its default of 60 s when the location sets none. */
