@@ -221,9 +221,12 @@ describe('terminal', () => {
       "The market's set time has come: the exchange is closing it and takes no new orders. You can still cancel open orders.",
     );
     expect(screen.getByText('Closing', { selector: '.state-badge' })).toBeInTheDocument();
+    // The countdown beside it reads the same clock on a timer of its own, so it may turn up to a second apart.
     expect(
-      screen.getByText(
+      await screen.findByText(
         'Its set time, 4 Nov 2026, 17:00:00 UTC, has come: the exchange is closing the market, and new orders are refused.',
+        {},
+        { timeout: 2_000 },
       ),
     ).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Cancel sell NOVA at 105.00' })).toBeEnabled();
