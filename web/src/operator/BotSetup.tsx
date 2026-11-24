@@ -323,6 +323,9 @@ function CreateBots({
     'aria-describedby': invalid.has(field) ? outcomeId : undefined,
   });
   const resolved = resolveMix(count, { marketMakers: makers, momentum });
+  // Not a refusal, as the exchange takes bots with no shares, but they could never sell: only bids would reach the book.
+  const noShares = holdingsFrom(instruments, shares).length === 0;
+  const sharesId = useId();
   const noiseShare = (() => {
     const left = 100 - Number(makers.trim()) - Number(momentum.trim());
     return Number.isInteger(left) && left >= 0 && left <= 100 ? `${left}%` : '—';
@@ -411,6 +414,13 @@ function CreateBots({
             invalid={invalidShares}
             describedBy={outcomeId}
           />
+          {noShares && (
+            <p id={sharesId} className="chart-note">
+              {instruments.length === 0
+                ? 'No instrument is listed yet, so these bots would own no shares, and a bot with no shares can never sell.'
+                : 'No shares given: these bots would own none, and a bot with no shares can never sell, so only bids would reach the book. Give each bot shares of at least one instrument.'}
+            </p>
+          )}
           <p className="muted hint">
             Any number, made in the background in parts while you go on setting up. Each bot gets the same endowment
             and its own token for the simulator; a blank or 0 gives none of that instrument. Each share is rounded
@@ -420,7 +430,7 @@ function CreateBots({
             type="submit"
             className="primary"
             disabled={'problem' in resolved}
-            aria-describedby={'problem' in resolved ? mixId : undefined}
+            aria-describedby={'problem' in resolved ? mixId : noShares ? sharesId : undefined}
           >
             Create bots
           </button>

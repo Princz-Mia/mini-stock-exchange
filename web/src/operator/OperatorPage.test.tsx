@@ -1386,6 +1386,41 @@ describe('the operator screen', () => {
     );
   });
 
+  it('warns plainly when the bots would get no shares, as none of them could ever sell', async () => {
+    exchange('SETUP');
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    const nova = await within(form).findByLabelText('NOVA shares');
+    const warning =
+      'No shares given: these bots would own none, and a bot with no shares can never sell, so only bids would reach the book. Give each bot shares of at least one instrument.';
+    expect(within(form).getByText(warning)).toBeInTheDocument();
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '20' } });
+    fireEvent.change(within(form).getByLabelText('Cash each'), { target: { value: '100000.00' } });
+    // A warning, not a refusal: the exchange takes such bots, so Create stays offered, and says why it warns.
+    const create = within(form).getByRole('button', { name: 'Create bots' });
+    expect(create).toBeEnabled();
+    expect(create).toHaveAccessibleDescription(warning);
+    // A 0 gives none either.
+    fireEvent.change(nova, { target: { value: '0' } });
+    expect(within(form).getByText(warning)).toBeInTheDocument();
+    fireEvent.change(nova, { target: { value: '1000' } });
+    expect(within(form).queryByText(warning)).toBeNull();
+    expect(create).not.toHaveAccessibleDescription();
+  });
+
+  it('warns that bots made before any instrument is listed own no shares', async () => {
+    exchange('SETUP', []);
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    expect(
+      within(form).getByText(
+        'No instrument is listed yet, so these bots would own no shares, and a bot with no shares can never sell.',
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('blocks Create while the mix cannot be worked out, saying why', async () => {
     exchange('SETUP');
     renderPage();
@@ -1757,6 +1792,7 @@ describe('the operator screen', () => {
     expect(screen.getByText('10,000 untagged')).toBeInTheDocument();
     const form = await screen.findByRole('form', { name: 'Create bots' });
     fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '1000000' } });
+    fireEvent.change(await within(form).findByLabelText('NOVA shares'), { target: { value: '1000' } });
     const create = await button('Create bots');
     expect(create).toBeEnabled();
     expect(create).not.toHaveAttribute('aria-describedby');
