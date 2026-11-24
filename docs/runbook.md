@@ -120,6 +120,8 @@ Find what changed the database outside Execution. If it can't be explained, rest
 
 **It stopped while the market was closing.** Nothing to do. A close cancels resting orders 5,000 to a transaction, and the market is closed from the first one. If Execution stops before the last, the next start cancels the rest before it takes commands, and logs `Finished the market's close at startup` with how many. A start that finds none left to cancel logs no such line. Every start on a closed market also removes its bots' token files, in case the close stopped before it had.
 
+**It started after a market's set time.** Nothing to do. A market opened for a set time whose time passed while Execution was down is closed while Execution starts, before it takes commands, and the log says `Closed the market at startup: its close time, …, passed while the exchange was not running`, with the close's sequence and what it cancelled. The close is the one the schedule would have made, under the operator who opened the market; a start that finds the market closed already closes nothing. If the start fails with `The market's close time had passed, and it could not be closed at startup`, the cause under it is what to fix; the next start tries again.
+
 **A close answered `504 COMMAND_OUTCOME_UNKNOWN`.** The request waited 45 seconds and the close had not answered. No lookup by key serves a close, so send the same key again. On the operator screen that is **Ask again**, under the note that the close is taking longer than the exchange waits. The key stays that close's for good: sent after a new simulation has started, it still returns the close of the market it closed and leaves the new one alone. The answers:
 - **`200`:** the close is done, and this is its answer.
 - **`504` again:** it is still going on.
@@ -135,6 +137,17 @@ A close that can't finish usually shows this way first. With the database away, 
 Every close sent before the restart gets this answer again; other commands get `503 TRADING_UNAVAILABLE`. Nothing needs sending again. The restart cancels the rest before it takes commands, as above, and the key that closed the market then returns the close's answer. The operator screen says the same in its Market panel and in the panel that shows the market as ended, with how many orders still rest at most, shows its Health panel's writer as halted, and offers no retry: **Ask for the close's answer** sends the same key once Execution is back. If the answer itself was lost, to a `504` before it or to the proxy, the screen still says the market is closed once the status does, and offers the same button. A page opened afresh has no key to ask with; it says that the exchange has stopped and that orders the close had not cancelled still rest. Traders see those orders listed as waiting for the close, with no cancel offered, and what they reserve still shown as reserved. If the restart fails with `The market's close could not be finished`, the cause in the log is what to fix first.
 
 A close can also halt the writer in its very first transaction, when the outcome of that commit is unknown. Then nobody knows yet whether the market closed: the log line says `halted the writer in its own transaction`, and every command, a close too, answers `503 TRADING_UNAVAILABLE`. Restart Execution and send the close's key again. It returns the close's answer if the market had closed, and closes it if not.
+
+## A market with a set time did not close
+
+`GET /api/v1/market` still says `OPEN` or `HALTED` after its `closesAt`. Orders and bot run starts are refused with `MARKET_CLOSED` from that time on whether or not the close has run, so nothing trades meanwhile; cancels are still taken. The close normally follows within a second. What to look at, in Execution's log:
+- **`closing it under key`, then `The market closed at its close time`:** it is closing, or has. A close of a full market takes up to about half a minute.
+- **Neither, and `The market of simulation … closes at …` from the start or the opening:** the schedule is armed and waiting. It compares the close time with Execution's clock, so a clock that is behind closes it late. The status's `closesAt` and the `Date` header of its answer are both on that clock.
+- **`this process does not own the writer`:** this Execution lost its hold on the market. Its health is `DOWN` with `writer ownership lost`; restart it.
+- **`the close could not be submitted` or `failed; asking again`:** the writer was busy, or the close rolled back; it is asked for again every 10 seconds (`mse.market.close-check-interval`).
+- **`halted the writer`:** the close stopped half way, as an operator's close can. Restart Execution, as under [Execution won't become healthy](#execution-wont-become-healthy): it closes the market, or finishes the close, before it takes commands.
+
+Closing by hand is always safe: **Close the market** on the operator screen, or `POST /api/v1/admin/market/close` with a new key. Only one close applies. If the scheduled one comes first, the hand close is refused with `409 MARKET_TRANSITION_NOT_ALLOWED` and state `CLOSED`, and the operator screen says the market had already closed at its set time; if the hand close comes first, the exchange makes none.
 
 ## Starting again: a new simulation, or wiping the stack
 
