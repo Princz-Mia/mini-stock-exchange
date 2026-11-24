@@ -4,8 +4,9 @@ import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resetSession } from '../api/client';
-import type { BotRun, MarketStatus } from '../api/types';
+import type { BotJob, BotRun, MarketStatus } from '../api/types';
 import { TOURS } from '../help/tours';
+import { botJob } from '../test/botJob';
 import { botRun, finishedRun, manifest } from '../test/botRun';
 import { signedIn } from '../test/fakeServer';
 import { noTrades } from '../test/fakeStream';
@@ -73,6 +74,8 @@ function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
     clock: null as string | null,
     // Trader logins without an account yet.
     unfunded: [] as string[],
+    // The newest bot job, as the exchange reads it; none until one is started.
+    job: null as BotJob | null,
   };
   const server = signedIn('operator', ['OPERATOR'])
     .on('GET /api/v1/market', () => ({ status: 200, json: state.market }))
@@ -94,7 +97,8 @@ function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
       status: 200,
       json: { runs: state.runs, nextCursor: null },
       ...(state.clock === null ? {} : { headers: { Date: new Date(state.clock).toUTCString() } }),
-    }));
+    }))
+    .on('GET /api/v1/admin/bot-jobs/current', () => (state.job === null ? { status: 204 } : { status: 200, json: state.job }));
   return { server, state };
 }
 
@@ -209,7 +213,9 @@ describe('the operator screen', () => {
 
     expect(await screen.findByRole('rowheader', { name: 'ORBT' })).toBeInTheDocument();
     expect(screen.queryByRole('rowheader', { name: 'NOVA' })).toBeNull();
-    expect(server.requests.at(-1)?.url).toBe(`/api/v1/instruments?simulationId=${NEXT}`);
+    expect(server.requests.filter((request) => request.url.startsWith('/api/v1/instruments')).at(-1)?.url).toBe(
+      `/api/v1/instruments?simulationId=${NEXT}`,
+    );
   });
 
   it('shows a closed market as ended: when it closed, what stays to read, and nothing to operate', async () => {
@@ -1104,134 +1110,315 @@ describe('the operator screen', () => {
     expect(within(bot).queryByRole('button', { name: /Revoke/ })).toBeNull();
   });
 
-  it('creates noise bots with the endowment typed and shows the new population', async () => {
+  it('creates any number of bots with the usual split preselected, and sends the exact counts it shows', async () => {
     const { server, state } = exchange('SETUP');
-    server.on('POST /api/v1/admin/bots', () => {
-      state.tagged.noise = 10;
-      return {
-        status: 201,
-        json: {
-          created: 10,
-          firstBot: 'bot-0001',
-          lastBot: 'bot-0010',
-          population: 10,
-          strategy: 'NOISE',
-          commandSequence: '9',
+    server.on('POST /api/v1/admin/bot-jobs', () => {
+      state.job = botJob({
+        total: 20_000,
+        strategies: {
+          marketMakers: { requested: 5_000, created: 0 },
+          noise: { requested: 11_000, created: 0 },
+          momentum: { requested: 4_000, created: 0 },
         },
-      };
+      });
+      return { status: 202, json: state.job };
     });
     renderPage();
 
     const form = await screen.findByRole('form', { name: 'Create bots' });
     expect(await screen.findByText('No bots yet')).toBeInTheDocument();
-    // The fields start empty, with examples, and the batch is what the operator typed.
+    // The count and the endowment start empty, with examples; the mix starts at the usual split.
     const count = within(form).getByLabelText('Number of bots');
     const cash = within(form).getByLabelText('Cash each');
     const nova = await within(form).findByLabelText('NOVA shares');
     expect([count, cash, nova].map((field) => (field as HTMLInputElement).value)).toEqual(['', '', '']);
     expect([count, cash, nova].map((field) => field.getAttribute('placeholder'))).toEqual([
-      'e.g. 10',
+      'e.g. 20,000',
       'e.g. 100000.00',
       'e.g. 1000',
     ]);
-    fireEvent.change(count, { target: { value: '10' } });
+    const mix = within(form).getByRole('group', { name: 'Strategy mix' });
+    expect(within(mix).getByLabelText('Market makers, %')).toHaveValue('20');
+    expect(within(mix).getByLabelText('Momentum, %')).toHaveValue('20');
+    expect(within(mix).getByText(/Noise: the rest,/)).toHaveTextContent('Noise: the rest, 60%');
+    const create = within(form).getByRole('button', { name: 'Create bots' });
+    expect(create).toBeDisabled();
+    expect(create).toHaveAccessibleDescription('Type how many bots to create.');
+
+    fireEvent.change(count, { target: { value: '20,000' } });
+    expect(within(mix).getByLabelText('Market makers, %')).toHaveAccessibleDescription(
+      'That is 4,000 market makers, 12,000 noise and 4,000 momentum bots: 20,000 in all.',
+    );
+    fireEvent.change(within(mix).getByLabelText('Market makers, %'), { target: { value: '25' } });
+    expect(count).toHaveAccessibleDescription(
+      'That is 5,000 market makers, 11,000 noise and 4,000 momentum bots: 20,000 in all.',
+    );
+    expect(within(mix).getByText(/Noise: the rest,/)).toHaveTextContent('Noise: the rest, 55%');
     fireEvent.change(cash, { target: { value: '100000.00' } });
     fireEvent.change(nova, { target: { value: '1000' } });
-    const strategy = within(form).getByRole('group', { name: 'Strategy' });
-    expect(within(strategy).getAllByRole('radio').map((radio) => radio.getAttribute('value'))).toEqual([
-      'MARKET_MAKER',
-      'NOISE',
-      'MOMENTUM',
-    ]);
-    expect(within(strategy).getByRole('radio', { name: 'Noise' })).toBeChecked();
-    expect(within(strategy).getByRole('radio', { name: 'Noise' })).toHaveAccessibleDescription(
-      'Places random limit orders near the current price.',
-    );
-    expect(within(form).getByText(/Up to 100 at a time, as many batches as you like/)).toBeInTheDocument();
-    fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
+    expect(create).toBeEnabled();
+    fireEvent.click(create);
 
-    expect(
-      await screen.findByText('Created bot-0001 to bot-0010 as noise bots. 10 bots in all.'),
-    ).toBeInTheDocument();
-    expect(await screen.findByText('10 bots')).toBeInTheDocument();
-    expect(screen.getByText('10 noise')).toBeInTheDocument();
-    const sent = server.requests.find((request) => request.url === '/api/v1/admin/bots' && request.method === 'POST');
-    expect(sent?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
-    expect(sent?.body).toEqual({
-      count: 10,
+    // The job answers at once; its progress takes the form's place.
+    expect(await screen.findByRole('heading', { name: 'Creating bots' })).toBeInTheDocument();
+    const bar = screen.getByRole('progressbar', { name: 'Creating bots' });
+    expect(bar).toHaveAttribute('aria-valuenow', '0');
+    expect(bar).toHaveAttribute('aria-valuemax', '20000');
+    expect(bar).toHaveAttribute('aria-valuetext', '0 of 20,000 bots made (0%)');
+    expect(screen.getByText('Working out the time left…', { exact: false })).toBeInTheDocument();
+    expect(screen.queryByRole('form', { name: 'Create bots' })).toBeNull();
+    const sent = server.requests.filter((request) => request.url === '/api/v1/admin/bot-jobs');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(sent[0]?.body).toEqual({
+      count: 20_000,
+      strategies: { marketMakers: 5_000, noise: 11_000, momentum: 4_000 },
       cash: '100000.00',
       holdings: [{ instrumentId: NOVA.instrumentId, quantity: 1000 }],
-      strategy: 'NOISE',
     });
+    // The market waits for the job.
+    expect(await button('Open market')).toBeDisabled();
+    expect(await button('Open market')).toHaveAccessibleDescription(
+      'Bots are still being created: 0 of 20,000 bots made (0%). The market can open once the job is done or stopped.',
+    );
   });
 
-  it('creates bots with the strategy chosen and counts the population by strategy', async () => {
+  it('blocks Create while the mix cannot be worked out, saying why', async () => {
+    exchange('SETUP');
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    const create = within(form).getByRole('button', { name: 'Create bots' });
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: 'many' } });
+    expect(create).toBeDisabled();
+    expect(create).toHaveAccessibleDescription('The number of bots is a whole number from 1 to 2,147,483,647.');
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '2147483647' } });
+    expect(create).toBeEnabled();
+    fireEvent.change(within(form).getByLabelText('Market makers, %'), { target: { value: '70' } });
+    fireEvent.change(within(form).getByLabelText('Momentum, %'), { target: { value: '40' } });
+    expect(create).toBeDisabled();
+    expect(create).toHaveAccessibleDescription(
+      'Market makers and momentum together can be at most 100%; noise is the rest.',
+    );
+    expect(within(form).getByText(/Noise: the rest,/)).toHaveTextContent('Noise: the rest, —');
+  });
+
+  it('shows the progress as it goes, per strategy with the time left, and announces it only at quarters', async () => {
+    const { state } = exchange('SETUP');
+    const going = (created: number, secondsLeft: number | null) =>
+      botJob({
+        created,
+        secondsLeft,
+        partsDone: created / 1_000,
+        strategies: {
+          marketMakers: { requested: 4_000, created: created / 5 },
+          noise: { requested: 12_000, created: (created * 3) / 5 },
+          momentum: { requested: 4_000, created: created / 5 },
+        },
+      });
+    state.job = going(5_000, 30);
+    state.tagged = { marketMakers: 1_000, noise: 3_000, momentum: 1_000 };
+    renderPage();
+
+    const bar = await screen.findByRole('progressbar', { name: 'Creating bots' });
+    expect(bar).toHaveAttribute('aria-valuenow', '5000');
+    expect(bar).toHaveAttribute('aria-valuetext', '5,000 of 20,000 bots made (25%)');
+    expect(screen.getByText('About 30 s left', { exact: false })).toBeInTheDocument();
+    expect(screen.getByText('Market makers 1,000 of 4,000 · Noise 3,000 of 12,000 · Momentum 1,000 of 4,000'))
+      .toBeInTheDocument();
+    expect(await screen.findByText('5,000 bots')).toBeInTheDocument();
+    const panel = screen.getByRole('region', { name: 'Bots' });
+    const announcements = within(panel).getAllByRole('status').find((node) => node.className === 'visually-hidden')!;
+    // A job found running on opening the page is shown, not announced.
+    expect(announcements).toHaveTextContent('');
+
+    state.job = going(6_000, 28);
+    await waitFor(() => expect(bar).toHaveAttribute('aria-valuenow', '6000'), { timeout: 3_000 });
+    expect(announcements).toHaveTextContent('');
+
+    state.job = going(10_000, 20);
+    state.tagged = { marketMakers: 2_000, noise: 6_000, momentum: 2_000 };
+    await waitFor(() => expect(announcements).toHaveTextContent('50% of the 20,000 bots are made.'), { timeout: 3_000 });
+    // The population follows the bots made.
+    expect(await screen.findByText('10,000 bots', {}, { timeout: 3_000 })).toBeInTheDocument();
+
+    state.job = { ...going(20_000, null), state: 'DONE', finishedAt: '2026-11-24T10:00:24Z' };
+    state.tagged = { marketMakers: 4_000, noise: 12_000, momentum: 4_000 };
+    const done = 'Created 20,000 bots: 4,000 market makers, 12,000 noise and 4,000 momentum bots.';
+    await waitFor(() => expect(announcements).toHaveTextContent(done), { timeout: 3_000 });
+    expect(within(panel).getByText(done, { selector: 'p.outcome' })).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    expect(await screen.findByRole('form', { name: 'Create bots' })).toBeInTheDocument();
+    expect(await button('Open market')).toBeEnabled();
+  });
+
+  it('stops a running job, and says that what was made stays', async () => {
     const { server, state } = exchange('SETUP');
-    state.tagged = { marketMakers: 0, noise: 12, momentum: 4 };
-    state.bots = 2;
-    server.on('POST /api/v1/admin/bots', () => {
-      state.tagged.marketMakers = 1;
+    state.job = botJob({ created: 3_000, partsDone: 3, secondsLeft: 40 });
+    server.on(`POST /api/v1/admin/bot-jobs/${state.job.jobId}/stop`, () => {
+      state.job = { ...state.job!, state: 'STOPPED', finishedAt: '2026-11-24T10:00:10Z', secondsLeft: null };
+      return { status: 200, json: state.job };
+    });
+    renderPage();
+
+    const stop = await button('Stop creating bots');
+    expect(stop).toHaveAccessibleDescription('The bots made so far stay.');
+    fireEvent.click(stop);
+
+    const stopped = 'Stopped after 3,000 of 20,000 bots. The 3,000 made stay. The rest were not made.';
+    expect(await screen.findByText(stopped, { selector: 'p.outcome' })).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).toBeNull();
+    expect(screen.getByRole('form', { name: 'Create bots' })).toBeInTheDocument();
+    const sent = server.requests.filter((request) => request.url.endsWith('/stop'));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.headers['Idempotency-Key']).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('shows the same progress after a reload, and on another screen, from the exchange', async () => {
+    const { server, state } = exchange('SETUP');
+    state.job = botJob({ created: 7_000, partsDone: 7, secondsLeft: 3_900, resumed: 1 });
+    const first = renderPage();
+    expect(await screen.findByRole('progressbar', { name: 'Creating bots' })).toHaveAttribute('aria-valuenow', '7000');
+    first.unmount();
+
+    renderPage();
+    const bar = await screen.findByRole('progressbar', { name: 'Creating bots' });
+    expect(bar).toHaveAttribute('aria-valuetext', '7,000 of 20,000 bots made (35%)');
+    expect(screen.getByText('About 1 h 5 min left', { exact: false })).toBeInTheDocument();
+    expect(
+      screen.getByText('The exchange restarted during this job and took it up again where it was; no bot is made twice.'),
+    ).toBeInTheDocument();
+    expect(server.requests.filter((request) => request.method === 'POST')).toHaveLength(0);
+  });
+
+  it('says when a job failed, with its reason, and when the exchange stops answering in the middle of one', async () => {
+    const { server, state } = exchange('SETUP');
+    state.job = botJob({
+      state: 'FAILED',
+      created: 2_000,
+      finishedAt: '2026-11-24T10:00:05Z',
+      failure: 'Bots could not be made: No space left on device',
+    });
+    const first = renderPage();
+    expect(
+      await screen.findByText(
+        'Creating bots failed after 2,000 of 20,000: Bots could not be made: No space left on device. The 2,000 made stay. Create the rest once the cause is fixed.',
+      ),
+    ).toBeInTheDocument();
+    first.unmount();
+
+    state.job = botJob({ created: 4_000, partsDone: 4, secondsLeft: 16 });
+    renderPage();
+    expect(await screen.findByRole('progressbar', { name: 'Creating bots' })).toBeInTheDocument();
+    server.on('GET /api/v1/admin/bot-jobs/current', {
+      status: 503,
+      problem: { status: 503, code: 'TRADING_UNAVAILABLE', detail: 'Trading is unavailable' },
+    });
+    expect(
+      await screen.findByText(/^Interrupted: the exchange is not answering/, {}, { timeout: 3_000 }),
+    ).toBeInTheDocument();
+    // The last progress stays on screen, not a form that would start a second job.
+    expect(screen.getByRole('progressbar', { name: 'Creating bots' })).toHaveAttribute('aria-valuenow', '4000');
+    expect(screen.queryByRole('form', { name: 'Create bots' })).toBeNull();
+  });
+
+  it("shows a refused job in the exchange's words beside the other operator's job it names", async () => {
+    const { server, state } = exchange('SETUP');
+    server.on('POST /api/v1/admin/bot-jobs', () => {
+      // Another operator started one meanwhile: the refusal names it, and its progress shows here.
+      state.job = botJob({ created: 1_000, partsDone: 1 });
       return {
-        status: 201,
-        json: {
-          created: 1,
-          firstBot: 'bot-0019',
-          lastBot: 'bot-0019',
-          population: 19,
-          strategy: 'MARKET_MAKER',
-          commandSequence: '12',
+        status: 409,
+        problem: {
+          status: 409,
+          code: 'BOT_JOB_RUNNING',
+          detail: 'Bots are already being created: 1,000 of 20,000 bots are made. Wait for that job to finish, or stop it',
         },
       };
     });
     renderPage();
 
-    expect(await screen.findByText('12 noise · 4 momentum · 2 untagged')).toBeInTheDocument();
     const form = await screen.findByRole('form', { name: 'Create bots' });
-    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '1' } });
-    fireEvent.change(within(form).getByLabelText('Cash each'), { target: { value: '50000.00' } });
-    fireEvent.click(within(form).getByRole('radio', { name: 'Market maker' }));
-    expect(within(form).getByRole('radio', { name: 'Noise' })).not.toBeChecked();
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '50' } });
     fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
 
     expect(
-      await screen.findByText('Created bot-0019 to bot-0019 as a market maker. 19 bots in all.'),
+      await screen.findByText(
+        'Bots are already being created: 1,000 of 20,000 bots are made. Wait for that job to finish, or stop it',
+      ),
     ).toBeInTheDocument();
-    expect(await screen.findByText('1 market maker · 12 noise · 4 momentum · 2 untagged')).toBeInTheDocument();
-    const sent = server.requests.find((request) => request.url === '/api/v1/admin/bots' && request.method === 'POST');
-    expect(sent?.body).toEqual({ count: 1, cash: '50000.00', holdings: [], strategy: 'MARKET_MAKER' });
-    // The choice stays for the next batch.
-    expect(within(form).getByRole('radio', { name: 'Market maker' })).toBeChecked();
+    expect(await screen.findByRole('progressbar', { name: 'Creating bots' })).toHaveAttribute('aria-valuenow', '1000');
   });
 
-  it('marks the fields a refused batch names, describes them by the refusal and focuses the first', async () => {
+  it('marks the fields a refused job names, describes them by the refusal and focuses the first', async () => {
     const { server } = exchange('SETUP');
-    server.on('POST /api/v1/admin/bots', {
+    server.on('POST /api/v1/admin/bot-jobs', {
       status: 400,
       problem: {
         status: 400,
         code: 'VALIDATION_FAILED',
-        detail: 'The bot request is invalid',
-        errors: [
-          { field: 'count', code: 'OUT_OF_RANGE', message: 'count must be between 1 and 100' },
-          { field: 'cash', code: 'INVALID_AMOUNT', message: 'Amount must be a fixed-scale decimal such as 100.25' },
-        ],
+        detail: 'The bot job request is invalid',
+        errors: [{ field: 'cash', code: 'INVALID_AMOUNT', message: 'Amount must be a fixed-scale decimal such as 100.25' }],
       },
     });
     renderPage();
 
-    // Nothing typed: the exchange names both blank fields.
     const form = await screen.findByRole('form', { name: 'Create bots' });
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '20' } });
+    fireEvent.change(within(form).getByLabelText('Cash each'), { target: { value: '1.005' } });
     fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
-    const message = 'count must be between 1 and 100; Amount must be a fixed-scale decimal such as 100.25';
+
+    const message = 'Amount must be a fixed-scale decimal such as 100.25';
     expect(await screen.findByText(message)).toBeInTheDocument();
-    const count = within(form).getByLabelText('Number of bots');
     const cash = within(form).getByLabelText('Cash each');
-    for (const field of [count, cash]) {
-      expect(field).toHaveAttribute('aria-invalid', 'true');
-      expect(field).toHaveAccessibleDescription(message);
-    }
-    expect(within(form).getByLabelText('NOVA shares')).not.toHaveAttribute('aria-invalid');
-    await waitFor(() => expect(count).toHaveFocus());
+    expect(cash).toHaveAttribute('aria-invalid', 'true');
+    expect(cash).toHaveAccessibleDescription(message);
+    expect(within(form).getByLabelText('Number of bots')).not.toHaveAttribute('aria-invalid');
+    expect(within(form).getByLabelText('Number of bots')).toHaveValue('20');
+    await waitFor(() => expect(cash).toHaveFocus());
+  });
+
+  it('sends a job whose answer did not come again under the same key, never as a second job', async () => {
+    const { server, state } = exchange('SETUP');
+    let asked = 0;
+    server.on('POST /api/v1/admin/bot-jobs', () => {
+      asked++;
+      if (asked === 1) {
+        return { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN', detail: 'The command may still complete' } };
+      }
+      state.job = botJob();
+      return { status: 202, json: state.job };
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '20000' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
+    fireEvent.click(await button('Retry'));
+
+    expect(await screen.findByRole('progressbar', { name: 'Creating bots' })).toBeInTheDocument();
+    const keys = server.requests
+      .filter((request) => request.url === '/api/v1/admin/bot-jobs')
+      .map((request) => request.headers['Idempotency-Key']);
+    expect(keys).toHaveLength(2);
+    expect(keys[1]).toBe(keys[0]);
+  });
+
+  it('keeps creating bots however many there are: no limit, no meter', async () => {
+    const { state } = exchange('SETUP');
+    state.bots = 10_000;
+    const { container } = renderPage();
+
+    expect(await screen.findByText('10,000 bots')).toBeInTheDocument();
+    expect(screen.getByText('10,000 untagged')).toBeInTheDocument();
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '1000000' } });
+    const create = await button('Create bots');
+    expect(create).toBeEnabled();
+    expect(create).not.toHaveAttribute('aria-describedby');
+    expect(container.querySelector('meter')).toBeNull();
+    const panel = screen.getByRole('region', { name: 'Bots' });
+    expect(within(panel).queryByText(/ of [\d,]+ bots|at its limit|more in all/)).toBeNull();
   });
 
   it("marks the instrument whose shares a refused funding names, by the holdings sent", async () => {
@@ -1263,38 +1450,6 @@ describe('the operator screen', () => {
     expect(within(form).getByLabelText('Cash')).not.toHaveAttribute('aria-invalid');
     expect(orbt).toHaveValue('00');
     await waitFor(() => expect(orbt).toHaveFocus());
-  });
-
-  it("shows a refused bot request in the exchange's words and keeps the input", async () => {
-    const { server } = exchange('SETUP');
-    // The population has no limit now; this refusal is one a retry can still replay from before.
-    server.on('POST /api/v1/admin/bots', {
-      status: 409,
-      problem: { status: 409, code: 'BOT_POPULATION_LIMIT', detail: 'At most 1000 bots; 990 exist' },
-    });
-    renderPage();
-
-    const form = await screen.findByRole('form', { name: 'Create bots' });
-    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '20' } });
-    fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
-
-    expect(await screen.findByText('At most 1000 bots; 990 exist')).toBeInTheDocument();
-    expect(within(form).getByLabelText('Number of bots')).toHaveValue('20');
-  });
-
-  it('keeps creating bots however many there are: no limit, no meter', async () => {
-    const { state } = exchange('SETUP');
-    state.bots = 10_000;
-    const { container } = renderPage();
-
-    expect(await screen.findByText('10,000 bots')).toBeInTheDocument();
-    expect(screen.getByText('10,000 untagged')).toBeInTheDocument();
-    const create = await button('Create bots');
-    expect(create).toBeEnabled();
-    expect(create).not.toHaveAttribute('aria-describedby');
-    expect(container.querySelector('meter')).toBeNull();
-    const panel = screen.getByRole('region', { name: 'Bots' });
-    expect(within(panel).queryByText(/ of [\d,]+ bots|at its limit|more in all/)).toBeNull();
   });
 
   it('counts a single bot as one', async () => {

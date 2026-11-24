@@ -1,20 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { DEFAULT_STRATEGY, populationText, STRATEGIES, strategyNoun, strategyTag } from './strategies';
+import { populationText, STRATEGIES, strategyTag } from './strategies';
 
 describe('bot strategies', () => {
-  it('lists the strategies in the order runs assign them, noise first chosen', () => {
+  it('lists the strategies in the order runs assign them', () => {
     expect(STRATEGIES.map((option) => option.value)).toEqual(['MARKET_MAKER', 'NOISE', 'MOMENTUM']);
-    expect(DEFAULT_STRATEGY).toBe('NOISE');
-  });
-
-  it('names a batch by its strategy and size', () => {
-    expect(strategyNoun('MARKET_MAKER', 1)).toBe('a market maker');
-    expect(strategyNoun('MARKET_MAKER', 4)).toBe('market makers');
-    expect(strategyNoun('NOISE', 1)).toBe('a noise bot');
-    expect(strategyNoun('NOISE', 12)).toBe('noise bots');
-    expect(strategyNoun('MOMENTUM', 1)).toBe('a momentum bot');
-    expect(strategyNoun('MOMENTUM', 2)).toBe('momentum bots');
   });
 
   it('tags an account with its strategy', () => {

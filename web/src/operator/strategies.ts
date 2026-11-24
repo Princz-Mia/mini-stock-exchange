@@ -12,21 +12,6 @@ export const STRATEGIES: readonly { value: BotStrategy; label: string; descripti
   { value: 'MOMENTUM', label: 'Momentum', description: 'Buys or sells with the recent direction of the price.' },
 ];
 
-export const DEFAULT_STRATEGY: BotStrategy = 'NOISE';
-
-/** "market makers", "noise bots", "a momentum bot": what a batch of bots with one tag is called. */
-export function strategyNoun(strategy: BotStrategy, count: number): string {
-  const one = count === 1;
-  switch (strategy) {
-    case 'MARKET_MAKER':
-      return one ? 'a market maker' : 'market makers';
-    case 'NOISE':
-      return one ? 'a noise bot' : 'noise bots';
-    case 'MOMENTUM':
-      return one ? 'a momentum bot' : 'momentum bots';
-  }
-}
-
 /** The tag in the account list: "market maker", "noise" or "momentum". */
 export function strategyTag(strategy: BotStrategy): string {
   return STRATEGIES.find((option) => option.value === strategy)!.label.toLowerCase();

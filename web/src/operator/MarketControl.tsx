@@ -2,10 +2,11 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api } from '../api/client';
-import type { MarketClosed, MarketStatus, MarketTransition } from '../api/types';
+import type { BotJob, MarketClosed, MarketStatus, MarketTransition } from '../api/types';
 import { CloseTime, scheduledCloseWords } from '../app/closeTime';
 import { groupInteger, utcDateTime, utcTime } from '../format';
 import { TermTip } from '../help/TermTip';
+import { progressText } from './botJob';
 import { useCloseCommand } from './closeCommand';
 import { CloseMarketDialog } from './CloseMarketDialog';
 import { CommandStatus } from './CommandStatus';
@@ -192,13 +193,22 @@ export function closedText(closed: MarketClosed): string {
 
 /**
  * Why an action is unavailable right now, or null when it is allowed. The instruments are counted once their list has
- * been read; until then a market in setup is not said to have none.
+ * been read; until then a market in setup is not said to have none. Bots are made only in setup, so a market does
+ * not open while a job is still making them.
  */
-function blocked(action: Action, state: MarketStatus['state'], instruments: number | undefined): string | null {
+function blocked(
+  action: Action,
+  state: MarketStatus['state'],
+  instruments: number | undefined,
+  job: BotJob | null | undefined,
+): string | null {
   switch (action) {
     case 'open':
       if (state === 'NOT_SET_UP') return 'Start a simulation or add an instrument first; either creates the market.';
       if (state !== 'SETUP') return 'The market has already opened. It opens only once.';
+      if (job?.state === 'RUNNING') {
+        return `Bots are still being created: ${progressText(job)}. The market can open once the job is done or stopped.`;
+      }
       if (instruments === undefined) return 'Reading the instruments…';
       return instruments === 0 ? 'Add at least one instrument first.' : null;
     case 'halt':
@@ -388,7 +398,16 @@ function CloseStatus({
  * while one is on its way, or its outcome is not known, none of the others is offered. Closing asks first, since it
  * cannot be undone. A closed market has no transition left, so none is shown.
  */
-export function MarketControl({ market, instruments }: { market: MarketStatus; instruments: number | undefined }) {
+export function MarketControl({
+  market,
+  instruments,
+  botJob,
+}: {
+  market: MarketStatus;
+  instruments: number | undefined;
+  /** The newest bot job, while the market is in setup: an opening waits for one that is running. */
+  botJob?: BotJob | null | undefined;
+}) {
   const client = useQueryClient();
   const send = useCallback(
     async ({ action, durationMinutes }: Sent, key: string): Promise<Done> => {
@@ -396,6 +415,8 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
         return { action, transition: await api.controlMarket(action, key, durationMinutes) };
       } finally {
         void client.invalidateQueries({ queryKey: ['market'] });
+        // An opening refused for a job that is running shows that job's progress.
+        void client.invalidateQueries({ queryKey: ['bot-job'] });
       }
     },
     [client],
@@ -502,7 +523,7 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
       ) : (
         <ul className="control-list">
           {ACTIONS.map(({ action, label }) => {
-            const reason = blocked(action, market.state, instruments);
+            const reason = blocked(action, market.state, instruments, botJob);
             // Why it can't be used now; for the close, while it can, what it is: the one transition with no way back.
             const note = reason ?? (action === 'close' ? 'Ends this market for good. Asks first.' : null);
             const hint = `${action}-hint`;
