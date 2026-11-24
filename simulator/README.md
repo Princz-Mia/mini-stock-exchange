@@ -63,7 +63,8 @@ same public and authenticated API as people use.
   call per bot, and a single revoked bot does not fail at every turn. The worker's log counts such bots.
 - **Safety:** a command keeps its idempotency key until the exchange answers it finally, so a retry after a busy,
   timed-out, rate-limited or lost answer can't apply twice. New orders pause while the market isn't open or market data
-  isn't live and recent.
+  isn't live and recent: at most two seconds old, counted from when the poll's answers arrived, so a slow poll does
+  not by itself make fresh data look old.
 
 ```powershell
 uv sync --frozen; uv run --frozen ruff check .; uv run --frozen pytest -q

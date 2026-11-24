@@ -275,7 +275,7 @@ class Runner:
                 self._http,
                 self.execution_url,
                 str(self._settings.market_data_url).rstrip("/"),
-                self._clock(),
+                self._clock,
             )
         except (httpx.HTTPError, KeyError, ValueError) as error:
             # The old view ages out, which pauses new exposure on its own.

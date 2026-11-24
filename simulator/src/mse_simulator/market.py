@@ -1,5 +1,6 @@
 """One shared view of the public market, polled once per interval for every bot."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from uuid import UUID
@@ -67,6 +68,8 @@ class MarketView:
     state: str
     live: bool
     instruments: tuple[Instrument, ...]
+    # When the answers arrived, on the worker's clock: the data is as old as that, however long
+    # the poll took.
     fetched_at: float
 
     @property
@@ -106,13 +109,15 @@ async def phase(http: httpx.AsyncClient, execution_url: str) -> str:
 
 
 async def fetch(
-    http: httpx.AsyncClient, execution_url: str, market_data_url: str, now: float
+    http: httpx.AsyncClient, execution_url: str, market_data_url: str, clock: Callable[[], float]
 ) -> MarketView:
-    """The authoritative phase from Execution, quotes from Market Data. Public, no credentials."""
+    """The authoritative phase from Execution, quotes from Market Data. Public, no credentials.
+    Stamped by ``clock`` once both have answered: stamped when the poll began, a slow poll would
+    make fresh data look old and pause the bots."""
     state = await phase(http, execution_url)
     if state == CLOSED:
         # Nothing is quoted any more, and the end of the market must not wait for Market Data.
-        return MarketView(state=state, live=False, instruments=(), fetched_at=now)
+        return MarketView(state=state, live=False, instruments=(), fetched_at=clock())
     listing = await http.get(f"{market_data_url}/api/v1/instruments")
     listing.raise_for_status()
     body = listing.json()
@@ -139,5 +144,5 @@ async def fetch(
         state=state,
         live=body["feed"]["state"] == "LIVE",
         instruments=instruments,
-        fetched_at=now,
+        fetched_at=clock(),
     )

@@ -810,11 +810,38 @@ def test_data_older_than_the_budget_pauses_new_orders(now, expected) -> None:
 
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
-            return await fetch(http, "http://execution", "http://market", 0.0)
+            return await fetch(http, "http://execution", "http://market", lambda: 0.0)
 
     market = asyncio.run(scenario())
     assert market.instruments[0].bid == 9_950
     assert market.tradable(now, 2.0) is expected
+
+
+def test_the_view_is_as_old_as_its_answers_not_as_old_as_the_poll(tmp_path) -> None:
+    """A poll that took three seconds brought data one second old a second later: still fresh
+    enough to trade on. Stamped when the poll began, it read four seconds old, and polls slower
+    than the two-second budget would have paused the bots for good."""
+    exchange = Exchange()
+    now = [0.0]
+    tmp_path.joinpath("tokens").mkdir()
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        answer = await exchange.handle(request)
+        if request.url.path == "/api/v1/instruments":
+            now[0] += 3.0
+        return answer
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(slow)) as http:
+            market = await fetch(http, "http://execution", "http://market", lambda: now[0])
+            runner = Runner(settings(tmp_path / "tokens"), http, clock=lambda: now[0])
+            await runner.refresh_market()
+            return market, runner._market
+
+    market, polled = asyncio.run(scenario())
+    assert market.fetched_at == 3.0
+    assert market.tradable(4.0, 2.0)
+    assert polled.fetched_at == 6.0, "the worker's poll too"
 
 
 def test_each_bot_draws_from_its_own_generator_seeded_by_the_run(tmp_path) -> None:
@@ -1614,7 +1641,7 @@ def test_the_view_keeps_the_markets_phase(state, open, closed) -> None:
 
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
-            return await fetch(http, "http://execution", "http://market", 0.0)
+            return await fetch(http, "http://execution", "http://market", lambda: 0.0)
 
     market = asyncio.run(scenario())
     assert (market.state, market.open, market.closed) == (state, open, closed)
@@ -1629,7 +1656,7 @@ def test_a_closed_market_is_known_without_market_data() -> None:
 
     async def scenario():
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
-            return await fetch(http, "http://execution", "http://market", 5.0)
+            return await fetch(http, "http://execution", "http://market", lambda: 5.0)
 
     market = asyncio.run(scenario())
     assert market.closed and not market.open
