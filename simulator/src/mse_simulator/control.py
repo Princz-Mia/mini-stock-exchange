@@ -17,6 +17,10 @@ STOPPED = "STOPPED"
 # A heartbeat's refusal for a run whose stop is already recorded.
 RUN_FINISHED = "RUN_FINISHED"
 
+# Where a worker is with its run: reading the bots' token files and building the bots, then trading.
+LOADING = "LOADING"
+TRADING = "TRADING"
+
 # The most bots one page holds, as Execution allows: 10,000 bots are ten pages.
 BOTS_PER_PAGE = 1000
 
@@ -30,10 +34,25 @@ class AssignedBot:
 
 @dataclass(frozen=True)
 class Totals:
+    """Cumulative for the run. The paused counts are the bots' steps that could place nothing new,
+    by why: market data too old or not live, the market not open, or another reason."""
+
     placed: int = 0
     canceled: int = 0
     rejected: int = 0
     errors: int = 0
+    paused_stale_data: int = 0
+    paused_market_not_open: int = 0
+    paused_other: int = 0
+
+
+@dataclass(frozen=True)
+class Progress:
+    """Where the worker is with its run: LOADING ``loaded`` of ``total`` bots, then TRADING."""
+
+    phase: str
+    loaded: int
+    total: int
 
 
 @dataclass(frozen=True)
@@ -67,7 +86,14 @@ class Assignment:
                 for bot in bots
             ),
             totals=Totals(
-                totals["placed"], totals["canceled"], totals["rejected"], totals["errors"]
+                totals["placed"],
+                totals["canceled"],
+                totals["rejected"],
+                totals["errors"],
+                # An exchange that keeps no paused counts has none to continue from.
+                totals.get("pausedStaleData", 0),
+                totals.get("pausedMarketNotOpen", 0),
+                totals.get("pausedOther", 0),
             ),
         )
 
@@ -142,9 +168,11 @@ class ControlClient:
         stop_failures: int,
         stopped: bool = False,
         manifest: Mapping[str, Any] | None = None,
+        progress: Progress | None = None,
     ) -> Beat | None:
         """None when the answer says nothing either way (a transport error or a server error), so
-        the caller tries again with the same cumulative totals. A manifest goes only if given."""
+        the caller tries again with the same cumulative totals. A manifest and the progress go only
+        if given."""
         body: dict[str, Any] = {
             "runId": str(run_id),
             "workerId": worker_id,
@@ -155,9 +183,18 @@ class ControlClient:
             "inFlight": in_flight,
             "stopFailures": stop_failures,
             "stopped": stopped,
+            "pausedStaleData": totals.paused_stale_data,
+            "pausedMarketNotOpen": totals.paused_market_not_open,
+            "pausedOther": totals.paused_other,
         }
         if manifest is not None:
             body["manifest"] = manifest
+        if progress is not None:
+            body |= {
+                "phase": progress.phase,
+                "botsLoaded": progress.loaded,
+                "botsTotal": progress.total,
+            }
         try:
             response = await self._http.post(
                 f"{self._base}/internal/simulator/heartbeat", json=body, headers=self._headers

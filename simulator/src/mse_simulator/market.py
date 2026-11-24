@@ -60,6 +60,12 @@ class Instrument:
 OPEN = "OPEN"
 CLOSED = "CLOSED"
 
+# Why new exposure pauses: the data is too old or not live, the market is not open, or anything
+# else, such as none of the run's instruments listed.
+STALE_DATA = "STALE_DATA"
+MARKET_NOT_OPEN = "MARKET_NOT_OPEN"
+OTHER = "OTHER"
+
 
 @dataclass(frozen=True)
 class MarketView:
@@ -83,9 +89,20 @@ class MarketView:
 
     def tradable(self, now: float, max_age: float) -> bool:
         """New exposure only while the market is open and the data is live and recent."""
-        return (
-            self.open and self.live and bool(self.instruments) and now - self.fetched_at <= max_age
-        )
+        return self.pause(now, max_age) is None
+
+    def pause(self, now: float, max_age: float) -> str | None:
+        """Why new exposure pauses now, or None if it need not. Data too old comes first: the
+        phase it shows may no longer hold."""
+        if now - self.fetched_at > max_age:
+            return STALE_DATA
+        if not self.open:
+            return MARKET_NOT_OPEN
+        if not self.live:
+            return STALE_DATA
+        if not self.instruments:
+            return OTHER
+        return None
 
     def only(self, instrument_ids: frozenset[UUID]) -> MarketView:
         """The same view, limited to a run's instruments."""

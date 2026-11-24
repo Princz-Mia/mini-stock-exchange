@@ -9,6 +9,7 @@ import httpx
 import numpy as np
 import pytest
 
+from mse_simulator import market as market_module
 from mse_simulator import runner as runner_module
 from mse_simulator.control import Assignment
 from mse_simulator.credentials import load_token
@@ -574,6 +575,46 @@ def test_heartbeats_go_on_while_a_run_loads_and_nothing_trades_until_it_has(
     asyncio.run(scenario())
 
 
+def test_the_heartbeats_say_how_far_the_bots_are_loaded_then_that_they_trade(
+    tmp_path, monkeypatch
+) -> None:
+    """Reading tens of thousands of token files takes seconds: each beat says how many bots are
+    built of how many, so the run shows its loading as it goes, then that it trades."""
+    accounts = write_tokens(tmp_path / "tokens", 3)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["NOISE", "NOISE", "NOISE"])
+    monkeypatch.setattr(runner_module, "BUILD_BATCH", 1)
+    files = threading.Semaphore(0)
+    real = runner_module.load_token
+
+    def slow(directory, ref):
+        assert files.acquire(timeout=5), "never released"
+        return real(directory, ref)
+
+    monkeypatch.setattr(runner_module, "load_token", slow)
+
+    def progress(beat: dict) -> tuple:
+        return beat["phase"], beat["botsLoaded"], beat["botsTotal"]
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(settings(tmp_path / "tokens"), http)
+            task = asyncio.create_task(runner.follow(assigned(exchange.run)))
+            await until(lambda: len(exchange.beats) >= 2)
+            assert progress(exchange.beats[0]) == ("LOADING", 0, 3), "the first beat, before any"
+            files.release()
+            await until(lambda: progress(exchange.beats[-1]) == ("LOADING", 1, 3))
+            files.release(2)
+            await until(lambda: progress(exchange.beats[-1]) == ("TRADING", 3, 3))
+            exchange.desired = "STOPPED"
+            await asyncio.wait_for(task, 5)
+
+    asyncio.run(scenario())
+    assert progress(exchange.beats[-1]) == ("TRADING", 3, 3), "the stop's confirmation too"
+    seen = [progress(beat) for beat in exchange.beats]
+    assert seen == sorted(seen, key=lambda item: (item[0] == "TRADING", item[1])), "never back"
+
+
 def test_a_lost_lease_stops_trading_at_once_without_settling(tmp_path) -> None:
     accounts = write_tokens(tmp_path / "tokens", 1)
     exchange = Exchange()
@@ -902,6 +943,67 @@ def test_a_run_in_a_new_simulation_trades_before_market_data_takes_it_for_curren
     asyncio.run(scenario())
     assert placed_instruments(exchange) == {INSTRUMENT}
     assert set(exchange.listed_for) == {SIMULATION}
+
+
+@pytest.mark.parametrize(
+    ("view", "reason"),
+    [
+        (MarketView("OPEN", True, (), 0.0), market_module.OTHER),
+        (MarketView("OPEN", False, (), 0.0), market_module.STALE_DATA),
+        (MarketView("HALTED", True, (), 0.0), market_module.MARKET_NOT_OPEN),
+        (MarketView("CLOSED", False, (), 0.0), market_module.MARKET_NOT_OPEN),
+        (MarketView("HALTED", False, (), -5.0), market_module.STALE_DATA),
+        (UNSEEN, market_module.STALE_DATA),
+    ],
+)
+def test_a_view_says_why_new_orders_pause(view, reason) -> None:
+    assert view.pause(1.0, 2.0) == reason
+    assert not view.tradable(1.0, 2.0)
+
+
+@pytest.mark.parametrize(
+    ("change", "reported"),
+    [
+        ({"live": "CATCHING_UP"}, "pausedStaleData"),
+        ({"state": "HALTED"}, "pausedMarketNotOpen"),
+        ({"listing_down": True}, "pausedStaleData"),
+        ({"earlier_current": True, "simulation": None}, "pausedOther"),
+    ],
+)
+def test_steps_that_place_nothing_new_are_reported_by_why(tmp_path, change, reported) -> None:
+    """A run whose bots pause shows why instead of only placing nothing: data not live, a halt,
+    market data that stopped answering (the view ages out), or none of the run's instruments
+    listed. The counts are cumulative, continuing from the totals the assignment gave."""
+    accounts = write_tokens(tmp_path / "tokens", 2)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["NOISE", "NOISE"])
+    exchange.run["totals"] |= {"pausedStaleData": 10, "pausedMarketNotOpen": 20, "pausedOther": 30}
+    for name, value in change.items():
+        setattr(exchange, name, value)
+    paused = ("pausedStaleData", "pausedMarketNotOpen", "pausedOther")
+    quick = settings(tmp_path / "tokens", market_poll_seconds=0.05, max_data_age_seconds=0.2)
+
+    async def scenario() -> Runner:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(quick, http)
+            await follow_until(
+                runner,
+                exchange,
+                lambda: (
+                    len(exchange.beats) >= 3
+                    and exchange.beats[-1][reported] >= exchange.run["totals"][reported] + 5
+                ),
+                lambda: setattr(exchange, "desired", "STOPPED"),
+            )
+            return runner
+
+    runner = asyncio.run(scenario())
+    assert exchange.placed == [], "nothing new was placed"
+    last = exchange.beats[-1]
+    assert {key: last[key] for key in paused if key != reported} == {
+        key: exchange.run["totals"][key] for key in paused if key != reported
+    }
+    assert runner.activity.steps >= last[reported] - exchange.run["totals"][reported]
 
 
 def test_each_bot_draws_from_its_own_generator_seeded_by_the_run(tmp_path) -> None:

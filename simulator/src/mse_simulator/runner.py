@@ -18,7 +18,17 @@ import numpy as np
 
 from mse_simulator import market
 from mse_simulator.client import TraderClient
-from mse_simulator.control import RUN_FINISHED, STOPPED, Assignment, Beat, ControlClient, Totals
+from mse_simulator.control import (
+    LOADING,
+    RUN_FINISHED,
+    STOPPED,
+    TRADING,
+    Assignment,
+    Beat,
+    ControlClient,
+    Progress,
+    Totals,
+)
 from mse_simulator.credentials import load_token
 from mse_simulator.manifest import manifest
 from mse_simulator.market import UNSEEN, MarketView
@@ -43,7 +53,8 @@ TURN_ORDER = {"MARKET_MAKER": 0, "MOMENTUM": 1, "NOISE": 1}
 # Token files read at once while a run loads: opening a file waits on the disk, not the processor.
 TOKEN_READERS = 8
 
-# Bots built between yields to the event loop while a run loads, so heartbeats keep their time.
+# Bots whose token files are read and who are built together while a run loads: between batches
+# the event loop runs, so heartbeats keep their time and report how far the load has come.
 BUILD_BATCH = 500
 
 # The trading loop's shortest pause: at a high rate it spends the credit of a few milliseconds at a
@@ -74,6 +85,10 @@ class Activity:
     canceled: int = 0
     rejected: int = 0
     errors: int = 0
+    # Steps that could place nothing new, by why: see MarketView.pause.
+    paused_stale_data: int = 0
+    paused_market_not_open: int = 0
+    paused_other: int = 0
     stop_failures: int = 0
     # This worker's own steps and reads, and the bots it stopped stepping because the exchange
     # refused their token, for its log; not reported in the heartbeat.
@@ -82,7 +97,23 @@ class Activity:
     unauthorized: int = 0
 
     def totals(self) -> Totals:
-        return Totals(self.placed, self.canceled, self.rejected, self.errors)
+        return Totals(
+            self.placed,
+            self.canceled,
+            self.rejected,
+            self.errors,
+            self.paused_stale_data,
+            self.paused_market_not_open,
+            self.paused_other,
+        )
+
+    def paused(self, reason: str) -> None:
+        if reason == market.STALE_DATA:
+            self.paused_stale_data += 1
+        elif reason == market.MARKET_NOT_OPEN:
+            self.paused_market_not_open += 1
+        else:
+            self.paused_other += 1
 
 
 class Runner:
@@ -130,6 +161,8 @@ class Runner:
         self._manifest = manifest(settings)
         # Whether Execution has heard the manifest for the current run: sent until a beat is held.
         self._manifest_heard = False
+        # How far the current run's bots are loaded, reported with every beat.
+        self._progress = Progress(LOADING, 0, 0)
 
     @property
     def execution_url(self) -> str:
@@ -224,6 +257,7 @@ class Runner:
         self._values = self._new_values(run.seed)
         self._makers = 0
         self._manifest_heard = False
+        self._progress = Progress(LOADING, 0, len(run.bots))
 
     async def load_bots(self) -> None:
         """The run's bots, each with its own generators seeded by the run and its account, market
@@ -234,32 +268,36 @@ class Runner:
         began = self._clock()
         assigned = sorted(run.bots, key=lambda bot: TURN_ORDER.get(bot.strategy, 2))
         directory = self._settings.token_directory
-        refs = [bot.credential_ref for bot in assigned]
-        tokens = await asyncio.to_thread(_read_tokens, directory, refs)
         missing = unknown = 0
-        for index, (bot, token) in enumerate(zip(assigned, tokens, strict=True)):
-            if index % BUILD_BATCH == 0 and index > 0:
-                await asyncio.sleep(0)
-            if token is None:
-                missing += 1
-                continue
-            account = bot.account_id
-            client = TraderClient(
-                self._http,
-                self.execution_url,
-                account,
-                token,
-                self._in_flight,
-                account.int ^ run.seed,
-                self._sleep,
-                reads=self._reads,
-            )
-            rng = np.random.default_rng([run.seed, account.int])
-            strategy = self._strategy(bot.strategy, rng, run)
-            if strategy is None:
-                unknown += 1
-            self._bots[account] = Bot(client, strategy)
-            self._order.append(account)
+        with ThreadPoolExecutor(TOKEN_READERS, thread_name_prefix="tokens") as readers:
+            for start in range(0, len(assigned), BUILD_BATCH):
+                batch = assigned[start : start + BUILD_BATCH]
+                refs = [bot.credential_ref for bot in batch]
+                tokens = await asyncio.to_thread(_read_tokens, readers, directory, refs)
+                for bot, token in zip(batch, tokens, strict=True):
+                    if token is None:
+                        missing += 1
+                        continue
+                    account = bot.account_id
+                    client = TraderClient(
+                        self._http,
+                        self.execution_url,
+                        account,
+                        token,
+                        self._in_flight,
+                        account.int ^ run.seed,
+                        self._sleep,
+                        reads=self._reads,
+                    )
+                    rng = np.random.default_rng([run.seed, account.int])
+                    strategy = self._strategy(bot.strategy, rng, run)
+                    if strategy is None:
+                        unknown += 1
+                    self._bots[account] = Bot(client, strategy)
+                    self._order.append(account)
+                # A bot without a token file is loaded too: there is nothing more to do for it.
+                self._progress = Progress(LOADING, start + len(batch), len(assigned))
+        self._progress = Progress(TRADING, len(assigned), len(assigned))
         logger.info(
             "run %s: %d bots in %.1f s, %d without a token file, %d with an unknown strategy",
             run.run_id,
@@ -320,10 +358,14 @@ class Runner:
         try:
             now = self._clock()
             view = self._market.only(self._run.instrument_ids)
-            tradable = view.tradable(now, self._settings.max_data_age_seconds)
+            pause = view.pause(now, self._settings.max_data_age_seconds)
+            tradable = pause is None
             holdings, orders = await self._observe(bot.client, now)
             intent = strategy.decide(view, tradable, holdings, orders, now)
-            if intent is None and tradable and self._pacer is not None:
+            if intent is None and pause is not None:
+                # Reported, so a run whose bots place nothing says why.
+                self.activity.paused(pause)
+            elif intent is None and self._pacer is not None:
                 # Waiting by choice sends nothing, so its command goes to another bot. Not while
                 # the data is stale: then the bots pause, at the paced rate of steps.
                 self._pacer.refund()
@@ -432,6 +474,7 @@ class Runner:
             self.activity.stop_failures,
             stopped,
             None if self._manifest_heard else self._manifest,
+            self._progress,
         )
         if answer is None:
             return None
@@ -606,7 +649,6 @@ class Runner:
                 await asyncio.wait_for(stop.wait(), self._settings.control_poll_seconds)
 
 
-def _read_tokens(directory: Path, refs: list[str]) -> list[str | None]:
+def _read_tokens(readers: ThreadPoolExecutor, directory: Path, refs: list[str]) -> list[str | None]:
     """Each bot's token, or None, in the order given, read by a few threads at once."""
-    with ThreadPoolExecutor(TOKEN_READERS, thread_name_prefix="tokens") as pool:
-        return list(pool.map(lambda ref: load_token(directory, ref), refs))
+    return list(readers.map(lambda ref: load_token(directory, ref), refs))
