@@ -14,6 +14,8 @@ import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -376,6 +378,39 @@ class TradingEngineIT {
 	}
 
 	/**
+	 * A market with a close time sends what one without sends: before the time an order rests with the statements of
+	 * "resting order" above, and from it an order is refused with those of "market not open". The writer compares the
+	 * time it holds with its clock; it does not read the close time again.
+	 */
+	@Test
+	void aMarketWithACloseTimeSendsNoMoreStatements() throws Exception {
+		UUID seller = funded();
+		Statements statements = new Statements(dataSource);
+		MovableClock clock = new MovableClock(Instant.now().truncatedTo(ChronoUnit.MICROS));
+		Instant closesAt = clock.instant().plus(Duration.ofHours(1));
+		jdbc.update("UPDATE simulation SET closes_at = ?", java.sql.Timestamp.from(closesAt));
+		try {
+			countingEngine(statements, clock);
+			Map<String, String> counts = new java.util.LinkedHashMap<>();
+			PlacementResult resting = statements.count(counts, "resting order",
+					() -> place(seller, Side.SELL, OrderType.LIMIT, "900.00", 1));
+			assertThat(resting.state()).isEqualTo(OrderState.OPEN);
+			clock.set(closesAt);
+			PlacementResult refused = statements.count(counts, "from its close time",
+					() -> place(seller, Side.SELL, OrderType.LIMIT, "900.10", 1));
+			assertThat(refused.rejection()).isEqualTo(RejectionCode.MARKET_CLOSED);
+			assertThat(counts).containsExactly(Map.entry("resting order", "8 statements, 1 commit"),
+					Map.entry("from its close time", "3 statements, 1 commit"));
+			assertThat(engine.cancel(key(), new CancelOrder(resting.orderId(), seller)).get().status())
+				.isEqualTo(CancelResult.Status.CANCELED);
+		}
+		finally {
+			jdbc.update("UPDATE simulation SET closes_at = NULL");
+			restartEngine();
+		}
+	}
+
+	/**
 	 * A run's statements do not grow with its commands: eight queued together (six orders that fill against one
 	 * resting order, one that rests, and a cancel of what is left) send each kind of row once, as one order with a
 	 * fill does, plus the cancel's row.
@@ -511,12 +546,23 @@ class TradingEngineIT {
 
 	private void countingEngine(Statements statements, int maxRun, BotCredentials credentials)
 			throws InterruptedException {
+		countingEngine(statements, maxRun, credentials, Clock.systemUTC());
+	}
+
+	private void countingEngine(Statements statements, Clock clock) throws InterruptedException {
+		countingEngine(statements, 1, (account) -> {
+			throw new UnsupportedOperationException("no bots in these tests");
+		}, clock);
+	}
+
+	private void countingEngine(Statements statements, int maxRun, BotCredentials credentials, Clock clock)
+			throws InterruptedException {
 		writer.close(Duration.ofSeconds(5));
 		writer = new CommandWriter("counted-writer", 1_000, maxRun);
 		DataSource counted = statements.dataSource();
 		engine = new TradingEngine(new JdbcTradingStore(JdbcClient.create(counted), JsonMapper.builder().build()),
 				new SpringTransactionRunner(new org.springframework.jdbc.support.JdbcTransactionManager(counted)), writer,
-				Clock.systemUTC(), credentials);
+				clock, credentials);
 		engine.start();
 	}
 

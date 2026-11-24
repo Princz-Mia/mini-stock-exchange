@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import com.mia_princz.mse.execution.MovableClock;
 import com.mia_princz.mse.execution.trading.application.CommandWriter.WriterHaltException;
 import com.mia_princz.mse.execution.trading.application.MarketClosing;
+import com.mia_princz.mse.execution.trading.application.TradingEngine.CloseUnfinishedException;
 
 /**
  * When the schedule asks the engine to close, and when it does not, with a clock the test moves and a closer that
@@ -131,6 +132,18 @@ class ScheduledCloseTest {
 	void aCloseThatHaltedTheWriterIsNotAskedForAgain() throws Exception {
 		answer = () -> CompletableFuture
 			.failedFuture(new WriterHaltException("halted", new IllegalStateException("out of step")));
+		schedule.arm(simulation, CLOSES_AT);
+		clock.set(CLOSES_AT);
+		await(() -> asked.size() == 1);
+		askedAfter(Duration.ofMillis(200), 1);
+		assertThat(schedule.closesAt()).isNull();
+	}
+
+	/** Told the close is unfinished, as a close sent to a writer that halted for one is: that is the halt too. */
+	@Test
+	void aCloseToldItIsUnfinishedIsNotAskedForAgain() throws Exception {
+		answer = () -> CompletableFuture.failedFuture(
+				new CloseUnfinishedException(9, 3, new IllegalStateException("the database went away")));
 		schedule.arm(simulation, CLOSES_AT);
 		clock.set(CLOSES_AT);
 		await(() -> asked.size() == 1);

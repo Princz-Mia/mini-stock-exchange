@@ -3,6 +3,7 @@ package com.mia_princz.mse.execution;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.net.http.HttpResponse;
+import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -22,12 +23,14 @@ import org.springframework.transaction.support.TransactionTemplate;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
+import com.mia_princz.mse.execution.trading.adapter.CurrentSimulation;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
 
 /**
  * Opening the market for a set time over HTTP, against the application itself with a clock the test moves: the body,
  * its limits and its part in the request, the status that shows the close time, and the close the exchange makes when
- * the time comes, which the status then says was scheduled. The engine-level cases are in {@link ScheduledCloseIT}.
+ * the time comes, which the status then says was scheduled. The engine-level cases are in {@link ScheduledCloseIT}. Each
+ * test sets up a market of its own; the clock is the class's, and each test counts from where it finds it.
  */
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT,
@@ -73,6 +76,7 @@ class MarketDurationIT {
 
 	@Test
 	void aMarketOpenedForASetTimeShowsItAndClosesOnItsOwnWhenItRunsOut() throws Exception {
+		CLOCK.set(NOW);
 		UUID instrument = new TransactionTemplate(transactionManager).execute((status) -> marketInSetup());
 		engine.start();
 		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
@@ -88,10 +92,12 @@ class MarketDurationIT {
 			check(refused, 400);
 			assertThat(JSON.readTree(refused.body()).get("code").asString()).as(body).isEqualTo("VALIDATION_FAILED");
 		}
+		// Not readable as the body at all: the framework refuses it, with no code of the application's.
 		for (String body : new String[] { "{\"durationMinutes\":\"ninety\"}",
 				"{\"durationMinutes\":90,\"closesAt\":\"2031-03-04T06:00:00Z\"}" }) {
-			assertThat(operator.post(OPEN, body, "Idempotency-Key", UUID.randomUUID().toString()).statusCode()).as(body)
-				.isEqualTo(400);
+			HttpResponse<String> unreadable = operator.post(OPEN, body, "Idempotency-Key", UUID.randomUUID().toString());
+			check(unreadable, 400);
+			assertThat(JSON.readTree(unreadable.body()).has("code")).as(body).isFalse();
 		}
 		HttpResponse<String> outOfRange = operator.post(OPEN, "{\"durationMinutes\":4}", "Idempotency-Key",
 				UUID.randomUUID().toString());
@@ -130,6 +136,13 @@ class MarketDurationIT {
 		assertThat(JSON.readTree(sameRefusal.body()).get("commandSequence").asString())
 			.isEqualTo(JSON.readTree(refused.body()).get("commandSequence").asString());
 		check(operator.post(OPEN, "{\"durationMinutes\":30}", "Idempotency-Key", second), 409);
+		// A refused opening with a duration of its own, under a new key, sets no close time.
+		HttpResponse<String> shorter = operator.post(OPEN, "{\"durationMinutes\":5}", "Idempotency-Key",
+				UUID.randomUUID().toString());
+		check(shorter, 409);
+		assertThat(JSON.readTree(shorter.body()).get("code").asString()).isEqualTo("MARKET_TRANSITION_NOT_ALLOWED");
+		assertThat(closesAtInDatabase()).isEqualTo(closesAt);
+		assertThat(Instant.parse(market(anonymous).get("closesAt").asString())).isEqualTo(closesAt);
 
 		String bid = MarketCloseUnfinishedIT.place(trader, instrument, "90.00");
 
@@ -163,6 +176,41 @@ class MarketDurationIT {
 		JsonNode problem = JSON.readTree(manual.body());
 		assertThat(problem.get("code").asString()).isEqualTo("MARKET_TRANSITION_NOT_ALLOWED");
 		assertThat(problem.get("state").asString()).isEqualTo("CLOSED");
+	}
+
+	/**
+	 * A market opened for an hour and closed by hand before its time: the status keeps the time it was meant to close,
+	 * and does not say it closed on schedule.
+	 */
+	@Test
+	void aMarketClosedByHandBeforeItsTimeKeepsItsTimeAndWasNotClosedOnSchedule() throws Exception {
+		new TransactionTemplate(transactionManager).execute((status) -> {
+			jdbc.update("""
+					UPDATE simulation SET state = 'CLOSED', opened_at = coalesce(opened_at, now()),
+					    closed_at = coalesce(closed_at, now())
+					WHERE state <> 'CLOSED'""");
+			return marketInSetup();
+		});
+		engine.start();
+		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
+		TestBrowser anonymous = new TestBrowser(port);
+		Instant opening = CLOCK.instant();
+		HttpResponse<String> opened = operator.post(OPEN, "{\"durationMinutes\":60}", "Idempotency-Key",
+				UUID.randomUUID().toString());
+		check(opened, 200);
+		Instant closesAt = opening.plus(Duration.ofHours(1));
+		assertThat(Instant.parse(JSON.readTree(opened.body()).get("closesAt").asString())).isEqualTo(closesAt);
+
+		CLOCK.set(opening.plus(Duration.ofMinutes(5)));
+		HttpResponse<String> closed = operator.post("/api/v1/admin/market/close", "", "Idempotency-Key",
+				UUID.randomUUID().toString());
+		check(closed, "POST", "/api/v1/admin/market/close", 200);
+		JsonNode status = market(anonymous);
+		assertThat(status.get("state").asString()).isEqualTo("CLOSED");
+		assertThat(Instant.parse(status.get("closedAt").asString())).isEqualTo(opening.plus(Duration.ofMinutes(5)));
+		assertThat(Instant.parse(status.get("closesAt").asString())).as("kept, as the time it was meant to close")
+			.isEqualTo(closesAt);
+		assertThat(status.get("closedOnSchedule").asBoolean()).as("an operator closed it").isFalse();
 	}
 
 	private JsonNode market(TestBrowser browser) throws Exception {
@@ -207,8 +255,14 @@ class MarketDurationIT {
 		return instrument;
 	}
 
+	/** The current simulation's last sequence: each test sets up a market of its own beside the closed ones. */
 	private long sequence() {
-		return jdbc.queryForObject("SELECT last_command_sequence FROM simulation", Long.class);
+		return jdbc.queryForObject("SELECT last_command_sequence FROM simulation " + CurrentSimulation.FIRST, Long.class);
+	}
+
+	private Instant closesAtInDatabase() {
+		return jdbc.queryForObject("SELECT closes_at FROM simulation " + CurrentSimulation.FIRST, Timestamp.class)
+			.toInstant();
 	}
 
 }

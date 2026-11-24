@@ -136,9 +136,16 @@ class ScheduledCloseIT {
 
 	private UUID second;
 
+	/** A process, or its database, that stopped: no transaction after it starts. Not a failure the engine knows. */
+	private static final class ProcessStopped extends RuntimeException {
+
+		private static final long serialVersionUID = 1L;
+
+	}
+
 	/**
 	 * Real transactions, counted, with an action that can be run just before a chosen one: from inside a start, before
-	 * its close's transaction, say.
+	 * its close's transaction, say. From {@link #stopAfter} on none starts.
 	 */
 	private final class CountingTransactions implements TransactionRunner {
 
@@ -150,14 +157,24 @@ class ScheduledCloseIT {
 
 		private volatile Runnable before;
 
+		private volatile int stopFrom = Integer.MAX_VALUE;
+
 		void before(int transactions, Runnable action) {
 			before = action;
 			beforeAt = asked.get() + transactions;
 		}
 
+		void stopAfter(int transactions) {
+			stopFrom = asked.get() + transactions;
+		}
+
 		@Override
 		public <T> T inTransaction(Supplier<T> work) {
-			if (asked.getAndIncrement() == beforeAt) {
+			int ordinal = asked.getAndIncrement();
+			if (ordinal >= stopFrom) {
+				throw new ProcessStopped();
+			}
+			if (ordinal == beforeAt) {
 				before.run();
 			}
 			return real.inTransaction(work);
@@ -231,8 +248,10 @@ class ScheduledCloseIT {
 		assertThat(reserved()).isZero();
 		assertThat(reconciliationProblems()).isEmpty();
 		assertThat(appliedCloses()).isEqualTo(1);
-		await(() -> schedule.closesAt() == null);
-		assertThat(output.getAll()).contains("The market closed at its close time, " + closesAt + ", at sequence " + close);
+		// Logged once the close has answered, after its last part and the read of its bots' token files.
+		await(() -> output.getAll()
+			.contains("The market closed at its close time, " + closesAt + ", at sequence " + close));
+		assertThat(schedule.closesAt()).isNull();
 		Thread.sleep(100);
 		assertThat(asked.get()).as("asked once").isEqualTo(1);
 		assertThat(place(engine, a, first, Side.BUY, "90.00", 1).rejection()).isEqualTo(RejectionCode.MARKET_CLOSED);
@@ -470,6 +489,107 @@ class ScheduledCloseIT {
 		await(() -> "CLOSED".equals(state()));
 		assertThat(audit(newSequence + 1)).containsExactly("MARKET_CLOSE_SCHEDULED APPLIED " + newer + " "
 				+ scheduledKey(simulation, newCloseAt));
+	}
+
+	/**
+	 * A scheduled close that stops between two parts halts the writer as an operator's close does, and the schedule
+	 * does not ask again: nothing would answer but the halt. The next start finishes the sweep under the operator who
+	 * opened the market, before it takes a command, and closes nothing twice.
+	 */
+	@Test
+	void aScheduledCloseThatCannotFinishHaltsAndTheNextStartFinishesIt(CapturedOutput output) throws Exception {
+		UUID a = funded();
+		UUID b = funded();
+		TradingEngine engine = engine();
+		engine.start();
+		open(engine, HOUR);
+		Instant closesAt = NOW.plus(HOUR);
+		fiveResting(engine, a, b);
+		long close = sequence() + 1;
+		// The read of who opened the market, then the close itself; no part of the sweep after it.
+		transactions.stopAfter(2);
+
+		clock.set(closesAt);
+		await(() -> output.getAll().contains("The market's close at its close time, " + closesAt
+				+ ", halted the writer; the next start closes the market"));
+		assertThat(state()).isEqualTo("CLOSED");
+		assertThat(sequence()).isEqualTo(close);
+		assertThat(resting()).as("two cancelled by the close itself").isEqualTo(3);
+		assertThat(reconciliationProblems()).as("between two parts").isEmpty();
+		assertThat(writer.isAvailable()).as("no writer goes on with a market half closed").isFalse();
+		assertThat(audit(close)).containsExactly("MARKET_CLOSE_SCHEDULED APPLIED " + opener + " "
+				+ scheduledKey(simulation, closesAt));
+		assertThat(schedule.closesAt()).isNull();
+		Thread.sleep(200);
+		assertThat(asked.get()).as("not asked again").isEqualTo(1);
+		assertThat(output.getAll()).doesNotContain("failed; asking again");
+
+		TradingEngine next = restarted();
+		next.start();
+		assertThat(sequence()).as("two more parts").isEqualTo(close + 2);
+		assertThat(resting()).isZero();
+		assertThat(reserved()).isZero();
+		assertThat(reconciliationProblems()).isEmpty();
+		assertThat(audit(close)).as("the parts a start cancels are the opener's, as the close is")
+			.containsExactly("MARKET_CLOSE_SCHEDULED APPLIED " + opener + " " + scheduledKey(simulation, closesAt),
+					"MARKET_CLOSE_SWEEP APPLIED " + opener, "MARKET_CLOSE_SWEEP APPLIED " + opener);
+		assertThat(appliedCloses()).isEqualTo(1);
+		assertThat(schedule.closesAt()).isNull();
+		assertThat(next.closeOnSchedule(simulation, closesAt).get(5, TimeUnit.SECONDS)).isEmpty();
+		assertThat(sequence()).isEqualTo(close + 2);
+		assertThat(asked.get()).isEqualTo(1);
+	}
+
+	/**
+	 * Only the close time the engine holds, of the simulation it holds, is closed: an ask for a second either side of
+	 * it, or for another simulation, makes no command, though the time has come. A changed close time is to be refused
+	 * this way when an ask for the old one comes late.
+	 */
+	@Test
+	void anAskForAnotherCloseTimeOrSimulationMakesNoCommand() throws Exception {
+		TradingEngine engine = engine(CloseSchedule.NONE);
+		engine.start();
+		open(engine, HOUR);
+		Instant closesAt = NOW.plus(HOUR);
+		clock.set(closesAt.plusSeconds(5));
+		long before = sequence();
+
+		assertThat(engine.closeOnSchedule(simulation, closesAt.minusSeconds(1)).get(5, TimeUnit.SECONDS)).isEmpty();
+		assertThat(engine.closeOnSchedule(simulation, closesAt.plusSeconds(1)).get(5, TimeUnit.SECONDS)).isEmpty();
+		assertThat(engine.closeOnSchedule(UUID.randomUUID(), closesAt).get(5, TimeUnit.SECONDS)).isEmpty();
+		assertThat(sequence()).as("no sequence taken").isEqualTo(before);
+		assertThat(state()).isEqualTo("OPEN");
+		assertThat(appliedCloses()).isZero();
+
+		assertThat(engine.closeOnSchedule(simulation, closesAt).get(20, TimeUnit.SECONDS)).isPresent();
+		assertThat(audit(before + 1)).containsExactly("MARKET_CLOSE_SCHEDULED APPLIED " + opener + " "
+				+ scheduledKey(simulation, closesAt));
+	}
+
+	/**
+	 * A clock finer than the database's: the close time is kept to the microsecond, in the opening's answer, in the row
+	 * and in memory alike, so the process after a restart makes its close under the key the one before would have.
+	 */
+	@Test
+	void theCloseTimeIsKeptToTheMicrosecondSoARestartMakesTheSameKey() throws Exception {
+		clock.set(Instant.parse("2031-03-04T05:06:07.123456789Z"));
+		TradingEngine engine = engine(CloseSchedule.NONE);
+		engine.start();
+		Instant closesAt = Instant.parse("2031-03-04T06:06:07.123456Z");
+		assertThat(open(engine, HOUR).closesAt()).isEqualTo(closesAt);
+		assertThat(closesAt()).isEqualTo(closesAt);
+		assertThat(jdbc.queryForObject("""
+				SELECT response_body ->> 'closesAt' FROM command_result
+				WHERE simulation_id = ? AND route = 'POST /api/v1/admin/market/open'""", String.class, simulation))
+			.as("the stored answer").isEqualTo(closesAt.toString());
+		long before = sequence();
+
+		clock.set(closesAt.plusSeconds(1));
+		TradingEngine next = restarted();
+		next.start();
+		assertThat(state()).isEqualTo("CLOSED");
+		assertThat(audit(before + 1)).containsExactly("MARKET_CLOSE_SCHEDULED APPLIED " + opener + " "
+				+ scheduledKey(simulation, closesAt));
 	}
 
 	/**
