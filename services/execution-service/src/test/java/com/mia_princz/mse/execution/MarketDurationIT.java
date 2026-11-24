@@ -77,8 +77,7 @@ class MarketDurationIT {
 	@Test
 	void aMarketOpenedForASetTimeShowsItAndClosesOnItsOwnWhenItRunsOut() throws Exception {
 		CLOCK.set(NOW);
-		UUID instrument = new TransactionTemplate(transactionManager).execute((status) -> marketInSetup());
-		engine.start();
+		UUID instrument = newMarket();
 		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
 		TestBrowser trader = TestBrowser.loggedIn(port, "trader", PASSWORD);
 		TestBrowser anonymous = new TestBrowser(port);
@@ -184,14 +183,7 @@ class MarketDurationIT {
 	 */
 	@Test
 	void aMarketClosedByHandBeforeItsTimeKeepsItsTimeAndWasNotClosedOnSchedule() throws Exception {
-		new TransactionTemplate(transactionManager).execute((status) -> {
-			jdbc.update("""
-					UPDATE simulation SET state = 'CLOSED', opened_at = coalesce(opened_at, now()),
-					    closed_at = coalesce(closed_at, now())
-					WHERE state <> 'CLOSED'""");
-			return marketInSetup();
-		});
-		engine.start();
+		newMarket();
 		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
 		TestBrowser anonymous = new TestBrowser(port);
 		Instant opening = CLOCK.instant();
@@ -227,6 +219,22 @@ class MarketDurationIT {
 		assertThat(response.statusCode()).as(response.body()).isEqualTo(status);
 		CONTRACT.assertResponse(method, template, status, response.headers().firstValue("Content-Type").orElse(null),
 				response.body());
+	}
+
+	/**
+	 * A market of the test's own, taken over by the engine: whatever another test left open is closed first, as only one
+	 * simulation may be. Returns its instrument.
+	 */
+	private UUID newMarket() {
+		UUID instrument = new TransactionTemplate(transactionManager).execute((status) -> {
+			jdbc.update("""
+					UPDATE simulation SET state = 'CLOSED', opened_at = coalesce(opened_at, now()),
+					    closed_at = coalesce(closed_at, now())
+					WHERE state <> 'CLOSED'""");
+			return marketInSetup();
+		});
+		engine.start();
+		return instrument;
 	}
 
 	/** A market in SETUP with one instrument and the development trader funded with cash; returns the instrument. */
