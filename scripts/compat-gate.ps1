@@ -905,19 +905,27 @@ try {
         $closed = Get-CurrentSimulation
         Assert-Equal 'the current simulation, by its row and by the market status' $closed (Invoke-RestMethod "$api/market" -WebSession $operator).simulationId
         $oldNova = Get-Nova
-        $bid = Invoke-ApiCommand $trader '/orders' (New-LimitOrder $oldNova 'BUY' '1.00')
-        Assert-Equal 'the trader bids far below the market' '201' $bid.Status
-        $offer = Invoke-ApiCommand $counterparty '/orders' (New-LimitOrder $oldNova 'SELL' '500.00')
-        Assert-Equal 'the counterparty offers far above it' '201' $offer.Status
-        $people = "'$(($bid.Body | ConvertFrom-Json).orderId)', '$(($offer.Body | ConvertFrom-Json).orderId)'"
         $cash = "SELECT sum(c.total_cents) || ' ' || sum(c.reserved_cents) FROM cash_balance c JOIN account a ON a.id = c.account_id WHERE a.simulation_id = '$closed'"
         $shares = "SELECT sum(p.total_quantity) || ' ' || sum(p.reserved_quantity) FROM position p JOIN account a ON a.id = p.account_id WHERE a.simulation_id = '$closed'"
         # A bot's token, copied inside the container while it still works, to send again once the close revoked it.
         [void](Invoke-InContainer 'execution-service' @('sh', '-c', 'umask 077; cp $(ls /run/mse/bot-tokens/*.token | head -n 1) /tmp/closed-bot.token'))
         Assert-Equal 'a bot read before the close' '200' (Invoke-InContainer 'execution-service' @('sh', '-c', $copiedBotRead))
+        # The run starts before the people's orders: its bots take their idea of NOVA's value from the book they first
+        # see, and a book holding only the two orders below would put it halfway between them.
         $before = Get-LatestBotTrade
         $run = Start-BotRun $operator 19
         if (-not (Wait-Until 60 { (Get-LatestBotTrade) -gt $before })) { throw "no bot trade after $before" }
+        # The people's orders rest at the lowest and the highest price NOVA takes, so no price the bots reach fills them.
+        $listed = @((Get-Listing).instruments | Where-Object { $_.symbol -eq 'NOVA' })[0]
+        Assert-Equal "NOVA in Market Data's list" $oldNova $listed.instrumentId
+        $bid = Invoke-ApiCommand $trader '/orders' (New-LimitOrder $oldNova 'BUY' $listed.tick)
+        Assert-Equal 'the trader bids at the lowest price' '201' $bid.Status
+        Assert-Match 'and the bid rests' '"state":"OPEN"' $bid.Body
+        $offer = Invoke-ApiCommand $counterparty '/orders' (New-LimitOrder $oldNova 'SELL' $listed.maxPrice)
+        Assert-Equal 'the counterparty offers at the highest' '201' $offer.Status
+        Assert-Match 'and the offer rests' '"state":"OPEN"' $offer.Body
+        "the people's orders => BUY $($listed.tick), SELL $($listed.maxPrice), last trade $($listed.lastPrice)" | Add-Content -Encoding utf8 $script:currentLog
+        $people = "'$(($bid.Body | ConvertFrom-Json).orderId)', '$(($offer.Body | ConvertFrom-Json).orderId)'"
         $cashBefore = Get-ExecutionValue $cash
         $sharesBefore = Get-ExecutionValue $shares
         Assert-Match 'cash in total, and held for orders, before the close' '^[1-9][0-9]* [1-9][0-9]*$' $cashBefore

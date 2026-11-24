@@ -648,7 +648,8 @@ close_and_start() {
   # steps after this one run with both simulations in the database.
   local operator="$run_dir/close-operator.txt" trader="$run_dir/close-trader.txt"
   local counterparty="$run_dir/close-counterparty.txt"
-  local closed old_nova bid offer people cash shares cash_before shares_before before run close sequence canceled
+  local closed old_nova listed lowest highest bid offer people cash shares cash_before shares_before before run close
+  local sequence canceled
   local detail refused status portfolio started new nova last listing files bots
   api_login "$operator" operator "$operator_password" && api_login "$trader" trader "$trader_password" &&
     api_login "$counterparty" counterparty "$counterparty_password" || return 1
@@ -656,19 +657,30 @@ close_and_start() {
   assert_match 'the current simulation, by its row and by the market status' "\"simulationId\":\"$closed\"" \
     "$(curl -s -m 10 -b "$operator" "$api/market")" || return 1
   old_nova=$(nova)
-  bid=$(api_command "$trader" /orders "$(limit_order "$old_nova" BUY 1.00)")
-  assert_equal 'the trader bids far below the market' 201 "$(status_of "$bid")" || return 1
-  offer=$(api_command "$counterparty" /orders "$(limit_order "$old_nova" SELL 500.00)")
-  assert_equal 'the counterparty offers far above it' 201 "$(status_of "$offer")" || return 1
-  people="'$(body_of "$bid" | sed -nE 's/.*"orderId":"([0-9a-f-]{36})".*/\1/p')', '$(body_of "$offer" | sed -nE 's/.*"orderId":"([0-9a-f-]{36})".*/\1/p')'"
   cash="SELECT sum(c.total_cents) || ' ' || sum(c.reserved_cents) FROM cash_balance c JOIN account a ON a.id = c.account_id WHERE a.simulation_id = '$closed'"
   shares="SELECT sum(p.total_quantity) || ' ' || sum(p.reserved_quantity) FROM position p JOIN account a ON a.id = p.account_id WHERE a.simulation_id = '$closed'"
   # A bot's token, copied inside the container while it still works, to send again once the close revoked it.
   compose exec -T execution-service sh -c 'umask 077; cp $(ls /run/mse/bot-tokens/*.token | head -n 1) /tmp/closed-bot.token' >> "$log" 2>&1
   assert_equal 'a bot read before the close' 200 "$(copied_bot_read)" || return 1
+  # The run starts before the people's orders: its bots take their idea of NOVA's value from the book they first see,
+  # and a book holding only the two orders below would put it halfway between them.
   before=$(latest_bot_trade)
   run=$(start_bot_run "$operator" 19) || return 1
   retry 60 bot_trade_after "$before" || { fail "no bot trade after $before"; return 1; }
+  # The people's orders rest at the lowest and the highest price NOVA takes, so no price the bots reach fills them.
+  listed=$(curl -s -m 10 "$api/instruments" | sed 's/"instrumentId"/\n&/g' | grep '"symbol":"NOVA"')
+  assert_equal "NOVA in Market Data's list" "$old_nova" \
+    "$(printf '%s' "$listed" | sed -nE 's/^"instrumentId":"([0-9a-f-]{36})".*/\1/p')" || return 1
+  lowest=$(printf '%s' "$listed" | sed -nE 's/.*"tick":"([0-9.]+)".*/\1/p')
+  highest=$(printf '%s' "$listed" | sed -nE 's/.*"maxPrice":"([0-9.]+)".*/\1/p')
+  bid=$(api_command "$trader" /orders "$(limit_order "$old_nova" BUY "$lowest")")
+  assert_equal 'the trader bids at the lowest price' 201 "$(status_of "$bid")" &&
+    assert_match 'and the bid rests' '"state":"OPEN"' "$(body_of "$bid")" || return 1
+  offer=$(api_command "$counterparty" /orders "$(limit_order "$old_nova" SELL "$highest")")
+  assert_equal 'the counterparty offers at the highest' 201 "$(status_of "$offer")" &&
+    assert_match 'and the offer rests' '"state":"OPEN"' "$(body_of "$offer")" || return 1
+  note "the people's orders => BUY $lowest, SELL $highest, last trade $(printf '%s' "$listed" | grep -o '"lastPrice":[^,]*' | head -n 1 | cut -d: -f2 | tr -d '"')"
+  people="'$(body_of "$bid" | sed -nE 's/.*"orderId":"([0-9a-f-]{36})".*/\1/p')', '$(body_of "$offer" | sed -nE 's/.*"orderId":"([0-9a-f-]{36})".*/\1/p')'"
   cash_before=$(execution_sql "$cash")
   shares_before=$(execution_sql "$shares")
   assert_match 'cash in total, and held for orders, before the close' '^[1-9][0-9]* [1-9][0-9]*$' "$cash_before" &&
