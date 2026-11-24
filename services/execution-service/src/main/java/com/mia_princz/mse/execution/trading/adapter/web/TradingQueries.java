@@ -170,16 +170,7 @@ class TradingQueries {
 	List<AccountSummary> accounts(AccountPosition after, int limit, PageOrder order) {
 		record Row(UUID id, String name, String kind, Instant createdAt, String token, String strategy) {
 		}
-		List<Row> rows = jdbc.sql("""
-				SELECT id, display_name, kind, created_at, bot_strategy,
-				    CASE WHEN kind <> 'BOT' THEN NULL
-				         WHEN EXISTS (SELECT 1 FROM api_token t WHERE t.account_id = account.id AND t.revoked_at IS NULL)
-				         THEN 'ACTIVE' ELSE 'REVOKED' END AS token
-				FROM account
-				WHERE simulation_id = %3$s AND kind <> 'ISSUANCE'%1$s
-				ORDER BY created_at %2$s, id %2$s LIMIT :limit""".formatted(
-				after == null ? "" : " AND (created_at, id) " + order.after() + " (:afterAt, :afterId)",
-				order.direction(), CurrentSimulation.ID))
+		List<Row> rows = jdbc.sql(accountsSql(order, after != null))
 			.param("afterAt", after == null ? null : Timestamp.from(after.createdAt()))
 			.param("afterId", after == null ? null : after.id())
 			.param("limit", limit)
@@ -330,6 +321,20 @@ class TradingQueries {
 	 * filter's index range or at the page's position; once the driver prepares the statement on the server and the
 	 * server settles on a generic plan, every later page would be read from the head of the range.
 	 */
+	/** A page of the current simulation's accounts: one range of account_by_simulation, either way, with no sort. */
+	static String accountsSql(PageOrder order, boolean continued) {
+		return """
+				SELECT id, display_name, kind, created_at, bot_strategy,
+				    CASE WHEN kind <> 'BOT' THEN NULL
+				         WHEN EXISTS (SELECT 1 FROM api_token t WHERE t.account_id = account.id AND t.revoked_at IS NULL)
+				         THEN 'ACTIVE' ELSE 'REVOKED' END AS token
+				FROM account
+				WHERE simulation_id = %3$s AND kind <> 'ISSUANCE'%1$s
+				ORDER BY created_at %2$s, id %2$s LIMIT :limit""".formatted(
+				continued ? " AND (created_at, id) " + order.after() + " (:afterAt, :afterId)" : "",
+				order.direction(), CurrentSimulation.ID);
+	}
+
 	static String ordersSql(PageOrder order, HistoryFilter filter, boolean continued) {
 		String conditions = (filter.instrumentId() == null ? "" : " AND o.instrument_id = :instrument")
 				+ (filter.side() == null ? "" : " AND o.side = :side")

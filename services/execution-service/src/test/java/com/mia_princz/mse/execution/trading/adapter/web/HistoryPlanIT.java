@@ -21,7 +21,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import com.mia_princz.mse.execution.TestcontainersConfiguration;
 
 /**
- * How the history statements the API really sends are planned. Each is explained as a generic plan, the plan the
+ * How the history statements the API really sends, and the operator's account list, are planned. Each is explained as a generic plan, the plan the
  * server may settle on once the driver prepares a statement it has run a few times, which knows no parameter values.
  * A later page of a filtered list must still start at its filter's index range and at the page's position, in either
  * order, with no sort. The test tables are nearly empty, so sequential and bitmap scans are turned off to make the
@@ -83,6 +83,18 @@ class HistoryPlanIT {
 		assertThat(plan(TradingQueries.finishedSql(new HistoryFilter(BY_INSTRUMENT.instrumentId(), "SELL", null))))
 			.contains("orders_finished_by_account_instrument", "(instrument_id = $")
 			.doesNotContain("Sort");
+	}
+
+	@Test
+	void everyPageOfTheAccountListIsOneRangeOfTheCurrentSimulation() {
+		for (PageOrder order : PageOrder.values()) {
+			for (boolean continued : new boolean[] { false, true }) {
+				assertThat(plan(TradingQueries.accountsSql(order, continued))).as(order + (continued ? ", later page" : ""))
+					.contains("Index Scan", "account_by_simulation", "(simulation_id = (InitPlan")
+					// The only sort is the one-row look-up of the current simulation.
+					.doesNotContainPattern("Sort Key: (account\\.)?(created_at|id)");
+			}
+		}
 	}
 
 	@Test
