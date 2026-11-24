@@ -224,6 +224,11 @@ input[aria-invalid='true'] {
 .context-badge {
   font-size: 12px;
   white-space: nowrap;
+  /* A market's name can be long: it is cut short on a narrow screen rather than widening the page. */
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
   padding: 2px var(--space-2);
   border-radius: 999px;
   background: var(--surface-sunken);

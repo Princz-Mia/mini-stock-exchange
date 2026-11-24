@@ -32,6 +32,17 @@ const DONE: Record<Transition, string> = {
   resume: 'Trading has resumed.',
 };
 
+/**
+ * What the market is called on this page: the name it was started with. One nobody named, which the first setup
+ * command created, is said to have none, and no name is shown before any market exists.
+ */
+function marketName(market: Pick<MarketStatus, 'name' | 'simulationId'>): string {
+  if (market.name !== null && market.name !== undefined) {
+    return market.name;
+  }
+  return market.simulationId === null ? 'No market yet' : 'Not named';
+}
+
 /** What a close did, from its answer: how many resting orders it cancelled and how many bot runs it ended. */
 export function closedText(closed: MarketClosed): string {
   const orders =
@@ -296,6 +307,8 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
         </span>
       </div>
       <dl className="balances">
+        <dt>Name</dt>
+        <dd>{marketName(market)}</dd>
         <dt>Opened</dt>
         <dd>{market.openedAt === null ? 'Not yet' : when(market.openedAt)}</dd>
         {market.closedAt !== null && (

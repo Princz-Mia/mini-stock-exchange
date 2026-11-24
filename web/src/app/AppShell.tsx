@@ -8,6 +8,7 @@ import { Tour } from '../help/Tour';
 import { TOURS } from '../help/tours';
 import { useTour } from '../help/useTour';
 import { FillNotice, FillWatch, useFillNotices } from './FillNotice';
+import { useMarketStatus } from './market';
 import { ThemeSwitch } from './ThemeSwitch';
 import { useAccountEvents } from './useAccountEvents';
 
@@ -81,6 +82,9 @@ function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout
   // Trading: the user's own account is on screen. An operator who also trades sees none of it while operating.
   const trading = trader && mode === 'TRADING';
   const notices = useFillNotices();
+  // Which market this is, by the name it was started with; a market with none, or a status that can't be read, is
+  // just the simulation.
+  const name = useMarketStatus().data?.name ?? null;
   // The trader's own change notifications while trading; each may bring a fill to tell them about.
   useAccountEvents(trading, undefined, notices.check);
   const help = useRef<HTMLButtonElement>(null);
@@ -96,7 +100,9 @@ function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout
     <div className="shell">
       <header className="topbar">
         <span className="brand">Mini Stock Exchange</span>
-        <span className="context-badge">Simulation · Virtual funds</span>
+        <span className="context-badge" title={name ?? undefined}>
+          {name ?? 'Simulation'} · Virtual funds
+        </span>
         {trader && operator && <ModeSwitch mode={mode} />}
         <nav aria-label="Main">
           {trading ? (

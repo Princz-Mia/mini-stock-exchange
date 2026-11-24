@@ -125,6 +125,23 @@ describe('the operator screen', () => {
     expect(screen.getByText('Opening freezes the instruments and every account\'s endowment.')).toBeInTheDocument();
   });
 
+  it("names the market in its panel, and says when it has no name or there is no market", async () => {
+    const { state } = exchange('SETUP');
+    state.market = { ...market('SETUP'), name: 'Thursday seminar' };
+    const named = renderPage();
+    const panel = await screen.findByRole('region', { name: 'Market' });
+    await waitFor(() => expect(within(panel).getByText('Name', { selector: 'dt' }).nextElementSibling).toHaveTextContent('Thursday seminar'));
+    named.unmount();
+
+    for (const [state, said] of [['OPEN', 'Not named'], ['NOT_SET_UP', 'No market yet']] as const) {
+      exchange(state, state === 'OPEN' ? [NOVA] : []);
+      const view = renderPage();
+      const each = await screen.findByRole('region', { name: 'Market' });
+      expect(within(each).getByText('Name', { selector: 'dt' }).nextElementSibling).toHaveTextContent(said);
+      view.unmount();
+    }
+  });
+
   it('cannot open a market without instruments', async () => {
     exchange('NOT_SET_UP', []);
     renderPage();

@@ -69,6 +69,25 @@ describe('signing in', () => {
     expect(screen.getByText('trader')).toBeInTheDocument();
   });
 
+  it("puts the market's name in the simulation context, and the simulation alone for a market without one", async () => {
+    let name: string | null = 'Thursday seminar';
+    fakeServer()
+      .on('GET /api/v1/me', { status: 200, json: { username: 'trader', roles: ['TRADER'] } })
+      .on('GET /api/v1/market', () => ({
+        status: 200,
+        json: { state: 'SETUP', simulationId: 's', name, openedAt: null, closedAt: null, commandSequence: '1' },
+      }))
+      .on('GET /api/v1/instruments', { status: 200, json: INSTRUMENTS });
+    const { unmount } = openAt('/terminal');
+    expect(await screen.findByText('Thursday seminar · Virtual funds')).toHaveAttribute('title', 'Thursday seminar');
+    unmount();
+
+    name = null;
+    openAt('/terminal');
+    await screen.findByRole('heading', { name: 'NOVA', level: 1 });
+    expect(await screen.findByText('Simulation · Virtual funds')).not.toHaveAttribute('title');
+  });
+
   it('keeps the typed username after wrong credentials', async () => {
     fakeServer()
       .on('GET /api/v1/me', { status: 401 })

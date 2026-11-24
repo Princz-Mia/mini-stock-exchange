@@ -86,9 +86,9 @@ const INSTRUMENT_LIST = /\/api\/v1\/instruments(\?|$)/;
  * by it.
  */
 async function setupMarket(route: Route): Promise<void> {
-  const live = (await (await route.fetch()).json()) as { simulationId: string | null };
+  const live = (await (await route.fetch()).json()) as { simulationId: string | null; name: string | null };
   await route.fulfill({
-    json: { state: 'SETUP', simulationId: live.simulationId, openedAt: null, closedAt: null, commandSequence: '7' },
+    json: { state: 'SETUP', simulationId: live.simulationId, name: live.name, openedAt: null, closedAt: null, commandSequence: '7' },
   });
 }
 
