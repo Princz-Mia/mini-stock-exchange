@@ -1,8 +1,8 @@
 import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useLayoutEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 
-import { api, pollEvery } from '../api/client';
+import { api, isRefusal, pollEvery } from '../api/client';
 import type { Feed, Instrument, Instruments, MarketStatus } from '../api/types';
 
 /** The exchange's own word on the market: its phase and which simulation it is, read again every five seconds. */
@@ -195,4 +195,40 @@ export function useForgetInAddress(generation: number, names: readonly string[])
     }
   }, [clearing, names, setParams]);
   return !clearing;
+}
+
+/**
+ * Changes whenever an operator may have created or funded an account since: any command while the market is being set
+ * up, which is when accounts are created, its opening, and another simulation. Undefined until the status is read.
+ */
+export function fundingMoment(market: MarketStatus | undefined): string | undefined {
+  if (market === undefined) {
+    return undefined;
+  }
+  const settingUp = market.state === 'NOT_SET_UP' || market.state === 'SETUP';
+  return [market.simulationId ?? NO_SIMULATION, market.state, settingUp ? market.commandSequence : ''].join('|');
+}
+
+/**
+ * A trader refused for having no account in the market stops being asked (`pollEvery`), so an account created for
+ * them afterwards would only be seen on coming back to the tab. Those of the given queries the exchange refused are
+ * read again at each moment an account may have been created, and at no other: not on every order of an open market.
+ */
+export function useAskAgainWhenFunded(market: MarketStatus | undefined, queryKeys: readonly (readonly string[])[]) {
+  const client = useQueryClient();
+  const moment = fundingMoment(market);
+  const seen = useRef(moment);
+  useEffect(() => {
+    if (moment === undefined || moment === seen.current) {
+      return;
+    }
+    const first = seen.current === undefined;
+    seen.current = moment;
+    if (first) {
+      return;
+    }
+    for (const queryKey of queryKeys) {
+      void client.invalidateQueries({ queryKey, predicate: (query) => isRefusal(query.state.error) });
+    }
+  }, [client, moment, queryKeys]);
 }

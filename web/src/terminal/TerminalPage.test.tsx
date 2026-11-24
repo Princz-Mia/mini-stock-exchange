@@ -713,9 +713,13 @@ describe('terminal', () => {
     expect(screen.queryByRole('heading', { name: 'NOVA', level: 1 })).toBeNull();
     expect(screen.getByRole('tab', { name: 'Open orders (0)' })).toHaveAttribute('aria-selected', 'true');
 
-    // Funded, and with an instrument: the ticket, waiting for the open, and no order from before.
+    // Funded, and with an instrument: the next reads of the status, which says a command was taken, and of the
+    // instrument list, as their polls would. The account is asked for again, as it was refused, with no reload and no
+    // coming back to the tab: the ticket, waiting for the open, and no order from before.
     next = 'funded';
-    await client.invalidateQueries();
+    status = { ...status, commandSequence: '3' };
+    await client.invalidateQueries({ queryKey: ['market'] });
+    await client.invalidateQueries({ queryKey: ['instruments'] });
     const ticket = await screen.findByRole('region', { name: 'Order · VEGA' });
     expect(within(ticket).getByText('The market has not opened yet.')).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'No trading account' })).toBeNull();

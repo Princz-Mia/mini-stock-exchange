@@ -3,10 +3,10 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { resetSession } from '../api/client';
+import { ApiError, resetSession } from '../api/client';
 import type { MarketStatus } from '../api/types';
 import { fakeServer } from '../test/fakeServer';
-import { listedSimulation, useInstruments, useRefreshOnMarketChange } from './market';
+import { fundingMoment, listedSimulation, useAskAgainWhenFunded, useInstruments, useRefreshOnMarketChange } from './market';
 
 const FIRST = '10000000-0000-0000-0000-000000000001';
 const SECOND = '10000000-0000-0000-0000-000000000002';
@@ -346,5 +346,64 @@ describe('reading again when the market changes', () => {
     await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
     expect(seen.every((each) => each.generation === 0 && each.orders === 'second')).toBe(true);
     third.unmount();
+  });
+});
+
+describe('asking again once an account may have been created', () => {
+  const KEYS = [['portfolio'], ['orders']] as const;
+  const refused = () => Promise.reject(new ApiError(403, { status: 403, code: 'NO_TRADING_ACCOUNT', detail: 'No account' }));
+
+  it('changes with every command while the market is set up, with its opening, and with another simulation only', () => {
+    const setup = status(FIRST, 'SETUP');
+    expect(fundingMoment(undefined)).toBeUndefined();
+    expect(fundingMoment({ ...setup, commandSequence: '8' })).not.toBe(fundingMoment(setup));
+    expect(fundingMoment(status(FIRST, 'OPEN'))).not.toBe(fundingMoment(setup));
+    expect(fundingMoment({ ...status(FIRST, 'OPEN'), commandSequence: '8' })).toBe(fundingMoment(status(FIRST, 'OPEN')));
+    expect(fundingMoment(status(SECOND, 'OPEN'))).not.toBe(fundingMoment(status(FIRST, 'OPEN')));
+    expect(fundingMoment({ ...status(null, 'NOT_SET_UP'), commandSequence: '1' })).not.toBe(
+      fundingMoment({ ...status(null, 'NOT_SET_UP'), commandSequence: null }),
+    );
+  });
+
+  it('reads again only what the exchange refused, at those moments, and not on every order of an open market', async () => {
+    const { wrapper } = withClient();
+    const reads = { portfolio: 0, orders: 0 };
+    let funded = false;
+    const { result, rerender } = renderHook(
+      ({ market }) => {
+        const portfolio = useQuery({
+          queryKey: ['portfolio'],
+          queryFn: () => {
+            reads.portfolio += 1;
+            return funded ? Promise.resolve('account') : refused();
+          },
+        });
+        useQuery({ queryKey: ['orders'], queryFn: () => ++reads.orders });
+        useAskAgainWhenFunded(market, KEYS);
+        return portfolio;
+      },
+      { wrapper, initialProps: { market: status(FIRST, 'SETUP') } },
+    );
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(reads).toEqual({ portfolio: 1, orders: 1 });
+
+    // Another command while it is set up: the refused one is asked again, the one answered is left to its own polling.
+    rerender({ market: { ...status(FIRST, 'SETUP'), commandSequence: '8' } });
+    await waitFor(() => expect(reads.portfolio).toBe(2));
+    expect(reads.orders).toBe(1);
+
+    // Its opening, after the last funding came in between two reads of the status.
+    funded = true;
+    rerender({ market: { ...status(FIRST, 'OPEN'), commandSequence: '9' } });
+    await waitFor(() => expect(result.current.data).toBe('account'));
+    expect(reads).toEqual({ portfolio: 3, orders: 1 });
+
+    // In an open market accounts are not created: orders come and go, and nothing is asked again for them.
+    funded = false;
+    await act(() => result.current.refetch());
+    rerender({ market: { ...status(FIRST, 'OPEN'), commandSequence: '10' } });
+    rerender({ market: { ...status(FIRST, 'OPEN'), commandSequence: '11' } });
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(reads).toEqual({ portfolio: 4, orders: 1 });
   });
 });

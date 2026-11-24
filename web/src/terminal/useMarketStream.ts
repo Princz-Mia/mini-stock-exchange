@@ -18,6 +18,8 @@ export interface StreamSource {
   addEventListener(type: string, listener: (event: MessageEvent<string>) => void): void;
   close(): void;
   onerror: ((event: Event) => void) | null;
+  /** 2 once the browser has given up on the stream for good; a dropped connection is reconnected by itself. */
+  readonly readyState?: number;
 }
 
 export type StreamFactory = (url: string) => StreamSource;

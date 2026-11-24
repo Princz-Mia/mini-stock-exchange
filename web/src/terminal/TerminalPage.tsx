@@ -5,7 +5,13 @@ import { Link, useSearchParams } from 'react-router';
 import { ApiError, api, pollEvery } from '../api/client';
 import type { MarketStatus } from '../api/types';
 import { FeedStatus } from '../app/FeedStatus';
-import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
+import {
+  useAskAgainWhenFunded,
+  useForgetInAddress,
+  useInstruments,
+  useMarketStatus,
+  useRefreshOnMarketChange,
+} from '../app/market';
 import { PRIVATE_QUERIES } from '../app/useAccountEvents';
 import { isOperator, useSession } from '../auth/session';
 import { groupDigits } from '../format';
@@ -56,6 +62,8 @@ export function TerminalPage() {
   // either, as it waits for the new simulation's instruments, and the instrument chosen in the one before is let go.
   const generation = useRefreshOnMarketChange(market.data, PRIVATE_QUERIES);
   useForgetInAddress(generation, CHOSEN);
+  // A trader with no account in this market is asked about again once the status says one may have been created.
+  useAskAgainWhenFunded(market.data, PRIVATE_QUERIES);
   const orders = useQuery({
     queryKey: ['orders', 'active'],
     queryFn: () => api.orders('active'),

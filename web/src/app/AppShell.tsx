@@ -8,7 +8,7 @@ import { Tour } from '../help/Tour';
 import { TOURS } from '../help/tours';
 import { useTour } from '../help/useTour';
 import { FillNotice, FillWatch, useFillNotices } from './FillNotice';
-import { useMarketStatus } from './market';
+import { fundingMoment, useMarketStatus } from './market';
 import { ThemeSwitch } from './ThemeSwitch';
 import { useAccountEvents } from './useAccountEvents';
 
@@ -84,9 +84,11 @@ function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout
   const notices = useFillNotices();
   // Which market this is, by the name it was started with; a market with none, or a status that can't be read, is
   // just the simulation.
-  const name = useMarketStatus().data?.name ?? null;
-  // The trader's own change notifications while trading; each may bring a fill to tell them about.
-  useAccountEvents(trading, undefined, notices.check);
+  const market = useMarketStatus().data;
+  const name = market?.name ?? null;
+  // The trader's own change notifications while trading; each may bring a fill to tell them about. A stream refused
+  // for want of an account in the market is opened again once one may have been created.
+  useAccountEvents(trading, undefined, notices.check, fundingMoment(market));
   const help = useRef<HTMLButtonElement>(null);
   const shown = useRef(tour.showing);
   // When a tour closes, focus goes to Help, where it can be found again, rather than to the top of the page.

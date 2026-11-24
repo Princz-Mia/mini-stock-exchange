@@ -520,10 +520,12 @@ describe('portfolio page', () => {
     expect(screen.queryByRole('table', { name: 'Executions' })).toBeNull();
     expect(screen.queryByText('10,404.00')).toBeNull();
 
-    // Funded again, and read again (on coming back to the tab, say): the new account, and nothing of the closed one's
-    // history.
+    // Funded again by an operator, which is a command: the next read of the status shows it, and the page asks again
+    // for what it was refused, with no reload and no coming back to the tab. The new account, and nothing of the
+    // closed one's history.
     funded = 'again';
-    await client.invalidateQueries();
+    status = { ...status, commandSequence: '2' };
+    await client.invalidateQueries({ queryKey: ['market'] });
     const summary = await screen.findByRole('region', { name: 'Summary' });
     expect(within(summary).getAllByText('5,000.00').length).toBeGreaterThan(0);
     expect(await screen.findByText('No executions yet.')).toBeInTheDocument();

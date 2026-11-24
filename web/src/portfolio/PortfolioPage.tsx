@@ -2,7 +2,13 @@ import { useQuery } from '@tanstack/react-query';
 
 import { ApiError, api, pollEvery } from '../api/client';
 import type { Holding, OrderDetail, OwnTrade } from '../api/types';
-import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
+import {
+  useAskAgainWhenFunded,
+  useForgetInAddress,
+  useInstruments,
+  useMarketStatus,
+  useRefreshOnMarketChange,
+} from '../app/market';
 import { type Column, PagedTable } from '../app/PagedTable';
 import { type Filter, filterParam, usePagedList } from '../app/paging';
 import { PRIVATE_QUERIES } from '../app/useAccountEvents';
@@ -163,6 +169,8 @@ export function PortfolioPage() {
   // histories start again from their first pages, with no symbol of the simulation before as a filter.
   const generation = useRefreshOnMarketChange(market.data, PRIVATE_QUERIES);
   const clear = useForgetInAddress(generation, SYMBOL_FILTERS);
+  // An account created for a trader who had none is seen once the status says one may have been.
+  useAskAgainWhenFunded(market.data, PRIVATE_QUERIES);
   if (!clear) {
     return <p className="page-status">Loading portfolio…</p>;
   }
