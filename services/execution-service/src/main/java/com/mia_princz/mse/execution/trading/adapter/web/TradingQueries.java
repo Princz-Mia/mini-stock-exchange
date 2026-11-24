@@ -19,7 +19,11 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import tools.jackson.databind.json.JsonMapper;
+
+import com.mia_princz.mse.execution.trading.adapter.BotJobRows;
 import com.mia_princz.mse.execution.trading.adapter.CurrentSimulation;
+import com.mia_princz.mse.execution.trading.application.BotJob;
 import com.mia_princz.mse.execution.trading.domain.CostBasis;
 import com.mia_princz.mse.execution.trading.domain.Price;
 
@@ -72,6 +76,9 @@ class TradingQueries {
 			o.id, o.instrument_id, i.symbol, o.side, o.type, o.time_in_force, o.bound_cents, o.requested_quantity,
 			o.filled_quantity, o.working_quantity, o.canceled_quantity, o.state, o.reason, o.version, o.created_at,
 			o.updated_at""";
+
+	/** Reads a job's endowment as the writer wrote it. */
+	private static final JsonMapper JOBS = JsonMapper.builder().build();
 
 	private final JdbcClient jdbc;
 
@@ -226,6 +233,23 @@ class TradingQueries {
 			.query((row, index) -> new BotsByStrategy(row.getInt("market_makers"), row.getInt("noise"),
 					row.getInt("momentum"), row.getInt("untagged")))
 			.single();
+	}
+
+	/** The current simulation's newest bot job, whatever its state: the one the operator's screen shows. */
+	Optional<BotJob> currentBotJob() {
+		return jdbc.sql("SELECT " + BotJobRows.COLUMNS + " FROM bot_job WHERE simulation_id = " + CurrentSimulation.ID
+				+ " ORDER BY started_at DESC, id DESC LIMIT 1")
+			.query((row, index) -> BotJobRows.read(row, JOBS))
+			.optional();
+	}
+
+	/** One of the current simulation's bot jobs; none of a simulation before it. */
+	Optional<BotJob> botJob(UUID jobId) {
+		return jdbc.sql("SELECT " + BotJobRows.COLUMNS + " FROM bot_job WHERE simulation_id = " + CurrentSimulation.ID
+				+ " AND id = ?")
+			.param(jobId)
+			.query((row, index) -> BotJobRows.read(row, JOBS))
+			.optional();
 	}
 
 	/** A user who may be given a trading account: one with the TRADER role. */

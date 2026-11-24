@@ -30,6 +30,7 @@ import com.mia_princz.mse.contracts.events.PublicTrade;
 import com.mia_princz.mse.contracts.events.TradeExecuted;
 import com.mia_princz.mse.contracts.events.VenueState;
 import com.mia_princz.mse.contracts.events.WireEvents;
+import com.mia_princz.mse.execution.trading.application.BotJob;
 import com.mia_princz.mse.execution.trading.application.BotStrategy;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.ProvisionAccount;
@@ -721,6 +722,53 @@ public final class JdbcTradingStore implements TradingStore {
 					+ " rows (accounts, batches, postings, allocations, cash, positions, tokens, issuance accounts); "
 					+ "expected " + expected);
 		}
+	}
+
+	@Override
+	public void insertBotJob(BotJob job) {
+		expectOne(jdbc.sql("""
+				INSERT INTO bot_job (id, simulation_id, started_by, idempotency_key, state, part_size, market_makers, noise,
+				    momentum, created_market_makers, created_noise, created_momentum, parts_done, cash_cents, holdings,
+				    started_at, run_started_at, created_at_run_start, last_part_at, finished_at, failure, resumed)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?, ?, ?, ?, ?)""")
+			.params(job.id(), job.simulationId(), job.startedBy(), job.idempotencyKey(), job.state().name(),
+					job.partSize(), job.requested().marketMakers(), job.requested().noise(), job.requested().momentum(),
+					job.created().marketMakers(), job.created().noise(), job.created().momentum(), job.partsDone(),
+					job.cashCents(), BotJobRows.holdings(job, json), BotJobRows.timestamp(job.startedAt()),
+					BotJobRows.timestamp(job.runStartedAt()), job.createdAtRunStart(),
+					BotJobRows.timestamp(job.lastPartAt()), BotJobRows.timestamp(job.finishedAt()), job.failure(),
+					job.resumed())
+			.update(), "insert bot job");
+	}
+
+	@Override
+	public void updateBotJob(BotJob job) {
+		expectOne(jdbc.sql("""
+				UPDATE bot_job SET state = ?, created_market_makers = ?, created_noise = ?, created_momentum = ?,
+				    parts_done = ?, run_started_at = ?, created_at_run_start = ?, last_part_at = ?, finished_at = ?,
+				    failure = ?, resumed = ?
+				WHERE id = ? AND simulation_id = ?""")
+			.params(job.state().name(), job.created().marketMakers(), job.created().noise(), job.created().momentum(),
+					job.partsDone(), BotJobRows.timestamp(job.runStartedAt()), job.createdAtRunStart(),
+					BotJobRows.timestamp(job.lastPartAt()), BotJobRows.timestamp(job.finishedAt()), job.failure(),
+					job.resumed(), job.id(), job.simulationId())
+			.update(), "update bot job");
+	}
+
+	@Override
+	public Optional<BotJob> botJob(UUID simulationId, UUID jobId) {
+		return jdbc.sql("SELECT " + BotJobRows.COLUMNS + " FROM bot_job WHERE simulation_id = ? AND id = ?")
+			.params(simulationId, jobId)
+			.query((row, index) -> BotJobRows.read(row, json))
+			.optional();
+	}
+
+	@Override
+	public Optional<BotJob> runningBotJob(UUID simulationId) {
+		return jdbc.sql("SELECT " + BotJobRows.COLUMNS + " FROM bot_job WHERE simulation_id = ? AND state = 'RUNNING'")
+			.param(simulationId)
+			.query((row, index) -> BotJobRows.read(row, json))
+			.optional();
 	}
 
 	@Override

@@ -237,6 +237,22 @@ One thing a rebuild can't bring back: each instrument's book minute by minute (`
 
 **A history gap.** `History gap on …` means Kafka deleted records (trades are kept seven days) before Market Data read them. Restoring from a backup rebuilds everything from Execution, history included.
 
+## A bot job stopped, failed or is not moving
+
+A job creates bots in parts of up to 1,000, and `GET /api/v1/admin/bot-jobs/current` shows it to any operator: its state, how many bots it has made of each strategy, and `failure` when it failed. Whatever happens to it, the bots it made stay, each complete with its token and endowment, and nothing makes a bot twice.
+
+**It stopped.** An operator stopped it, and no part committed after the stop. To make the rest, start a new job for what is missing.
+
+**It failed.** A part failed three times in a row and was rolled back each time, and the job was recorded as failed; `failure` gives the reason, and Execution's log has `Part … of bot job … failed 3 times` with the cause. The usual causes:
+- `Could not hand over the tokens of … bot accounts`: the token directory (`mse.bots.token-directory`, the `bot-tokens` volume in Compose) is full or not writable by Execution's user. Make room or fix its owner (`mse`, mode `700`).
+- `An instrument of the endowment was deleted before every bot was made`: someone deleted an instrument the job's endowment names, before any bot of the job held it.
+
+Fix the cause, then start a new job for the rest.
+
+**Execution restarted during the job.** Nothing to do. The process that starts next takes the job up again once its books are reconciled, and logs `Taking up bot job … again: … of … bots made in … parts`; `resumed` in the job counts these. A part that was being made when the process stopped either committed, and the job counts it, or did not, and is made again under the same key. Token files of a part that never committed may be left in the token directory under their account's name; no bot has that account, so their tokens authenticate nothing.
+
+**It is running but not moving.** The count stays the same for more than a few seconds. Look in Execution's log for `The writer stopped while bot job … was being made`: the writer halted or Execution is stopping, and the job stays running in the database. Restart Execution, as for a halted writer above; it takes the job up again. Until the job is done or stopped the market does not open (`409 BOT_JOB_RUNNING`); stop the job to open sooner.
+
 ## A bot run is stuck
 
 The Bot runs panel on the operator screen shows the run in progress, and every run, a page at a time, under Recent runs. One simulator worker holds a run at a time and sends a heartbeat while it works. Each heartbeat keeps the run for that worker for another 15 seconds.

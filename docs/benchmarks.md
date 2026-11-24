@@ -169,6 +169,14 @@ Each bot is an account, a genesis batch funding it (four ledger rows for cash an
 
 The files are written on the thread that sends the command, not on the writer, so other commands no longer wait behind them. Database round trips here go through Docker Desktop's port forwarding, and "ext4" is the disk inside its VM, not a native Linux host.
 
+**A job of 20,000 bots, 2026-11-24.** `BotJobBench` starts one job over HTTP (4,000 market makers, 12,000 noise, 4,000 momentum, each with cash and one holding, in parts of 1,000) and adds an instrument every 100 ms while it runs; same machine, fsync on, token files on the Windows disk:
+
+| Whole job | Rate | Parts | Longest part on the writer | Other commands meanwhile |
+| --- | --- | --- | --- | --- |
+| 23.5 s | 852 bots a second | 20 | 158 ms of statements, about 7 ms of commit | 182, median 16 ms, p95 133 ms, max 194 ms |
+
+The start answered in 42 ms. Each part took about 1.2 s, nearly all of it its 1,000 token files on the Windows disk, made on the job's own thread while the writer took other commands. On ext4 those files took 0.27 s per 1,000 above, so the same job should take nearer 9 s there. The estimate of the time left, read every 2 s, was within a second or two of the end from the second part on. Reconciliation afterwards took 141 ms. Before these changes, 20,000 bots took 200 commands of 100 by hand, and about 171 s of the writer's time.
+
 ## Steady load
 
 **Scenario:** five instruments and 10,000 bots (2,000 market makers, 2,000 momentum, 6,000 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. Until 2026-11-15 the scenario was 1,000 bots; its last result is kept below. Neither is a limit: the exchange limits neither the bot population nor the bots in one run, and `--bots` sets the number.

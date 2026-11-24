@@ -380,7 +380,9 @@ export interface paths {
         /**
          * Create funded bot accounts, each with its own API token, while the market is in SETUP.
          * @description Operator only. Sequenced on the writer and audited, with an idempotency key: a retry with the same key and
-         *     body returns the first answer, even a refusal. Bots are named bot-0001, bot-0002 and so on, in the order
+         *     body returns the first answer, even a refusal. At most 100 bots, answered once they are all made: for
+         *     scripts that make a few bots and wait (the demo seed, the load test). Any number of bots, with progress, is
+         *     a job: POST /admin/bot-jobs. Bots are named bot-0001, bot-0002 and so on, in the order
          *     they are created (bot-10000 follows bot-9999), and each gets the same endowment in its own genesis batch.
          *     Each token is written once to the simulator's secret directory; no response ever contains a token.
          */
@@ -406,6 +408,101 @@ export interface paths {
          *     are untouched. Revoking again revokes nothing: revoked is 0. A revoked token stays revoked.
          */
         readonly post: operations["revokeBotToken"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/bot-jobs": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Start creating any number of bots in the background while the market is in SETUP.
+         * @description Operator only, with an idempotency key; sequenced on the writer and audited. Answers as soon as the job is
+         *     recorded, before any bot is made, with the job as it stands when answered: a retry of the same key and body
+         *     returns the same job, however far it has got. A different body under the key is IDEMPOTENCY_CONFLICT.
+         *
+         *     The exchange then makes the bots in parts, one after another: each part is one ordinary provisioning command
+         *     of up to partSize bots, all with one strategy, under a key derived from the job's key and the part's number,
+         *     so a part sent again (after a restart, say) is answered from its stored answer and makes nothing twice. Other
+         *     commands are taken between parts. The next part always goes to the strategy furthest behind its share, so a
+         *     job stopped partway leaves each strategy in about the proportion asked for. Bots are named and numbered as
+         *     those made by POST /admin/bots are, carry their strategy as a tag, and each gets the same endowment in its
+         *     own genesis batch. Their tokens go to the simulator's secret directory, as for every bot.
+         *
+         *     There is no limit on the count beyond what a count can hold (2,147,483,647). One job runs at a time in a
+         *     simulation, and the market cannot open while it runs. A job survives a restart: the process that starts
+         *     next takes it up again from its next part.
+         */
+        readonly post: operations["startBotJob"];
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/bot-jobs/current": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /**
+         * The current simulation's newest bot job, whatever its state. Operator only.
+         * @description The job's progress as committed: each part moves it on in the part's own transaction. secondsLeft is the
+         *     time left at the rate this process has made bots since it took the job up, and is null until a part has
+         *     committed since then. No content while the simulation has had no job; a job of an earlier simulation is
+         *     never shown.
+         */
+        readonly get: operations["getCurrentBotJob"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/bot-jobs/{jobId}": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        /** One of the current simulation's bot jobs. Operator only. */
+        readonly get: operations["getBotJob"];
+        readonly put?: never;
+        readonly post?: never;
+        readonly delete?: never;
+        readonly options?: never;
+        readonly head?: never;
+        readonly patch?: never;
+        readonly trace?: never;
+    };
+    readonly "/api/v1/admin/bot-jobs/{jobId}/stop": {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly get?: never;
+        readonly put?: never;
+        /**
+         * Stop a running bot job. The bots made so far stay; the rest are not made.
+         * @description Operator only, with an idempotency key; sequenced on the writer and audited. A part being made when the
+         *     stop arrives is the last one to commit, if it commits before the stop; no part commits after it.
+         */
+        readonly post: operations["stopBotJob"];
         readonly delete?: never;
         readonly options?: never;
         readonly head?: never;
@@ -982,6 +1079,8 @@ export interface components {
             readonly restingOrders?: number;
             readonly usage?: components["schemas"]["InstrumentUsage"];
             readonly shortfall?: components["schemas"]["BotShortfall"];
+            /** @description With BOT_JOB_RUNNING and BOT_JOB_NOT_RUNNING, the job the refusal is about. */
+            readonly botJob?: components["schemas"]["BotJob"];
         };
         readonly FieldError: {
             readonly field: string;
@@ -1281,6 +1380,56 @@ export interface components {
             /** @description The tag every bot in the batch carries; runs assign each strategy to bots tagged with it. */
             readonly strategy: components["schemas"]["BotStrategy"];
         };
+        readonly BotJobRequest: {
+            /** @description How many bots in all. There is no limit beyond what a count can hold. */
+            readonly count: number;
+            /** @description How many of each strategy; they must add up to count. 0 for a strategy with none. */
+            readonly strategies: {
+                readonly marketMakers: number;
+                readonly noise: number;
+                readonly momentum: number;
+            };
+            readonly cash: components["schemas"]["Money"];
+            readonly holdings?: readonly components["schemas"]["Endowment"][];
+        };
+        readonly BotJobProgress: {
+            readonly requested: number;
+            readonly created: number;
+        };
+        readonly BotJob: {
+            readonly jobId: components["schemas"]["Uuid"];
+            /**
+             * @description RUNNING until every bot is made (DONE), an operator stops it (STOPPED), or a part cannot be made
+             *     (FAILED). The bots made stay in every case.
+             * @enum {string}
+             */
+            readonly state: "RUNNING" | "DONE" | "STOPPED" | "FAILED";
+            readonly total: number;
+            /** @description Bots made so far, counted by the parts that have committed. */
+            readonly created: number;
+            readonly strategies: {
+                readonly marketMakers: components["schemas"]["BotJobProgress"];
+                readonly noise: components["schemas"]["BotJobProgress"];
+                readonly momentum: components["schemas"]["BotJobProgress"];
+            };
+            readonly cash: components["schemas"]["Money"];
+            readonly holdings: readonly components["schemas"]["Endowment"][];
+            /** @description The most bots one part makes, fixed when the job started. */
+            readonly partSize: number;
+            readonly partsDone: number;
+            readonly startedAt: components["schemas"]["Timestamp"];
+            /** @description When it became DONE, STOPPED or FAILED; null while it runs. */
+            readonly finishedAt: components["schemas"]["Timestamp"] | null;
+            /**
+             * @description An estimate from the rate since the process that has the job took it up, rounded up; null until a part
+             *     has committed since then, and once the job no longer runs.
+             */
+            readonly secondsLeft: number | null;
+            /** @description Why a FAILED job could not go on; null otherwise. */
+            readonly failure: string | null;
+            /** @description How many times a restart took the job up again. */
+            readonly resumed: number;
+        };
         /** @description A strategy a bot run asked for more bots of than are tagged with it. */
         readonly BotShortfall: {
             readonly strategy: components["schemas"]["BotStrategy"];
@@ -1294,7 +1443,10 @@ export interface components {
         readonly BotStrategy: "MARKET_MAKER" | "NOISE" | "MOMENTUM";
         readonly BotPopulation: {
             readonly population: number;
-            /** @description The most bots one command may create. The population itself has no limit. */
+            /**
+             * @description The most bots POST /admin/bots creates at once. The population itself has no limit, and a bot job
+             *     creates any number.
+             */
             readonly maxPerCommand: number;
             /** @description How many bots carry each tag, and how many none. They add up to population. */
             readonly byStrategy: {
@@ -3278,6 +3430,245 @@ export interface operations {
             readonly 504: components["responses"]["OutcomeUnknown"];
         };
     };
+    readonly startBotJob: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody: {
+            readonly content: {
+                readonly "application/json": components["schemas"]["BotJobRequest"];
+            };
+        };
+        readonly responses: {
+            /** @description Started. The bots are being made; read GET /admin/bot-jobs/current for the progress. */
+            readonly 202: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BotJob"];
+                };
+            };
+            /**
+             * @description IDEMPOTENCY_KEY_REQUIRED, or VALIDATION_FAILED with each field named: count out of range, a strategy
+             *     count missing or out of range, the strategies not adding up to count (MIX_MISMATCH), or the endowment
+             *     invalid as for POST /admin/bots.
+             */
+            readonly 400: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /**
+             * @description MARKET_NOT_IN_SETUP, or BOT_JOB_RUNNING with `botJob` the job that is still running (both committed and
+             *     audited), or IDEMPOTENCY_CONFLICT.
+             */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description UNKNOWN_INSTRUMENT (committed and audited). */
+            readonly 422: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
+    readonly getCurrentBotJob: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path?: never;
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The job. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BotJob"];
+                };
+            };
+            /** @description The current simulation has had no bot job. No body. */
+            readonly 204: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    readonly getBotJob: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header?: never;
+            readonly path: {
+                readonly jobId: components["schemas"]["Uuid"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description The job. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BotJob"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description BOT_JOB_NOT_FOUND, also for a job of an earlier simulation. */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    readonly stopBotJob: {
+        readonly parameters: {
+            readonly query?: never;
+            readonly header: {
+                /**
+                 * @description A client-chosen UUID, kept for retries of the same request. Use a new one for every new command. An answer
+                 *     is kept in the simulation the command ran in, and a key is looked up in the current simulation. The
+                 *     market's transitions (open, halt, resume, close) and the start of a simulation also find an answer given
+                 *     in an earlier simulation, and return it. Every other command does not: its key from an earlier simulation
+                 *     is a new command in the current one, so do not send it again once a new simulation has started.
+                 */
+                readonly "Idempotency-Key": components["parameters"]["IdempotencyKey"];
+            };
+            readonly path: {
+                readonly jobId: components["schemas"]["Uuid"];
+            };
+            readonly cookie?: never;
+        };
+        readonly requestBody?: never;
+        readonly responses: {
+            /** @description Stopped. The job as it stopped. */
+            readonly 200: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/json": components["schemas"]["BotJob"];
+                };
+            };
+            readonly 400: components["responses"]["Problem"];
+            /** @description No session. No body. */
+            readonly 401: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not an operator, or missing CSRF token. No body. */
+            readonly 403: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description BOT_JOB_NOT_FOUND (committed and audited once a market exists). */
+            readonly 404: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /**
+             * @description BOT_JOB_NOT_RUNNING with `botJob`, for a job done, stopped or failed already (committed and audited), or
+             *     IDEMPOTENCY_CONFLICT.
+             */
+            readonly 409: {
+                headers: {
+                    readonly [name: string]: unknown;
+                };
+                content: {
+                    readonly "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            readonly 503: components["responses"]["Unavailable"];
+            readonly 504: components["responses"]["OutcomeUnknown"];
+        };
+    };
     readonly getHealthSummary: {
         readonly parameters: {
             readonly query?: never;
@@ -3602,7 +3993,9 @@ export interface operations {
             };
             /**
              * @description MARKET_TRANSITION_NOT_ALLOWED (committed and audited, with the market's current state),
-             *     MARKET_NOT_SET_UP (nothing committed), or IDEMPOTENCY_CONFLICT.
+             *     BOT_JOB_RUNNING (committed and audited, with `botJob` the job still creating bots, as it was when the
+             *     opening was refused; the market stays in SETUP), MARKET_NOT_SET_UP (nothing committed), or
+             *     IDEMPOTENCY_CONFLICT.
              */
             readonly 409: {
                 headers: {

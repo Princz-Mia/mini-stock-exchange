@@ -690,7 +690,9 @@ paths:
       summary: Create funded bot accounts, each with its own API token, while the market is in SETUP.
       description: |
         Operator only. Sequenced on the writer and audited, with an idempotency key: a retry with the same key and
-        body returns the first answer, even a refusal. Bots are named bot-0001, bot-0002 and so on, in the order
+        body returns the first answer, even a refusal. At most 100 bots, answered once they are all made: for
+        scripts that make a few bots and wait (the demo seed, the load test). Any number of bots, with progress, is
+        a job: POST /admin/bot-jobs. Bots are named bot-0001, bot-0002 and so on, in the order
         they are created (bot-10000 follows bot-9999), and each gets the same endowment in its own genesis batch.
         Each token is written once to the simulator's secret directory; no response ever contains a token.
       parameters:
@@ -760,6 +762,161 @@ paths:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
           description: IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
+  /api/v1/admin/bot-jobs:
+    post:
+      tags: [execution]
+      operationId: startBotJob
+      summary: Start creating any number of bots in the background while the market is in SETUP.
+      description: |
+        Operator only, with an idempotency key; sequenced on the writer and audited. Answers as soon as the job is
+        recorded, before any bot is made, with the job as it stands when answered: a retry of the same key and body
+        returns the same job, however far it has got. A different body under the key is IDEMPOTENCY_CONFLICT.
+
+        The exchange then makes the bots in parts, one after another: each part is one ordinary provisioning command
+        of up to partSize bots, all with one strategy, under a key derived from the job's key and the part's number,
+        so a part sent again (after a restart, say) is answered from its stored answer and makes nothing twice. Other
+        commands are taken between parts. The next part always goes to the strategy furthest behind its share, so a
+        job stopped partway leaves each strategy in about the proportion asked for. Bots are named and numbered as
+        those made by POST /admin/bots are, carry their strategy as a tag, and each gets the same endowment in its
+        own genesis batch. Their tokens go to the simulator's secret directory, as for every bot.
+
+        There is no limit on the count beyond what a count can hold (2,147,483,647). One job runs at a time in a
+        simulation, and the market cannot open while it runs. A job survives a restart: the process that starts
+        next takes it up again from its next part.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/BotJobRequest' }
+      responses:
+        '202':
+          description: Started. The bots are being made; read GET /admin/bot-jobs/current for the progress.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotJob' }
+        '400':
+          description: |
+            IDEMPOTENCY_KEY_REQUIRED, or VALIDATION_FAILED with each field named: count out of range, a strategy
+            count missing or out of range, the strategies not adding up to count (MIX_MISMATCH), or the endowment
+            invalid as for POST /admin/bots.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '409':
+          description: |
+            MARKET_NOT_IN_SETUP, or BOT_JOB_RUNNING with `botJob` the job that is still running (both committed and
+            audited), or IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: UNKNOWN_INSTRUMENT (committed and audited).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '504':
+          $ref: '#/components/responses/OutcomeUnknown'
+
+  /api/v1/admin/bot-jobs/current:
+    get:
+      tags: [execution]
+      operationId: getCurrentBotJob
+      summary: The current simulation's newest bot job, whatever its state. Operator only.
+      description: |
+        The job's progress as committed: each part moves it on in the part's own transaction. secondsLeft is the
+        time left at the rate this process has made bots since it took the job up, and is null until a part has
+        committed since then. No content while the simulation has had no job; a job of an earlier simulation is
+        never shown.
+      responses:
+        '200':
+          description: The job.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotJob' }
+        '204':
+          description: The current simulation has had no bot job. No body.
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator. No body.
+
+  /api/v1/admin/bot-jobs/{jobId}:
+    get:
+      tags: [execution]
+      operationId: getBotJob
+      summary: One of the current simulation's bot jobs. Operator only.
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Uuid' }
+      responses:
+        '200':
+          description: The job.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotJob' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator. No body.
+        '404':
+          description: BOT_JOB_NOT_FOUND, also for a job of an earlier simulation.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+
+  /api/v1/admin/bot-jobs/{jobId}/stop:
+    post:
+      tags: [execution]
+      operationId: stopBotJob
+      summary: Stop a running bot job. The bots made so far stay; the rest are not made.
+      description: |
+        Operator only, with an idempotency key; sequenced on the writer and audited. A part being made when the
+        stop arrives is the last one to commit, if it commits before the stop; no part commits after it.
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema: { $ref: '#/components/schemas/Uuid' }
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Stopped. The job as it stopped.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BotJob' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '404':
+          description: BOT_JOB_NOT_FOUND (committed and audited once a market exists).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: |
+            BOT_JOB_NOT_RUNNING with `botJob`, for a job done, stopped or failed already (committed and audited), or
+            IDEMPOTENCY_CONFLICT.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -973,7 +1130,9 @@ paths:
         '409':
           description: |
             MARKET_TRANSITION_NOT_ALLOWED (committed and audited, with the market's current state),
-            MARKET_NOT_SET_UP (nothing committed), or IDEMPOTENCY_CONFLICT.
+            BOT_JOB_RUNNING (committed and audited, with `botJob` the job still creating bots, as it was when the
+            opening was refused; the market stays in SETUP), MARKET_NOT_SET_UP (nothing committed), or
+            IDEMPOTENCY_CONFLICT.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1688,6 +1847,9 @@ components:
             stopped. The exchange's own count; fewer may rest, by up to one transaction of the close.
         usage: { $ref: '#/components/schemas/InstrumentUsage' }
         shortfall: { $ref: '#/components/schemas/BotShortfall' }
+        botJob:
+          $ref: '#/components/schemas/BotJob'
+          description: With BOT_JOB_RUNNING and BOT_JOB_NOT_RUNNING, the job the refusal is about.
     FieldError:
       type: object
       additionalProperties: false
@@ -2145,6 +2307,92 @@ components:
           $ref: '#/components/schemas/BotStrategy'
           description: The tag every bot in the batch carries; runs assign each strategy to bots tagged with it.
 
+    BotJobRequest:
+      type: object
+      additionalProperties: false
+      required: [count, strategies, cash]
+      properties:
+        count:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          description: How many bots in all. There is no limit beyond what a count can hold.
+        strategies:
+          type: object
+          additionalProperties: false
+          description: How many of each strategy; they must add up to count. 0 for a strategy with none.
+          required: [marketMakers, noise, momentum]
+          properties:
+            marketMakers: { type: integer, minimum: 0, maximum: 2147483647 }
+            noise: { type: integer, minimum: 0, maximum: 2147483647 }
+            momentum: { type: integer, minimum: 0, maximum: 2147483647 }
+        cash: { $ref: '#/components/schemas/Money' }
+        holdings:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/Endowment' }
+
+    BotJobProgress:
+      type: object
+      additionalProperties: false
+      required: [requested, created]
+      properties:
+        requested: { type: integer, minimum: 0 }
+        created: { type: integer, minimum: 0 }
+
+    BotJob:
+      type: object
+      additionalProperties: false
+      required: [jobId, state, total, created, strategies, cash, holdings, partSize, partsDone, startedAt, finishedAt,
+                 secondsLeft, failure, resumed]
+      properties:
+        jobId: { $ref: '#/components/schemas/Uuid' }
+        state:
+          type: string
+          enum: [RUNNING, DONE, STOPPED, FAILED]
+          description: |
+            RUNNING until every bot is made (DONE), an operator stops it (STOPPED), or a part cannot be made
+            (FAILED). The bots made stay in every case.
+        total: { type: integer, minimum: 1 }
+        created:
+          type: integer
+          minimum: 0
+          description: Bots made so far, counted by the parts that have committed.
+        strategies:
+          type: object
+          additionalProperties: false
+          required: [marketMakers, noise, momentum]
+          properties:
+            marketMakers: { $ref: '#/components/schemas/BotJobProgress' }
+            noise: { $ref: '#/components/schemas/BotJobProgress' }
+            momentum: { $ref: '#/components/schemas/BotJobProgress' }
+        cash: { $ref: '#/components/schemas/Money' }
+        holdings:
+          type: array
+          items: { $ref: '#/components/schemas/Endowment' }
+        partSize:
+          type: integer
+          minimum: 1
+          description: The most bots one part makes, fixed when the job started.
+        partsDone: { type: integer, minimum: 0 }
+        startedAt: { $ref: '#/components/schemas/Timestamp' }
+        finishedAt:
+          oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: When it became DONE, STOPPED or FAILED; null while it runs.
+        secondsLeft:
+          type: [integer, 'null']
+          minimum: 0
+          description: |
+            An estimate from the rate since the process that has the job took it up, rounded up; null until a part
+            has committed since then, and once the job no longer runs.
+        failure:
+          type: [string, 'null']
+          description: Why a FAILED job could not go on; null otherwise.
+        resumed:
+          type: integer
+          minimum: 0
+          description: How many times a restart took the job up again.
+
     BotShortfall:
       type: object
       additionalProperties: false
@@ -2169,7 +2417,9 @@ components:
         maxPerCommand:
           type: integer
           minimum: 1
-          description: The most bots one command may create. The population itself has no limit.
+          description: |
+            The most bots POST /admin/bots creates at once. The population itself has no limit, and a bot job
+            creates any number.
         byStrategy:
           type: object
           additionalProperties: false

@@ -282,6 +282,18 @@ public interface TradingStore {
 	void insertBots(UUID simulationId, long commandSequence, BotStrategy strategy, long cashCents,
 			List<ProvisionAccount.Holding> holdings, List<NewBot> bots);
 
+	/** Records a bot job as it starts. */
+	void insertBotJob(BotJob job);
+
+	/** Writes a job's state, progress and the fields of the run that has it, as {@code job} holds them. */
+	void updateBotJob(BotJob job);
+
+	/** The job, if it is this simulation's. */
+	Optional<BotJob> botJob(UUID simulationId, UUID jobId);
+
+	/** The simulation's running job, if one runs: there is at most one. */
+	Optional<BotJob> runningBotJob(UUID simulationId);
+
 	/** Whether the account is a bot in this market. */
 	boolean isBotAccount(UUID simulationId, UUID accountId);
 

@@ -90,6 +90,21 @@ public final class TradingEngine {
 	 */
 	static final String SCHEDULED_CLOSE = "MARKET_CLOSE_SCHEDULED";
 
+	/** The most bots one part of a bot job makes, unless configured. */
+	public static final int BOT_JOB_PART_SIZE = 1_000;
+
+	/**
+	 * The most bots a part may be configured to make: a part is one transaction on the writer, which must answer well
+	 * inside the request timeout of the commands queued behind it.
+	 */
+	public static final int MAX_BOT_JOB_PART_SIZE = 10_000;
+
+	/** The route of a bot job part's stored answer, which no request ever comes by. */
+	static final String BOT_JOB_PART = "BOT_JOB_PART";
+
+	/** The route of the stored answer recording that a bot job failed, which no request ever comes by. */
+	static final String BOT_JOB_FAILURE = "BOT_JOB_FAILURE";
+
 	/** How many times a later part of a close's sweep is tried before the writer gives the close up. */
 	static final int SWEEP_ATTEMPTS = 3;
 
@@ -136,6 +151,10 @@ public final class TradingEngine {
 	private final RetryPause retryPause;
 
 	private final CloseSchedule closeSchedule;
+
+	private final int botJobPartSize;
+
+	private final BotJobRunner botJobs;
 
 	private final Map<UUID, OrderBook> books = new HashMap<>();
 
@@ -262,6 +281,24 @@ public final class TradingEngine {
 			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings, LongSupplier nanoTime,
 			RestingOrders resting, int closeChunkOrders, RetryPause retryPause, SimulationChanges simulationChanges,
 			CloseSchedule closeSchedule) {
+		this(store, transactions, writer, clock, botCredentials, accountChanges, timings, nanoTime, resting,
+				closeChunkOrders, retryPause, simulationChanges, closeSchedule, BOT_JOB_PART_SIZE, BotJobRunner.NONE);
+	}
+
+	/**
+	 * {@code botJobPartSize} is the most bots one part of a bot job makes, fixed for a job when it starts, and
+	 * {@code botJobs} makes the parts of each job that starts, or that was running when this engine starts.
+	 */
+	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
+			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings, LongSupplier nanoTime,
+			RestingOrders resting, int closeChunkOrders, RetryPause retryPause, SimulationChanges simulationChanges,
+			CloseSchedule closeSchedule, int botJobPartSize, BotJobRunner botJobs) {
+		if (botJobPartSize < 1 || botJobPartSize > MAX_BOT_JOB_PART_SIZE) {
+			throw new IllegalArgumentException("A bot job's part makes from 1 to " + MAX_BOT_JOB_PART_SIZE + " bots: "
+					+ botJobPartSize);
+		}
+		this.botJobPartSize = botJobPartSize;
+		this.botJobs = botJobs;
 		if (closeChunkOrders < 1) {
 			throw new IllegalArgumentException(
 					"A close cancels at least one order per transaction: " + closeChunkOrders);
@@ -300,6 +337,7 @@ public final class TradingEngine {
 	 */
 	public void start() {
 		UUID previous = simulationId;
+		BotJob[] resuming = new BotJob[1];
 		transactions.inTransaction(() -> {
 			Market market = lockCurrentMarket();
 			UUID simulation = market.simulationId();
@@ -330,6 +368,12 @@ public final class TradingEngine {
 			}
 			Set<UUID> trading = store.tradingAccounts(simulation);
 			Instant closing = store.closesAt(simulation).orElse(null);
+			// Only the current simulation's job: one of a simulation before it is never taken up here.
+			Optional<BotJob> running = store.runningBotJob(simulation);
+			if (running.isPresent()) {
+				resuming[0] = running.get().resumedAt(now());
+				store.updateBotJob(resuming[0]);
+			}
 			simulationId = simulation;
 			writerEpoch = epoch;
 			closed = "CLOSED".equals(market.state());
@@ -363,6 +407,17 @@ public final class TradingEngine {
 		// check that comes before admission is refused as not started and looks again after the interval.
 		armCloseSchedule();
 		started = true;
+		if (resuming[0] != null) {
+			BotJob job = resuming[0];
+			LOG.info("Taking up bot job {} again: {} of {} bots made in {} parts", job.id(), job.createdTotal(),
+					job.total(), job.partsDone());
+			botJobs.run(job);
+		}
+	}
+
+	/** The service's clock to the microsecond, as the database keeps a time, so a job read back equals itself. */
+	private Instant now() {
+		return clock.instant().truncatedTo(ChronoUnit.MICROS);
 	}
 
 	/**
@@ -682,6 +737,38 @@ public final class TradingEngine {
 	/** Asks a running bot run to stop. */
 	public CompletableFuture<BotRunResult> stopBotRun(CommandKey key, StopBotRun command) {
 		return submit(() -> processStopRun(key, command));
+	}
+
+	/**
+	 * Starts a job that creates bots in the background while the market is in SETUP, at most one at a time in a
+	 * simulation. The answer comes once the job is recorded; its parts follow, each a command of its own, so other
+	 * commands are taken between them.
+	 */
+	public CompletableFuture<BotJobResult> startBotJob(CommandKey key, StartBotJob command) {
+		return submit(() -> processStartJob(key, command));
+	}
+
+	/** Stops a running bot job: no part commits after this, and the bots already made stay. */
+	public CompletableFuture<BotJobResult> stopBotJob(CommandKey key, StopBotJob command) {
+		return submit(() -> processStopJob(key, command));
+	}
+
+	/**
+	 * Makes the next part of {@code job}, as last committed, for the job's runner: its tokens are handed over on the
+	 * calling thread, then the part is one command on the writer, under a key derived from the job's and the part's
+	 * number. The part decides from the job's row, not from {@code job}: a job stopped meanwhile makes nothing, and a
+	 * part that has committed already is answered from its stored answer.
+	 */
+	public CompletableFuture<BotJobResult> botJobPart(BotJob job) {
+		BotJob.Part part = job.nextPart()
+			.orElseThrow(() -> new IllegalArgumentException("Job " + job.id() + " has no bot left to make"));
+		int number = job.partsDone();
+		return withTokens(part.count(), (issued) -> () -> processJobPart(job, number, part, issued));
+	}
+
+	/** Records that {@code job} cannot go on, for the job's runner, once, if it is still running. */
+	public CompletableFuture<BotJobResult> failBotJob(BotJob job, String reason) {
+		return submit(() -> processFailJob(job, reason));
 	}
 
 	/** A snapshot of one side of a book, read on the writer thread so it never sees a half-applied plan. */
@@ -1733,6 +1820,213 @@ public final class TradingEngine {
 		store.insertBots(simulationId, sequence, strategy, cashCents, holdings, bots);
 	}
 
+	/** A job command's answer and, for a start, whether this transaction started the job. */
+	private record JobAnswer(BotJobResult result, boolean started) {
+	}
+
+	private BotJobResult processStartJob(CommandKey key, StartBotJob command) {
+		JobAnswer answer;
+		try {
+			ensureMarket();
+			answer = timed("other", () -> startJobInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+		if (answer.started()) {
+			BotJob job = answer.result().job();
+			LOG.info("Bot job {} started: {} bots ({} market makers, {} noise, {} momentum) in parts of up to {}",
+					job.id(), job.total(), job.requested().marketMakers(), job.requested().noise(),
+					job.requested().momentum(), job.partSize());
+			botJobs.run(job);
+		}
+		return answer.result();
+	}
+
+	/**
+	 * A job is started only in SETUP, while no other job of the simulation runs, with an endowment of instruments the
+	 * market has. Refusals are committed and audited, as for every setup command.
+	 */
+	private JobAnswer startJobInTransaction(CommandKey key, StartBotJob command) {
+		TradingStore.Opening<BotJobResult> opening = open(key, BotJobResult.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return new JobAnswer(replay(key, opening.prior().get()), false);
+		}
+		long sequence = opening.sequence();
+		Optional<BotJob> running = store.runningBotJob(simulationId);
+		BotJobResult.Status refusal = null;
+		if (!"SETUP".equals(market.state())) {
+			refusal = BotJobResult.Status.NOT_IN_SETUP;
+		}
+		else if (running.isPresent()) {
+			refusal = BotJobResult.Status.JOB_RUNNING;
+		}
+		else if (!command.holdings().stream().allMatch((holding) -> books.containsKey(holding.instrumentId()))) {
+			refusal = BotJobResult.Status.UNKNOWN_INSTRUMENT;
+		}
+		if (refusal != null) {
+			store.insertAudit(simulationId, command.actorUserId(), "BOT_JOB_START", "NOT_ALLOWED", key.idempotencyKey(),
+					sequence);
+			int status = refusal == BotJobResult.Status.UNKNOWN_INSTRUMENT ? 422 : 409;
+			return new JobAnswer(remember(key, status, new BotJobResult(refusal,
+					refusal == BotJobResult.Status.JOB_RUNNING ? running.get() : null, sequence)), false);
+		}
+		BotJob job = BotJob.start(command.jobId(), simulationId, command.actorUserId(), key.idempotencyKey(),
+				botJobPartSize, command.requested(), command.cashCents(), command.holdings(), now());
+		store.insertBotJob(job);
+		store.insertAudit(simulationId, command.actorUserId(), "BOT_JOB_START", "APPLIED", key.idempotencyKey(),
+				sequence);
+		return new JobAnswer(remember(key, 202, new BotJobResult(BotJobResult.Status.STARTED, job, sequence)), true);
+	}
+
+	private BotJobResult processStopJob(CommandKey key, StopBotJob command) {
+		if (simulationId == null) {
+			return new BotJobResult(BotJobResult.Status.NOT_FOUND, null, 0);
+		}
+		try {
+			return timed("other", () -> stopJobInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+	}
+
+	/** A part after this one finds the job stopped and makes nothing: parts and stops are commands on this writer. */
+	private BotJobResult stopJobInTransaction(CommandKey key, StopBotJob command) {
+		TradingStore.Opening<BotJobResult> opening = open(key, BotJobResult.class);
+		if (opening.prior().isPresent()) {
+			return replay(key, opening.prior().get());
+		}
+		long sequence = opening.sequence();
+		Optional<BotJob> found = store.botJob(simulationId, command.jobId());
+		BotJobResult.Status status = found.isEmpty() ? BotJobResult.Status.NOT_FOUND
+				: found.get().state() == BotJob.State.RUNNING ? BotJobResult.Status.STOPPED
+						: BotJobResult.Status.NOT_RUNNING;
+		BotJob job = found.orElse(null);
+		if (status == BotJobResult.Status.STOPPED) {
+			job = job.stopped(now());
+			store.updateBotJob(job);
+		}
+		store.insertAudit(simulationId, command.actorUserId(), "BOT_JOB_STOP",
+				status == BotJobResult.Status.STOPPED ? "APPLIED" : "NOT_ALLOWED", key.idempotencyKey(), sequence);
+		int http = switch (status) {
+			case STOPPED -> 200;
+			case NOT_FOUND -> 404;
+			default -> 409;
+		};
+		return remember(key, http, new BotJobResult(status, job, sequence));
+	}
+
+	/**
+	 * One part of a job. A job of a simulation this engine no longer writes for makes nothing and commits nothing:
+	 * a close or a new simulation never carries another simulation's job.
+	 */
+	private Made<BotJobResult> processJobPart(BotJob job, int number, BotJob.Part part, IssuedBots issued) {
+		if (simulationId == null || !simulationId.equals(job.simulationId())) {
+			return new Made<>(new BotJobResult(BotJobResult.Status.NOT_FOUND, null, 0), List.of());
+		}
+		CommandKey key = new CommandKey(job.startedBy(), BotJob.partKey(job.idempotencyKey(), number), BOT_JOB_PART,
+				BotJob.partHash(job.id(), number, part));
+		Made<BotJobResult> made;
+		try {
+			made = timed("other", () -> jobPartInTransaction(key, job.id(), number, part, issued));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+		knownToTrade(made.accounts());
+		return made;
+	}
+
+	/**
+	 * A part makes its bots and moves the job's row on in the same transaction, so the row's count of parts done is
+	 * exactly the parts that committed: the next part, by this process or the next, is the one after it. A part that
+	 * disagrees with the row is a fault and rolls back; a job that cannot go on (the market out of SETUP, an instrument
+	 * of its endowment gone) is recorded as failed by the part that finds it.
+	 */
+	private Made<BotJobResult> jobPartInTransaction(CommandKey key, UUID jobId, int number, BotJob.Part part,
+			IssuedBots issued) {
+		TradingStore.Opening<BotJobResult> opening = open(key, BotJobResult.class);
+		Market market = opening.market();
+		if (opening.prior().isPresent()) {
+			return new Made<>(replay(key, opening.prior().get()), List.of());
+		}
+		long sequence = opening.sequence();
+		BotJob job = store.botJob(simulationId, jobId).orElse(null);
+		BotJobResult.Status refusal = null;
+		if (job == null) {
+			refusal = BotJobResult.Status.NOT_FOUND;
+		}
+		else if (job.state() != BotJob.State.RUNNING) {
+			refusal = BotJobResult.Status.NOT_RUNNING;
+		}
+		else if (job.partsDone() != number || !job.nextPart().equals(Optional.of(part))) {
+			throw new IllegalStateException("Part " + number + " of bot job " + jobId + " (" + part + ") is not the "
+					+ "next one: " + job.partsDone() + " parts are done and the next is " + job.nextPart());
+		}
+		else if (!"SETUP".equals(market.state())) {
+			refusal = BotJobResult.Status.NOT_IN_SETUP;
+			job = job.failed("The market left SETUP before every bot was made", now());
+			store.updateBotJob(job);
+		}
+		else if (!job.holdings().stream().allMatch((holding) -> books.containsKey(holding.instrumentId()))) {
+			refusal = BotJobResult.Status.UNKNOWN_INSTRUMENT;
+			job = job.failed("An instrument of the endowment was deleted before every bot was made", now());
+			store.updateBotJob(job);
+		}
+		if (refusal != null) {
+			store.insertAudit(simulationId, key.principalId(), "BOT_PROVISION", "NOT_ALLOWED", key.idempotencyKey(),
+					sequence);
+			int status = refusal == BotJobResult.Status.NOT_FOUND ? 404
+					: refusal == BotJobResult.Status.UNKNOWN_INSTRUMENT ? 422 : 409;
+			return new Made<>(remember(key, status, new BotJobResult(refusal, job, sequence)), List.of());
+		}
+		int population = store.botCount(simulationId);
+		Math.addExact(population, part.count());
+		insertBots(part.strategy(), job.cashCents(), job.holdings(), population, issued, sequence);
+		BotJob after = job.afterPart(part, now());
+		store.updateBotJob(after);
+		store.insertAudit(simulationId, key.principalId(), "BOT_PROVISION", "APPLIED", key.idempotencyKey(), sequence);
+		if (after.state() == BotJob.State.DONE) {
+			LOG.info("Bot job {} done: {} bots in {} parts", after.id(), after.total(), after.partsDone());
+		}
+		return new Made<>(remember(key, 201, new BotJobResult(BotJobResult.Status.PART_CREATED, after, sequence)),
+				issued.accounts());
+	}
+
+	private BotJobResult processFailJob(BotJob job, String reason) {
+		if (simulationId == null || !simulationId.equals(job.simulationId())) {
+			return new BotJobResult(BotJobResult.Status.NOT_FOUND, null, 0);
+		}
+		CommandKey key = new CommandKey(job.startedBy(), BotJob.failureKey(job.idempotencyKey()), BOT_JOB_FAILURE,
+				BotJob.sha256(job.id().toString()));
+		try {
+			return timed("other", () -> failJobInTransaction(key, job.id(), reason));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+	}
+
+	private BotJobResult failJobInTransaction(CommandKey key, UUID jobId, String reason) {
+		TradingStore.Opening<BotJobResult> opening = open(key, BotJobResult.class);
+		if (opening.prior().isPresent()) {
+			return replay(key, opening.prior().get());
+		}
+		long sequence = opening.sequence();
+		BotJob job = store.botJob(simulationId, jobId).orElse(null);
+		BotJobResult.Status status = job == null ? BotJobResult.Status.NOT_FOUND
+				: job.state() == BotJob.State.RUNNING ? BotJobResult.Status.FAILED : BotJobResult.Status.NOT_RUNNING;
+		if (status == BotJobResult.Status.FAILED) {
+			job = job.failed(reason, now());
+			store.updateBotJob(job);
+		}
+		store.insertAudit(simulationId, key.principalId(), "BOT_JOB_FAIL",
+				status == BotJobResult.Status.FAILED ? "APPLIED" : "NOT_ALLOWED", key.idempotencyKey(), sequence);
+		return remember(key, 200, new BotJobResult(status, job, sequence));
+	}
+
 	private TokenRevocation processRevoke(CommandKey key, RevokeBotToken command) {
 		if (simulationId == null) {
 			return new TokenRevocation(TokenRevocation.Status.NOT_A_BOT, command.accountId(), 0, 0);
@@ -1926,6 +2220,16 @@ public final class TradingEngine {
 					key.idempotencyKey(), sequence);
 			return new Controlled(remember(key, 409,
 					new MarketTransition(MarketTransition.Status.NOT_ALLOWED, market.state(), sequence)), null);
+		}
+		if (action == MarketControl.Action.OPEN) {
+			Optional<BotJob> creating = store.runningBotJob(simulationId);
+			if (creating.isPresent()) {
+				// Bots are made only in SETUP; opening now would leave the job's other parts to be refused.
+				store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "NOT_ALLOWED",
+						key.idempotencyKey(), sequence);
+				return new Controlled(remember(key, 409, new MarketTransition(MarketTransition.Status.BOT_JOB_RUNNING,
+						market.state(), sequence, null, creating.get())), null);
+			}
 		}
 		store.updateMarketState(simulationId, action.to());
 		Instant closing = null;
@@ -2520,6 +2824,7 @@ public final class TradingEngine {
 			case BotsResult bots -> bots.commandSequence();
 			case BotRunResult run -> run.commandSequence();
 			case TokenRevocation revocation -> revocation.commandSequence();
+			case BotJobResult job -> job.commandSequence();
 			default -> throw new IllegalArgumentException("Not a command result: " + result);
 		};
 		writes.result(key, httpStatus, result, sequence);

@@ -160,6 +160,13 @@ class MarketController {
 					result.closesAt());
 			case NOT_ALLOWED -> throw notAllowed(action, result.state(), result.commandSequence());
 			case NOT_SET_UP -> throw notSetUp();
+			// The job as it was when the opening was refused, which a replay of the key repeats.
+			case BOT_JOB_RUNNING -> throw new ApiException(HttpStatus.CONFLICT, "BOT_JOB_RUNNING",
+					"Bots are still being created: " + BotJobViews.progress(result.botJob())
+							+ ". The market can open once the job is done or stopped")
+				.with("state", result.state())
+				.with("commandSequence", Long.toString(result.commandSequence()))
+				.with("botJob", BotJobViews.of(result.botJob()));
 		};
 	}
 
