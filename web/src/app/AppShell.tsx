@@ -100,8 +100,9 @@ function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout
     <div className="shell">
       <header className="topbar">
         <span className="brand">Mini Stock Exchange</span>
+        {/* Only the name is cut short on a narrow screen: that the funds are virtual always shows. */}
         <span className="context-badge" title={name ?? undefined}>
-          {name ?? 'Simulation'} · Virtual funds
+          <span className="context-name">{name ?? 'Simulation'}</span> <span className="context-funds">· Virtual funds</span>
         </span>
         {trader && operator && <ModeSwitch mode={mode} />}
         <nav aria-label="Main">

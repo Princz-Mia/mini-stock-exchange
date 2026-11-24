@@ -35,6 +35,15 @@ const INSTRUMENTS = {
   feed: { state: 'STALE', lag: 4 },
 };
 
+/** The simulation context in the top bar, found by the name it shows. */
+function badge(name: string): HTMLElement {
+  const shown = screen.getByText(name, { selector: '.context-name' }).closest<HTMLElement>('.context-badge');
+  if (shown === null) {
+    throw new Error(`no simulation context for ${name}`);
+  }
+  return shown;
+}
+
 describe('signing in', () => {
   beforeEach(() => resetSession());
   afterEach(() => resetSession());
@@ -65,7 +74,7 @@ describe('signing in', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
 
     expect(await screen.findByRole('heading', { name: 'NOVA', level: 1 })).toBeInTheDocument();
-    expect(screen.getByText('Simulation · Virtual funds')).toBeInTheDocument();
+    expect(badge('Simulation')).toHaveTextContent('Simulation · Virtual funds');
     expect(screen.getByText('trader')).toBeInTheDocument();
   });
 
@@ -79,13 +88,20 @@ describe('signing in', () => {
       }))
       .on('GET /api/v1/instruments', { status: 200, json: INSTRUMENTS });
     const { unmount } = openAt('/terminal');
-    expect(await screen.findByText('Thursday seminar · Virtual funds')).toHaveAttribute('title', 'Thursday seminar');
+    await screen.findByText('Thursday seminar');
+    expect(badge('Thursday seminar')).toHaveTextContent('Thursday seminar · Virtual funds');
+    expect(badge('Thursday seminar')).toHaveAttribute('title', 'Thursday seminar');
+    // Only the name is cut short on a narrow screen, so that the funds are virtual always shows: it is apart from it.
+    expect(screen.getByText('Thursday seminar')).toHaveClass('context-name');
+    expect(screen.getByText('· Virtual funds')).not.toHaveClass('context-name');
+    expect(screen.getByText('· Virtual funds').closest('.context-name')).toBeNull();
     unmount();
 
     name = null;
     openAt('/terminal');
     await screen.findByRole('heading', { name: 'NOVA', level: 1 });
-    expect(await screen.findByText('Simulation · Virtual funds')).not.toHaveAttribute('title');
+    expect(badge('Simulation')).toHaveTextContent('Simulation · Virtual funds');
+    expect(badge('Simulation')).not.toHaveAttribute('title');
   });
 
   it('keeps the typed username after wrong credentials', async () => {
