@@ -50,19 +50,71 @@ final class FileBotCredentials implements BotCredentials, AutoCloseable {
 
 	private static final Logger LOG = LoggerFactory.getLogger(FileBotCredentials.class);
 
+	/**
+	 * The three steps that make a file durable under its final name, apart from the rest so their order can be checked:
+	 * a file is synced before it is renamed, and the directory after the last rename of a batch. Leaving either out
+	 * loses nothing anyone sees until the power fails, so only the order shows it.
+	 */
+	interface Disk {
+
+		/** Syncs a file's data and the metadata needed to read it back, its size among them. */
+		void force(Path file, FileChannel channel) throws IOException;
+
+		/** Puts a file in place under its final name, in one step. */
+		void move(Path from, Path to) throws IOException;
+
+		/**
+		 * Makes the renames in {@code directory} durable. Windows cannot open a directory to sync it, so where the file
+		 * system has no POSIX view, which only development runs on, this is skipped as the permissions are.
+		 */
+		void syncDirectory(Path directory) throws IOException;
+
+		Disk REAL = new Disk() {
+
+			@Override
+			public void force(Path file, FileChannel channel) throws IOException {
+				channel.force(true);
+			}
+
+			@Override
+			public void move(Path from, Path to) throws IOException {
+				Files.move(from, to, StandardCopyOption.ATOMIC_MOVE);
+			}
+
+			@Override
+			public void syncDirectory(Path directory) throws IOException {
+				if (!posix()) {
+					return;
+				}
+				try (FileChannel folder = FileChannel.open(directory, StandardOpenOption.READ)) {
+					folder.force(true);
+				}
+			}
+
+		};
+
+	}
+
 	private final Path directory;
 
 	private final ExecutorService syncing;
+
+	private final Disk disk;
 
 	FileBotCredentials(Path directory) {
 		this(directory, SYNC_THREADS);
 	}
 
 	FileBotCredentials(Path directory, int syncThreads) {
+		this(directory, syncThreads, Disk.REAL);
+	}
+
+	FileBotCredentials(Path directory, int syncThreads, Disk disk) {
 		if (syncThreads < 1) {
 			throw new IllegalArgumentException("At least one thread syncs the token files: " + syncThreads);
 		}
 		this.directory = directory;
+		this.disk = disk;
 		this.syncing = Executors.newFixedThreadPool(syncThreads,
 				Thread.ofPlatform().name("bot-token-sync-", 1).daemon().factory());
 	}
@@ -97,11 +149,12 @@ final class FileBotCredentials implements BotCredentials, AutoCloseable {
 			for (int i = 0; i < accountIds.size(); i++) {
 				current = accountIds.get(i);
 				Path target = directory.resolve(current + SUFFIX);
-				Files.move(temporaries.get(i), target, StandardCopyOption.ATOMIC_MOVE);
+				disk.move(temporaries.get(i), target);
 				temporaries.set(i, null);
 				placed.add(target);
 			}
-			syncDirectory();
+			// The renames land with a later journal commit unless the directory is synced.
+			disk.syncDirectory(directory);
 		}
 		catch (IOException ex) {
 			deleteQuietly(temporaries);
@@ -151,28 +204,31 @@ final class FileBotCredentials implements BotCredentials, AutoCloseable {
 			}
 		}
 		List<Future<Void>> synced = new ArrayList<>(open.size());
-		for (FileChannel file : open) {
+		int first = temporaries.size() - open.size();
+		for (int i = 0; i < open.size(); i++) {
+			FileChannel file = open.get(i);
+			Path temporary = temporaries.get(first + i);
 			synced.add(syncing.submit(() -> {
 				try (file) {
-					file.force(true);
+					disk.force(temporary, file);
 				}
 				return null;
 			}));
 		}
-		AccountFailure first = null;
+		AccountFailure failed = null;
 		for (int i = 0; i < synced.size(); i++) {
 			try {
 				synced.get(i).get();
 			}
 			catch (ExecutionException ex) {
-				if (first == null) {
-					first = new AccountFailure(accounts.get(i),
+				if (failed == null) {
+					failed = new AccountFailure(accounts.get(i),
 							ex.getCause() instanceof IOException io ? io : new IOException(ex.getCause()));
 				}
 			}
 		}
-		if (first != null) {
-			throw first;
+		if (failed != null) {
+			throw failed;
 		}
 	}
 
@@ -198,20 +254,6 @@ final class FileBotCredentials implements BotCredentials, AutoCloseable {
 			catch (IOException ex) {
 				// Its file is deleted with the batch's.
 			}
-		}
-	}
-
-	/**
-	 * Makes the renames durable: a file's own sync covers its data and its temporary name, and the rename lands with a
-	 * later journal commit unless the directory is synced. Windows cannot open a directory to sync it, so where the
-	 * file system has no POSIX view, which only development runs on, this is skipped as the permissions are.
-	 */
-	private void syncDirectory() throws IOException {
-		if (!posix()) {
-			return;
-		}
-		try (FileChannel folder = FileChannel.open(directory, StandardOpenOption.READ)) {
-			folder.force(true);
 		}
 	}
 
