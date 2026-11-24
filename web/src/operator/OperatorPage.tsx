@@ -92,19 +92,26 @@ export function OperatorPage() {
  */
 export function restingOrdersText(known: {
   close: CommandOutcome<unknown>['kind'];
-  /** How many orders an unfinished close left resting, null if it did not say; undefined when it was not unfinished. */
+  /**
+   * At most how many orders an unfinished close left resting, null if it did not say; undefined when it was not
+   * unfinished.
+   */
   stillResting: number | null | undefined;
   /** The exchange says it has stopped taking commands. */
   writerHalted: boolean;
 }): string {
   if (known.stillResting !== undefined) {
+    if (known.stillResting === 0) {
+      return 'The close was left unfinished, though the exchange counted no order still resting when it stopped. It finishes the close when it is restarted.';
+    }
+    // What the exchange gives is an upper bound: its own count when it stopped, of which some may be cancelled already.
     const count =
       known.stillResting === null
         ? 'Some orders still rest, with their holds'
         : known.stillResting === 1
-          ? '1 order still rests, with its hold'
-          : `${groupInteger(known.stillResting)} orders still rest, with their holds`;
-    return `${count}: the close was left unfinished. The exchange has stopped, and cancels them when it is restarted.`;
+          ? 'At most 1 order still rests, with its hold'
+          : `At most ${groupInteger(known.stillResting)} orders still rest, with their holds`;
+    return `${count}: the close was left unfinished. The exchange has stopped, and cancels ${known.stillResting === 1 ? 'it' : 'them'} when it is restarted.`;
   }
   switch (known.close) {
     case 'done':

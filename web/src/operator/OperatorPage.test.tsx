@@ -10,7 +10,7 @@ import { botRun, finishedRun, manifest } from '../test/botRun';
 import { signedIn } from '../test/fakeServer';
 import { noTrades } from '../test/fakeStream';
 import { inUseMessage } from './InstrumentSetup';
-import { closedText } from './MarketControl';
+import { closedText, unfinishedText } from './MarketControl';
 import { OperatorPage, restingOrdersText } from './OperatorPage';
 
 const NOVA = {
@@ -277,11 +277,17 @@ describe('the operator screen', () => {
     // Left unfinished: said with the count whatever came after it under the same key, and whatever the writer says.
     for (const close of ['unresolved', 'sending'] as const) {
       expect(text(close, 4200, true)).toBe(
-        '4,200 orders still rest, with their holds: the close was left unfinished. The exchange has stopped, and cancels them when it is restarted.',
+        'At most 4,200 orders still rest, with their holds: the close was left unfinished. The exchange has stopped, and cancels them when it is restarted.',
       );
     }
-    expect(text('unresolved', 1)).toMatch(/^1 order still rests, with its hold: /);
+    // The exchange's count is an upper bound, and is never printed as how many rest.
+    expect(text('unresolved', 1)).toBe(
+      'At most 1 order still rests, with its hold: the close was left unfinished. The exchange has stopped, and cancels it when it is restarted.',
+    );
     expect(text('unresolved', null)).toMatch(/^Some orders still rest, with their holds: /);
+    expect(text('unresolved', 0)).toBe(
+      'The close was left unfinished, though the exchange counted no order still resting when it stopped. It finishes the close when it is restarted.',
+    );
     // Nothing known of the close: what a close does, and a stopped exchange if there is one. Never that it is done.
     for (const close of ['idle', 'refused'] as const) {
       expect(text(close)).toMatch(/^A close cancels every order that still rested and releases its hold, which/);
@@ -2708,14 +2714,16 @@ describe('closing the market on the operator screen', () => {
     await confirmClose();
     const unfinished = await said();
     expect(unfinished).toHaveTextContent(
-      'The market is closed, but 4,200 orders still rest. The exchange has stopped trading and cancels them when it is restarted. Nothing needs to be sent again.',
+      "The market is closed, but at most 4,200 orders still rest. The exchange has stopped trading and cancels them when it is restarted. The count is the exchange's own from when it stopped; fewer may rest. Nothing needs to be sent again.",
     );
+    // An upper bound is never said as a count: no sentence on the page has the number without "at most".
+    expect(document.body.textContent).not.toMatch(/(?<!at most )4,200 orders still rest/i);
     expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
     expect(screen.queryByText(/Not confirmed/)).toBeNull();
     // The market is closed, and the page shows it so: with the orders that still rest, not as if all were cancelled.
     const ended = await screen.findByRole('region', { name: 'This market has ended' });
     expect(ended).toHaveTextContent(
-      '4,200 orders still rest, with their holds: the close was left unfinished. The exchange has stopped, and cancels them when it is restarted.',
+      'At most 4,200 orders still rest, with their holds: the close was left unfinished. The exchange has stopped, and cancels them when it is restarted.',
     );
     expect(ended).not.toHaveTextContent(/was cancelled|A close cancels/);
     expect(screen.queryByRole('button', { name: 'Close the market' })).toBeNull();
@@ -2724,9 +2732,9 @@ describe('closing the market on the operator screen', () => {
     // exchange is still stopped, and the market is no less closed for that.
     fireEvent.click(screen.getByRole('button', { name: "Ask for the close's answer" }));
     await waitFor(() => expect(closes(server)).toHaveLength(2));
-    expect(await said()).toHaveTextContent('The market is closed, but 4,200 orders still rest.');
+    expect(await said()).toHaveTextContent('The market is closed, but at most 4,200 orders still rest.');
     expect(screen.queryByText(/whether the market closed is not known/)).toBeNull();
-    expect(ended).toHaveTextContent('4,200 orders still rest, with their holds');
+    expect(ended).toHaveTextContent('At most 4,200 orders still rest, with their holds');
 
     fireEvent.click(await button("Ask for the close's answer"));
     expect(
@@ -2756,7 +2764,7 @@ describe('closing the market on the operator screen', () => {
     // The exchange is stopped, or just back: nothing is being cancelled by this request, which only asks.
     expect(await screen.findByText("Asking for the close's answer…")).toHaveAttribute('role', 'status');
     expect(screen.queryByText(/Closing the market…/)).toBeNull();
-    expect(screen.getByRole('region', { name: 'This market has ended' })).toHaveTextContent('7 orders still rest, with their holds');
+    expect(screen.getByRole('region', { name: 'This market has ended' })).toHaveTextContent('At most 7 orders still rest, with their holds');
     later.answer({ status: 200, json: closedAnswer });
     expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
   });
@@ -2883,13 +2891,13 @@ describe('closing the market on the operator screen', () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const before = renderWith(client);
     await confirmClose();
-    expect(await said()).toHaveTextContent('The market is closed, but 4,200 orders still rest.');
+    expect(await said()).toHaveTextContent('The market is closed, but at most 4,200 orders still rest.');
     before.unmount();
     renderWith(client);
 
-    expect(await said()).toHaveTextContent('The market is closed, but 4,200 orders still rest.');
+    expect(await said()).toHaveTextContent('The market is closed, but at most 4,200 orders still rest.');
     expect(await screen.findByRole('region', { name: 'This market has ended' })).toHaveTextContent(
-      '4,200 orders still rest, with their holds',
+      'At most 4,200 orders still rest, with their holds',
     );
     fireEvent.click(await button("Ask for the close's answer"));
     expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
@@ -2973,7 +2981,7 @@ describe('closing the market on the operator screen', () => {
     expect(screen.queryByText('The key was used for another command')).toBeNull();
   });
 
-  it('says a close left unfinished without a count still rests some orders', async () => {
+  it('says what an unfinished close left as an upper bound: one order, none counted, or no count at all', async () => {
     const { server, state } = exchange('HALTED');
     server.on(`POST ${CLOSE}`, () => {
       state.market = market('CLOSED');
@@ -2982,7 +2990,23 @@ describe('closing the market on the operator screen', () => {
     renderPage();
 
     await confirmClose();
-    expect(await said()).toHaveTextContent('The market is closed, but 1 order still rests.');
+    expect(await said()).toHaveTextContent(
+      'The market is closed, but at most 1 order still rests. The exchange has stopped trading and cancels it when it is restarted.',
+    );
+    expect(await screen.findByRole('region', { name: 'This market has ended' })).toHaveTextContent(
+      'At most 1 order still rests, with its hold',
+    );
+
+    expect(unfinishedText(1)).toContain("The count is the exchange's own from when it stopped; fewer may rest.");
+    expect(unfinishedText(12000)).toMatch(/^The market is closed, but at most 12,000 orders still rest\. .* cancels them when it is restarted\./);
+    // No count given: nothing to bound, and nothing said of a count.
+    expect(unfinishedText(null)).toBe(
+      'The market is closed, but some orders still rest. The exchange has stopped trading and cancels them when it is restarted.',
+    );
+    // None counted is not "at most 0 orders": the close is unfinished all the same, and the restart finishes it.
+    expect(unfinishedText(0)).toBe(
+      'The market is closed and the exchange counted no order still resting, but the close did not finish. The exchange has stopped trading and finishes the close when it is restarted.',
+    );
   });
 
   it('says so when trading is unavailable, without claiming the market closed or did not', async () => {
