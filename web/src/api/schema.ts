@@ -658,7 +658,16 @@ export interface paths {
             readonly path?: never;
             readonly cookie?: never;
         };
-        /** Every instrument with its rules, quotes and how current the data is. */
+        /**
+         * One simulation's instruments with their rules, quotes and how current the data is.
+         * @description Without simulationId, the current simulation's instruments. Market Data hears of a simulation only through
+         *     its instruments' snapshots, so the current simulation is the one whose instrument has the newest snapshot by
+         *     the exchange's clock: the one running, or, once it has closed, still that one until the next simulation's
+         *     first instrument arrives. A simulation with no instrument yet is not known here, so in the moment after a new
+         *     simulation starts the default is still the closed one before it. A client that knows which simulation it
+         *     wants (MarketStatus.simulationId) passes it, and gets an empty list until the first instrument arrives.
+         *     Instruments of other simulations are not listed, but every read by instrument id still serves them.
+         */
         readonly get: operations["listInstruments"];
         readonly put?: never;
         readonly post?: never;
@@ -1629,6 +1638,11 @@ export interface components {
          */
         readonly VenueState: "SETUP" | "OPEN" | "HALTED" | "CLOSED" | "UNKNOWN";
         readonly Instruments: {
+            /**
+             * @description The simulation the list is of: the one asked for, or else the current one. Null when none was asked for
+             *     and Market Data knows no instrument at all.
+             */
+            readonly simulationId: components["schemas"]["Uuid"] | null;
             readonly instruments: readonly components["schemas"]["Instrument"][];
             readonly feed: components["schemas"]["Feed"];
         };
@@ -3588,7 +3602,10 @@ export interface operations {
     };
     readonly listInstruments: {
         readonly parameters: {
-            readonly query?: never;
+            readonly query?: {
+                /** @description List exactly this simulation's instruments. One never heard of has none. */
+                readonly simulationId?: components["schemas"]["Uuid"];
+            };
             readonly header?: never;
             readonly path?: never;
             readonly cookie?: never;
@@ -3604,6 +3621,7 @@ export interface operations {
                     readonly "application/json": components["schemas"]["Instruments"];
                 };
             };
+            readonly 400: components["responses"]["Problem"];
         };
     };
     readonly getBook: {
