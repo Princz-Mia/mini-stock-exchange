@@ -49,7 +49,10 @@ export interface InstrumentList {
  * The instruments of the simulation the exchange says is current. The simulation is part of the query's key, so a
  * change of simulation reads the list again and never shows the one before under the new market's name.
  */
-export function useInstruments(market: StatusRead, options: { refetchInterval?: ReturnType<typeof pollEvery> } = {}): InstrumentList {
+export function useInstruments(
+  market: StatusRead,
+  options: { refetchInterval?: (query: { state: { data: Instruments | undefined; error: unknown } }) => number | false } = {},
+): InstrumentList {
   const client = useQueryClient();
   const simulation = listedSimulation(market);
   const list = useQuery({

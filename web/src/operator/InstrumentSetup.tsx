@@ -4,6 +4,7 @@ import { type FormEvent, type RefObject, useCallback, useEffect, useId, useRef, 
 import { api } from '../api/client';
 import type { Instrument, InstrumentEdited, InstrumentEditRequest, InstrumentRequest, InstrumentUsage } from '../api/types';
 import { groupDigits, groupInteger } from '../format';
+import { type AddedInstrument, takingLonger, useAddedInstruments, WAITING_FAST_FOR_MS } from './addedInstruments';
 import { CommandStatus } from './CommandStatus';
 import { refusedFields } from './refusals';
 import { type CommandOutcome, useCommand } from './useCommand';
@@ -337,30 +338,71 @@ function InstrumentRow({
   );
 }
 
+/**
+ * An instrument the exchange has added that Market Data does not list yet: the exchange's answer, labelled as such,
+ * with no controls until the list has it, as editing and deleting go by the list's own values. Once Market Data has
+ * taken longer than usual, it says so.
+ */
+function WaitingRow({ added, editable }: { added: AddedInstrument; editable: boolean }) {
+  const [longer, setLonger] = useState(() => takingLonger(added, Date.now()));
+  useEffect(() => {
+    if (longer) {
+      return;
+    }
+    const timer = setTimeout(() => setLonger(true), added.answeredAt + WAITING_FAST_FOR_MS - Date.now());
+    return () => clearTimeout(timer);
+  }, [longer, added.answeredAt]);
+  const label = longer ? 'Added; market data is taking longer than usual to list it' : 'Added, waiting for market data';
+  return (
+    <tr className="row-waiting">
+      <th scope="row">
+        {added.symbol}
+        {added.displayName ? <> <span className="instrument-name">{added.displayName}</span></> : null}
+        {!editable && <span className="instrument-name">{label}</span>}
+      </th>
+      <td className="num">{groupDigits(added.referencePrice)}</td>
+      {editable && (
+        <td>
+          <span className="muted">{label}</span>
+        </td>
+      )}
+    </tr>
+  );
+}
+
 /** The catalogue and, while the market is being set up, a form to add to it and a way to edit or delete each entry. */
 export function InstrumentSetup({
   instruments,
   editable,
   closed = false,
+  simulationId = null,
 }: {
   instruments: readonly Instrument[];
   editable: boolean;
   /** The market has closed: the catalogue is what it was, and stays. */
   closed?: boolean;
+  /** The simulation on screen, which an add goes to; null while there is no market, which an add then creates. */
+  simulationId?: string | null;
 }) {
   const client = useQueryClient();
   const [symbol, setSymbol] = useState('');
   const [price, setPrice] = useState('');
   const [name, setName] = useState('');
-  const send = useCallback(async (request: InstrumentRequest, key: string) => {
-    const created = await api.addInstrument(request, key);
-    setSymbol('');
-    setPrice('');
-    setName('');
-    void client.invalidateQueries({ queryKey: ['instruments'] });
-    void client.invalidateQueries({ queryKey: ['market'] });
-    return created;
-  }, [client]);
+  const { waiting, add } = useAddedInstruments(simulationId, instruments);
+  const send = useCallback(
+    async (request: InstrumentRequest, key: string) => {
+      const created = await api.addInstrument(request, key);
+      // Shown at once from the answer, and the list read quickly until Market Data has it.
+      add(created, simulationId);
+      setSymbol('');
+      setPrice('');
+      setName('');
+      void client.invalidateQueries({ queryKey: ['instruments'] });
+      void client.invalidateQueries({ queryKey: ['market'] });
+      return created;
+    },
+    [client, add, simulationId],
+  );
   const command = useCommand(send);
   const symbolField = useRef<HTMLInputElement>(null);
   useFocusOnAnswer(command.outcome.kind, symbolField);
@@ -374,7 +416,10 @@ export function InstrumentSetup({
     }
   }, []);
   const listed = new Set(instruments.map((instrument) => instrument.symbol));
-  const suggestions = DEFAULT_INSTRUMENTS.filter((suggestion) => !listed.has(suggestion.symbol));
+  const waitingSymbols = new Set(waiting.map((each) => each.symbol));
+  const suggestions = DEFAULT_INSTRUMENTS.filter(
+    (suggestion) => !listed.has(suggestion.symbol) && !waitingSymbols.has(suggestion.symbol),
+  );
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -390,7 +435,7 @@ export function InstrumentSetup({
   return (
     <section className="panel" aria-labelledby="instruments-title">
       <h2 id="instruments-title">Instruments</h2>
-      {instruments.length === 0 ? (
+      {instruments.length === 0 && waiting.length === 0 ? (
         <p className="muted">No instruments yet.</p>
       ) : (
         <table aria-label="Instruments" className="setup-table">
@@ -415,6 +460,9 @@ export function InstrumentSetup({
                 editable={editable}
                 onDeleted={announceDeleted}
               />
+            ))}
+            {waiting.map((added) => (
+              <WaitingRow key={added.instrumentId} added={added} editable={editable} />
             ))}
           </tbody>
         </table>
@@ -488,7 +536,7 @@ export function InstrumentSetup({
         action="Adding the instrument"
         done={(created) =>
           `Added ${created.symbol}${created.displayName ? ` (${created.displayName})` : ''} at ` +
-          `${groupDigits(created.referencePrice)}. It appears in the list once market data has it.`
+          `${groupDigits(created.referencePrice)}. The list shows it as waiting until market data has it.`
         }
         onRetry={() => void command.retry()}
       />

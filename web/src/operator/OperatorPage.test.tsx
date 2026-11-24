@@ -10,6 +10,7 @@ import { botJob } from '../test/botJob';
 import { botRun, finishedRun, manifest } from '../test/botRun';
 import { signedIn } from '../test/fakeServer';
 import { noTrades } from '../test/fakeStream';
+import { WAITING_FAST_FOR_MS } from './addedInstruments';
 import { inUseMessage } from './InstrumentSetup';
 import { closedText, unfinishedText } from './MarketControl';
 import { OperatorPage, restingOrdersText } from './OperatorPage';
@@ -453,6 +454,103 @@ describe('the operator screen', () => {
       .filter((request) => request.url === '/api/v1/admin/instruments')
       .map((request) => request.headers['Idempotency-Key']);
     expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  describe('an instrument just added', () => {
+    const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT', referencePrice: '50.00' };
+    const ORBT_ADDED = {
+      instrumentId: ORBT.instrumentId,
+      symbol: 'ORBT',
+      displayName: null,
+      referencePrice: '50.00',
+      commandSequence: '9',
+    };
+    const listOf = (instruments: readonly (typeof NOVA)[]) => ({
+      status: 200,
+      json: { instruments, feed: { state: 'LIVE', lag: 0 } },
+    });
+    const pause = (ms: number) => act(() => new Promise((resolve) => setTimeout(resolve, ms)));
+    const rowOf = (symbol: string) =>
+      within(screen.getByRole('table', { name: 'Instruments' })).getByRole('rowheader', { name: symbol }).closest('tr');
+
+    it('shows at once as waiting for market data, and the list is read quickly until it has it', async () => {
+      const { server } = exchange('SETUP');
+      // Market Data has it a little after the exchange answers: later than the read straight after the answer.
+      let listedFrom: number | null = null;
+      server.on('GET /api/v1/instruments', () =>
+        listOf(listedFrom !== null && Date.now() >= listedFrom ? [NOVA, ORBT] : [NOVA]),
+      );
+      server.on('POST /api/v1/admin/instruments', () => {
+        listedFrom = Date.now() + 600;
+        return { status: 201, json: ORBT_ADDED };
+      });
+      renderPage();
+
+      const form = await screen.findByRole('form', { name: 'Add an instrument' });
+      await screen.findByRole('table', { name: 'Instruments' });
+      fireEvent.click(within(form).getByRole('button', { name: 'ORBT 50.00' }));
+      fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
+
+      expect(
+        await screen.findByText('Added ORBT at 50.00. The list shows it as waiting until market data has it.'),
+      ).toBeInTheDocument();
+      // From the exchange's answer, and said to be that: no controls until market data lists it.
+      const waiting = rowOf('ORBT');
+      expect(waiting).toHaveTextContent('Added, waiting for market data');
+      expect(waiting).toHaveTextContent('50.00');
+      expect(within(waiting as HTMLElement).queryByRole('button')).toBeNull();
+      // Nor is it offered again, which would only send it twice.
+      expect(within(form).queryByRole('button', { name: 'ORBT 50.00' })).toBeNull();
+
+      // Listed within a second or so, not five seconds after the read that missed it.
+      expect(await screen.findByRole('button', { name: 'Edit ORBT' }, { timeout: 2_000 })).toBeInTheDocument();
+      expect(screen.queryByText('Added, waiting for market data')).toBeNull();
+      // Then back to the usual pace.
+      const reads = () => server.requests.filter((request) => request.url === LIST).length;
+      const listed = reads();
+      await pause(1_200);
+      expect(reads()).toBe(listed);
+    });
+
+    it('says so when market data takes longer than usual, and goes back to the usual pace', async () => {
+      const { server } = exchange('SETUP');
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      // Answered nearly twenty seconds ago, and still not listed.
+      client.setQueryData(
+        ['instruments-added'],
+        [{ ...ORBT_ADDED, scope: SIMULATION, answeredAt: Date.now() - WAITING_FAST_FOR_MS + 300 }],
+      );
+      renderWith(client);
+
+      expect(await screen.findByText('Added, waiting for market data')).toBeInTheDocument();
+      expect(
+        await screen.findByText('Added; market data is taking longer than usual to list it', undefined, { timeout: 1_500 }),
+      ).toBeInTheDocument();
+      // At most one more quick read, the one already timed when the time ran out; then the usual pace.
+      await pause(500);
+      const reads = () => server.requests.filter((request) => request.url === LIST).length;
+      const slow = reads();
+      await pause(1_200);
+      expect(reads()).toBe(slow);
+    });
+
+    it('is still shown as waiting on coming back to the page', async () => {
+      const { server } = exchange('SETUP');
+      server.on('POST /api/v1/admin/instruments', { status: 201, json: ORBT_ADDED });
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      const first = renderWith(client);
+      const form = await screen.findByRole('form', { name: 'Add an instrument' });
+      fireEvent.click(within(form).getByRole('button', { name: 'ORBT 50.00' }));
+      fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
+      await screen.findByText('Added, waiting for market data');
+
+      // The operator looks at another page for a while.
+      first.unmount();
+      await pause(20);
+      renderWith(client);
+      expect(await screen.findByText('Added, waiting for market data')).toBeInTheDocument();
+      expect(rowOf('ORBT')).toHaveTextContent('50.00');
+    });
   });
 
   it('edits the name and price together under a key, and keeps the form after a refusal', async () => {

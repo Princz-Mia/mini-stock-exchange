@@ -1048,6 +1048,12 @@ button.chip {
   overflow-wrap: anywhere;
 }
 
+/* An instrument the exchange added that market data does not list yet: set apart from the listed rows. */
+.row-waiting > th,
+.row-waiting > td {
+  color: var(--muted);
+}
+
 /* The form Edit opens under an instrument's row: its fields wrap as the add form's do. */
 .row-editor fieldset {
   border: none;
