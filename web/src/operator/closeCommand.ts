@@ -1,9 +1,9 @@
 import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 
-import { ApiError, api } from '../api/client';
+import { api } from '../api/client';
 import type { MarketClosed } from '../api/types';
-import { type CommandOutcome, describe } from './useCommand';
+import { type CommandOutcome, failed } from './useCommand';
 
 /**
  * The close of one market, as far as this session knows it. It is kept beside the cached queries, not in the panel
@@ -45,18 +45,16 @@ async function send(client: QueryClient, simulationId: string, key: string, befo
       client.setQueryData<CloseCommand | null>(CLOSE_COMMAND, turn);
     }
   };
-  record({ kind: 'sending' }, stillResting);
+  record({ kind: 'sending', since: Date.now() }, stillResting);
   try {
     record({ kind: 'done', result: await api.closeMarket(key) }, undefined);
   } catch (error) {
-    if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
-      record({ kind: 'refused', code: error.code ?? 'REFUSED', message: describe(error), problem: error.problem }, undefined);
+    const outcome = failed<MarketClosed>(error);
+    if (outcome.kind === 'unresolved') {
+      const problem = outcome.problem;
+      record(outcome, problem?.code === 'MARKET_CLOSE_UNFINISHED' ? (problem.restingOrders ?? null) : stillResting);
     } else {
-      const problem = error instanceof ApiError ? error.problem : null;
-      record(
-        { kind: 'unresolved', problem },
-        problem?.code === 'MARKET_CLOSE_UNFINISHED' ? (problem.restingOrders ?? null) : stillResting,
-      );
+      record(outcome, undefined);
     }
   } finally {
     void client.invalidateQueries({ queryKey: ['market'] });

@@ -132,7 +132,9 @@ export function BotSetup({
               typed is kept for then.
             </p>
           ) : (
-            outcome.kind !== 'done' && <CommandStatus outcome={outcome} done={() => ''} onRetry={() => void retry()} />
+            outcome.kind !== 'done' && (
+              <CommandStatus outcome={outcome} action="Starting the bot job" done={() => ''} onRetry={() => void retry()} />
+            )
           )}
         </div>
       )}
@@ -265,7 +267,12 @@ function JobProgress({
         </span>
       </div>
       {stop.outcome.kind !== 'done' && (
-        <CommandStatus outcome={stop.outcome} done={() => ''} onRetry={() => void stop.retry()} />
+        <CommandStatus
+          outcome={stop.outcome}
+          action="Stopping the bot job"
+          done={() => ''}
+          onRetry={() => void stop.retry()}
+        />
       )}
     </div>
   );

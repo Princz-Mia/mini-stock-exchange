@@ -2896,9 +2896,12 @@ describe('closing the market on the operator screen', () => {
     await confirmClose();
     // On its way: said so, the confirmation gone, and neither a second close nor another transition on offer.
     expect(screen.queryByRole('alertdialog')).toBeNull();
-    expect(
-      screen.getByText(/^Closing the market… Every resting order is being cancelled, which can take up to about half a minute/),
-    ).toHaveAttribute('role', 'status');
+    const closing = screen.getByText(/^Closing the market…/);
+    expect(closing).toHaveAttribute('role', 'status');
+    // Named, with the seconds it has taken so far, and what it is doing meanwhile.
+    expect(closing).toHaveTextContent(/^Closing the market… \d+ s$/);
+    expect(screen.getByText(/^Every resting order is being cancelled, which can take up to about half a minute/))
+      .toBeInTheDocument();
     for (const name of ['Close the market', 'Halt trading', 'Open market', 'Resume trading']) {
       expect(screen.getByRole('button', { name })).toBeDisabled();
     }
@@ -3131,7 +3134,7 @@ describe('closing the market on the operator screen', () => {
       'The orders that still rested are being cancelled and their holds released; until the close answers, some still rest.',
     );
     expect(ended).not.toHaveTextContent(/was cancelled|A close cancels/);
-    expect(screen.getByText(/^Closing the market… Every resting order is being cancelled/)).toBeInTheDocument();
+    expect(screen.getByText(/^Closing the market…/)).toBeInTheDocument();
 
     later.answer({ status: 200, json: closedAnswer });
     expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();

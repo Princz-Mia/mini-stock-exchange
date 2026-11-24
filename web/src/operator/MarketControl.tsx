@@ -9,7 +9,7 @@ import { TermTip } from '../help/TermTip';
 import { progressText } from './botJob';
 import { useCloseCommand } from './closeCommand';
 import { CloseMarketDialog } from './CloseMarketDialog';
-import { CommandStatus } from './CommandStatus';
+import { CommandStatus, Waiting } from './CommandStatus';
 import { useBotJob } from './useBotJob';
 import { type CommandOutcome, useCommand } from './useCommand';
 
@@ -39,6 +39,13 @@ const DONE: Record<Transition, string> = {
   open: 'The market is open.',
   halt: 'Trading is halted. Cancels still work.',
   resume: 'Trading has resumed.',
+};
+
+/** Each transition while it is on its way. */
+const SENDING: Record<Transition, string> = {
+  open: 'Opening the market',
+  halt: 'Halting trading',
+  resume: 'Resuming trading',
 };
 
 /** What a transition did, and for an opening with a duration when the exchange closes the market. */
@@ -303,14 +310,14 @@ function CloseStatus({
       // Asked again for a market that is closed already: nothing is being closed, and after an unfinished close
       // nothing is being cancelled either until the exchange is restarted.
       return stillResting !== undefined || (askedBefore && state === 'CLOSED') ? (
-        <p role="status" className="outcome outcome-pending">
-          Asking for the close&apos;s answer…
-        </p>
+        <Waiting action="Asking for the close's answer" since={outcome.since} />
       ) : (
-        <p role="status" className="outcome outcome-pending">
-          Closing the market… Every resting order is being cancelled, which can take up to about half a minute on a
-          full market.
-        </p>
+        <>
+          <Waiting action="Closing the market" since={outcome.since} />
+          <p className="muted">
+            Every resting order is being cancelled, which can take up to about half a minute on a full market.
+          </p>
+        </>
       );
     case 'done':
       return (
@@ -390,7 +397,7 @@ function CloseStatus({
           </div>
         );
       }
-      return <CommandStatus outcome={outcome} done={() => ''} onRetry={onRetry} />;
+      return <CommandStatus outcome={outcome} action="Closing the market" done={() => ''} onRetry={onRetry} />;
     }
   }
 }
@@ -419,6 +426,7 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
     [client],
   );
   const command = useCommand(send);
+  const [sent, setSent] = useState<Transition | null>(null);
   // The close is kept outside this panel, so leaving the page and coming back finds it as it was, key and all.
   const close = useCloseCommand(market.simulationId);
   const closing = close.outcome.kind !== 'idle';
@@ -435,6 +443,9 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
     close.forget();
     // Only an opening has a length; one that cannot be sent keeps its button disabled.
     const minutes = action === 'open' && 'minutes' in duration ? duration.minutes : undefined;
+    if (command.outcome.kind !== 'sending' && !command.unresolved) {
+      setSent(action);
+    }
     void command.run(minutes === undefined ? { action } : { action, durationMinutes: minutes });
   };
 
@@ -572,7 +583,12 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
           onRetry={close.run}
         />
       ) : (
-        <CommandStatus outcome={command.outcome} done={doneText} onRetry={() => void command.retry()} />
+        <CommandStatus
+          outcome={command.outcome}
+          action={sent === null ? 'Sending' : SENDING[sent]}
+          done={doneText}
+          onRetry={() => void command.retry()}
+        />
       )}
     </section>
   );

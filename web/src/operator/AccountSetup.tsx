@@ -64,6 +64,7 @@ function BotToken({ account }: { account: AccountSummary }) {
       )}
       <CommandStatus
         outcome={command.outcome}
+        action="Revoking the token"
         done={(result) => (result.revoked > 0 ? 'Revoked: its next request is refused.' : 'Already revoked.')}
         onRetry={() => void command.retry()}
       />
@@ -278,6 +279,7 @@ export function AccountSetup({
       <div id={outcomeId}>
         <CommandStatus
           outcome={command.outcome}
+          action="Funding the account"
           done={(created) => `Funded ${created.username} with ${groupDigits(created.cash)}.`}
           onRetry={() => void command.retry()}
         />

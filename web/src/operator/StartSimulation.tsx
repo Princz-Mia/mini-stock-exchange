@@ -4,7 +4,7 @@ import { type FormEvent, type RefObject, useCallback, useEffect, useId, useRef, 
 import { api } from '../api/client';
 import type { MarketStatus, SimulationStarted } from '../api/types';
 import { TermTip } from '../help/TermTip';
-import { CommandStatus } from './CommandStatus';
+import { CommandStatus, Waiting } from './CommandStatus';
 import { refusedFields, useFocusOnRefusal } from './refusals';
 import { type CommandOutcome, useCommand } from './useCommand';
 
@@ -162,9 +162,10 @@ function StartStatus({
       return null;
     case 'sending':
       return (
-        <p role="status" className="outcome outcome-pending">
-          {elsewhere ? "Asking for the start's answer…" : 'Starting the simulation…'}
-        </p>
+        <Waiting
+          action={elsewhere ? "Asking for the start's answer" : 'Starting the simulation'}
+          since={outcome.since}
+        />
       );
     case 'done':
       return (
@@ -192,7 +193,7 @@ function StartStatus({
             ? "Trading is unavailable: the exchange has stopped taking commands, so whether the simulation started is not known here. Once the exchange has been restarted, asking again sends the same key and returns the start's answer."
             : null;
       if (said === null) {
-        return <CommandStatus outcome={outcome} done={() => ''} onRetry={onRetry} />;
+        return <CommandStatus outcome={outcome} action="Starting the simulation" done={() => ''} onRetry={onRetry} />;
       }
       return (
         <div role="alert" className="outcome outcome-pending">

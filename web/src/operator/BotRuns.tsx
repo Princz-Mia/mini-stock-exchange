@@ -287,6 +287,7 @@ function ActiveRun({ run, now }: { run: BotRun; now: number }) {
       )}
       <CommandStatus
         outcome={command.outcome}
+        action="Stopping the run"
         done={() => 'Stop requested. New orders stop now; quotes are canceled before the worker confirms.'}
         onRetry={() => void command.retry()}
       />
@@ -468,6 +469,7 @@ function StartForm({
       )}
       <CommandStatus
         outcome={command.outcome}
+        action="Starting the run"
         done={(started) => `Started a run of ${groupInteger(started.bots)} bots.`}
         onRetry={() => void command.retry()}
       />
