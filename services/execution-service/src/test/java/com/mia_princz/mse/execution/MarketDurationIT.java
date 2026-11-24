@@ -3,10 +3,13 @@ package com.mia_princz.mse.execution;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
@@ -205,6 +208,93 @@ class MarketDurationIT {
 		assertThat(status.get("closedOnSchedule").asBoolean()).as("an operator closed it").isFalse();
 	}
 
+	/**
+	 * Windows PowerShell, and other clients, send an empty POST with a form content type. An empty body is no body,
+	 * with any content type or none: the opening without a duration that it was before durations existed, under the
+	 * request hash it had then.
+	 */
+	@Test
+	void anEmptyOpeningIsOneWithoutADurationWhateverItsContentType() throws Exception {
+		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
+		TestBrowser anonymous = new TestBrowser(port);
+		for (String type : new String[] { "application/x-www-form-urlencoded", "text/plain", null }) {
+			newMarket();
+			String key = UUID.randomUUID().toString();
+			HttpResponse<String> opened = operator.postAs(OPEN, type, "", "Idempotency-Key", key);
+			check(opened, 200);
+			assertThat(JSON.readTree(opened.body()).get("state").asString()).as(type).isEqualTo("OPEN");
+			assertThat(JSON.readTree(opened.body()).path("closesAt").isNull()).as(type).isTrue();
+			JsonNode status = market(anonymous);
+			assertThat(status.get("state").asString()).as(type).isEqualTo("OPEN");
+			assertThat(status.get("closesAt").isNull()).as(type).isTrue();
+			assertThat(closesAtIsNull()).as(type).isTrue();
+			assertThat(requestHash(key)).as("the hash of an opening without a duration, as keys stored before had it")
+				.isEqualTo(MessageDigest.getInstance("SHA-256")
+					.digest("POST /api/v1/admin/market/open".getBytes(StandardCharsets.UTF_8)));
+		}
+	}
+
+	/**
+	 * Every way of sending an opening without a duration is the same request under one key; a duration under it is
+	 * another request.
+	 */
+	@Test
+	void anEmptyFormOpeningAndOneWithNoContentTypeAreTheSameRequest() throws Exception {
+		newMarket();
+		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
+		String key = UUID.randomUUID().toString();
+		HttpResponse<String> opened = operator.postAs(OPEN, "application/x-www-form-urlencoded", "", "Idempotency-Key",
+				key);
+		check(opened, 200);
+		HttpResponse<String> again = operator.postAs(OPEN, null, "", "Idempotency-Key", key);
+		check(again, 200);
+		assertThat(again.body()).isEqualTo(opened.body());
+		for (HttpResponse<String> same : List.of(operator.postAs(OPEN, "text/plain", "", "Idempotency-Key", key),
+				operator.post(OPEN, "", "Idempotency-Key", key), operator.post(OPEN, "{}", "Idempotency-Key", key))) {
+			check(same, 200);
+			assertThat(same.body()).isEqualTo(opened.body());
+		}
+		HttpResponse<String> conflict = operator.post(OPEN, "{\"durationMinutes\":60}", "Idempotency-Key", key);
+		check(conflict, 409);
+		assertThat(JSON.readTree(conflict.body()).get("code").asString()).isEqualTo("IDEMPOTENCY_CONFLICT");
+	}
+
+	/**
+	 * A body with anything in it is JSON or is refused: another content type, or none, is 415, as the framework answers
+	 * it, before the key is looked at; JSON that cannot be read is the framework's 400; and a duration in JSON, with
+	 * its content type's parameters, still sets the close time.
+	 */
+	@Test
+	void aBodyWithAnythingInItIsReadAsJsonOrRefused() throws Exception {
+		newMarket();
+		TestBrowser operator = TestBrowser.loggedIn(port, "operator", PASSWORD);
+		String[][] others = { { "application/x-www-form-urlencoded", "durationMinutes=90" },
+				{ "text/plain", "{\"durationMinutes\":90}" }, { null, "{\"durationMinutes\":90}" } };
+		for (String[] other : others) {
+			HttpResponse<String> unsupported = operator.postAs(OPEN, other[0], other[1], "Idempotency-Key",
+					UUID.randomUUID().toString());
+			assertThat(unsupported.statusCode()).as("%s %s", other[0], unsupported.body()).isEqualTo(415);
+			assertThat(unsupported.headers().firstValue("Content-Type").orElseThrow())
+				.startsWith("application/problem+json");
+			assertThat(unsupported.headers().firstValue("Accept").orElseThrow()).contains("application/json");
+		}
+		HttpResponse<String> keyless = operator.postAs(OPEN, "application/x-www-form-urlencoded", "durationMinutes=90");
+		assertThat(keyless.statusCode()).as("the body before the key").isEqualTo(415);
+		HttpResponse<String> unreadable = operator.post(OPEN, "durationMinutes=90", "Idempotency-Key",
+				UUID.randomUUID().toString());
+		check(unreadable, 400);
+		assertThat(JSON.readTree(unreadable.body()).has("code")).isFalse();
+		assertThat(sequence()).as("nothing sequenced").isZero();
+
+		Instant opening = CLOCK.instant();
+		HttpResponse<String> opened = operator.postAs(OPEN, "application/json; charset=UTF-8", "{\"durationMinutes\":45}",
+				"Idempotency-Key", UUID.randomUUID().toString());
+		check(opened, 200);
+		Instant closesAt = opening.plus(Duration.ofMinutes(45));
+		assertThat(Instant.parse(JSON.readTree(opened.body()).get("closesAt").asString())).isEqualTo(closesAt);
+		assertThat(closesAtInDatabase()).isEqualTo(closesAt);
+	}
+
 	private JsonNode market(TestBrowser browser) throws Exception {
 		HttpResponse<String> status = browser.get(MARKET);
 		check(status, "GET", MARKET, 200);
@@ -271,6 +361,16 @@ class MarketDurationIT {
 	private Instant closesAtInDatabase() {
 		return jdbc.queryForObject("SELECT closes_at FROM simulation " + CurrentSimulation.FIRST, Timestamp.class)
 			.toInstant();
+	}
+
+	private boolean closesAtIsNull() {
+		return jdbc.queryForObject("SELECT closes_at IS NULL FROM simulation " + CurrentSimulation.FIRST, Boolean.class);
+	}
+
+	/** The hash an opening is stored under, which decides whether a key sent again is the same request. */
+	private byte[] requestHash(String key) {
+		return jdbc.queryForObject("SELECT request_hash FROM command_result WHERE idempotency_key = ?::uuid", byte[].class,
+				key);
 	}
 
 }

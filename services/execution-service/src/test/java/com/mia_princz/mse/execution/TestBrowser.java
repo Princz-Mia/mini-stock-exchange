@@ -74,6 +74,24 @@ final class TestBrowser {
 		return send(request);
 	}
 
+	/**
+	 * A POST with this content type, or with none for null, as clients other than the screens send one. Extra headers
+	 * come as name, value pairs.
+	 */
+	HttpResponse<String> postAs(String path, String contentType, String body, String... headers) throws Exception {
+		HttpRequest.Builder request = request(path).POST(HttpRequest.BodyPublishers.ofString(body));
+		if (contentType != null) {
+			request.header("Content-Type", contentType);
+		}
+		if (csrfToken != null) {
+			request.header("X-CSRF-TOKEN", csrfToken);
+		}
+		for (int i = 0; i < headers.length; i += 2) {
+			request.header(headers[i], headers[i + 1]);
+		}
+		return send(request);
+	}
+
 	/** Extra headers come as name, value pairs. */
 	HttpResponse<String> put(String path, String json, String... headers) throws Exception {
 		HttpRequest.Builder request = request(path).header("Content-Type", "application/json")

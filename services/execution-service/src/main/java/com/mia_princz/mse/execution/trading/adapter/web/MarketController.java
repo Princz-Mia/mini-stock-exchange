@@ -1,18 +1,23 @@
 package com.mia_princz.mse.execution.trading.adapter.web;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
 import org.springframework.security.core.Authentication;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+
+import tools.jackson.databind.json.JsonMapper;
 
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.MarketClosing;
@@ -44,13 +49,17 @@ class MarketController {
 
 	private final Duration closeTimeout;
 
+	/** Built as the application builds the converter that reads every other JSON body, from the same mapper. */
+	private final JacksonJsonHttpMessageConverter json;
+
 	MarketController(TradingEngine engine, TradingQueries queries,
 			@Value("${mse.trading.command-timeout:5s}") Duration timeout,
-			@Value("${mse.market.close-timeout:45s}") Duration closeTimeout) {
+			@Value("${mse.market.close-timeout:45s}") Duration closeTimeout, JsonMapper jsonMapper) {
 		this.engine = engine;
 		this.queries = queries;
 		this.timeout = timeout;
 		this.closeTimeout = closeTimeout;
+		this.json = new JacksonJsonHttpMessageConverter(jsonMapper);
 	}
 
 	/**
@@ -81,14 +90,17 @@ class MarketController {
 	/**
 	 * Opens the market, with an optional body that gives it a duration, after which the exchange closes it. With no
 	 * body, or one without a duration, it stays open until an operator closes it, and the request is the one it always
-	 * was: a key sent before durations existed means the same as before. With a duration, the duration is part of the
-	 * request, so the same key with another duration is a conflict.
+	 * was: a key sent before durations existed means the same as before. An empty body, with any content type or none,
+	 * is no body. With a duration, the duration is part of the request, so the same key with another duration is a
+	 * conflict. The body comes as bytes, with the headers as the framework sees them, for {@link MarketOpenBody#read},
+	 * which reads it before the key is looked at, where the framework would have.
 	 */
 	@PostMapping("/admin/market/open")
 	TransitionResponse open(@RequestHeader(name = "Idempotency-Key", required = false) String keyHeader,
-			@RequestBody(required = false) MarketOpenBody body, Authentication authentication) {
+			HttpEntity<byte[]> sent, Authentication authentication) throws IOException, HttpMediaTypeNotSupportedException {
+		MarketOpenBody request = MarketOpenBody.read(sent.getBody(), sent.getHeaders(), json);
 		UUID key = CommandCalls.idempotencyKey(keyHeader);
-		Duration duration = body == null ? null : body.validate();
+		Duration duration = request == null ? null : request.validate();
 		UUID operator = queries.userId(authentication.getName()).orElseThrow();
 		byte[] hash = CommandCalls.sha256(duration == null ? OPEN_ROUTE : OPEN_ROUTE + "|" + duration.toMinutes());
 		return control(MarketControl.Action.OPEN, key, new CommandKey(operator, key, OPEN_ROUTE, hash),
