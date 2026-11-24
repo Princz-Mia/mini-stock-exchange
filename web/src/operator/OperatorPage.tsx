@@ -44,14 +44,22 @@ export const LIST_POLL_MS = 5_000;
  * How often the setup list is read: quickly while an instrument the exchange has added is not in it yet, for a
  * while, and otherwise every five seconds. Worked out again with every read, so it slows down by itself once the
  * instrument is listed or has waited long enough.
+ *
+ * A closed market's list is read no more once market data has caught up with it: the catalogue is frozen and nothing
+ * trades, so nothing this page shows of it can change. Until then the feed it reports may still be behind, with the
+ * close's own last events.
  */
-export function instrumentPace(client: QueryClient, simulation: string | null) {
+export function instrumentPace(client: QueryClient, simulation: string | null, closed = false) {
   return (query: { state: { data: Instruments | undefined; error: unknown } }): number | false => {
     if (isRefusal(query.state.error)) {
       return false;
     }
     const waiting = waitingFor(addedInstruments(client), simulation, query.state.data?.instruments ?? []);
-    return readQuickly(waiting, Date.now()) ? WAITING_POLL_MS : LIST_POLL_MS;
+    if (readQuickly(waiting, Date.now())) {
+      return WAITING_POLL_MS;
+    }
+    const feed = query.state.data?.feed;
+    return closed && feed?.state === 'LIVE' && feed.lag === 0 ? false : LIST_POLL_MS;
   };
 }
 
@@ -78,7 +86,7 @@ export function OperatorPage() {
   const marketRead = freshness(market, opened);
   // This market's instruments only: the list is asked for by the simulation the status names.
   const instruments = useInstruments(market, {
-    refetchInterval: instrumentPace(client, market.data?.simulationId ?? null),
+    refetchInterval: instrumentPace(client, market.data?.simulationId ?? null, market.data?.state === 'CLOSED'),
   });
 
   if (market.isPending) {
@@ -114,6 +122,7 @@ export function OperatorPage() {
           {!editable && (
             <HealthPanel
               instruments={listed}
+              closed={closed}
               feed={
                 instruments.isError
                   ? { kind: 'unreachable' }

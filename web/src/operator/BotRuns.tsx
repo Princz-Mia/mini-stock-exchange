@@ -62,7 +62,8 @@ const DEFAULTS = {
 /**
  * Bot runs: the one that is running with its worker and activity, a form to start the next, and every run a page at a
  * time. Everything shown is what Execution committed and what the worker last reported. The current run is refetched
- * every two seconds; the history every five, and at once whenever the newest run changes, so the two agree. How long
+ * every two seconds; the history every five, and at once whenever the newest run changes, so the two agree. Neither
+ * is polled once the market has closed, as nothing about its runs can change any more. How long
  * the run has been going is counted up to the last answer, on the exchange's clock as that answer gave it: it moves
  * with each refetch, needs no timer of its own, and does not depend on the browser's clock.
  */
@@ -79,7 +80,14 @@ export function BotRuns({
   closedAt: string | null;
   instruments: readonly Instrument[];
 }) {
-  const runs = useQuery({ queryKey: ['bot-runs'], queryFn: api.botRuns, refetchInterval: pollEvery(2_000) });
+  // A close ends every run in its own transaction, and a worker's report on an ended run is refused, so a closed
+  // market's runs are read once, when the page opens or the market closes, and not polled.
+  const closed = market === 'CLOSED';
+  const runs = useQuery({
+    queryKey: ['bot-runs'],
+    queryFn: api.botRuns,
+    refetchInterval: closed ? false : pollEvery(2_000),
+  });
   const population = useQuery({ queryKey: ['bots'], queryFn: api.botPopulation });
   const list = runs.data?.runs ?? [];
   const active = activeRun(list);
@@ -110,7 +118,7 @@ export function BotRuns({
       return { rows: page.runs, nextCursor: page.nextCursor };
     },
     defaults: { size: 10, order: 'newest' },
-    refetchInterval: pollEvery(5_000),
+    ...(closed ? {} : { refetchInterval: pollEvery(5_000) }),
   });
   const client = useQueryClient();
   const newest = list[0];

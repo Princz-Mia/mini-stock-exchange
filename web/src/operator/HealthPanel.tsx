@@ -147,10 +147,28 @@ export function useHealthSummary() {
 }
 
 /**
- * How trading is keeping up, beside the market controls. Execution's figures refresh every two seconds; the analytics'
- * freshness, read from one minute of each instrument's candles, every ten.
+ * Whether an instrument's analytics have caught up with every trade, live: on a closed market, where nothing trades
+ * any more, nothing about them can change after that.
  */
-export function HealthPanel({ instruments, feed }: { instruments: readonly Instrument[]; feed: FeedReading }) {
+export function analyticsCaughtUp(candles: Candles | undefined): boolean {
+  return candles !== undefined && candles.freshness.tradesBehind === 0 && candles.freshness.feed.state === 'LIVE';
+}
+
+/**
+ * How trading is keeping up, beside the market controls. Execution's figures refresh every two seconds; the analytics'
+ * freshness, read from one minute of each instrument's candles, every ten. On a closed market an instrument's
+ * analytics are read no more once caught up. Execution's figures still are: its writer can stop, and the close's own
+ * events are still being published for a moment.
+ */
+export function HealthPanel({
+  instruments,
+  feed,
+  closed = false,
+}: {
+  instruments: readonly Instrument[];
+  feed: FeedReading;
+  closed?: boolean;
+}) {
   const summary = useHealthSummary();
   const candles = useQueries({
     queries: instruments.map((instrument) => ({
@@ -165,7 +183,8 @@ export function HealthPanel({ instruments, feed }: { instruments: readonly Instr
           { signal },
         );
       },
-      refetchInterval: pollEvery(10_000),
+      refetchInterval: (query: { state: { data: Candles | undefined; error: unknown } }) =>
+        closed && analyticsCaughtUp(query.state.data) ? false : pollEvery(10_000)(query),
     })),
   });
   const analytics = worstAnalytics(

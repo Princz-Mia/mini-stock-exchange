@@ -3693,6 +3693,114 @@ describe('closing the market on the operator screen', () => {
   });
 });
 
+describe('what the operator screen reads again of a closed market', () => {
+  beforeEach(() => resetSession());
+  afterEach(() => vi.useRealTimers());
+
+  const HEALTH = {
+    writer: { available: true, queueDepth: 0, queueCapacity: 256 },
+    lastMinute: { committed: 0, failed: 0, withinBudget: 0, refused: 0 },
+    outbox: { admitting: true, pendingEvents: 0, oldestPendingMillis: 0 },
+  };
+  const CANDLES = `/api/v1/instruments/${NOVA.instrumentId}/candles`;
+  const candles = (behind: number) => ({
+    instrumentId: NOVA.instrumentId,
+    computationEpoch: 1,
+    from: '2026-11-05T15:59:00Z',
+    to: '2026-11-05T16:00:00Z',
+    candles: [],
+    freshness: {
+      feed: { state: 'LIVE', lag: 0 },
+      candlesThroughTradeSequence: '1',
+      latestTradeSequence: String(1 + behind),
+      tradesBehind: behind,
+    },
+  });
+  const PATHS = ['/api/v1/market', '/api/v1/admin/health', '/api/v1/admin/bot-runs', '/api/v1/instruments', CANDLES];
+
+  /** Each path's reads so far, the instrument list by its simulation only. */
+  function reads(server: ReturnType<typeof exchange>['server']) {
+    return Object.fromEntries(
+      PATHS.map((path) => [
+        path,
+        server.requests.filter((request) =>
+          path === '/api/v1/instruments' ? request.url === LIST : request.url.split('?')[0] === path,
+        ).length,
+      ]),
+    );
+  }
+
+  /** Renders the page with the browser's clock faked, once every list has been read, and a way to let time pass. */
+  async function opened(at: MarketStatus['state'], feed = { state: 'LIVE', lag: 0 }, behind = 0) {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { server, state } = exchange(at);
+    state.runs = [finishedRun()];
+    let list = feed;
+    let trades = behind;
+    server
+      .on('GET /api/v1/admin/health', { status: 200, json: HEALTH })
+      .on('GET /api/v1/instruments', () => ({ status: 200, json: { instruments: [NOVA], feed: list } }))
+      .on(`GET ${CANDLES}`, () => ({ status: 200, json: candles(trades) }));
+    const view = renderPage();
+    await screen.findByRole('table', { name: 'Recent runs' });
+    await screen.findByText('Taking commands');
+    await waitFor(() => expect(reads(server)[CANDLES]).toBeGreaterThan(0));
+    const wait = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+    return {
+      server,
+      view,
+      wait,
+      catchUp: () => {
+        list = { state: 'LIVE', lag: 0 };
+        trades = 0;
+      },
+    };
+  }
+
+  it('reads again only what can still change once closed, and everything while open', async () => {
+    for (const at of ['OPEN', 'CLOSED'] as const) {
+      const { server, view, wait } = await opened(at);
+      // One more for each, in case one was already on its way when the page settled.
+      await wait(10);
+      const before = reads(server);
+      await wait(11_000);
+      const after = reads(server);
+      // The market's state, and how Execution's writer is doing, can change either way.
+      expect(after['/api/v1/market']).toBeGreaterThan(before['/api/v1/market']!);
+      expect(after['/api/v1/admin/health']).toBeGreaterThan(before['/api/v1/admin/health']!);
+      for (const path of ['/api/v1/admin/bot-runs', '/api/v1/instruments', CANDLES]) {
+        if (at === 'OPEN') {
+          expect(after[path], path).toBeGreaterThan(before[path]!);
+        } else {
+          expect(after[path], path).toBe(before[path]);
+        }
+      }
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('goes on reading a closed market\'s list and analytics until market data and the analytics have caught up', async () => {
+    const { server, wait, catchUp } = await opened('CLOSED', { state: 'CATCHING_UP', lag: 3 }, 5);
+    await wait(10);
+    const before = reads(server);
+    await wait(11_000);
+    const behind = reads(server);
+    expect(behind['/api/v1/instruments']).toBeGreaterThan(before['/api/v1/instruments']!);
+    expect(behind[CANDLES]).toBeGreaterThan(before[CANDLES]!);
+
+    // Caught up: one more read of each says so, and then nothing more is asked.
+    catchUp();
+    await wait(11_000);
+    const caughtUp = reads(server);
+    await wait(11_000);
+    const later = reads(server);
+    expect(later['/api/v1/instruments']).toBe(caughtUp['/api/v1/instruments']);
+    expect(later[CANDLES]).toBe(caughtUp[CANDLES]);
+    expect(screen.getByText('Up to date')).toBeInTheDocument();
+  });
+});
+
 describe('the operator screen when the exchange names another simulation', () => {
   beforeEach(() => resetSession());
 
