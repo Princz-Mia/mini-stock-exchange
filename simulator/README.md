@@ -16,11 +16,19 @@ same public and authenticated API as people use.
 - **Strategies:** each bot draws from its own generator, seeded by the run's seed and its account, so the same
   observations give the same decisions. Market makers take the first turns of a run. No bot orders more than it
   holds or than the run's position limit allows, and old orders are cancelled.
-  - **Fair values:** each instrument of a run has a fair value that only the bots know. It starts at the
-    market's price, wanders at random, and is pulled back toward the instrument's reference price (half of a
-    gap closes in four hours), so it moves a few percent and returns. It moves one step per market poll while
-    the market is open, from the run's seed. Each bot sees it through a small bias of its own. A value never
-    sets a price: it only shapes the orders a bot sends, and prices are made by orders meeting in the book.
+  - **Fair values:** each instrument of a run has a fair value that only the bots know. It wanders at random
+    and is pulled back toward the instrument's reference price (half of a gap closes in four hours), so it
+    moves a few percent and returns. It moves one step per market poll while the market is open, from the
+    run's seed. Each bot sees it through a small bias of its own. A value never sets a price: it only shapes
+    the orders a bot sends, and prices are made by orders meeting in the book.
+  - **Where a value starts:** at the first poll of an open market, at a price the market supports: the last
+    trade, which two accounts agreed on; with no trade yet, the mid of a narrow book; otherwise the reference
+    price. A second run on a market that has traded, or a restarted worker, starts again from the last trade.
+  - **The market's price:** where the bots take an instrument to trade now is the mid only of a narrow book,
+    whose two sides are at most 100 basis points of the mid apart, or one tick; otherwise the last trade, else
+    the reference price. A wide book's mid is no price anyone offered: one order left far away, such as a bid
+    at 1.00 facing an offer at 500.00 around 100.00, would otherwise move the noise bots' prices, the momentum
+    signal and a run's values halfway to it.
   - **Prices:** spreads and offsets are in basis points of the price, at least one tick, so a cheap instrument
     trades like a dear one. A limit is rounded to the tick once, a buy down and a sell up, which favours
     neither side.
@@ -29,13 +37,12 @@ same public and authenticated API as people use.
     the current price, so it buys below the value and sells above it wherever the market is. The run's makers
     take its instruments in turn. Quotes that drift too far from their target, or would cross the other side,
     are cancelled before new ones go in.
-  - **Momentum:** short and long moving averages of each instrument's mid, sampled once per market poll for
+  - **Momentum:** short and long moving averages of each instrument's price, sampled once per market poll for
     all momentum bots and started afresh after a halt. Past a threshold, the side is drawn with a bias toward
     the trend, never more than three orders in four. An order takes the best opposite quote only if it is
     within twenty basis points of the price and rests otherwise, one order at a time with a cooldown.
   - **Noise:** limit orders on the run's instruments, a random side, up to thirty basis points either side of
-    a centre: the mid (or the last trade, or the reference price) moved a quarter of the way toward the bot's
-    idea of the value.
+    a centre: the market's price moved a quarter of the way toward the bot's idea of the value.
 - **Stop:** once the run is stopped or out of time, no new orders; every command in flight gets its final
   answer, every open order of the run's bots is cancelled (each one that can't be is reported), and the
   worker confirms the stop. A worker that stops without that leaves the run to the next one.

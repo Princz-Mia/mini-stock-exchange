@@ -45,6 +45,13 @@ class Book:
     last: int | None = None
 
 
+class Passive:
+    """An account that only holds what was placed for it: a person who placed orders and left."""
+
+    def decide(self, *_) -> None:
+        return None
+
+
 class ToyMarket:
     """Bots take turns, market makers first, at ``rate`` commands a second of simulated time. As in
     the simulator, every bot sees the same market view, refreshed once per poll, while its own
@@ -72,6 +79,11 @@ class ToyMarket:
         account = Account(strategy, cash, {instrument: shares for instrument in self.books})
         self.accounts.append(account)
         return account
+
+    def rest(self, account: Account, intent: Place) -> None:
+        """Places an order for an account outside the turns, as a person's order would be: to set
+        up a book before the bots start."""
+        self._place(self.accounts.index(account), account, intent)
 
     def run(self, commands: int, rate: float) -> None:
         for _ in range(commands):
