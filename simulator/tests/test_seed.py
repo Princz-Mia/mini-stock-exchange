@@ -64,6 +64,7 @@ class FakeExchange:
             answer = httpx.Response(201, json={"instrumentId": str(uuid4())})
             self.state = "SETUP"
         elif path == "/api/v1/admin/market/open":
+            # As the real one answers; the seed is never meant to send it.
             answer = httpx.Response(200, json={"state": "OPEN"})
             self.state = "OPEN"
         else:
@@ -77,7 +78,7 @@ def operator(exchange: FakeExchange, password: str = "secret") -> Operator:
     return Operator(http, password, sleep=lambda seconds: None)
 
 
-def test_a_fresh_market_is_set_up_and_opened() -> None:
+def test_a_fresh_market_is_set_up_and_left_in_setup_for_the_operator() -> None:
     exchange = FakeExchange()
 
     done = seed(operator(exchange), bots=150, trader_password=TRADER_PASSWORD)
@@ -94,9 +95,14 @@ def test_a_fresh_market_is_set_up_and_opened() -> None:
         ("NOISE", 90),
         ("MOMENTUM", 30),
     ], "a command per strategy, market makers first"
-    assert exchange.applied[-1] == "/api/v1/admin/market/open"
-    assert exchange.state == "OPEN"
-    assert "150 bots (30 market makers, 90 noise, 30 momentum)" in done
+    assert "/api/v1/admin/market/open" not in exchange.applied
+    assert exchange.applied[-1] == "/api/v1/admin/bots", "the bots are the last step"
+    assert exchange.state == "SETUP"
+    assert done == (
+        "seeded 5 instruments, the trader account and 150 bots"
+        " (30 market makers, 90 noise, 30 momentum);"
+        " the market is left in setup for the operator to open"
+    )
 
 
 def test_each_strategy_is_provisioned_100_at_a_time_under_its_own_keys() -> None:
@@ -132,7 +138,7 @@ def test_a_few_bots_still_include_a_market_maker_and_a_noise_bot() -> None:
         seed(operator(exchange), bots=bots, trader_password=TRADER_PASSWORD)
 
         assert [(body["strategy"], body["count"]) for _, body in exchange.bots] == expected, bots
-        assert exchange.state == "OPEN"
+        assert exchange.state == "SETUP", bots
 
 
 def test_an_interrupted_seed_finishes_without_doing_anything_twice() -> None:
@@ -156,7 +162,7 @@ def test_an_interrupted_seed_finishes_without_doing_anything_twice() -> None:
         "NOISE",
         "MOMENTUM",
     ], "retried after busy, each applied once"
-    assert exchange.state == "OPEN"
+    assert exchange.state == "SETUP"
 
 
 def test_a_wrong_operator_password_stops_before_anything() -> None:
@@ -209,7 +215,7 @@ def test_a_market_in_setup_that_nobody_named_is_the_seeds_own_and_is_finished() 
     seed(operator(exchange), bots=2, trader_password=TRADER_PASSWORD)
 
     assert exchange.applied.count("/api/v1/admin/instruments") == len(INSTRUMENTS)
-    assert exchange.state == "OPEN"
+    assert exchange.state == "SETUP"
 
 
 def test_an_exchange_that_reports_no_name_is_seeded_as_before() -> None:
@@ -229,7 +235,8 @@ def test_an_exchange_that_reports_no_name_is_seeded_as_before() -> None:
         trader_password=TRADER_PASSWORD,
     )
 
-    assert exchange.state == "OPEN"
+    assert exchange.applied.count("/api/v1/admin/bots") == 1
+    assert exchange.state == "SETUP"
 
 
 def test_a_refused_field_is_named_in_the_error() -> None:
@@ -269,17 +276,42 @@ def test_a_configured_trader_from_an_earlier_stack_is_funded_instead() -> None:
     assert body["username"] == "trader"
     assert body["cash"] == "100000.00"
     assert len(body["holdings"]) == len(INSTRUMENTS)
-    assert exchange.state == "OPEN"
+    assert exchange.state == "SETUP"
 
 
 def test_a_resumed_seed_repeats_the_traders_answer_without_adding_twice() -> None:
     exchange = FakeExchange()
     seed(operator(exchange), bots=0, trader_password=TRADER_PASSWORD)
-    exchange.state = "SETUP"
 
     seed(operator(exchange), bots=0, trader_password=TRADER_PASSWORD)
 
     assert exchange.applied.count("/api/v1/admin/traders") == 1, "the stored answer replays"
+
+
+def test_a_seed_started_again_on_its_own_market_adds_nothing_and_still_leaves_it_in_setup() -> None:
+    # A stack restarted before the operator opened the market: the seed runs once more.
+    exchange = FakeExchange()
+    first = seed(operator(exchange), bots=20, trader_password=TRADER_PASSWORD)
+    applied = list(exchange.applied)
+
+    again = seed(operator(exchange), bots=20, trader_password=TRADER_PASSWORD)
+
+    assert exchange.applied == applied, "every step replays its first answer"
+    assert "/api/v1/admin/market/open" not in exchange.applied
+    assert exchange.state == "SETUP"
+    assert again == first
+
+
+def test_the_operator_opening_the_seeded_market_makes_a_later_seed_leave_it_alone() -> None:
+    exchange = FakeExchange()
+    seed(operator(exchange), bots=20, trader_password=TRADER_PASSWORD)
+    exchange.state = "OPEN"
+    applied = list(exchange.applied)
+
+    done = seed(operator(exchange), bots=20, trader_password=TRADER_PASSWORD)
+
+    assert exchange.applied == applied
+    assert done == "the market is already open; nothing to do"
 
 
 def test_seeding_is_off_unless_asked_for(
@@ -301,5 +333,32 @@ def test_seeding_is_off_unless_asked_for(
 
 
 def test_keys_are_the_same_on_every_run_and_differ_by_step() -> None:
-    assert seeding.key("open") == seeding.key("open")
+    assert seeding.key("trader:trader") == seeding.key("trader:trader")
     assert seeding.key("instrument:NOVA") != seeding.key("instrument:ORBT")
+
+
+def test_the_seed_says_in_its_last_line_that_the_operator_opens_the_market(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    exchange = FakeExchange()
+    client = httpx.Client
+
+    def against_the_fake(**settings) -> httpx.Client:
+        return client(transport=httpx.MockTransport(exchange), **settings)
+
+    monkeypatch.setattr(seeding.httpx, "Client", against_the_fake)
+    monkeypatch.setenv("MSE_DEMO_SEED", "true")
+    monkeypatch.setenv("MSE_DEMO_OPERATOR_PASSWORD", "secret")
+    monkeypatch.setenv("MSE_DEMO_TRADER_PASSWORD", TRADER_PASSWORD)
+    monkeypatch.setenv("MSE_DEMO_BOTS", "20")
+    caplog.set_level("INFO", logger="mse_simulator.seed")
+
+    assert seeding.main() == 0
+
+    assert "/api/v1/admin/market/open" not in exchange.applied
+    assert exchange.state == "SETUP"
+    assert caplog.records[-1].getMessage() == (
+        "seeded 5 instruments, the trader account and 20 bots"
+        " (4 market makers, 12 noise, 4 momentum);"
+        " the market is left in setup for the operator to open"
+    )

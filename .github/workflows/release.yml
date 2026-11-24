@@ -74,7 +74,8 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
-  # The release check: the published images, pulled on a fresh machine, start the whole stack and seed the demo market.
+  # The release check: the published images, pulled on a fresh machine, start the whole stack, seed the demo market and
+  # open it.
   verify:
     if: github.event_name == 'push'
     needs: images
@@ -92,6 +93,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Start the published release
+        env:
+          # Whatever .env.example's default, so the check always has a seeded market to look at.
+          MSE_DEMO_SEED: "true"
         run: |
           ./scripts/init-env.sh
           docker compose -f compose.yaml -f compose.release.yaml --profile full up -d --no-build --wait --wait-timeout 300
@@ -101,12 +105,24 @@ jobs:
           for service in execution-service market-data-service web flink-jobmanager flink-taskmanager simulator; do
             grep -E "^$service $REGISTRY/[a-z-]+:$MSE_VERSION$" images.txt || { echo "$service is not on $MSE_VERSION"; exit 1; }
           done
-      - name: The demo market is open
+      - name: The seeded market waits in setup, and the operator opens it
         run: |
           docker compose -f compose.yaml -f compose.release.yaml --profile full logs --no-log-prefix demo-seed
-          curl -fsS http://localhost:8080/api/v1/market | tee market.json
-          grep -q '"state":"OPEN"' market.json
-          test "$(curl -fsS http://localhost:8080/api/v1/instruments | grep -o '"symbol":"[A-Z]*"' | wc -l)" = 5
+          api=http://localhost:8080/api/v1
+          curl -fsS "$api/market" | tee market.json
+          grep -q '"state":"SETUP"' market.json
+          test "$(curl -fsS "$api/instruments" | grep -o '"symbol":"[A-Z]*"' | wc -l)" = 5
+          # The seed never opens the market: the operator signs in, finds the bots and opens it.
+          jar=operator-cookies.txt
+          csrf() { curl -fsS -b "$jar" -c "$jar" "$api/auth/csrf" | sed -E 's/.*"token":"([^"]+)".*/\1/'; }
+          operator_login=$(sed -n 's/^DEV_OPERATOR_PASSWORD=//p' .env)
+          curl -fsS -b "$jar" -c "$jar" -H "X-CSRF-TOKEN: $(csrf)" -H 'Content-Type: application/json' \
+            -d "{\"username\":\"operator\",\"password\":\"$operator_login\"}" "$api/auth/login" > /dev/null
+          curl -fsS -b "$jar" "$api/admin/bots" | tee bots.json
+          grep -qE '"population":20[,}]' bots.json
+          curl -fsS -b "$jar" -c "$jar" -H "X-CSRF-TOKEN: $(csrf)" -H "Idempotency-Key: $(cat /proc/sys/kernel/random/uuid)" \
+            -X POST "$api/admin/market/open" | tee opened.json
+          curl -fsS "$api/market" | grep -q '"state":"OPEN"'
       - name: Logs
         if: failure()
         run: docker compose -f compose.yaml -f compose.release.yaml --profile full logs --tail 200
