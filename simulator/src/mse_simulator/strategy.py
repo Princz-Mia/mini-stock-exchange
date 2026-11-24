@@ -40,7 +40,16 @@ class Cancel:
     order_id: str
 
 
-Intent = Place | Cancel
+@dataclass(frozen=True)
+class Replace:
+    """A cancel and a place in one step, sent in that order: the place goes only once the cancel
+    is answered, and it costs a command of its own."""
+
+    cancel: Cancel
+    place: Place
+
+
+Intent = Place | Cancel | Replace
 
 
 class Strategy(Protocol):

@@ -28,7 +28,7 @@ from mse_simulator.noise import NoiseBot, NoiseConfig
 from mse_simulator.pacing import Pacer
 from mse_simulator.prices import BASIS_POINT
 from mse_simulator.settings import Settings
-from mse_simulator.strategy import Cancel, Holdings, OpenOrder, Place, Strategy
+from mse_simulator.strategy import Cancel, Holdings, OpenOrder, Place, Replace, Strategy
 from mse_simulator.values import FairValues, View
 
 logger = logging.getLogger(__name__)
@@ -328,28 +328,15 @@ class Runner:
                 # the data is stale: then the bots pause, at the paced rate of steps.
                 self._pacer.refund()
             if isinstance(intent, Place):
-                answer = await bot.client.place(
-                    {
-                        "instrumentId": str(intent.instrument_id),
-                        "side": intent.side,
-                        "type": "LIMIT",
-                        "timeInForce": "GTC",
-                        "quantity": intent.quantity,
-                        "limitPrice": market.price(intent.limit),
-                    }
-                )
-                if answer.status == 201:
-                    self.activity.placed += 1
-                else:
-                    self.activity.rejected += 1
-                    self._unauthorized(bot, answer.status)
+                await self._place(bot, intent)
             elif isinstance(intent, Cancel):
-                answer = await bot.client.cancel(intent.order_id)
-                if answer.status == 200:
-                    self.activity.canceled += 1
-                else:
-                    self.activity.rejected += 1
-                    self._unauthorized(bot, answer.status)
+                await self._cancel(bot, intent)
+            elif isinstance(intent, Replace) and await self._cancel(bot, intent.cancel):
+                # The place is a second command: the pacer is charged for it. A cancel that was
+                # refused leaves the order where it was, so nothing is placed beside it.
+                if self._pacer is not None:
+                    self._pacer.charge()
+                await self._place(bot, intent.place)
         except httpx.HTTPStatusError as error:
             self.activity.errors += 1
             self._unauthorized(bot, error.response.status_code)
@@ -358,6 +345,33 @@ class Runner:
             self.activity.errors += 1
         finally:
             bot.busy = False
+
+    async def _place(self, bot: Bot, intent: Place) -> None:
+        answer = await bot.client.place(
+            {
+                "instrumentId": str(intent.instrument_id),
+                "side": intent.side,
+                "type": "LIMIT",
+                "timeInForce": "GTC",
+                "quantity": intent.quantity,
+                "limitPrice": market.price(intent.limit),
+            }
+        )
+        if answer.status == 201:
+            self.activity.placed += 1
+        else:
+            self.activity.rejected += 1
+            self._unauthorized(bot, answer.status)
+
+    async def _cancel(self, bot: Bot, intent: Cancel) -> bool:
+        """Whether the order was cancelled."""
+        answer = await bot.client.cancel(intent.order_id)
+        if answer.status == 200:
+            self.activity.canceled += 1
+            return True
+        self.activity.rejected += 1
+        self._unauthorized(bot, answer.status)
+        return False
 
     def _unauthorized(self, bot: Bot, status: int) -> None:
         """A refused token stays refused: a token is written once and never renewed. So the bot

@@ -872,6 +872,49 @@ def test_market_makers_take_the_first_turns_and_quote_both_sides(tmp_path) -> No
     assert len(quotes) == 2, "resting quotes on target aren't replaced"
 
 
+@pytest.mark.parametrize("cancelable", [True, False])
+def test_a_maker_replaces_a_stale_quote_in_one_step_and_pays_for_both_commands(
+    tmp_path, cancelable
+) -> None:
+    """Its bid has rested past the quote lifetime: one step cancels it and asks, the side with no
+    quote. The place is a second command, so the pacer is charged for it. A cancel the exchange
+    refuses leaves the bid where it was, and nothing goes beside it."""
+    accounts = write_tokens(tmp_path / "tokens", 1)
+    exchange = Exchange()
+    exchange.run = run_body(accounts, ["MARKET_MAKER"])
+    maker = next(iter(accounts.values()))
+    stale = exchange.open_order(maker, side="BUY", limit="99.90")
+    exchange.active[maker][0]["createdAt"] = "2026-01-01T00:00:00+00:00"
+    if not cancelable:
+        exchange.uncancelable.add(stale)
+    still = settings(tmp_path / "tokens", fair_value_volatility=0.0, view_spread_bp=0.0)
+
+    async def scenario() -> tuple[Runner, Pacer]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:
+            runner = Runner(still, http)
+            runner.start_run(assigned(exchange.run))
+            await runner.load_bots()
+            await runner.refresh_market()
+            runner._pacer = pacer = Pacer(1.0, 0.0)
+            assert pacer.take()
+            runner.tick()
+            await asyncio.wait_for(runner.drain(), 2)
+            return runner, pacer
+
+    runner, pacer = asyncio.run(scenario())
+    if cancelable:
+        assert exchange.canceled == [stale]
+        assert [json.loads(r.content)["side"] for r in exchange.placed] == ["SELL"]
+        assert (runner.activity.canceled, runner.activity.placed) == (1, 1)
+        pacer.accrue(1.5)
+        assert not pacer.take(), "a second and a half pays for two commands, not a third"
+    else:
+        assert exchange.canceled == [] and exchange.placed == []
+        assert (runner.activity.rejected, runner.activity.placed) == (1, 0)
+        pacer.accrue(1.0)
+        assert pacer.take()
+
+
 def test_momentum_bots_trade_on_the_signal_the_market_polls_feed(tmp_path) -> None:
     accounts = write_tokens(tmp_path / "tokens", 1)
     exchange = Exchange()

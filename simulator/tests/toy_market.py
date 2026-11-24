@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from uuid import UUID
 
 from mse_simulator.market import Instrument, MarketView
-from mse_simulator.strategy import Cancel, Holdings, OpenOrder, Place, Strategy
+from mse_simulator.strategy import Cancel, Holdings, OpenOrder, Place, Replace, Strategy
 
 MAX_PRICE = 100_000_000
 
@@ -76,6 +76,8 @@ class ToyMarket:
         self._next_poll = 0.0
         self._next_bot = 0
         self._next_order = 0
+        # Commands a replace spent beyond its turn: the turns they stand for pass with no step.
+        self._owed = 0
         self._view = self._snapshot()
 
     def join(self, strategy: Strategy, cash: int, shares: int) -> Account:
@@ -94,6 +96,9 @@ class ToyMarket:
             while self.now >= self._next_poll:
                 self._poll()
                 self._next_poll += self._poll_seconds
+            if self._owed:
+                self._owed -= 1
+                continue
             self._command()
 
     def price(self, instrument: UUID) -> float:
@@ -155,19 +160,26 @@ class ToyMarket:
             if isinstance(intent, Cancel):
                 self._cancel(account, intent.order_id)
                 return
+            if isinstance(intent, Replace):
+                if self._cancel(account, intent.cancel.order_id):
+                    self._owed += 1
+                    intent = intent.place
+                else:
+                    return
             if isinstance(intent, Place):
                 for observer in self.on_place:
                     observer(account, intent, self._view)
                 self._place(index, account, intent)
                 return
 
-    def _cancel(self, account: Account, order_id: str) -> None:
+    def _cancel(self, account: Account, order_id: str) -> bool:
         order = account.orders.pop(order_id, None)
         if order is None:
-            return
+            return False
         book = self.books[order.instrument]
         (book.bids if order.side == "BUY" else book.asks).remove(order)
         self._release(account, order, order.working)
+        return True
 
     @staticmethod
     def _release(account: Account, order: Resting, quantity: int) -> None:

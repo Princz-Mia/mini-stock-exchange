@@ -37,8 +37,11 @@ same public and authenticated API as people use.
   - **Market maker:** one bid and one ask on one instrument, ten basis points either side of a reservation
     price: the bot's idea of the value, leaning against its inventory. It quotes around the value, not around
     the current price, so it buys below the value and sells above it wherever the market is. The run's makers
-    take its instruments in turn. Quotes that drift too far from their target, or would cross the other side,
-    are cancelled before new ones go in.
+    take its instruments in turn. A quote older than 30 seconds is cancelled and replaced in the same step,
+    with a quote for the side that has none, the cancelled side last: a maker whose turns come further apart
+    than that, as in a large run, then bids and asks in turn instead of only bidding, and one with closer
+    turns keeps both. The replacement is a command of its own for the run's rate. Quotes that drift too far
+    from their target, or would cross the other side, are cancelled before new ones go in.
   - **Momentum:** short and long moving averages of each instrument's price, sampled once per market poll for
     all momentum bots and started afresh after a halt. Past a threshold, the side is drawn with a bias toward
     the trend, never more than three orders in four. An order takes the best opposite quote only if it is
