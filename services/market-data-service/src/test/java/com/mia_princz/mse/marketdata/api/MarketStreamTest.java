@@ -9,9 +9,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,6 +44,8 @@ class MarketStreamTest {
 
 	private final AtomicInteger frameReads = new AtomicInteger();
 
+	private final Map<UUID, AtomicInteger> reads = new ConcurrentHashMap<>();
+
 	private final List<RecordingEmitter> emitters = new CopyOnWriteArrayList<>();
 
 	private volatile CountDownLatch nextSendBlocks;
@@ -49,11 +54,23 @@ class MarketStreamTest {
 
 	private final AtomicBoolean nextReadFails = new AtomicBoolean();
 
+	/** Set, the next instrument read fails, and so does every later read of that instrument. */
+	private final AtomicBoolean nextReadBreaks = new AtomicBoolean();
+
+	private final Set<UUID> broken = ConcurrentHashMap.newKeySet();
+
 	private final MarketStream stream = new MarketStream(new MarketStream.Frames() {
 
 		@Override
 		public Optional<Object> frame(UUID instrumentId) {
 			frameReads.incrementAndGet();
+			reads.computeIfAbsent(instrumentId, (id) -> new AtomicInteger()).incrementAndGet();
+			if (nextReadBreaks.getAndSet(false)) {
+				broken.add(instrumentId);
+			}
+			if (broken.contains(instrumentId)) {
+				throw new IllegalStateException("projection row does not map");
+			}
 			if (nextReadFails.getAndSet(false)) {
 				throw new IllegalStateException("database not answering");
 			}
@@ -264,11 +281,53 @@ class MarketStreamTest {
 		stream.changed(instrument);
 
 		nextReadFails.set(true);
-		assertThatThrownBy(stream::tick).isInstanceOf(IllegalStateException.class);
+		stream.tick();
 		stream.tick();
 
 		waitUntil(() -> emitter.events().size() == 2);
 		assertThat(emitter.events().getLast()).as("no new trade was needed to send it").isEqualTo("market:frame-1");
+	}
+
+	@Test
+	void anInstrumentWhoseFrameKeepsFailingHoldsUpNoOther() throws Exception {
+		List<UUID> instruments = List.of(UUID.randomUUID(), UUID.randomUUID(), UUID.randomUUID());
+		List<RecordingEmitter> watchers = new ArrayList<>();
+		for (UUID instrument : instruments) {
+			watchers.add(subscribe(instrument, "frame-0"));
+		}
+		waitUntil(() -> watchers.stream().allMatch((watcher) -> watcher.events().size() == 1));
+		instruments.forEach((instrument) -> {
+			versions.computeIfAbsent(instrument, (id) -> new AtomicInteger()).set(1);
+			stream.changed(instrument);
+		});
+
+		// Whichever instrument the round reads first breaks for good, so it is ahead of all the others.
+		nextReadBreaks.set(true);
+		stream.tick();
+
+		assertThat(broken).hasSize(1);
+		UUID failing = broken.iterator().next();
+		for (int i = 0; i < instruments.size(); i++) {
+			RecordingEmitter watcher = watchers.get(i);
+			if (!instruments.get(i).equals(failing)) {
+				waitUntil(() -> watcher.events().size() == 2);
+				assertThat(watcher.events().getLast()).isEqualTo("market:frame-1");
+			}
+		}
+		Map<UUID, Integer> before = readCounts(instruments);
+		stream.tick();
+		Map<UUID, Integer> after = readCounts(instruments);
+		for (UUID instrument : instruments) {
+			assertThat(after.get(instrument) - before.get(instrument)).as("only the failed read is tried again")
+				.isEqualTo(instrument.equals(failing) ? 1 : 0);
+		}
+		assertThat(watchers.get(instruments.indexOf(failing)).events()).containsExactly("market:frame-0");
+	}
+
+	private Map<UUID, Integer> readCounts(List<UUID> instruments) {
+		Map<UUID, Integer> counts = new HashMap<>();
+		instruments.forEach((instrument) -> counts.put(instrument, reads.getOrDefault(instrument, new AtomicInteger()).get()));
+		return counts;
 	}
 
 	@Test
