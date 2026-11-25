@@ -237,9 +237,9 @@ function useSeenTrades(
 function useCandles(instrumentId: string, range: Range) {
   return useQuery({
     queryKey: ['candles', instrumentId, range],
-    queryFn: () => {
+    queryFn: ({ signal }) => {
       const window = windowFor(range, Date.now());
-      return api.candles(instrumentId, window.from, window.to);
+      return api.candles(instrumentId, window.from, window.to, { signal });
     },
     refetchInterval: pollEvery(10_000),
   });

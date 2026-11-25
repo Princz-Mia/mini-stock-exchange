@@ -1,7 +1,32 @@
+import { QueryClient } from '@tanstack/react-query';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { fakeServer } from '../test/fakeServer';
-import { ApiError, api, isRefusal, pollEvery, resetSession } from './client';
+import {
+  ApiError,
+  api,
+  CLOSE_DEADLINE_MS,
+  COMMAND_DEADLINE_MS,
+  isRefusal,
+  NoAnswerError,
+  pollEvery,
+  READ_DEADLINE_MS,
+  resetSession,
+} from './client';
+
+/** A handler that never answers: the request stays on its way until the client stops waiting. */
+const never = () => new Promise<never>(() => undefined);
+
+/** Whether a promise has settled yet, without waiting for it. */
+async function settled(promise: Promise<unknown>): Promise<boolean> {
+  let done = false;
+  promise.then(
+    () => (done = true),
+    () => (done = true),
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  return done;
+}
 
 describe('api client', () => {
   beforeEach(() => resetSession());
@@ -99,5 +124,94 @@ describe('api client', () => {
     expect(poll({ state: { error: refused } })).toBe(false);
     expect(poll({ state: { error: outage } })).toBe(5_000);
     expect(poll({ state: { error: null } })).toBe(5_000);
+  });
+
+  describe('deadlines', () => {
+    beforeEach(() => vi.useFakeTimers());
+
+    it('gives up on a command with no answer after its deadline, and says it was not answered', async () => {
+      const server = fakeServer()
+        .on('GET /api/v1/auth/csrf', { status: 200, json: { headerName: 'X-CSRF-TOKEN', token: 't' } })
+        .on('POST /api/v1/admin/market/halt', never);
+
+      const halt = api.controlMarket('halt', 'k-1').catch((caught: unknown) => caught);
+      await vi.advanceTimersByTimeAsync(COMMAND_DEADLINE_MS - 1);
+      expect(await settled(halt)).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      const error = await halt;
+      expect(error).toBeInstanceOf(NoAnswerError);
+      expect((error as NoAnswerError).waited).toBe(COMMAND_DEADLINE_MS);
+      const sent = server.requests.find((request) => request.method === 'POST');
+      expect(sent?.signal?.aborted).toBe(true);
+    });
+
+    it('waits longer for a close than the exchange does, and no longer than the proxy', async () => {
+      fakeServer()
+        .on('GET /api/v1/auth/csrf', { status: 200, json: { headerName: 'X-CSRF-TOKEN', token: 't' } })
+        .on('POST /api/v1/admin/market/close', never);
+
+      const close = api.closeMarket('k-2').catch((caught: unknown) => caught);
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(await settled(close)).toBe(false);
+      await vi.advanceTimersByTimeAsync(CLOSE_DEADLINE_MS - 45_000);
+
+      expect(await close).toBeInstanceOf(NoAnswerError);
+      expect(CLOSE_DEADLINE_MS).toBeGreaterThan(45_000);
+      expect(CLOSE_DEADLINE_MS).toBeLessThan(60_000);
+    });
+
+    it('reads a plain abort at the deadline as no answer, as older browsers give no reason', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          (_: RequestInfo | URL, init?: RequestInit) =>
+            new Promise<never>((__, reject) =>
+              init?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError'))),
+            ),
+        ),
+      );
+
+      const read = api.portfolio().catch((caught: unknown) => caught);
+      await vi.advanceTimersByTimeAsync(READ_DEADLINE_MS);
+
+      expect(await read).toBeInstanceOf(NoAnswerError);
+    });
+
+    it('gives up on a read sooner than on a command', async () => {
+      fakeServer().on('GET /api/v1/market', never);
+
+      const read = api.market().catch((caught: unknown) => caught);
+      await vi.advanceTimersByTimeAsync(READ_DEADLINE_MS);
+
+      expect(await read).toBeInstanceOf(NoAnswerError);
+      expect(READ_DEADLINE_MS).toBeLessThan(COMMAND_DEADLINE_MS);
+    });
+
+    it('stops a read when its caller stops it, which is not a missing answer', async () => {
+      const server = fakeServer().on('GET /api/v1/admin/bot-runs', never);
+      const caller = new AbortController();
+
+      const read = api.botRuns({ signal: caller.signal }).catch((caught: unknown) => caught);
+      caller.abort();
+
+      const error = await read;
+      expect(error).not.toBeInstanceOf(NoAnswerError);
+      expect(server.requests[0]?.signal?.aborted).toBe(true);
+      // Nothing is left to time out afterwards.
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('stops the request of a query that is cancelled, so it does not hold a connection', async () => {
+      const server = fakeServer().on('GET /api/v1/market', never);
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+      const read = client.fetchQuery({ queryKey: ['market'], queryFn: api.market }).catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      await client.cancelQueries({ queryKey: ['market'] });
+      await read;
+
+      expect(server.requests[0]?.signal?.aborted).toBe(true);
+    });
   });
 });

@@ -205,6 +205,64 @@ input[aria-invalid='true'] {
   padding: var(--space-6);
 }
 
+/*
+ * Loading: bars where words and figures will be, in the panels they will fill and at their size, so nothing moves when
+ * the data comes. They pulse gently, and stand still for anyone who asks for less motion.
+ */
+.skeleton {
+  display: block;
+  height: 0.9em;
+  border-radius: var(--space-1);
+  background: var(--line);
+  animation: skeleton-pulse 1.6s ease-in-out infinite;
+}
+
+/* As tall as a panel's heading, a figure, and a table row with its padding. */
+.skeleton-title {
+  height: 15px;
+}
+
+.skeleton-figure {
+  height: 24px;
+}
+
+.skeleton-row {
+  height: calc(1.45em + 2 * var(--space-2) - var(--space-3));
+}
+
+/* Rows inside a panel spaced as the panel spaces its own lines. */
+.skeleton-rows {
+  display: grid;
+  gap: var(--space-3);
+  position: relative;
+}
+
+/* Where the navigation and the account will be, once it is known who is signed in: as tall as a button there. */
+.topbar-skeleton {
+  flex-grow: 1;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: calc(1.45em + 2 * var(--space-2) + 2px);
+}
+
+/* The chart's own height under its controls. */
+.skeleton-chart {
+  min-height: 376px;
+}
+
+@keyframes skeleton-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+}
+
 /* Shell */
 .topbar {
   display: flex;
@@ -420,6 +478,11 @@ tbody th {
   box-shadow: inset 0 0 0 1px var(--warn-line);
 }
 
+/* As wide as its words wherever it sits, in a header's row or at the top of a page's column. */
+.last-updated {
+  justify-self: start;
+}
+
 /* Login */
 /* Border-box, so the padding is inside the full height and the card's padding and border inside its width: without
    it the card overflowed a phone's width by its padding. */
@@ -469,6 +532,11 @@ tbody th {
 .terminal > .ticket,
 .terminal-empty {
   grid-area: ticket;
+}
+
+.terminal-empty {
+  display: grid;
+  justify-items: start;
 }
 
 .terminal-orders {
@@ -972,7 +1040,8 @@ button.chip {
 }
 
 .transport-stale,
-.transport-connecting {
+.transport-connecting,
+.transport-reconnecting {
   color: var(--warn-text);
 }
 
@@ -1001,6 +1070,11 @@ button.chip {
   background: var(--warn-bg);
   color: var(--warn-text);
   font-size: 13px;
+}
+
+/* Above the page, when the trader's live account updates are being reconnected. */
+.stream-note {
+  margin: 0 0 var(--space-4);
 }
 
 .chart-legend {
@@ -1046,6 +1120,12 @@ button.chip {
   font-size: 12px;
   font-weight: normal;
   overflow-wrap: anywhere;
+}
+
+/* An instrument the exchange added that market data does not list yet: set apart from the listed rows. */
+.row-waiting > th,
+.row-waiting > td {
+  color: var(--muted);
 }
 
 /* The form Edit opens under an instrument's row: its fields wrap as the add form's do. */
@@ -1340,6 +1420,18 @@ button.primary.sell:enabled {
 .outcome-pending {
   background: var(--warn-bg);
   color: var(--warn-text);
+}
+
+/* A command's button with what became of it beside it, wrapping under it where the panel is narrow. */
+.command-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+
+.command-row > .outcome {
+  flex: 1 1 16rem;
 }
 
 .tabs {

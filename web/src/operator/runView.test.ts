@@ -7,9 +7,13 @@ import { seeded } from '../test/seeded';
 import {
   activeRun,
   averageRate,
+  botsAskedFor,
+  defaultRate,
   elapsedSeconds,
   LEFT_RUNNING_AFTER_SECONDS,
   leftRunning,
+  MAX_RUN_RATE,
+  paceText,
   ranForSeconds,
   ranForText,
   remainingSeconds,
@@ -477,5 +481,57 @@ describe('the bot run view', () => {
         expect('request' in built && built.request.instrumentIds).toEqual(chosen);
       }
     }
+  });
+});
+
+describe('the run form\'s rate', () => {
+  it('counts the bots asked for, leaving out a count that is not a whole number', () => {
+    expect(botsAskedFor({ marketMakers: '2', noise: ' 6 ', momentum: '2' })).toBe(10);
+    expect(botsAskedFor({ marketMakers: '2', noise: 'six', momentum: '' })).toBe(2);
+  });
+
+  it('starts at a tenth of the bots each second, from 1.00 to the exchange\'s highest rate', () => {
+    expect(defaultRate(0)).toBe('1.00');
+    expect(defaultRate(5)).toBe('1.00');
+    expect(defaultRate(25)).toBe('2.50');
+    expect(defaultRate(1_000)).toBe('100.00');
+    expect(defaultRate(20_000)).toBe('2000.00');
+    expect(defaultRate(25_000)).toBe('2000.00');
+    // Whatever the number, a rate the exchange takes, with each bot acting about every ten seconds while it can.
+    const next = seeded(14);
+    for (let round = 0; round < 500; round += 1) {
+      const bots = next(40_000);
+      const rate = defaultRate(bots);
+      expect(rate).toMatch(/^(0|[1-9][0-9]{0,3})\.[0-9]{2}$/);
+      expect(Number(rate)).toBeGreaterThanOrEqual(1);
+      expect(Number(rate)).toBeLessThanOrEqual(MAX_RUN_RATE);
+      if (bots >= 10 && bots <= 20_000) {
+        expect(bots / Number(rate)).toBeCloseTo(10, 6);
+      }
+    }
+  });
+
+  it('says how often each bot acts and when the first trades come, after every market maker\'s first turn', () => {
+    const form = (marketMakers: string, noise: string, momentum: string, commandsPerSecond: string) => ({
+      marketMakers,
+      noise,
+      momentum,
+      commandsPerSecond,
+    });
+    expect(paceText(form('200', '600', '200', '100.00'))).toBe(
+      'Each bot acts about every 10 s; first trades in about 2 s, once every market maker has had its first turn.',
+    );
+    expect(paceText(form('4000', '12000', '4000', '4.00'))).toBe(
+      'Each bot acts about every 1 h 23 min; first trades in about 16 min 40 s, once every market maker has had its first turn.',
+    );
+    expect(paceText(form('0', '6', '2', '1.00'))).toBe('Each bot acts about every 8 s; first trades in about 1 s.');
+    // Never under a second, however fast.
+    expect(paceText(form('1', '1', '0', '2000.00'))).toBe(
+      'Each bot acts about every 1 s; first trades in about 1 s, once every market maker has had its first turn.',
+    );
+    expect(paceText(form('0', '0', '0', '4.00'))).toBeNull();
+    expect(paceText(form('1', '1', '0', ''))).toBeNull();
+    expect(paceText(form('1', '1', '0', '0.00'))).toBeNull();
+    expect(paceText(form('1', '1', '0', 'fast'))).toBeNull();
   });
 });

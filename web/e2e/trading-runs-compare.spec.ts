@@ -5,7 +5,7 @@ import { type APIRequestContext, type APIResponse, expect, request, test } from 
 import type { BotRun, BotRunDetail, BotRunList, CsrfToken } from '../src/api/types';
 
 // Runs after trading-flow.spec.ts (files run in name order on one worker), whose last test ran a bot run from the
-// operator screen to a confirmed stop: one market maker and one noise bot, seed 11, at the form's 4.00 a second. This
+// operator screen to a confirmed stop: one market maker and one noise bot, seed 11, at 4.00 a second typed in. This
 // test runs a second through the operator API at twice the rate, then compares the two on the screen. It leaves no
 // run active: the gate's later steps start runs of their own.
 

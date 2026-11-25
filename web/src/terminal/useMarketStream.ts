@@ -1,9 +1,13 @@
 import { useEffect, useState } from 'react';
 
 import type { Feed, Heartbeat, MarketFrame } from '../api/types';
+import { CLOSED, reopenDelay } from '../app/reopen';
 
-/** The transport, separately from the data's own freshness: a live connection can still carry stale data. */
-export type Transport = 'connecting' | 'open' | 'stale';
+/**
+ * The transport, separately from the data's own freshness: a live connection can still carry stale data. Reconnecting
+ * is a stream that failed and is being opened again, by the browser or by this hook; what it showed stays meanwhile.
+ */
+export type Transport = 'connecting' | 'open' | 'reconnecting' | 'stale';
 
 export interface MarketStream {
   frame: MarketFrame | null;
@@ -29,7 +33,9 @@ const browserStream: StreamFactory = (url) => new EventSource(url) as unknown as
 /**
  * Follows one instrument's live market. Each `market` frame replaces the whole view, so a missed or repeated frame
  * cannot leave it inconsistent. Heartbeats carry the feed's state; silence beyond the limit marks the transport stale.
- * EventSource reconnects by itself after an error, and a new instrument opens a new stream.
+ * The browser reconnects by itself after a dropped connection. A stream it gave up on, after an answer that was not a
+ * 200 event stream, is opened again here after a pause that doubles with each failure in a row, up to 30 seconds, and
+ * starts again from one second once a frame arrives. A new instrument opens a new stream.
  */
 export function useMarketStream(
   instrumentId: string | null,
@@ -47,31 +53,58 @@ export function useMarketStream(
     if (instrumentId === null) {
       return;
     }
+    const url = `/api/v1/market-events?instrumentId=${encodeURIComponent(instrumentId)}`;
     let lastEvent = now();
-    const source = create(`/api/v1/market-events?instrumentId=${encodeURIComponent(instrumentId)}`);
-    source.addEventListener('market', (event) => {
-      const frame = JSON.parse(event.data) as MarketFrame;
+    // Attempts that failed since the last frame, and the next attempt while one is waiting.
+    let failures = 0;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let source: StreamSource;
+    const heard = () => {
       lastEvent = now();
-      if (frame.instrumentId === instrumentId) {
-        setState({ instrumentId, frame, feed: frame.feed, transport: 'open' });
-      }
-    });
-    source.addEventListener('heartbeat', (event) => {
-      const heartbeat = JSON.parse(event.data) as Heartbeat;
+      failures = 0;
+    };
+    const open = () => {
+      retry = undefined;
+      // A new attempt is not silence: the watchdog counts from it.
       lastEvent = now();
-      setState((current) => ({ ...sameInstrument(current, instrumentId), feed: heartbeat.feed, transport: 'open' }));
-    });
-    source.onerror = () =>
-      setState((current) => ({ ...sameInstrument(current, instrumentId), transport: 'connecting' }));
+      const opened = create(url);
+      source = opened;
+      opened.addEventListener('market', (event) => {
+        const frame = JSON.parse(event.data) as MarketFrame;
+        heard();
+        if (frame.instrumentId === instrumentId) {
+          setState({ instrumentId, frame, feed: frame.feed, transport: 'open' });
+        }
+      });
+      opened.addEventListener('heartbeat', (event) => {
+        const heartbeat = JSON.parse(event.data) as Heartbeat;
+        heard();
+        setState((current) => ({ ...sameInstrument(current, instrumentId), feed: heartbeat.feed, transport: 'open' }));
+      });
+      opened.onerror = () => {
+        if (opened.readyState === CLOSED) {
+          opened.close();
+          retry = setTimeout(open, reopenDelay(failures));
+          failures += 1;
+        }
+        setState((current) => ({ ...sameInstrument(current, instrumentId), transport: 'reconnecting' }));
+      };
+    };
+    open();
+    // Marks a connected stream that went silent, or a first attempt that never answered. A stream being opened again
+    // already says so, and says it more truly than "no updates".
     const watchdog = setInterval(() => {
       if (now() - lastEvent > STALE_AFTER_MS) {
         setState((current) =>
-          current.transport === 'stale' ? current : { ...sameInstrument(current, instrumentId), transport: 'stale' },
+          current.transport === 'stale' || (current.instrumentId === instrumentId && current.transport === 'reconnecting')
+            ? current
+            : { ...sameInstrument(current, instrumentId), transport: 'stale' },
         );
       }
     }, 1_000);
     return () => {
       clearInterval(watchdog);
+      clearTimeout(retry);
       source.close();
     };
   }, [instrumentId, create, now]);

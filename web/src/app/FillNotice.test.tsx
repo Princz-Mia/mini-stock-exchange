@@ -456,6 +456,27 @@ describe('the fill notice', () => {
     expect(within(notice).getByRole('status')).toHaveTextContent('Order partly filledBought 5 NOVA at 101.00, 5 of 10 filled.');
   });
 
+  it('says live updates are paused while the account stream is reopened, then tells of a fill made meanwhile', async () => {
+    const resting = order('a1');
+    open = [resting];
+    const server = await startOnPortfolio();
+    await accountChanged(server);
+    const paused = () => screen.queryByText(/^Live updates to your account were interrupted/);
+    expect(paused()).toBeNull();
+
+    // Execution restarts and the proxy answers 502: the browser gives the stream up. A bot fills the order meanwhile.
+    const before = streams.length;
+    act(() => streams.findLast((stream) => stream.url === '/api/v1/account-events')!.fail('refused'));
+    expect(paused()).toHaveAttribute('role', 'status');
+    open = [filled(resting, 4)];
+
+    // Opened again a second later; its first frame refetches, so the fill is news, and the note goes.
+    await waitFor(() => expect(streams.length).toBeGreaterThan(before), { timeout: 3_000 });
+    await accountChanged(server);
+    expect(await screen.findByRole('region', { name: 'Fills' })).toHaveTextContent('Bought 4 NOVA at 101.00');
+    expect(paused()).toBeNull();
+  });
+
   it('tries again when the very first look fails, so the fill that follows is still news', async () => {
     const resting = order('a1');
     open = [resting];

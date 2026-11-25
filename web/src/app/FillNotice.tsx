@@ -47,7 +47,7 @@ export function useFillNotices() {
   const look = useCallback(async () => {
     const open = await client.fetchQuery({
       queryKey: ['orders', 'active'],
-      queryFn: () => api.orders('active'),
+      queryFn: ({ signal }) => api.orders('active', undefined, undefined, undefined, {}, { signal }),
       staleTime: 0,
       retry: false,
     });
