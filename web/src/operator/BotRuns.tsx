@@ -161,7 +161,8 @@ export function BotRuns({
   return (
     <section className="panel" aria-labelledby="runs-title">
       <h2 id="runs-title">Bot runs</h2>
-      <Announcer said={runs.data === undefined ? undefined : active === undefined ? null : runMilestone(active)} />
+      {/* The newest run, stopped ones too, so a run's end is said as it leaves the panel to the form. */}
+      <Announcer said={runs.data === undefined ? undefined : newest === undefined ? null : runMilestone(newest)} />
       {runs.isError && (
         <p role="alert" className="form-error">
           The bot runs could not be loaded.

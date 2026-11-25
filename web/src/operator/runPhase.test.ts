@@ -117,6 +117,7 @@ describe('runMilestone', () => {
       'The run is stopping.',
     );
     expect(runMilestone(botRun({ progress: null }))).toBe('A simulator worker holds the run.');
+    expect(runMilestone(botRun({ status: 'STOPPED', desiredState: 'STOPPED' }))).toBe('The run has stopped.');
     expect(runMilestone(botRun({ progress: { phase: 'LOADING', botsLoaded: 0, botsTotal: 1 } }))).toBe('Loading 1 bot.');
   });
 });

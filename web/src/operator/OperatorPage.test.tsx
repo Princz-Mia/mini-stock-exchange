@@ -2576,7 +2576,27 @@ describe('bot runs on the operator screen', () => {
       await within(panel).findByRole('progressbar', { name: 'Waiting for a simulator worker' }, { timeout: 3_000 }),
     ).toBeInTheDocument();
     await waitFor(() => expect(announcements.textContent).toBe('The run is waiting for a simulator worker.'));
+
+    // Its end is said too, as the run gives way to the form.
+    state.runs = [finishedRun()];
+    expect(await within(panel).findByRole('form', { name: 'Start a bot run' }, { timeout: 3_000 })).toBeInTheDocument();
+    await waitFor(() => expect(announcements.textContent).toBe('The run has stopped.'));
   });
+
+  it('does not announce a run that had already stopped when the page opened', async () => {
+    const { server, state } = exchange('OPEN');
+    state.bots = 3;
+    state.runs = [finishedRun()];
+    renderPage();
+
+    const panel = await runs();
+    expect(await within(panel).findByRole('form', { name: 'Start a bot run' })).toBeInTheDocument();
+    const announcements = within(panel).getAllByRole('status').find((node) => node.className === 'visually-hidden')!;
+    // Two more reads: what was there on opening stays unsaid.
+    const reads = () => server.requests.filter((request) => request.url === '/api/v1/admin/bot-runs?limit=10').length;
+    await waitFor(() => expect(reads()).toBeGreaterThanOrEqual(3), { timeout: 6_000 });
+    expect(announcements).toHaveTextContent('');
+  }, 10_000);
 
   it('says how long the run has been going and how long a timed one has left, as of the last answer', async () => {
     const { state } = exchange('OPEN');

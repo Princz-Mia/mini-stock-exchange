@@ -109,8 +109,8 @@ export function runTimeText({ elapsed, length }: { elapsed: number; length: numb
 }
 
 /**
- * What a screen reader is told about the run: when its phase changes and, while it loads, at each quarter of its
- * bots. Never on every poll: the bar has the current value for whoever looks.
+ * What a screen reader is told about the run: when its phase changes, its end included, and, while it loads, at each
+ * quarter of its bots. Never on every poll: the bar has the current value for whoever looks.
  */
 export function runMilestone(run: BotRun): string {
   const phase = runPhase(run);
