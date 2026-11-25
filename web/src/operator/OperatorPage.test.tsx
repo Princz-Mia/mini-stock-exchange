@@ -4746,4 +4746,71 @@ describe('operator commands across leaving the page', () => {
     const said = 'Trading is already halted: an earlier halt already went through, so this one changed nothing.';
     expect(await screen.findByText(said)).toHaveAttribute('role', 'alert');
   });
+
+  describe("a run's stop", () => {
+    const SECOND = '20000000-0000-0000-0000-000000000002';
+    const stopOf = (runId: string) => `${RUNS}/${runId}/stop`;
+    const stoppingRun = () =>
+      botRun({ status: 'STOPPING', desiredState: 'STOPPED', stopRequestedAt: '2026-11-06T10:01:00Z' });
+    const nextRun = () => botRun({ runId: SECOND, startedAt: '2026-11-06T10:20:00Z' });
+    const stoppedFirst = () => finishedRun();
+    /** Waits for the next run to be the current one, as the runs are read every two seconds. */
+    const nextIsCurrent = (panel: HTMLElement) =>
+      waitFor(
+        () =>
+          expect(within(within(panel).getByRole('group', { name: 'Current run' })).getByText('10:20:00 UTC')).toBeInTheDocument(),
+        { timeout: 4_000 },
+      );
+
+    it('is said beside the run it was sent for only, never beside the next one', async () => {
+      const { server, state } = exchange('OPEN');
+      state.runs = [botRun()];
+      server.on(`POST ${stopOf(botRun().runId)}`, () => {
+        state.runs = [stoppingRun()];
+        return { status: 200, json: { runId: botRun().runId, commandSequence: '12' } };
+      });
+      renderPage();
+
+      fireEvent.click(await button('Stop run'));
+      const done = 'Stop requested. New orders stop now; quotes are canceled before the worker confirms.';
+      expect(await screen.findByText(done)).toBeInTheDocument();
+      // The first run stops, and the next one starts before the page is left.
+      state.runs = [nextRun(), stoppedFirst()];
+
+      const panel = await screen.findByRole('region', { name: 'Bot runs' });
+      await nextIsCurrent(panel);
+      expect(within(panel).queryByText(done)).toBeNull();
+      expect(within(panel).getByRole('button', { name: 'Stop run' })).toBeEnabled();
+    });
+
+    it("lets a stop with no answer go once its run has ended, and stops the next run under the next run's own key", async () => {
+      const { server, state } = exchange('OPEN');
+      state.runs = [botRun()];
+      server.on(`POST ${stopOf(botRun().runId)}`, unknown);
+      server.on(`POST ${stopOf(SECOND)}`, () => {
+        state.runs = [{ ...nextRun(), status: 'STOPPING', desiredState: 'STOPPED', stopRequestedAt: '2026-11-06T10:21:00Z' }, stoppedFirst()];
+        return { status: 200, json: { runId: SECOND, commandSequence: '14' } };
+      });
+      renderPage();
+
+      fireEvent.click(await button('Stop run'));
+      expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+      // That stop went through after all, and the next run started meanwhile.
+      state.runs = [nextRun(), stoppedFirst()];
+
+      const panel = await screen.findByRole('region', { name: 'Bot runs' });
+      await nextIsCurrent(panel);
+      expect(within(panel).queryByRole('button', { name: 'Retry' })).toBeNull();
+      const stop = within(panel).getByRole('button', { name: 'Stop run' });
+      expect(stop).toBeEnabled();
+      fireEvent.click(stop);
+
+      expect(await within(panel).findByRole('status', { name: 'Run status: Stopping' })).toBeInTheDocument();
+      expect(sent(server, stopOf(botRun().runId))).toHaveLength(1);
+      expect(sent(server, stopOf(SECOND))).toHaveLength(1);
+      expect(sent(server, stopOf(SECOND))[0]?.headers['Idempotency-Key']).not.toBe(
+        sent(server, stopOf(botRun().runId))[0]?.headers['Idempotency-Key'],
+      );
+    });
+  });
 });

@@ -300,6 +300,24 @@ function ActiveRun({
   const command = useOperatorCommand<string, BotRunStopping>('run-stop', simulationId, send, {
     reached: (runId) => read === 'fresh' && runId === run.runId && stopping,
   });
+  // The stop kept is one run's, and outlives that run's panel. A stop sent for a run that has since ended is finished
+  // business: never shown beside the next run, never sent again for it, and let go of once it has an answer, if any.
+  const earlier = command.args !== undefined && command.args !== run.runId;
+  const earlierSending = earlier && command.outcome.kind === 'sending';
+  const { forget } = command;
+  useEffect(() => {
+    if (earlier && !earlierSending) {
+      forget();
+    }
+  }, [earlier, earlierSending, forget]);
+  const stop = () => {
+    if (earlier) {
+      forget();
+    }
+    command.run(run.runId);
+  };
+  const ownSending = !earlier && command.outcome.kind === 'sending';
+  const ownUnresolved = !earlier && command.unresolved;
   const unread = notReadYet(read);
   const rate = averageRate(run);
   const timeLeft = timeLeftText(run, now);
@@ -315,11 +333,19 @@ function ActiveRun({
         <button
           type="button"
           className="primary danger"
-          disabled={stopping || unread !== null || command.outcome.kind === 'sending' || command.unresolved}
+          disabled={stopping || unread !== null || earlierSending || ownSending || ownUnresolved}
           aria-describedby={
-            stopping ? 'stop-hint' : unread !== null ? 'stop-unread' : forgotten ? 'left-running' : undefined
+            stopping
+              ? 'stop-hint'
+              : unread !== null
+                ? 'stop-unread'
+                : earlierSending
+                  ? 'stop-earlier'
+                  : forgotten
+                    ? 'left-running'
+                    : undefined
           }
-          onClick={() => command.run(run.runId)}
+          onClick={stop}
         >
           Stop run
         </button>
@@ -329,8 +355,13 @@ function ActiveRun({
           {unread}
         </p>
       )}
-      {/* Beside the button that sent it. */}
-      {command.settled ? (
+      {earlierSending && !stopping && (
+        <p id="stop-earlier" className="muted">
+          A stop sent for the run before is still waiting for its answer.
+        </p>
+      )}
+      {/* Beside the button that sent it, and only this run's. */}
+      {earlier ? null : command.settled ? (
         <p role="status" className="outcome outcome-ok">
           Your earlier stop already went through: the run is stopping.
         </p>
