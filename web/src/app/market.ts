@@ -50,6 +50,10 @@ export interface InstrumentList {
   isPending: boolean;
   /** The last read of the list failed. An earlier list, if any, is still in `instruments`. */
   isError: boolean;
+  /** When the list on screen was read, by the browser's clock; undefined while none has been. */
+  updatedAt: number | undefined;
+  /** The last read was refused rather than unanswered, so it is not asked again by itself. */
+  refused: boolean;
 }
 
 /**
@@ -101,16 +105,18 @@ export function useInstruments(
     ...options,
   });
   if (simulation === undefined) {
-    return { instruments: [], feed: undefined, isPending: true, isError: false };
+    return { instruments: [], feed: undefined, isPending: true, isError: false, updatedAt: undefined, refused: false };
   }
   if (simulation === null) {
-    return { instruments: [], feed: undefined, isPending: false, isError: false };
+    return { instruments: [], feed: undefined, isPending: false, isError: false, updatedAt: undefined, refused: false };
   }
   return {
     instruments: list.data?.instruments ?? [],
     feed: list.data?.feed,
     isPending: list.isPending,
     isError: list.isError,
+    updatedAt: list.data === undefined ? undefined : list.dataUpdatedAt,
+    refused: isRefusal(list.error),
   };
 }
 

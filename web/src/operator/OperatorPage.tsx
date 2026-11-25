@@ -4,6 +4,8 @@ import { useState } from 'react';
 import { isRefusal } from '../api/client';
 import type { Instruments } from '../api/types';
 import { closedPhrase } from '../app/closeTime';
+import { lastUpdatedText } from '../app/LastUpdated';
+import { OperatorSkeleton } from '../app/Skeleton';
 import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
 import { groupInteger } from '../format';
 import { AccountSetup } from './AccountSetup';
@@ -47,7 +49,7 @@ export const LIST_POLL_MS = 5_000;
  *
  * A closed market's list is read no more once market data has caught up with it: the catalogue is frozen and nothing
  * trades, so nothing this page shows of it can change. Until then the feed it reports may still be behind, with the
- * close's own last events.
+ * close's own last events. A read that failed is asked again, whatever the list read before it said.
  */
 export function instrumentPace(client: QueryClient, simulation: string | null, closed = false) {
   return (query: { state: { data: Instruments | undefined; error: unknown } }): number | false => {
@@ -59,7 +61,7 @@ export function instrumentPace(client: QueryClient, simulation: string | null, c
       return WAITING_POLL_MS;
     }
     const feed = query.state.data?.feed;
-    return closed && feed?.state === 'LIVE' && feed.lag === 0 ? false : LIST_POLL_MS;
+    return closed && feed?.state === 'LIVE' && feed.lag === 0 && query.state.error == null ? false : LIST_POLL_MS;
   };
 }
 
@@ -89,8 +91,9 @@ export function OperatorPage() {
     refetchInterval: instrumentPace(client, market.data?.simulationId ?? null, market.data?.state === 'CLOSED'),
   });
 
+  // Every panel here waits for the market's status, so the page's layout is drawn as bars until it comes.
   if (market.isPending) {
-    return <p className="page-status">Loading the market…</p>;
+    return <OperatorSkeleton />;
   }
   // Only when there is nothing to show: a failed poll after a good read keeps the page, and every form's unconfirmed
   // command with its key and Retry, on screen with the last known state.
@@ -111,7 +114,8 @@ export function OperatorPage() {
         <div className="operator-side">
           {market.isError && (
             <p role="alert" className="form-error">
-              The exchange is not answering, so the market state shown may be out of date.
+              The exchange is not answering, so the market state shown may be out of date.{' '}
+              {lastUpdatedText(market.dataUpdatedAt, !isRefusal(market.error))}.
             </p>
           )}
           <MarketControl
@@ -137,6 +141,7 @@ export function OperatorPage() {
           {instruments.isError && (
             <p role="alert" className="form-error">
               Market data is not reachable, so the instrument list may be incomplete.
+              {instruments.updatedAt !== undefined && <> {lastUpdatedText(instruments.updatedAt, !instruments.refused)}.</>}
             </p>
           )}
           {market.data.simulationId === null && (

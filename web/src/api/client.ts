@@ -118,6 +118,16 @@ export function pollEvery(milliseconds: number) {
     isRefusal(query.state.error) ? false : milliseconds;
 }
 
+/**
+ * For a query whose answer can no longer change, such as a closed market's bot runs: read again every `milliseconds`
+ * only while its last read failed for a reason that may pass, and not at all once a read has come back. Without it, a
+ * read that failed would leave the page showing the failure, or what was cached before, with nothing asking again.
+ */
+export function pollUntilRead(milliseconds: number) {
+  return (query: { state: { error: unknown } }): number | false =>
+    query.state.error != null && !isRefusal(query.state.error) ? milliseconds : false;
+}
+
 /** The session's CSRF token, fetched on first use and again after login rotates it. */
 let csrf: CsrfToken | null = null;
 

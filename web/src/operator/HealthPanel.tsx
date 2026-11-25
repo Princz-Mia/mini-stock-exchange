@@ -3,6 +3,7 @@ import { useQueries, useQuery } from '@tanstack/react-query';
 import { api, pollEvery } from '../api/client';
 import type { Candles, Feed, HealthSummary, Instrument } from '../api/types';
 import { FEED_LABELS } from '../app/FeedStatus';
+import { SkeletonRows } from '../app/Skeleton';
 import { groupInteger } from '../format';
 
 /** One line of the panel: what it measures, its value, and a warning in words when it needs attention. */
@@ -157,7 +158,7 @@ export function analyticsCaughtUp(candles: Candles | undefined): boolean {
 /**
  * How trading is keeping up, beside the market controls. Execution's figures refresh every two seconds; the analytics'
  * freshness, read from one minute of each instrument's candles, every ten. On a closed market an instrument's
- * analytics are read no more once caught up. Execution's figures still are: its writer can stop, and the close's own
+ * analytics are read no more once caught up and read without failing. Execution's figures still are: its writer can stop, and the close's own
  * events are still being published for a moment.
  */
 export function HealthPanel({
@@ -184,7 +185,7 @@ export function HealthPanel({
         );
       },
       refetchInterval: (query: { state: { data: Candles | undefined; error: unknown } }) =>
-        closed && analyticsCaughtUp(query.state.data) ? false : pollEvery(10_000)(query),
+        closed && analyticsCaughtUp(query.state.data) && query.state.error == null ? false : pollEvery(10_000)(query),
     })),
   });
   const analytics = worstAnalytics(
@@ -203,7 +204,7 @@ export function HealthPanel({
           Trading health is not reachable: Execution may be down.
         </p>
       ) : summary.data === undefined ? (
-        <p className="muted">Loading…</p>
+        <SkeletonRows rows={5} />
       ) : (
         <dl className="health">
           {healthFigures(summary.data, feed, analytics).map((figure) => (

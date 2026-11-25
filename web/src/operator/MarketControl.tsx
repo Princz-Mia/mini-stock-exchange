@@ -50,6 +50,9 @@ const SENDING: Record<Transition, string> = {
   resume: 'Resuming trading',
 };
 
+/** The market's status, which shows what a transition did. */
+const MARKET = ['market'] as const;
+
 /** Whether the market's state shows what a transition asked for: open for an opening, halted for a halt. */
 export function transitionReached(action: Transition, state: MarketStatus['state']): boolean {
   switch (action) {
@@ -62,6 +65,38 @@ export function transitionReached(action: Transition, state: MarketStatus['state
   }
 }
 
+/** The state each transition leaves the market in, which its answer describes. */
+const LEAVES: Record<Transition, MarketStatus['state']> = { open: 'OPEN', halt: 'HALTED', resume: 'OPEN' };
+
+/** The state each transition is sent from, in which a refusal of it was given unless the exchange says otherwise. */
+const FROM: Record<Transition, MarketStatus['state']> = { open: 'SETUP', halt: 'OPEN', resume: 'HALTED' };
+
+/**
+ * Whether what a transition came to still describes the market. Its outcome is kept through a change of page, and the
+ * market moves on meanwhile: a market opened for a set time closes by itself, and another operator resumes a halted
+ * one. An answer is shown while the market is still in the state it describes, and a refusal while the market is
+ * still in the state it was refused in. One on its way or with no answer is always shown, as Retry belongs with it,
+ * and so is one whose answer has not been read back yet: the state on screen is then older than the answer.
+ */
+export function stillDescribes(
+  outcome: CommandOutcome<unknown>,
+  action: Transition,
+  settled: boolean,
+  awaitingRead: boolean,
+  state: MarketStatus['state'],
+): boolean {
+  if (awaitingRead) {
+    return true;
+  }
+  if (outcome.kind === 'done' || (outcome.kind === 'unresolved' && settled)) {
+    return state === LEAVES[action];
+  }
+  if (outcome.kind === 'refused') {
+    return state === ((outcome.problem?.state as MarketStatus['state'] | undefined) ?? FROM[action]);
+  }
+  return true;
+}
+
 /** A transition that had no answer here, and that the market's state now shows went through. */
 const WENT_THROUGH: Record<Transition, string> = {
   open: 'Your earlier opening already went through: the market has opened.',
@@ -69,7 +104,11 @@ const WENT_THROUGH: Record<Transition, string> = {
   resume: 'Your earlier resume already went through: trading has resumed.',
 };
 
-/** A transition refused because the market was already where it asked to go, with no earlier one known here. */
+/**
+ * A transition refused because the market was already where it asked to go. Never said as the operator's own earlier
+ * command: one with no answer is sent again under its own key while it is open, and a new key is used only once the
+ * state has settled it, so by then the market may have been moved back and forth by others.
+ */
 const ALREADY: Record<Transition, string> = {
   open: 'The market has already opened: an earlier opening already went through, so this one changed nothing.',
   halt: 'Trading is already halted: an earlier halt already went through, so this one changed nothing.',
@@ -78,14 +117,12 @@ const ALREADY: Record<Transition, string> = {
 
 /**
  * A refused transition, in words. One refused only because the market already is where it asked to go, as the state
- * read now shows, is said as the earlier command having gone through, not as a failure: the operator's own earlier
- * one, when one went unanswered here, or else whoever's it was.
+ * read now shows, is said as an earlier command having gone through, not as a failure.
  */
 export function transitionRefusal(
   outcome: Extract<CommandOutcome<unknown>, { kind: 'refused' }>,
   action: Transition,
   state: MarketStatus['state'],
-  earlier: Transition | undefined,
 ): string {
   const refusedIn = outcome.problem?.state as MarketStatus['state'] | undefined;
   const already =
@@ -96,7 +133,7 @@ export function transitionRefusal(
   if (!already) {
     return outcome.message;
   }
-  return earlier === action ? `${WENT_THROUGH[action]} This one changed nothing.` : ALREADY[action];
+  return ALREADY[action];
 }
 
 /** What a transition did, and for an opening with a duration when the exchange closes the market. */
@@ -461,7 +498,8 @@ function CloseStatus({
 
 /**
  * What became of a transition. One with no answer that the state now shows went through is said as such, and one
- * refused only because an earlier one already did it is said that way too.
+ * refused only because an earlier one already did it is said that way too. Once the market has moved on from what it
+ * says, it is no longer shown.
  */
 function TransitionStatus({
   command,
@@ -471,6 +509,9 @@ function TransitionStatus({
   state: MarketStatus['state'];
 }) {
   const { outcome, args } = command;
+  if (args !== undefined && !stillDescribes(outcome, args.action, command.settled, command.awaitingRead, state)) {
+    return null;
+  }
   if (args !== undefined && command.settled) {
     return (
       <p role="status" className="outcome outcome-ok">
@@ -481,7 +522,7 @@ function TransitionStatus({
   if (args !== undefined && outcome.kind === 'refused') {
     return (
       <p role="alert" className="outcome outcome-rejected">
-        {transitionRefusal(outcome, args.action, state, command.after?.action)}
+        {transitionRefusal(outcome, args.action, state)}
       </p>
     );
   }
@@ -520,7 +561,6 @@ export function MarketControl({
       try {
         return { action, transition: await api.controlMarket(action, key, durationMinutes) };
       } finally {
-        void client.invalidateQueries({ queryKey: ['market'] });
         // An opening refused for a job that is running shows that job's progress.
         void client.invalidateQueries({ queryKey: ['bot-job'] });
       }
@@ -528,12 +568,20 @@ export function MarketControl({
     [client],
   );
   // Kept outside this panel, as the close is, so leaving the page and coming back finds it as it was, key and all.
+  // The status is read again with the answer.
   const command = useOperatorCommand<Sent, Done>('market', market.simulationId ?? '', send, {
     reached: ({ action }) => read === 'fresh' && transitionReached(action, market.state),
+    confirmedBy: MARKET,
   });
   const close = useCloseCommand(market.simulationId);
   const closing = close.outcome.kind !== 'idle';
-  const busy = command.outcome.kind === 'sending' || close.outcome.kind === 'sending';
+  // Until the status has been read after a command's answer, it still shows the market from before: Halt trading
+  // would be offered for a market just halted. So nothing is offered until then, as while a command is on its way.
+  const busy =
+    command.outcome.kind === 'sending' ||
+    close.outcome.kind === 'sending' ||
+    command.awaitingRead ||
+    close.awaitingRead;
   const unresolved = command.unresolved || close.outcome.kind === 'unresolved';
   const [confirming, setConfirming] = useState(false);
   const [length, setLength] = useState<MarketLength>({ timed: false, hours: '1', minutes: '0' });

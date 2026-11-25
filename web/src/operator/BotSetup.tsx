@@ -3,6 +3,7 @@ import { type FormEvent, useCallback, useEffect, useId, useRef, useState } from 
 
 import { api } from '../api/client';
 import type { BotJob, BotJobRequest, Instrument } from '../api/types';
+import { SkeletonRows } from '../app/Skeleton';
 import { groupInteger, utcTime } from '../format';
 import {
   milestone,
@@ -88,7 +89,7 @@ export function BotSetup({
           The bot population could not be loaded.
         </p>
       ) : bots === undefined ? (
-        <p className="muted">Loading…</p>
+        <SkeletonRows rows={2} />
       ) : (
         <div className="population">
           <p>

@@ -6,9 +6,16 @@ import type { MarketStatus, SimulationStarted } from '../api/types';
 import { TermTip } from '../help/TermTip';
 import { CommandStatus, Waiting } from './CommandStatus';
 import { type Freshness, notReadYet } from './freshRead';
-import { useOperatorCommand } from './operatorCommands';
+import { keptCommand, useOperatorCommand } from './operatorCommands';
 import { refusedFields, useFocusOnRefusal } from './refusals';
 import type { CommandOutcome } from './useCommand';
+
+const IDLE: CommandOutcome<SimulationStarted> = { kind: 'idle' };
+
+/** Whether a start has its final answer, which a page that shows it records as shown. */
+function answered(outcome: CommandOutcome<SimulationStarted>): boolean {
+  return outcome.kind === 'done' || outcome.kind === 'refused';
+}
 
 export interface StartCommand {
   outcome: CommandOutcome<SimulationStarted>;
@@ -25,6 +32,8 @@ export interface StartCommand {
    * whichever panel shows an answer first takes focus to it, and another takes it only from one drawn anew or gone.
    */
   claimFocus: (answer: CommandOutcome<SimulationStarted>, by: Element | null) => boolean;
+  /** Records that the final answer has been shown, so that a later visit to the page does not say it again. */
+  markShown: () => void;
 }
 
 interface StartArgs {
@@ -70,7 +79,16 @@ export function useStartCommand(): StartCommand {
     [client],
   );
   const command = useOperatorCommand<StartArgs, SimulationStarted>('simulation-start', 'operator', send);
-  const { outcome, run: runCommand, retry: retryCommand, forget } = command;
+  // An answer already shown on an earlier visit to the page: it is kept for the session, as every command is, but a
+  // start that has its answer has nothing left to do, and saying it again on every visit for the simulation's whole
+  // life would only repeat it, and read it out again. One on its way or with no answer is still shown, with Retry.
+  const [seenBefore] = useState(() => {
+    const kept = keptCommand<StartArgs, SimulationStarted>(client, 'simulation-start');
+    return kept !== null && kept.shown ? kept.key : null;
+  });
+  const final = command.outcome.kind === 'done' || command.outcome.kind === 'refused';
+  const outcome = final && command.key === seenBefore ? IDLE : command.outcome;
+  const { run: runCommand, retry: retryCommand, forget, markShown } = command;
   const sentFrom = command.args?.from;
   const run = useCallback(
     (name: string, from: string | null) => {
@@ -93,7 +111,7 @@ export function useStartCommand(): StartCommand {
     claimed.current = { answer, by };
     return true;
   }, []);
-  return { outcome, sentFrom, run, retry, claimFocus };
+  return { outcome, sentFrom, run, retry, claimFocus, markShown };
 }
 
 /** Focus was lost to the page, as when what had it was disabled or taken away; focus the user moved stays. */
@@ -114,8 +132,6 @@ function useFocusOnAskAgain(
     }
   }, [outcome, claimFocus, status]);
 }
-
-const IDLE: CommandOutcome<SimulationStarted> = { kind: 'idle' };
 
 const NOT_CLOSED: Record<string, string> = {
   SETUP:
@@ -235,6 +251,13 @@ export function StartSimulation({
   useFocusOnRefusal(outcome.kind, form);
   const status = useRef<HTMLDivElement>(null);
   useFocusOnAskAgain(start, outcome, status);
+  const { markShown } = start;
+  const shownAnswer = answered(outcome);
+  useEffect(() => {
+    if (shownAnswer) {
+      markShown();
+    }
+  }, [shownAnswer, markShown]);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -329,6 +352,13 @@ export function StartNotice({ start, market }: { start: StartCommand; market: Ma
     }
   }, [shown, outcome, claimFocus]);
   useFocusOnAskAgain(start, shown ? outcome : IDLE, status);
+  const { markShown } = start;
+  const shownAnswer = shown && answered(outcome);
+  useEffect(() => {
+    if (shownAnswer) {
+      markShown();
+    }
+  }, [shownAnswer, markShown]);
   if (!shown) {
     return null;
   }

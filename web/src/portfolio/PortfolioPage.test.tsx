@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useLocation } from 'react-router';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -637,6 +637,103 @@ describe('portfolio page', () => {
       expect(orders.at(-1)?.url).not.toContain('instrumentId=');
       expect(screen.getByTestId('address')).toHaveTextContent('?executionsSide=SELL');
     }
+  });
+
+  it('keeps the balances when a refresh goes unanswered, saying when they were read, and drops the note once read', async () => {
+    let down = false;
+    signedIn()
+      .on('GET /api/v1/portfolio', () =>
+        down ? { status: 502, problem: { status: 502, code: 'BAD_GATEWAY' } } : { status: 200, json: PORTFOLIO },
+      )
+      .on('GET /api/v1/market', { status: 200, json: { ...CLOSED_MARKET, state: 'OPEN', closedAt: null } })
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/portfolio']}>
+          <PortfolioPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const summary = await screen.findByRole('region', { name: 'Summary' });
+    const read = client.getQueryState(['portfolio'])?.dataUpdatedAt ?? 0;
+
+    down = true;
+    await client.refetchQueries({ queryKey: ['portfolio'] });
+
+    const note = await screen.findByText(/^Last updated \d\d:\d\d:\d\d UTC, retrying$/);
+    expect(note).toHaveAttribute('role', 'status');
+    expect(note).toHaveTextContent(`Last updated ${new Date(read).toISOString().slice(11, 19)} UTC, retrying`);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('region', { name: 'Summary' })).toBe(summary);
+    expect(within(summary).getByText('22,100.00')).toBeInTheDocument();
+
+    down = false;
+    await client.refetchQueries({ queryKey: ['portfolio'] });
+    await waitFor(() => expect(screen.queryByText(/^Last updated/)).toBeNull());
+  });
+
+  it("gives the page to a refusal even after a good read: the account is no longer the trader's to see", async () => {
+    let refused = false;
+    signedIn()
+      .on('GET /api/v1/portfolio', () =>
+        refused ? { status: 403, problem: { status: 403, code: 'NO_TRADING_ACCOUNT' } } : { status: 200, json: PORTFOLIO },
+      )
+      .on('GET /api/v1/market', { status: 200, json: { ...CLOSED_MARKET, state: 'OPEN', closedAt: null } })
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/portfolio']}>
+          <PortfolioPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    await screen.findByRole('region', { name: 'Summary' });
+
+    refused = true;
+    await client.refetchQueries({ queryKey: ['portfolio'] });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('no trading account in this market yet');
+    expect(screen.queryByRole('region', { name: 'Summary' })).toBeNull();
+  });
+
+  it('draws its layout at once while the balances are read, and fills the executions as soon as they come', async () => {
+    let balances: (reply: { status: number; json: unknown }) => void = () => undefined;
+    signedIn()
+      .on('GET /api/v1/portfolio', () => new Promise((resolve) => (balances = resolve)))
+      .on('GET /api/v1/market', { status: 200, json: { ...CLOSED_MARKET, state: 'OPEN', closedAt: null } })
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [trade(1)], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const view = render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/portfolio']}>
+          <PortfolioPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    expect(screen.getByText('Loading portfolio…')).toHaveAttribute('role', 'status');
+    expect(view.container.querySelector('.page-status')).toBeNull();
+    expect(view.container.querySelectorAll('.summary[aria-busy="true"] .figure')).toHaveLength(5);
+    const executions = await screen.findByRole('table', { name: 'Executions' });
+    const panel = screen.getByRole('region', { name: 'Executions' });
+    expect(screen.queryByRole('region', { name: 'Summary' })).toBeNull();
+
+    act(() => balances({ status: 200, json: PORTFOLIO }));
+    const summary = await screen.findByRole('region', { name: 'Summary' });
+    expect(within(summary).getByText('22,100.00')).toBeInTheDocument();
+    expect(view.container.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(screen.queryByText('Loading portfolio…')).toBeNull();
+    // The histories are not drawn again when the balances come.
+    expect(screen.getByRole('region', { name: 'Executions' })).toBe(panel);
+    expect(screen.getByRole('table', { name: 'Executions' })).toBe(executions);
   });
 
   it('explains a missing trading account instead of calling it an outage', async () => {

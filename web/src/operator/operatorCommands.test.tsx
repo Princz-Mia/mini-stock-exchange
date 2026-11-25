@@ -10,6 +10,7 @@ import { useOperatorCommand } from './operatorCommands';
 
 const SIMULATION = '10000000-0000-0000-0000-000000000001';
 const HALT = '/api/v1/admin/market/halt';
+const MARKET = ['market'] as const;
 
 type Reply = { status: number; json?: unknown; problem?: unknown };
 
@@ -138,6 +139,22 @@ describe('an operator command kept beside the cache', () => {
     act(() => result.current.run('halt'));
     await waitFor(() => expect(halts()).toHaveLength(2));
     expect(new Set(halts().map((request) => request.headers['Idempotency-Key'])).size).toBe(2);
-    await waitFor(() => expect(result.current.after).toBe('halt'));
+  });
+
+  it('holds a done command until the query that shows what it did has been read since its answer', async () => {
+    signedIn('operator', ['OPERATOR']).on(`POST ${HALT}`, { status: 200, json: { state: 'HALTED', commandSequence: '9' } });
+    const { client, wrapper } = withClient();
+    client.setQueryData(MARKET, { state: 'OPEN' });
+    const { result } = renderHook(
+      () => useOperatorCommand<string, MarketTransition>('market', SIMULATION, halt, { confirmedBy: MARKET }),
+      { wrapper },
+    );
+
+    act(() => result.current.run('halt'));
+    await waitFor(() => expect(result.current.outcome.kind).toBe('done'));
+    expect(result.current.awaitingRead).toBe(true);
+    // A read that lands after the answer.
+    act(() => client.setQueryData(MARKET, { state: 'HALTED' }));
+    expect(result.current.awaitingRead).toBe(false);
   });
 });

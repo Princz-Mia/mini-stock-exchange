@@ -86,6 +86,16 @@ describe('instruments added and not listed yet', () => {
     expect(pace({ state: { data: undefined, error: new ApiError(403, null) } })).toBe(false);
   });
 
+  it("stop reading a closed market's caught-up list only once a read of it has come back", () => {
+    const { client } = withClient();
+    const pace = instrumentPace(client, FIRST, true);
+    const caughtUp = { instruments: [], feed: { state: 'LIVE', lag: 0 } } as never;
+    expect(pace({ state: { data: caughtUp, error: null } })).toBe(false);
+    // The list cached says it has caught up, but the read since then failed: it is asked again.
+    expect(pace({ state: { data: caughtUp, error: new ApiError(502, null) } })).toBe(LIST_POLL_MS);
+    expect(pace({ state: { data: caughtUp, error: new ApiError(403, null) } })).toBe(false);
+  });
+
   it('take the simulation an add with no market created, and go once the list has them', async () => {
     const { client, wrapper } = withClient();
     const { result, rerender } = renderHook(
