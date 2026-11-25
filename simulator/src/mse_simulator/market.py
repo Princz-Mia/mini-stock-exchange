@@ -6,6 +6,10 @@ from uuid import UUID
 
 import httpx
 
+# The widest book whose mid the bots take for a price, in basis points of that mid: the default
+# of the setting narrow_book_bp.
+NARROW_BOOK_BP = 100.0
+
 
 def cents(price: str) -> int:
     """Exact cents from a two-decimal string such as "100.25"."""
@@ -29,13 +33,24 @@ class Instrument:
     min_quantity: int
     max_quantity: int
 
-    def anchor(self) -> float:
-        """Where the market stands, in cents: the mid if both sides quote, else the last trade,
-        else the reference. The mid is exact, so it may lie half a tick off the grid: rounding it
-        here, one way for every order, would push prices that way. ``prices.limit_price`` rounds
-        each order's limit instead."""
-        if self.bid is not None and self.ask is not None:
-            return (self.bid + self.ask) / 2
+    def mid(self, narrow: float) -> float | None:
+        """The mid of a narrow book, in cents: both sides quoted, at most ``narrow`` of the mid or
+        one tick apart. None otherwise. The mid of a wide book is no price anyone offered to trade
+        at: a single order far from the rest, facing nothing near it, would make it whatever that
+        order says. The mid is exact, so it may lie half a tick off the grid: rounding it here,
+        one way for every order, would push prices that way. ``prices.limit_price`` rounds each
+        order's limit instead."""
+        if self.bid is None or self.ask is None:
+            return None
+        mid = (self.bid + self.ask) / 2
+        return mid if self.ask - self.bid <= max(narrow * mid, self.tick) else None
+
+    def anchor(self, narrow: float) -> float:
+        """Where the market stands, in cents: the mid of a narrow book, else the last trade, else
+        the reference."""
+        mid = self.mid(narrow)
+        if mid is not None:
+            return mid
         if self.last is not None:
             return float(self.last)
         return float(self.reference)
