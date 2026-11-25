@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router';
 
 import { api, pollEvery } from '../api/client';
@@ -219,24 +219,19 @@ export function BotRuns({
   );
 }
 
+/** The runs, which show what a start or a stop did. Read again with each answer, with the history under them. */
+const RUNS = ['bot-runs'] as const;
+
 /**
  * A bot run's start, kept beside the cached queries rather than in its form, which gives way to the run once it is
  * going: leaving the page and coming back finds it on its way or with its answer, under the same key. `going` says a
  * run has been read as going since the page opened, which settles a start whose answer never came.
  */
 function useStartRun(simulationId: string, going: boolean) {
-  const client = useQueryClient();
-  const send = useCallback(
-    async (request: BotRunRequest, key: string) => {
-      try {
-        return await api.startBotRun(request, key);
-      } finally {
-        void client.invalidateQueries({ queryKey: ['bot-runs'] });
-      }
-    },
-    [client],
-  );
-  return useOperatorCommand<BotRunRequest, BotRunStarted>('run-start', simulationId, send, { reached: () => going });
+  return useOperatorCommand<BotRunRequest, BotRunStarted>('run-start', simulationId, api.startBotRun, {
+    reached: () => going,
+    confirmedBy: RUNS,
+  });
 }
 
 type StartRun = ReturnType<typeof useStartRun>;
@@ -285,20 +280,10 @@ function ActiveRun({
   simulationId: string;
   read: Freshness;
 }) {
-  const client = useQueryClient();
-  const send = useCallback(
-    async (runId: string, key: string) => {
-      try {
-        return await api.stopBotRun(runId, key);
-      } finally {
-        void client.invalidateQueries({ queryKey: ['bot-runs'] });
-      }
-    },
-    [client],
-  );
   const stopping = run.desiredState === 'STOPPED';
-  const command = useOperatorCommand<string, BotRunStopping>('run-stop', simulationId, send, {
+  const command = useOperatorCommand<string, BotRunStopping>('run-stop', simulationId, api.stopBotRun, {
     reached: (runId) => read === 'fresh' && runId === run.runId && stopping,
+    confirmedBy: RUNS,
   });
   // The stop kept is one run's, and outlives that run's panel. A stop sent for a run that has since ended is finished
   // business: never shown beside the next run, never sent again for it, and let go of once it has an answer, if any.
@@ -316,7 +301,8 @@ function ActiveRun({
     }
     command.run(run.runId);
   };
-  const ownSending = !earlier && command.outcome.kind === 'sending';
+  // A stop answered but not read back yet: the run as shown is not stopping yet, and is not offered a second stop.
+  const ownSending = !earlier && (command.outcome.kind === 'sending' || command.awaitingRead);
   const ownUnresolved = !earlier && command.unresolved;
   const unread = notReadYet(read);
   const rate = averageRate(run);
@@ -508,7 +494,8 @@ function StartForm({
     setInvalid(null);
     command.run(built.request);
   };
-  const locked = command.outcome.kind === 'sending' || command.unresolved;
+  // A start answered but not read back yet: the runs as shown have none going, and a second start would be refused.
+  const locked = command.outcome.kind === 'sending' || command.unresolved || command.awaitingRead;
 
   return (
     <form onSubmit={submit} className="setup-form" aria-label="Start a bot run">

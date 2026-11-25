@@ -3982,8 +3982,8 @@ describe('starting a new simulation on the operator screen', () => {
       exchange(state);
       renderPage();
       await screen.findByRole('region', { name: 'Market' });
-      expect(screen.queryByRole('form', { name: /^Start/ })).toBeNull();
-      expect(screen.queryByRole('region', { name: /^Start/ })).toBeNull();
+      expect(screen.queryByRole('form', { name: /^Start (a new|the first) simulation$/ })).toBeNull();
+      expect(screen.queryByRole('region', { name: /^Start (a new|the first) simulation$/ })).toBeNull();
     }
   });
 
@@ -4745,6 +4745,56 @@ describe('operator commands across leaving the page', () => {
 
     const said = 'Trading is already halted: an earlier halt already went through, so this one changed nothing.';
     expect(await screen.findByText(said)).toHaveAttribute('role', 'alert');
+  });
+
+  it('offers no second start once a start is answered, until the runs have been read again', async () => {
+    const { server, state } = exchange('OPEN');
+    state.tagged = { marketMakers: 1, noise: 2, momentum: 0 };
+    const runsRead = answerLater();
+    let holding = false;
+    server.on(`GET ${RUNS}`, () => (holding ? runsRead.reply : { status: 200, json: { runs: state.runs, nextCursor: null } }));
+    server.on(`POST ${RUNS}`, () => {
+      // The read straight after the answer is slow to come back.
+      holding = true;
+      state.runs = [starting()];
+      return { status: 201, json: { runId: botRun().runId, bots: 3, commandSequence: '9' } };
+    });
+    renderPage();
+
+    const form = await startRun();
+
+    expect(await within(form).findByText('Started a run of 3 bots.')).toBeInTheDocument();
+    // The runs on screen are still those from before the start, with none going: Start run is not offered again.
+    expect(within(form).getByRole('button', { name: 'Start run' })).toBeDisabled();
+    runsRead.answer({ status: 200, json: { runs: state.runs, nextCursor: null } });
+    const panel = await screen.findByRole('region', { name: 'Bot runs' });
+    expect(await within(panel).findByRole('group', { name: 'Current run' })).toBeInTheDocument();
+    expect(sent(server, RUNS)).toHaveLength(1);
+  });
+
+  it('offers nothing once a halt is answered, until the market has been read again', async () => {
+    const { server, state } = exchange('OPEN');
+    const marketRead = answerLater();
+    let holding = false;
+    server.on('GET /api/v1/market', () => (holding ? marketRead.reply : { status: 200, json: state.market }));
+    server.on(`POST ${HALT}`, () => {
+      holding = true;
+      state.market = market('HALTED');
+      return { status: 200, json: { state: 'HALTED', commandSequence: '9' } };
+    });
+    renderPage();
+
+    fireEvent.click(await button('Halt trading'));
+
+    expect(await screen.findByText('Trading is halted. Cancels still work.')).toBeInTheDocument();
+    // The status on screen still says open: Halt trading is not offered for a market just halted.
+    for (const name of ['Halt trading', 'Resume trading', 'Close the market']) {
+      expect(await button(name)).toBeDisabled();
+    }
+    marketRead.answer({ status: 200, json: market('HALTED') });
+    await waitFor(async () => expect(await button('Resume trading')).toBeEnabled());
+    expect(await button('Halt trading')).toBeDisabled();
+    expect(sent(server, HALT)).toHaveLength(1);
   });
 
   describe("a run's stop", () => {

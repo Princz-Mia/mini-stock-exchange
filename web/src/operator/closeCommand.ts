@@ -1,9 +1,11 @@
-import { useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 
 import { api } from '../api/client';
 import type { MarketClosed } from '../api/types';
 import { type Noting, useOperatorCommand } from './operatorCommands';
+
+/** The market's status, which shows what a close did. */
+const MARKET = ['market'] as const;
 import type { CommandOutcome } from './useCommand';
 
 /**
@@ -30,19 +32,11 @@ const stillResting: Noting<MarketClosed, StillResting> = (outcome: CommandOutcom
  * for every operator command, and kept through a change of page as well. A close can take half a minute.
  */
 export function useCloseCommand(simulationId: string | null) {
-  const client = useQueryClient();
-  const send = useCallback(
-    async (_: null, key: string) => {
-      try {
-        return await api.closeMarket(key);
-      } finally {
-        void client.invalidateQueries({ queryKey: ['market'] });
-      }
-    },
-    [client],
-  );
+  const send = useCallback((_: null, key: string) => api.closeMarket(key), []);
+  // The status is read again with the answer, and the market is offered nothing more until it has been.
   const close = useOperatorCommand<null, MarketClosed, StillResting>('close', simulationId ?? '', send, {
     note: stillResting,
+    confirmedBy: MARKET,
   });
   const { run: runClose, forget: forgetClose, outcome } = close;
 
@@ -62,6 +56,8 @@ export function useCloseCommand(simulationId: string | null) {
 
   return {
     outcome,
+    /** Closed, and the status has not been read since: it still shows the market as open. */
+    awaitingRead: close.awaitingRead,
     stillResting: close.note,
     /** The key has been sent before: what is on its way now asks for the answer of a close already made. */
     askedBefore: close.asks > 1,

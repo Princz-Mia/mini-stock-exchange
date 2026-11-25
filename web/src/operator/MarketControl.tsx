@@ -50,6 +50,9 @@ const SENDING: Record<Transition, string> = {
   resume: 'Resuming trading',
 };
 
+/** The market's status, which shows what a transition did. */
+const MARKET = ['market'] as const;
+
 /** Whether the market's state shows what a transition asked for: open for an opening, halted for a halt. */
 export function transitionReached(action: Transition, state: MarketStatus['state']): boolean {
   switch (action) {
@@ -520,7 +523,6 @@ export function MarketControl({
       try {
         return { action, transition: await api.controlMarket(action, key, durationMinutes) };
       } finally {
-        void client.invalidateQueries({ queryKey: ['market'] });
         // An opening refused for a job that is running shows that job's progress.
         void client.invalidateQueries({ queryKey: ['bot-job'] });
       }
@@ -528,12 +530,20 @@ export function MarketControl({
     [client],
   );
   // Kept outside this panel, as the close is, so leaving the page and coming back finds it as it was, key and all.
+  // The status is read again with the answer.
   const command = useOperatorCommand<Sent, Done>('market', market.simulationId ?? '', send, {
     reached: ({ action }) => read === 'fresh' && transitionReached(action, market.state),
+    confirmedBy: MARKET,
   });
   const close = useCloseCommand(market.simulationId);
   const closing = close.outcome.kind !== 'idle';
-  const busy = command.outcome.kind === 'sending' || close.outcome.kind === 'sending';
+  // Until the status has been read after a command's answer, it still shows the market from before: Halt trading
+  // would be offered for a market just halted. So nothing is offered until then, as while a command is on its way.
+  const busy =
+    command.outcome.kind === 'sending' ||
+    close.outcome.kind === 'sending' ||
+    command.awaitingRead ||
+    close.awaitingRead;
   const unresolved = command.unresolved || close.outcome.kind === 'unresolved';
   const [confirming, setConfirming] = useState(false);
   const [length, setLength] = useState<MarketLength>({ timed: false, hours: '1', minutes: '0' });
