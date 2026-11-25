@@ -19,10 +19,17 @@ interface StatusRead {
 /** Asked of Market Data when the exchange can't be asked which simulation is current. */
 const MARKET_DATA_CURRENT = 'current';
 
+/** Market Data's own current list, under the key it would have if the status could not be read. */
+const CURRENT_LIST = ['instruments', MARKET_DATA_CURRENT] as const;
+
+/** How long that list, once read, is taken as current when the status could not be read. */
+const CURRENT_FRESH_MS = 2_000;
+
 /**
  * Whose instruments to list:
- * - undefined while the status has not been read: nothing is asked yet, so no list of another simulation is shown
- *   for a moment and then replaced;
+ * - undefined while the status has not been read: nothing is shown yet, so no list of another simulation is shown
+ *   for a moment and then replaced. Market Data's own current list is asked for meanwhile, and used only once the
+ *   status names the simulation it is of;
  * - null when the exchange has no simulation at all: nothing is asked, as there is nothing to list;
  * - the simulation's id once the exchange has named it;
  * - Market Data's own current simulation when the status could not be read at all. The exchange is down then, but
@@ -49,23 +56,48 @@ export interface InstrumentList {
  * The instruments of the simulation the exchange says is current. The simulation is part of the query's key, so a
  * change of simulation reads the list again and never shows the one before under the new market's name.
  */
-export function useInstruments(market: StatusRead, options: { refetchInterval?: ReturnType<typeof pollEvery> } = {}): InstrumentList {
+export function useInstruments(
+  market: StatusRead,
+  options: { refetchInterval?: (query: { state: { data: Instruments | undefined; error: unknown } }) => number | false } = {},
+): InstrumentList {
   const client = useQueryClient();
   const simulation = listedSimulation(market);
+  // While the status is on its way, Market Data's own current list is asked for at the same time rather than after it,
+  // and never shown: it is used below only when the status then names the very simulation it is of.
+  useQuery({
+    queryKey: CURRENT_LIST,
+    queryFn: ({ signal }) => api.instruments(undefined, { signal }),
+    enabled: simulation === undefined,
+  });
   const list = useQuery({
     queryKey: ['instruments', simulation ?? null],
-    queryFn: ({ signal }) =>
-      api.instruments(simulation === MARKET_DATA_CURRENT ? undefined : (simulation ?? undefined), { signal }),
+    queryFn: async ({ signal }) => {
+      if (simulation === MARKET_DATA_CURRENT || simulation === undefined || simulation === null) {
+        return api.instruments(undefined, { signal });
+      }
+      // The early read still on its way is waited for rather than asked again, when it is of this simulation.
+      const early = client.getQueryCache().find<Instruments>({ queryKey: CURRENT_LIST, exact: true });
+      if (early?.state.fetchStatus === 'fetching' && early.promise !== undefined) {
+        const read = await early.promise.catch(() => undefined);
+        if (read?.simulationId === simulation) {
+          return read;
+        }
+      }
+      return api.instruments(simulation, { signal });
+    },
     enabled: simulation !== undefined && simulation !== null,
+    // When the status then fails, Market Data's own list is the one the early read has just brought: it is not asked
+    // for again straight away, only at the page's next poll.
+    staleTime: simulation === MARKET_DATA_CURRENT ? CURRENT_FRESH_MS : 0,
     // A page that had to start from Market Data's own current simulation, the status being unreadable, goes on from
     // that list when the status then names the very same simulation: the list is asked again by id, but nothing on
     // screen is taken down to wait for it, such as a ticket holding an order whose outcome is not known. A list of
     // another simulation is never carried over.
     initialData: () => {
-      const fallback = client.getQueryData<Instruments>(['instruments', MARKET_DATA_CURRENT]);
+      const fallback = client.getQueryData<Instruments>(CURRENT_LIST);
       return typeof simulation === 'string' && fallback?.simulationId === simulation ? fallback : undefined;
     },
-    initialDataUpdatedAt: () => client.getQueryState(['instruments', MARKET_DATA_CURRENT])?.dataUpdatedAt,
+    initialDataUpdatedAt: () => client.getQueryState(CURRENT_LIST)?.dataUpdatedAt,
     ...options,
   });
   if (simulation === undefined) {

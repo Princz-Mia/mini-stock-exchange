@@ -255,6 +255,10 @@ test.describe.serial('trading through the browser', () => {
     await expect(form.getByLabel('Market makers')).toHaveValue('1');
     await expect(form.getByLabel('Noise')).toHaveValue('1');
     await expect(form.getByLabel('Momentum')).toHaveValue('0');
+    // The rate starts at a tenth of the bots asked for, at least one a second. This run asks for four, so that the
+    // comparison after it has two rates to tell apart.
+    await expect(form.getByLabel('Commands per second')).toHaveValue('1.00');
+    await form.getByLabel('Commands per second').fill('4.00');
     // A run is for a set time, an hour, unless the operator chooses otherwise. This one is stopped long before.
     await expect(form.getByRole('radio', { name: 'For a set time' })).toBeChecked();
     await expect(form.getByRole('radio', { name: 'Until I stop it' })).not.toBeChecked();

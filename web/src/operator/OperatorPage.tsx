@@ -1,10 +1,13 @@
+import { type QueryClient, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 
-import { pollEvery } from '../api/client';
+import { isRefusal } from '../api/client';
+import type { Instruments } from '../api/types';
 import { closedPhrase } from '../app/closeTime';
 import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
 import { groupInteger } from '../format';
 import { AccountSetup } from './AccountSetup';
+import { addedInstruments, readQuickly, WAITING_POLL_MS, waitingFor } from './addedInstruments';
 import { BotRuns } from './BotRuns';
 import { BotSetup } from './BotSetup';
 import { useCloseCommand } from './closeCommand';
@@ -34,6 +37,32 @@ const PER_SIMULATION = [
 /** The runs ticked for a comparison are in the address, and are the simulation's they were ticked in. */
 const TICKED = ['compare'] as const;
 
+/** How often the setup list is read otherwise. */
+export const LIST_POLL_MS = 5_000;
+
+/**
+ * How often the setup list is read: quickly while an instrument the exchange has added is not in it yet, for a
+ * while, and otherwise every five seconds. Worked out again with every read, so it slows down by itself once the
+ * instrument is listed or has waited long enough.
+ *
+ * A closed market's list is read no more once market data has caught up with it: the catalogue is frozen and nothing
+ * trades, so nothing this page shows of it can change. Until then the feed it reports may still be behind, with the
+ * close's own last events.
+ */
+export function instrumentPace(client: QueryClient, simulation: string | null, closed = false) {
+  return (query: { state: { data: Instruments | undefined; error: unknown } }): number | false => {
+    if (isRefusal(query.state.error)) {
+      return false;
+    }
+    const waiting = waitingFor(addedInstruments(client), simulation, query.state.data?.instruments ?? []);
+    if (readQuickly(waiting, Date.now())) {
+      return WAITING_POLL_MS;
+    }
+    const feed = query.state.data?.feed;
+    return closed && feed?.state === 'LIVE' && feed.lag === 0 ? false : LIST_POLL_MS;
+  };
+}
+
 /**
  * The operator's screen: the authoritative trading phase with its controls and, once open, how trading is keeping
  * up; bot runs, and the SETUP editor for
@@ -43,6 +72,7 @@ const TICKED = ['compare'] as const;
  * refetched after each command and every five seconds.
  */
 export function OperatorPage() {
+  const client = useQueryClient();
   const market = useMarketStatus();
   // Goes up when the exchange names another simulation. The page is drawn anew then, so that nothing typed, answered
   // or paged through in the simulation before is left on the page of the new one.
@@ -55,7 +85,9 @@ export function OperatorPage() {
   const [opened] = useState(() => Date.now());
   const marketRead = freshness(market, opened);
   // This market's instruments only: the list is asked for by the simulation the status names.
-  const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
+  const instruments = useInstruments(market, {
+    refetchInterval: instrumentPace(client, market.data?.simulationId ?? null, market.data?.state === 'CLOSED'),
+  });
 
   if (market.isPending) {
     return <p className="page-status">Loading the market…</p>;
@@ -90,6 +122,7 @@ export function OperatorPage() {
           {!editable && (
             <HealthPanel
               instruments={listed}
+              closed={closed}
               feed={
                 instruments.isError
                   ? { kind: 'unreachable' }
@@ -127,7 +160,12 @@ export function OperatorPage() {
               instruments={listed}
             />
           )}
-          <InstrumentSetup instruments={listed} editable={editable} closed={closed} />
+          <InstrumentSetup
+            instruments={listed}
+            editable={editable}
+            closed={closed}
+            simulationId={market.data.simulationId}
+          />
           <BotSetup
             instruments={listed}
             editable={editable}

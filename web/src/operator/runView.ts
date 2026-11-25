@@ -182,6 +182,44 @@ export function shortfallText(form: RunForm, byStrategy: ByStrategy | undefined)
   return null;
 }
 
+/** The exchange's highest command rate for a run, across all its bots. */
+export const MAX_RUN_RATE = 2_000;
+
+/** The bots the counts ask for, leaving out any count that is not a whole number. */
+export function botsAskedFor(form: Pick<RunForm, 'marketMakers' | 'noise' | 'momentum'>): number {
+  return [form.marketMakers, form.noise, form.momentum]
+    .map((count) => count.trim())
+    .filter((count) => WHOLE.test(count))
+    .reduce((sum, count) => sum + Number(count), 0);
+}
+
+/**
+ * The rate a run starts from unless one is typed: a tenth of the bots asked for each second, so each bot acts about
+ * every ten seconds whatever their number, from 1.00 to the exchange's 2,000.00. A fixed rate sized for a handful of
+ * bots would leave a large run looking dead for minutes.
+ */
+export function defaultRate(bots: number): string {
+  return Math.min(MAX_RUN_RATE, Math.max(1, bots / 10)).toFixed(2);
+}
+
+/**
+ * How the run will pace itself, in words: how often each bot acts at the rate given, and roughly when the first
+ * trades come. Market makers take the first turns and place bids first, so nothing can trade until each has had its
+ * turn. Null when the counts ask for no bot or the rate is not a positive number.
+ */
+export function paceText(form: Pick<RunForm, 'marketMakers' | 'noise' | 'momentum' | 'commandsPerSecond'>): string | null {
+  const bots = botsAskedFor(form);
+  const rateText = form.commandsPerSecond.trim();
+  const rate = /^\d+(\.\d+)?$/.test(rateText) ? Number(rateText) : 0;
+  if (bots === 0 || rate <= 0) return null;
+  const makers = WHOLE.test(form.marketMakers.trim()) ? Number(form.marketMakers.trim()) : 0;
+  const every = durationText(Math.max(1, bots / rate));
+  const first = durationText(Math.max(1, (makers + 1) / rate));
+  return makers > 0
+    ? `Each bot acts about every ${every}; first trades in about ${first}, once every market maker has had its first turn.`
+    : `Each bot acts about every ${every}; first trades in about ${first}.`;
+}
+
 /** What the worker is doing, in words. */
 export function workerText(run: BotRun): string {
   const { workerId, heartbeatAt } = run.worker;

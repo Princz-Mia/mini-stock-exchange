@@ -10,6 +10,7 @@ import { botJob } from '../test/botJob';
 import { botRun, finishedRun, manifest } from '../test/botRun';
 import { signedIn } from '../test/fakeServer';
 import { noTrades } from '../test/fakeStream';
+import { WAITING_FAST_FOR_MS } from './addedInstruments';
 import { inUseMessage } from './InstrumentSetup';
 import { closedText, unfinishedText } from './MarketControl';
 import { OperatorPage, restingOrdersText } from './OperatorPage';
@@ -180,20 +181,29 @@ describe('the operator screen', () => {
 
     await screen.findByRole('table', { name: 'Instruments' });
     const asked = server.requests.filter((request) => request.url.split('?')[0] === '/api/v1/instruments');
-    expect(asked.length).toBeGreaterThan(0);
-    // Never without the simulation, not even before the status was read.
-    expect(asked.every((request) => request.url === LIST)).toBe(true);
+    expect(asked.some((request) => request.url === LIST)).toBe(true);
+    // Without the simulation only once, at the same time as the status, and that list says of no simulation whose it
+    // is, so it is never shown.
+    expect(asked.filter((request) => request.url !== LIST).map((request) => request.url)).toEqual(['/api/v1/instruments']);
   });
 
-  it('asks Market Data for no list while there is no market, whatever it still holds', async () => {
-    // Market Data would answer with NOVA, of some simulation the exchange no longer has.
+  it('shows no list while there is no market, whatever Market Data still holds', async () => {
+    // Market Data answers with NOVA, of some simulation the exchange no longer has.
     const { server } = exchange('NOT_SET_UP');
+    server.on('GET /api/v1/instruments', {
+      status: 200,
+      json: { simulationId: '10000000-0000-0000-0000-000000000009', instruments: [NOVA], feed: { state: 'LIVE', lag: 0 } },
+    });
     renderPage();
 
     expect(await button('Open market')).toHaveAccessibleDescription('Start a simulation or add an instrument first; either creates the market.');
     await screen.findByText('No accounts yet.');
     expect(screen.getByText('No instruments yet.')).toBeInTheDocument();
-    expect(server.requests.filter((request) => request.url.startsWith('/api/v1/instruments'))).toHaveLength(0);
+    expect(screen.queryByRole('rowheader', { name: 'NOVA' })).toBeNull();
+    // Only the early read made while the status was on its way, and nothing after it.
+    expect(server.requests.filter((request) => request.url.startsWith('/api/v1/instruments')).map((request) => request.url)).toEqual([
+      '/api/v1/instruments',
+    ]);
   });
 
   it('reads the instruments again when the exchange names another simulation, showing none of the one before', async () => {
@@ -445,6 +455,8 @@ describe('the operator screen', () => {
     expect(lastAdd()).toEqual({ symbol: 'ORBT', referencePrice: '50.00' });
 
     fireEvent.change(within(form).getByLabelText('Name (optional)'), { target: { value: ' Orbit Labs ' } });
+    // The refusal was about the form as it was.
+    expect(screen.queryByText('An instrument with symbol ORBT already exists')).toBeNull();
     fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
     expect(await screen.findByText(/Added ORBT \(Orbit Labs\) at 50.00/)).toBeInTheDocument();
     expect(lastAdd()).toEqual({ symbol: 'ORBT', referencePrice: '50.00', displayName: 'Orbit Labs' });
@@ -453,6 +465,192 @@ describe('the operator screen', () => {
       .filter((request) => request.url === '/api/v1/admin/instruments')
       .map((request) => request.headers['Idempotency-Key']);
     expect(keys[1]).not.toBe(keys[0]);
+  });
+
+  describe('an instrument just added', () => {
+    const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT', referencePrice: '50.00' };
+    const ORBT_ADDED = {
+      instrumentId: ORBT.instrumentId,
+      symbol: 'ORBT',
+      displayName: null,
+      referencePrice: '50.00',
+      commandSequence: '9',
+    };
+    const listOf = (instruments: readonly (typeof NOVA)[]) => ({
+      status: 200,
+      json: { instruments, feed: { state: 'LIVE', lag: 0 } },
+    });
+    const pause = (ms: number) => act(() => new Promise((resolve) => setTimeout(resolve, ms)));
+    const rowOf = (symbol: string) =>
+      within(screen.getByRole('table', { name: 'Instruments' })).getByRole('rowheader', { name: symbol }).closest('tr');
+
+    it('shows at once as waiting for market data, and the list is read quickly until it has it', async () => {
+      const { server } = exchange('SETUP');
+      // Market Data has it a little after the exchange answers: later than the read straight after the answer.
+      let listedFrom: number | null = null;
+      server.on('GET /api/v1/instruments', () =>
+        listOf(listedFrom !== null && Date.now() >= listedFrom ? [NOVA, ORBT] : [NOVA]),
+      );
+      server.on('POST /api/v1/admin/instruments', () => {
+        listedFrom = Date.now() + 600;
+        return { status: 201, json: ORBT_ADDED };
+      });
+      renderPage();
+
+      const form = await screen.findByRole('form', { name: 'Add an instrument' });
+      await screen.findByRole('table', { name: 'Instruments' });
+      fireEvent.click(within(form).getByRole('button', { name: 'ORBT 50.00' }));
+      fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
+
+      expect(
+        await screen.findByText('Added ORBT at 50.00. The list shows it as waiting until market data has it.'),
+      ).toBeInTheDocument();
+      // From the exchange's answer, and said to be that: no controls until market data lists it.
+      const waiting = rowOf('ORBT');
+      expect(waiting).toHaveTextContent('Added, waiting for market data');
+      expect(waiting).toHaveTextContent('50.00');
+      expect(within(waiting as HTMLElement).queryByRole('button')).toBeNull();
+      // Nor is it offered again, which would only send it twice.
+      expect(within(form).queryByRole('button', { name: 'ORBT 50.00' })).toBeNull();
+
+      // Listed within a second or so, not five seconds after the read that missed it.
+      expect(await screen.findByRole('button', { name: 'Edit ORBT' }, { timeout: 2_000 })).toBeInTheDocument();
+      expect(screen.queryByText('Added, waiting for market data')).toBeNull();
+      // Then back to the usual pace.
+      const reads = () => server.requests.filter((request) => request.url === LIST).length;
+      const listed = reads();
+      await pause(1_200);
+      expect(reads()).toBe(listed);
+    });
+
+    it('says so when market data takes longer than usual, and goes back to the usual pace', async () => {
+      const { server } = exchange('SETUP');
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      // Answered nearly twenty seconds ago, and still not listed.
+      client.setQueryData(
+        ['instruments-added'],
+        [{ ...ORBT_ADDED, scope: SIMULATION, answeredAt: Date.now() - WAITING_FAST_FOR_MS + 300 }],
+      );
+      renderWith(client);
+
+      expect(await screen.findByText('Added, waiting for market data')).toBeInTheDocument();
+      expect(
+        await screen.findByText('Added; market data is taking longer than usual to list it', undefined, { timeout: 1_500 }),
+      ).toBeInTheDocument();
+      // At most one more quick read, the one already timed when the time ran out; then the usual pace.
+      await pause(500);
+      const reads = () => server.requests.filter((request) => request.url === LIST).length;
+      const slow = reads();
+      await pause(1_200);
+      expect(reads()).toBe(slow);
+    });
+
+    it('is still shown as waiting on coming back to the page', async () => {
+      const { server } = exchange('SETUP');
+      server.on('POST /api/v1/admin/instruments', { status: 201, json: ORBT_ADDED });
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      const first = renderWith(client);
+      const form = await screen.findByRole('form', { name: 'Add an instrument' });
+      fireEvent.click(within(form).getByRole('button', { name: 'ORBT 50.00' }));
+      fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
+      await screen.findByText('Added, waiting for market data');
+
+      // The operator looks at another page for a while.
+      first.unmount();
+      await pause(20);
+      renderWith(client);
+      expect(await screen.findByText('Added, waiting for market data')).toBeInTheDocument();
+      expect(rowOf('ORBT')).toHaveTextContent('50.00');
+    });
+
+    it('is checked against before sending, as listed symbols are, and nothing is sent for either', async () => {
+      const { server } = exchange('SETUP');
+      let listed = [NOVA];
+      server.on('GET /api/v1/instruments', () => listOf(listed));
+      server.on('POST /api/v1/admin/instruments', { status: 201, json: ORBT_ADDED });
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      renderWith(client);
+      const form = await screen.findByRole('form', { name: 'Add an instrument' });
+      await screen.findByRole('table', { name: 'Instruments' });
+      const symbol = within(form).getByLabelText('Symbol');
+      const add = () => fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
+      const posts = () => server.requests.filter((request) => request.method === 'POST').length;
+
+      fireEvent.change(symbol, { target: { value: ' nova ' } });
+      fireEvent.change(within(form).getByLabelText('Reference price'), { target: { value: '1.00' } });
+      add();
+      const said = (await screen.findByText(/NOVA is already in this market/)).closest('[role="alert"]');
+      expect(said).toHaveTextContent('NOVA is already in this market, and a symbol is listed only once. Nothing was sent.');
+      expect(symbol).toHaveAttribute('aria-invalid', 'true');
+      expect(symbol).toHaveAccessibleDescription(/NOVA is already in this market/);
+      expect(posts()).toBe(0);
+      // Changing the form puts it away.
+      fireEvent.change(symbol, { target: { value: 'NOV' } });
+      expect(screen.queryByText(/already in this market/)).toBeNull();
+      expect(symbol).not.toHaveAttribute('aria-invalid');
+
+      fireEvent.click(within(form).getByRole('button', { name: 'ORBT 50.00' }));
+      add();
+      await screen.findByText('Added, waiting for market data');
+      fireEvent.change(symbol, { target: { value: 'ORBT' } });
+      fireEvent.change(within(form).getByLabelText('Reference price'), { target: { value: '50.00' } });
+      add();
+      expect(await screen.findByText(/ORBT was just added, and is waiting for market data to list it\. Nothing was sent\./)).toBeInTheDocument();
+      expect(posts()).toBe(1);
+      // Once listed, it is said as listed.
+      listed = [NOVA, ORBT];
+      await act(() => client.invalidateQueries({ queryKey: ['instruments'] }));
+      expect(await screen.findByText(/ORBT is already in this market/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      expect(screen.queryByText(/already in this market/)).toBeNull();
+      expect(symbol).toHaveFocus();
+      expect(posts()).toBe(1);
+    });
+
+    it('lets a refused add go when the form changes, a chip is picked, it is dismissed, or the list shows the symbol', async () => {
+      const { server } = exchange('SETUP');
+      let listed = [NOVA];
+      server.on('GET /api/v1/instruments', () => listOf(listed));
+      // Another operator added each of these a moment ago, and market data does not list them yet.
+      server.on('POST /api/v1/admin/instruments', (request) => ({
+        status: 409,
+        problem: {
+          status: 409,
+          code: 'SYMBOL_TAKEN',
+          detail: `An instrument with symbol ${(request.body as { symbol: string }).symbol} already exists`,
+        },
+      }));
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      renderWith(client);
+      const form = await screen.findByRole('form', { name: 'Add an instrument' });
+      await screen.findByRole('table', { name: 'Instruments' });
+      const add = () => fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
+
+      fireEvent.click(within(form).getByRole('button', { name: 'HELI 200.00' }));
+      add();
+      expect(await screen.findByText('An instrument with symbol HELI already exists')).toBeInTheDocument();
+      fireEvent.change(within(form).getByLabelText('Reference price'), { target: { value: '201.00' } });
+      expect(screen.queryByText('An instrument with symbol HELI already exists')).toBeNull();
+
+      add();
+      expect(await screen.findByText('An instrument with symbol HELI already exists')).toBeInTheDocument();
+      fireEvent.click(within(form).getByRole('button', { name: 'QUAD 25.00' }));
+      expect(screen.queryByText('An instrument with symbol HELI already exists')).toBeNull();
+
+      add();
+      expect(await screen.findByText('An instrument with symbol QUAD already exists')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      expect(screen.queryByText('An instrument with symbol QUAD already exists')).toBeNull();
+      expect(within(form).getByLabelText('Symbol')).toHaveFocus();
+
+      fireEvent.click(within(form).getByRole('button', { name: 'VELO 80.00' }));
+      add();
+      expect(await screen.findByText('An instrument with symbol VELO already exists')).toBeInTheDocument();
+      listed = [NOVA, { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000005', symbol: 'VELO' }];
+      await act(() => client.invalidateQueries({ queryKey: ['instruments'] }));
+      expect(await screen.findByRole('button', { name: 'Edit VELO' })).toBeInTheDocument();
+      await waitFor(() => expect(screen.queryByText('An instrument with symbol VELO already exists')).toBeNull());
+    });
   });
 
   it('edits the name and price together under a key, and keeps the form after a refusal', async () => {
@@ -1188,6 +1386,41 @@ describe('the operator screen', () => {
     );
   });
 
+  it('warns plainly when the bots would get no shares, as none of them could ever sell', async () => {
+    exchange('SETUP');
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    const nova = await within(form).findByLabelText('NOVA shares');
+    const warning =
+      'No shares given: these bots would own none, and a bot with no shares can never sell, so only bids would reach the book. Give each bot shares of at least one instrument.';
+    expect(within(form).getByText(warning)).toBeInTheDocument();
+    fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '20' } });
+    fireEvent.change(within(form).getByLabelText('Cash each'), { target: { value: '100000.00' } });
+    // A warning, not a refusal: the exchange takes such bots, so Create stays offered, and says why it warns.
+    const create = within(form).getByRole('button', { name: 'Create bots' });
+    expect(create).toBeEnabled();
+    expect(create).toHaveAccessibleDescription(warning);
+    // A 0 gives none either.
+    fireEvent.change(nova, { target: { value: '0' } });
+    expect(within(form).getByText(warning)).toBeInTheDocument();
+    fireEvent.change(nova, { target: { value: '1000' } });
+    expect(within(form).queryByText(warning)).toBeNull();
+    expect(create).not.toHaveAccessibleDescription();
+  });
+
+  it('warns that bots made before any instrument is listed own no shares', async () => {
+    exchange('SETUP', []);
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Create bots' });
+    expect(
+      within(form).getByText(
+        'No instrument is listed yet, so these bots would own no shares, and a bot with no shares can never sell.',
+      ),
+    ).toBeInTheDocument();
+  });
+
   it('blocks Create while the mix cannot be worked out, saying why', async () => {
     exchange('SETUP');
     renderPage();
@@ -1559,6 +1792,7 @@ describe('the operator screen', () => {
     expect(screen.getByText('10,000 untagged')).toBeInTheDocument();
     const form = await screen.findByRole('form', { name: 'Create bots' });
     fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '1000000' } });
+    fireEvent.change(await within(form).findByLabelText('NOVA shares'), { target: { value: '1000' } });
     const create = await button('Create bots');
     expect(create).toBeEnabled();
     expect(create).not.toHaveAttribute('aria-describedby');
@@ -1933,6 +2167,8 @@ describe('bot runs on the operator screen', () => {
     await waitFor(() => expect(within(form).getByLabelText('Market makers')).toHaveValue('2'));
     expect(within(form).getByLabelText('Noise')).toHaveValue('6');
     expect(within(form).getByLabelText('Momentum')).toHaveValue('2');
+    // A tenth of the bots asked for, at least one a second.
+    expect(within(form).getByLabelText('Commands per second')).toHaveValue('1.00');
     expect(within(form).getByRole('checkbox', { name: 'ORBT' })).toBeChecked();
     expect(
       within(form).getByText(/11 bots exist: 2 market makers · 6 noise · 2 momentum · 1 untagged\. Each strategy is run by/),
@@ -1947,11 +2183,39 @@ describe('bot runs on the operator screen', () => {
       marketMakers: 2,
       noise: 6,
       momentum: 2,
-      commandsPerSecond: '4.00',
+      commandsPerSecond: '1.00',
       maxOrderQuantity: 10,
       maxPosition: 100,
       durationMinutes: 60,
     });
+  });
+
+  it('starts from a rate that follows the bots asked for until one is typed, and says how the run will pace itself', async () => {
+    const { state } = exchange('OPEN');
+    state.tagged = { marketMakers: 200, noise: 600, momentum: 200 };
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    const rate = within(form).getByLabelText('Commands per second');
+    await waitFor(() => expect(rate).toHaveValue('100.00'));
+    expect(rate).toHaveAccessibleDescription(
+      'Each bot acts about every 10 s; first trades in about 2 s, once every market maker has had its first turn.',
+    );
+    fireEvent.change(within(form).getByLabelText('Noise'), { target: { value: '0' } });
+    expect(rate).toHaveValue('40.00');
+    expect(rate).toHaveAccessibleDescription(
+      'Each bot acts about every 10 s; first trades in about 5 s, once every market maker has had its first turn.',
+    );
+
+    // A rate typed is the operator's: it stays as the counts change, and the words follow it.
+    fireEvent.change(rate, { target: { value: '4.00' } });
+    fireEvent.change(within(form).getByLabelText('Noise'), { target: { value: '600' } });
+    expect(rate).toHaveValue('4.00');
+    expect(rate).toHaveAccessibleDescription(
+      'Each bot acts about every 4 min 10 s; first trades in about 50 s, once every market maker has had its first turn.',
+    );
+    fireEvent.change(rate, { target: { value: '' } });
+    expect(rate).not.toHaveAccessibleDescription();
   });
 
   it('starts a run for an hour unless told otherwise, and never reads an empty duration as no end', async () => {
@@ -1990,7 +2254,7 @@ describe('bot runs on the operator screen', () => {
       marketMakers: 1,
       noise: 1,
       momentum: 0,
-      commandsPerSecond: '4.00',
+      commandsPerSecond: '1.00',
       maxOrderQuantity: 10,
       maxPosition: 100,
       durationMinutes: 15,
@@ -2031,7 +2295,7 @@ describe('bot runs on the operator screen', () => {
       marketMakers: 1,
       noise: 1,
       momentum: 0,
-      commandsPerSecond: '4.00',
+      commandsPerSecond: '1.00',
       maxOrderQuantity: 10,
       maxPosition: 100,
     });
@@ -2071,7 +2335,7 @@ describe('bot runs on the operator screen', () => {
       marketMakers: 1,
       noise: 1,
       momentum: 0,
-      commandsPerSecond: '4.00',
+      commandsPerSecond: '1.00',
       maxOrderQuantity: 10,
       maxPosition: 100,
       durationMinutes: 15,
@@ -3426,6 +3690,114 @@ describe('closing the market on the operator screen', () => {
     expect(await screen.findByText('Trading is halted. Cancels still work.')).toBeInTheDocument();
     await waitFor(async () => expect(await button('Close the market')).toBeEnabled());
     expect(closes(server)).toHaveLength(0);
+  });
+});
+
+describe('what the operator screen reads again of a closed market', () => {
+  beforeEach(() => resetSession());
+  afterEach(() => vi.useRealTimers());
+
+  const HEALTH = {
+    writer: { available: true, queueDepth: 0, queueCapacity: 256 },
+    lastMinute: { committed: 0, failed: 0, withinBudget: 0, refused: 0 },
+    outbox: { admitting: true, pendingEvents: 0, oldestPendingMillis: 0 },
+  };
+  const CANDLES = `/api/v1/instruments/${NOVA.instrumentId}/candles`;
+  const candles = (behind: number) => ({
+    instrumentId: NOVA.instrumentId,
+    computationEpoch: 1,
+    from: '2026-11-05T15:59:00Z',
+    to: '2026-11-05T16:00:00Z',
+    candles: [],
+    freshness: {
+      feed: { state: 'LIVE', lag: 0 },
+      candlesThroughTradeSequence: '1',
+      latestTradeSequence: String(1 + behind),
+      tradesBehind: behind,
+    },
+  });
+  const PATHS = ['/api/v1/market', '/api/v1/admin/health', '/api/v1/admin/bot-runs', '/api/v1/instruments', CANDLES];
+
+  /** Each path's reads so far, the instrument list by its simulation only. */
+  function reads(server: ReturnType<typeof exchange>['server']) {
+    return Object.fromEntries(
+      PATHS.map((path) => [
+        path,
+        server.requests.filter((request) =>
+          path === '/api/v1/instruments' ? request.url === LIST : request.url.split('?')[0] === path,
+        ).length,
+      ]),
+    );
+  }
+
+  /** Renders the page with the browser's clock faked, once every list has been read, and a way to let time pass. */
+  async function opened(at: MarketStatus['state'], feed = { state: 'LIVE', lag: 0 }, behind = 0) {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { server, state } = exchange(at);
+    state.runs = [finishedRun()];
+    let list = feed;
+    let trades = behind;
+    server
+      .on('GET /api/v1/admin/health', { status: 200, json: HEALTH })
+      .on('GET /api/v1/instruments', () => ({ status: 200, json: { instruments: [NOVA], feed: list } }))
+      .on(`GET ${CANDLES}`, () => ({ status: 200, json: candles(trades) }));
+    const view = renderPage();
+    await screen.findByRole('table', { name: 'Recent runs' });
+    await screen.findByText('Taking commands');
+    await waitFor(() => expect(reads(server)[CANDLES]).toBeGreaterThan(0));
+    const wait = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+    return {
+      server,
+      view,
+      wait,
+      catchUp: () => {
+        list = { state: 'LIVE', lag: 0 };
+        trades = 0;
+      },
+    };
+  }
+
+  it('reads again only what can still change once closed, and everything while open', async () => {
+    for (const at of ['OPEN', 'CLOSED'] as const) {
+      const { server, view, wait } = await opened(at);
+      // One more for each, in case one was already on its way when the page settled.
+      await wait(10);
+      const before = reads(server);
+      await wait(11_000);
+      const after = reads(server);
+      // The market's state, and how Execution's writer is doing, can change either way.
+      expect(after['/api/v1/market']).toBeGreaterThan(before['/api/v1/market']!);
+      expect(after['/api/v1/admin/health']).toBeGreaterThan(before['/api/v1/admin/health']!);
+      for (const path of ['/api/v1/admin/bot-runs', '/api/v1/instruments', CANDLES]) {
+        if (at === 'OPEN') {
+          expect(after[path], path).toBeGreaterThan(before[path]!);
+        } else {
+          expect(after[path], path).toBe(before[path]);
+        }
+      }
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it('goes on reading a closed market\'s list and analytics until market data and the analytics have caught up', async () => {
+    const { server, wait, catchUp } = await opened('CLOSED', { state: 'CATCHING_UP', lag: 3 }, 5);
+    await wait(10);
+    const before = reads(server);
+    await wait(11_000);
+    const behind = reads(server);
+    expect(behind['/api/v1/instruments']).toBeGreaterThan(before['/api/v1/instruments']!);
+    expect(behind[CANDLES]).toBeGreaterThan(before[CANDLES]!);
+
+    // Caught up: one more read of each says so, and then nothing more is asked.
+    catchUp();
+    await wait(11_000);
+    const caughtUp = reads(server);
+    await wait(11_000);
+    const later = reads(server);
+    expect(later['/api/v1/instruments']).toBe(caughtUp['/api/v1/instruments']);
+    expect(later[CANDLES]).toBe(caughtUp[CANDLES]);
+    expect(screen.getByText('Up to date')).toBeInTheDocument();
   });
 });
 
