@@ -901,6 +901,12 @@ export interface components {
             readonly commandKey?: components["schemas"]["Uuid"];
             readonly reason?: string;
             /**
+             * @description With MARKET_TRANSITION_NOT_ALLOWED, the state the market was in, from which the transition is not allowed.
+             *     With MARKET_CLOSE_UNFINISHED, CLOSED.
+             * @enum {string}
+             */
+            readonly state?: "SETUP" | "OPEN" | "HALTED" | "CLOSED";
+            /**
              * @description With MARKET_CLOSE_UNFINISHED, at most how many orders a closed market still had resting when trading
              *     stopped. The exchange's own count; fewer may rest, by up to one transaction of the close.
              */

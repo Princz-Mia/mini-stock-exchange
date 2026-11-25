@@ -48,12 +48,21 @@ type Tab = 'open' | 'recent';
  */
 export function OwnOrders({
   orders,
+  read = true,
   instrument,
+  closed = false,
 }: {
   /** The open orders, all of them: at most the per-account limit, so they come whole. */
   orders: readonly OrderDetail[];
+  /** Whether the open orders have been read at all. Until they are, an empty list says nothing of what a close did. */
+  read?: boolean;
   /** The instrument on screen, to narrow the lists to. */
   instrument: { instrumentId: string; symbol: string } | null;
+  /**
+   * The market has closed. The empty list says where the cancelled orders are; an order still listed is one the close
+   * has not cancelled yet, and is shown as that, with no cancel of the trader's own: a closed market takes none.
+   */
+  closed?: boolean;
 }) {
   const client = useQueryClient();
   const id = useId();
@@ -155,7 +164,8 @@ export function OwnOrders({
         hidden={tab !== 'open'}
         tabIndex={0}
       >
-        {cancel.isError && (
+        {/* Not on a closed market: "try again" would be advice that cannot work there. */}
+        {cancel.isError && !closed && (
           <p role="alert" className="form-error">
             {cancel.error instanceof ApiError && cancel.error.code === 'ORDER_NOT_CANCELABLE'
               ? 'That order was already filled.'
@@ -165,52 +175,71 @@ export function OwnOrders({
           </p>
         )}
         {open.length === 0 ? (
-          <p className="muted">{narrowTo === null ? 'No open orders.' : `No open orders in ${narrowTo.symbol}.`}</p>
+          <p className="muted">
+            {narrowTo === null ? 'No open orders.' : `No open orders in ${narrowTo.symbol}.`}
+            {/* Only once none is known to be open in any instrument: one narrowed away may still wait for the close. */}
+            {closed &&
+              read &&
+              orders.length === 0 &&
+              ' The market has closed: any order that was still open was cancelled by the close, and is listed under Recent orders.'}
+          </p>
         ) : (
-          <table aria-label="Open orders">
-            <thead>
-              <tr>
-                <th scope="col">Placed</th>
-                <th scope="col">Symbol</th>
-                <th scope="col">Side</th>
-                <th scope="col" className="num">
-                  Limit
-                </th>
-                <th scope="col" className="num">
-                  Filled
-                </th>
-                <th scope="col" className="num">
-                  Working
-                </th>
-                <th scope="col">
-                  <span className="visually-hidden">Action</span>
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {open.map((order) => (
-                <tr key={order.orderId}>
-                  <td>{utcTime(order.createdAt)}</td>
-                  <td>{order.symbol}</td>
-                  <td className={order.side === 'BUY' ? 'side-buy' : 'side-sell'}>{sideText(order)}</td>
-                  <td className="num">{groupDigits(order.limitPrice ?? '0.00')}</td>
-                  <td className="num">{groupInteger(order.filledQuantity)}</td>
-                  <td className="num">{groupInteger(order.workingQuantity)}</td>
-                  <td>
-                    <button
-                      type="button"
-                      className="quiet"
-                      onClick={() => cancel.mutate(order.orderId)}
-                      disabled={cancel.isPending && cancel.variables === order.orderId}
-                      aria-label={`Cancel ${order.side === 'BUY' ? 'buy' : 'sell'} ${order.symbol} at ${order.limitPrice ?? ''}`}
-                    >
-                      Cancel
-                    </button>
-                  </td>
+          <>
+            {closed && (
+              <p className="muted">
+                The market has closed, and the close cancels these: it is doing so now, or does when the exchange is
+                restarted if it has stopped. What they reserve is released as each is cancelled.
+              </p>
+            )}
+            <table aria-label="Open orders">
+              <thead>
+                <tr>
+                  <th scope="col">Placed</th>
+                  <th scope="col">Symbol</th>
+                  <th scope="col">Side</th>
+                  <th scope="col" className="num">
+                    Limit
+                  </th>
+                  <th scope="col" className="num">
+                    Filled
+                  </th>
+                  <th scope="col" className="num">
+                    Working
+                  </th>
+                  <th scope="col">
+                    <span className="visually-hidden">{closed ? 'Status' : 'Action'}</span>
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {open.map((order) => (
+                  <tr key={order.orderId}>
+                    <td>{utcTime(order.createdAt)}</td>
+                    <td>{order.symbol}</td>
+                    <td className={order.side === 'BUY' ? 'side-buy' : 'side-sell'}>{sideText(order)}</td>
+                    <td className="num">{groupDigits(order.limitPrice ?? '0.00')}</td>
+                    <td className="num">{groupInteger(order.filledQuantity)}</td>
+                    <td className="num">{groupInteger(order.workingQuantity)}</td>
+                    <td>
+                      {closed ? (
+                        <span className="muted">Waiting for the close to cancel it</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="quiet"
+                          onClick={() => cancel.mutate(order.orderId)}
+                          disabled={cancel.isPending && cancel.variables === order.orderId}
+                          aria-label={`Cancel ${order.side === 'BUY' ? 'buy' : 'sell'} ${order.symbol} at ${order.limitPrice ?? ''}`}
+                        >
+                          Cancel
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
         )}
       </div>
       <div

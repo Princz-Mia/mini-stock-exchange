@@ -1,12 +1,13 @@
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect } from 'react';
+import { type ReactNode, useCallback, useEffect, useState } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
+import { Link } from 'react-router';
 import { z } from 'zod';
 
 import type { Instrument, Order, OrderRequest, Portfolio } from '../api/types';
 import { useFillWatch } from '../app/FillNotice';
-import { groupDigits, groupInteger } from '../format';
+import { groupDigits, groupInteger, utcDateTime } from '../format';
 import { TermTip } from '../help/TermTip';
 import { isPrice, maximumSpend } from './money';
 import { isUnresolved, type Outcome, useOrderIntent } from './orderIntent';
@@ -107,15 +108,73 @@ function OutcomeMessage({ outcome }: { outcome: Outcome }) {
   }
 }
 
+/**
+ * What the close has done with the trader's open orders, by the list of them beside the ticket. The market reads as
+ * closed before the last order is cancelled, and stays so with orders resting when the exchange stopped half way: that
+ * they were cancelled is said only once none is listed as open.
+ */
+export function closedOrdersText(stillOpen: number | undefined): string {
+  if (stillOpen === undefined) {
+    return 'The close cancels any order of yours that was still open, and releases what it had reserved.';
+  }
+  if (stillOpen === 0) {
+    return 'Any order of yours that was still open was cancelled, and what it had reserved was released.';
+  }
+  const orders = stillOpen === 1 ? '1 order of yours is' : `${groupInteger(stillOpen)} orders of yours are`;
+  return `${orders} still open, with what ${stillOpen === 1 ? 'it reserves' : 'they reserve'}. The close cancels ${stillOpen === 1 ? 'it' : 'them'}: it is doing so now, or does when the exchange is restarted if it has stopped.`;
+}
+
+/**
+ * In the ticket's place once the market has closed: that it closed and when, and what became of the trader's orders
+ * and balances. No form, since no order will ever be taken again; a halt, which ends, keeps the ticket.
+ */
+export function ClosedTicket({
+  closedAt,
+  account = true,
+  stillOpen,
+  children,
+}: {
+  closedAt: string | null;
+  /** Whether the user traded in this market; one who never had an account has no orders or balances to hear of. */
+  account?: boolean;
+  /** How many of the trader's orders are still listed as open, in any instrument; undefined until the list is read. */
+  stillOpen?: number | undefined;
+  children?: ReactNode;
+}) {
+  return (
+    <section className="panel ticket ended" aria-labelledby="ticket-closed-title">
+      <h2 id="ticket-closed-title">Market closed</h2>
+      <p role="status">
+        The market closed{closedAt === null ? '' : ` on ${utcDateTime(closedAt)}`} and takes no more orders.
+      </p>
+      {account ? (
+        <p className="muted">
+          {closedOrdersText(stillOpen)} Your <Link to="/portfolio">portfolio</Link> and your history of orders and
+          trades stay {stillOpen === undefined || stillOpen === 0 ? 'as the market left them' : 'to read'}.
+        </p>
+      ) : (
+        <p className="muted">You had no trading account in it.</p>
+      )}
+      {children}
+    </section>
+  );
+}
+
 export function OrderTicket({
   instrument,
   portfolio,
   paused = null,
+  closed = null,
 }: {
   instrument: Instrument;
   portfolio: Portfolio | undefined;
   /** Why new orders cannot be placed now, or null while the market is open. An unresolved order can still be retried. */
   paused?: string | null;
+  /**
+   * Set once the market has closed, with when. The ticket then gives way to a statement of that, unless an order sent
+   * before is still unresolved: that one keeps its Retry, which finds out what became of it.
+   */
+  closed?: { closedAt: string | null; stillOpen?: number | undefined } | null;
 }) {
   const client = useQueryClient();
   const watch = useFillWatch();
@@ -131,6 +190,13 @@ export function OrderTicket({
   const intent = useOrderIntent({ onAccepted });
   const unresolved = isUnresolved(intent.outcome);
   const sending = intent.outcome.kind === 'sending';
+  // The close found an order of this ticket on its way or unresolved. Only that order's answer is shown with the
+  // statement that the market closed: an answer from before the close, such as an order accepted an hour ago and
+  // cancelled by the close since, says nothing true there.
+  const [caughtByClose, setCaughtByClose] = useState(false);
+  if (closed !== null && (unresolved || sending) && !caughtByClose) {
+    setCaughtByClose(true);
+  }
   const {
     register,
     handleSubmit,
@@ -164,6 +230,15 @@ export function OrderTicket({
       void intent.submit(request);
     }
   };
+
+  if (closed !== null && !unresolved && !sending) {
+    return (
+      <ClosedTicket closedAt={closed.closedAt} stillOpen={closed.stillOpen}>
+        {/* What became of the order the close caught unanswered, and of no order before it. */}
+        {caughtByClose && <OutcomeMessage outcome={intent.outcome} />}
+      </ClosedTicket>
+    );
+  }
 
   return (
     <section className="panel ticket" aria-labelledby="ticket-title">

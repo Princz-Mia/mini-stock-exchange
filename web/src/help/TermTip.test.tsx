@@ -126,7 +126,7 @@ describe('How this exchange works', () => {
     }
   });
 
-  it('explains the order terms with the orders, the money terms with cash and shares, and halts on their own', () => {
+  it('explains the order terms with the orders, the money terms with cash and shares, and a halt and a close on their own', () => {
     render(<HowItWorks />);
     const section = (name: string) => screen.getByRole('region', { name });
     for (const term of ['limit', 'protected', 'partial'] as const) {
@@ -136,5 +136,23 @@ describe('How this exchange works', () => {
       expect(section('Your cash and shares')).toHaveTextContent(GLOSSARY[term].definition);
     }
     expect(section('When trading is halted')).toHaveTextContent(GLOSSARY.halted.definition);
+    expect(section('When the market has closed')).toHaveTextContent(GLOSSARY.closed.definition);
+    // A market's whole life is in the introduction: set up, opened, halted and resumed, and closed.
+    expect(section('A simulated market')).toHaveTextContent('can halt and resume it, and in the end closes it for good');
+  });
+
+  it('tells a halt, which ends, from a close, which does not', () => {
+    expect(GLOSSARY.halted.definition).toContain('Trading goes on when the operator resumes the market.');
+    expect(GLOSSARY.closed.term).toBe('Closed');
+    for (const said of [
+      'ended the market for good',
+      'No order is taken any more',
+      // What a close does, not that it is done: a market reads as closed before its last order is cancelled.
+      'The close cancels every order that was still open and releases what it had reserved.',
+      'Portfolios, orders and trades stay readable',
+      'A closed market never opens again.',
+    ]) {
+      expect(GLOSSARY.closed.definition).toContain(said);
+    }
   });
 });

@@ -20,6 +20,7 @@ import {
   STATUS_LABELS,
   shortfallText,
   startBlocked,
+  stopRecordedByClose,
   statusClass,
   strategiesText,
   taggedSplit,
@@ -52,7 +53,16 @@ const DEFAULTS = {
  * the run has been going is counted up to the last answer, on the exchange's clock as that answer gave it: it moves
  * with each refetch, needs no timer of its own, and does not depend on the browser's clock.
  */
-export function BotRuns({ market, instruments }: { market: MarketStatus['state']; instruments: readonly Instrument[] }) {
+export function BotRuns({
+  market,
+  closedAt,
+  instruments,
+}: {
+  market: MarketStatus['state'];
+  /** When the market closed, or null while it has not: the close leaves its time on runs it did not end. */
+  closedAt: string | null;
+  instruments: readonly Instrument[];
+}) {
   const runs = useQuery({ queryKey: ['bot-runs'], queryFn: api.botRuns, refetchInterval: pollEvery(2_000) });
   const population = useQuery({ queryKey: ['bots'], queryFn: api.botPopulation });
   const list = runs.data?.runs ?? [];
@@ -99,7 +109,7 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
       },
       { replace: true },
     );
-  const columns = [compareColumn(picked, pick), STARTED_COLUMN, ranForColumn(now), ...RUN_COLUMNS];
+  const columns = [compareColumn(picked, pick), STARTED_COLUMN, ranForColumn(now), ...RUN_COLUMNS, endedColumn(closedAt)];
   // The screen's own address goes along, so coming back keeps the table's page size and order.
   const from = useLocation().search;
 
@@ -115,6 +125,9 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
         <p className="muted">Loading…</p>
       ) : active !== undefined ? (
         <ActiveRun run={active} now={now} />
+      ) : market === 'CLOSED' ? (
+        // No form: nothing in it could be sent. The runs the market had stay below, with their comparison.
+        <p className="muted">The market has closed, so no run can start. Its runs stay listed, and can still be compared.</p>
       ) : (
         <StartForm
           market={market}
@@ -464,14 +477,19 @@ function StartForm({
 
 /**
  * When a run ended, or where it stands while it has not. A run the market's close ended says so: its time is the
- * close's, not a stop its worker confirmed.
+ * close's, not a stop its worker confirmed. A run that had ended before the close, with no worker confirming, stays
+ * not confirmed, though the close has since recorded its own time on it.
  */
-function ended(run: BotRun): string {
+function ended(run: BotRun, closedAt: string | null): string {
   const failures = run.activity.stopFailures > 0 ? ` · ${groupInteger(run.activity.stopFailures)} not canceled` : '';
-  if (run.stoppedAt !== null) {
+  if (run.stoppedAt !== null && !stopRecordedByClose(run, closedAt)) {
     return utcTime(run.stoppedAt) + (run.window.endedBy === 'MARKET_CLOSE' ? ' · Market close' : '') + failures;
   }
   return (run.status === 'STOPPED' ? 'Not confirmed' : STATUS_LABELS[run.status]) + failures;
+}
+
+function endedColumn(closedAt: string | null): Column<BotRun> {
+  return { key: 'ended', header: 'Ended', cell: (run) => ended(run, closedAt) };
 }
 
 /** The settings the run's simulator reported, collapsed: the table is drawn only while open. */
@@ -586,5 +604,4 @@ const RUN_COLUMNS: readonly Column<BotRun>[] = [
     cell: (run) => groupInteger(run.activity.canceled),
     sortValue: (run) => run.activity.canceled,
   },
-  { key: 'ended', header: 'Ended', cell: ended },
 ];

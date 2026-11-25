@@ -30,6 +30,7 @@ export type QualityMinute = Schemas['QualityMinute'];
 export type FieldError = Schemas['FieldError'];
 export type MarketStatus = Schemas['MarketStatus'];
 export type MarketTransition = Schemas['MarketTransition'];
+export type MarketClosed = Schemas['MarketClosed'];
 export type InstrumentRequest = Schemas['InstrumentRequest'];
 export type InstrumentCreated = Schemas['InstrumentCreated'];
 export type InstrumentEditRequest = Schemas['InstrumentEditRequest'];

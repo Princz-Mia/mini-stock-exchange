@@ -190,3 +190,12 @@ describe('the page under the tour', () => {
     expect(scrolled.at(-1)).toEqual({ block: 'center', behavior: 'auto' });
   });
 });
+
+describe("the operator's tour on the market's states", () => {
+  it('names every transition the market panel offers, and says which one is final', () => {
+    const step = TOURS.OPERATOR.steps.find((each) => each.title === 'Market state')!;
+    expect(step.anchor).toBe('section[aria-labelledby="market-title"]');
+    expect(step.body).toContain('Open, halt and resume the market, and in the end close it.');
+    expect(step.body).toContain('it opens once, and closing it is final.');
+  });
+});

@@ -3,8 +3,8 @@ import { useEffect, useRef } from 'react';
 
 import type { StreamFactory, StreamSource } from '../terminal/useMarketStream';
 
-/** The private queries an account change can make stale. */
-const PRIVATE_QUERIES = [['portfolio'], ['orders'], ['own-trades']] as const;
+/** The private queries an account change can make stale, and a market's close or a change of simulation with it. */
+export const PRIVATE_QUERIES = [['portfolio'], ['orders'], ['own-trades']] as const;
 
 /** Changes in quick succession, such as a run of fills, become one refetch after this pause. */
 export const DEBOUNCE_MS = 150;

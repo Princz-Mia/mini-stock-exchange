@@ -1,10 +1,13 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter } from 'react-router';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { App } from '../App';
 import { resetSession } from '../api/client';
 import { GLOSSARY } from '../help/glossary';
 import { signedIn } from '../test/fakeServer';
+import { PortfolioPage, orderReason } from './PortfolioPage';
 
 const PORTFOLIO = {
   cash: { total: '10404.00', available: '10224.00', reserved: '180.00' },
@@ -44,6 +47,21 @@ const PORTFOLIO = {
   costBasis: '11744.00',
   unrealized: '-48.00',
   unrealizedPercent: '-0.41',
+};
+
+/** The same account once nothing of it is reserved: no order of its own is open any more. */
+const SETTLED = {
+  ...PORTFOLIO,
+  cash: { total: '10404.00', available: '10404.00', reserved: '0.00' },
+  holdings: PORTFOLIO.holdings.map((holding) => ({ ...holding, available: holding.total, reserved: 0 })),
+};
+
+const CLOSED_MARKET = {
+  state: 'CLOSED',
+  simulationId: 's',
+  openedAt: '2026-11-04T09:00:00Z',
+  closedAt: '2026-11-04T17:00:00Z',
+  commandSequence: '12',
 };
 
 function trade(n: number) {
@@ -222,6 +240,10 @@ describe('portfolio page', () => {
     const ORBIT = '00000000-0000-0000-0000-000000000002';
     const server = signedIn()
       .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/market', {
+        status: 200,
+        json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
+      })
       .on('GET /api/v1/instruments', {
         status: 200,
         json: {
@@ -245,6 +267,10 @@ describe('portfolio page', () => {
     await waitFor(() =>
       expect(within(symbol).getAllByRole('option').map((option) => option.textContent)).toEqual(['All', 'NOVA', 'ORBIT']),
     );
+    // They are this simulation's: the list is asked for by the id the market status gives.
+    expect(
+      server.requests.filter((request) => request.url.startsWith('/api/v1/instruments')).map((request) => request.url),
+    ).toEqual(['/api/v1/instruments?simulationId=s']);
     fireEvent.change(symbol, { target: { value: ORBIT } });
     fireEvent.change(within(executions).getByLabelText('Side'), { target: { value: 'SELL' } });
     await waitFor(() =>
@@ -289,6 +315,161 @@ describe('portfolio page', () => {
     expect(server.requests.some((request) => request.url.includes('state=FILLED') && request.url.includes('status=all'))).toBe(
       true,
     );
+  });
+
+  it('says the market has closed above the final balances, and what the close did to an order', async () => {
+    const order = {
+      orderId: '00000000-0000-0000-0000-0000000000cc',
+      instrumentId: '00000000-0000-0000-0000-000000000001',
+      symbol: 'NOVA',
+      side: 'SELL',
+      type: 'LIMIT',
+      timeInForce: 'GTC',
+      limitPrice: '105.00',
+      protectionPrice: null,
+      requestedQuantity: 10,
+      filledQuantity: 0,
+      workingQuantity: 0,
+      canceledQuantity: 10,
+      state: 'CANCELED',
+      reason: 'MARKET_CLOSED',
+      version: '2',
+      createdAt: '2026-11-04T12:00:00Z',
+      updatedAt: '2026-11-04T17:00:00Z',
+    };
+    signedIn()
+      .on('GET /api/v1/portfolio', { status: 200, json: SETTLED })
+      .on('GET /api/v1/market', { status: 200, json: CLOSED_MARKET })
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [trade(1)], nextCursor: null } })
+      .on('GET /api/v1/orders', {
+        status: 200,
+        json: { orders: [order, { ...order, orderId: 'x', state: 'CANCELED', reason: 'CANCELED_BY_OWNER' }], nextCursor: null },
+      });
+    window.history.pushState({}, '', '/portfolio');
+    render(<App />);
+
+    const closed = await screen.findByRole('region', { name: 'Market closed' });
+    expect(within(closed).getByRole('status')).toHaveTextContent(
+      'The market closed on 4 Nov 2026, 17:00:00 UTC. Nothing trades any more, so this is where your account ended: no order is open and nothing is reserved. Your executions and orders stay below.',
+    );
+    // What the account ended with, and its history, stay.
+    expect(screen.getByRole('region', { name: 'Summary' })).toHaveTextContent('22,100.00');
+    expect(await screen.findByRole('table', { name: 'Executions' })).toBeInTheDocument();
+    const orders = await screen.findByRole('table', { name: 'Orders' });
+    const states = within(orders)
+      .getAllByRole('row')
+      .slice(1)
+      .map((row) => row.lastElementChild?.textContent);
+    expect(states).toEqual(['canceled · the market closed', 'canceled · CANCELED_BY_OWNER']);
+  });
+
+  it('does not say nothing is reserved in a closed market while something still is', async () => {
+    // The close has not cancelled every order of this account yet, or stopped half way: cash, shares or both are held.
+    const held = [
+      PORTFOLIO,
+      { ...SETTLED, cash: PORTFOLIO.cash },
+      { ...SETTLED, holdings: PORTFOLIO.holdings },
+    ];
+    for (const portfolio of held) {
+      signedIn()
+        .on('GET /api/v1/portfolio', { status: 200, json: portfolio })
+        .on('GET /api/v1/market', { status: 200, json: CLOSED_MARKET })
+        .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+        .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
+        .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+      window.history.pushState({}, '', '/portfolio');
+      const view = render(<App />);
+
+      const closed = within(await view.findByRole('region', { name: 'Market closed' })).getByRole('status');
+      expect(closed).toHaveTextContent(
+        'The market closed on 4 Nov 2026, 17:00:00 UTC. Nothing trades any more, but some of your orders are still open, with what they reserve. The close cancels them and releases it: it is doing so now, or does when the exchange is restarted if it has stopped. Your balances are final once nothing is reserved.',
+      );
+      expect(closed).not.toHaveTextContent(/no order is open|where your account ended/);
+      view.unmount();
+    }
+  });
+
+  it("reads the trader's balances and history again as soon as the market is seen to have closed", async () => {
+    let closed = false;
+    const server = signedIn()
+      .on('GET /api/v1/portfolio', () => ({ status: 200, json: closed ? SETTLED : PORTFOLIO }))
+      .on('GET /api/v1/market', () => ({
+        status: 200,
+        json: closed ? CLOSED_MARKET : { ...CLOSED_MARKET, state: 'OPEN', closedAt: null },
+      }))
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/portfolio']}>
+          <PortfolioPage />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const summary = await screen.findByRole('region', { name: 'Summary' });
+    expect(summary).toHaveTextContent('180.00');
+    await screen.findByText('No orders yet.');
+    await screen.findByText('No executions yet.');
+    const paths = ['/api/v1/portfolio', '/api/v1/orders', '/api/v1/portfolio/trades'];
+    const reads = () => paths.map((path) => server.requests.filter((request) => request.url.split('?')[0] === path).length);
+    const before = reads();
+
+    closed = true;
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    // At once, not at the next poll five seconds on: what the close released is no longer shown as reserved.
+    const said = within(await screen.findByRole('region', { name: 'Market closed' })).getByRole('status');
+    await waitFor(() => expect(said).toHaveTextContent('no order is open and nothing is reserved'), { timeout: 900 });
+    await waitFor(() => expect(reads().every((count, index) => count > before[index]!)).toBe(true), { timeout: 900 });
+  });
+
+  it('tells a user who had no account in a closed market that it closed, not how to get one', async () => {
+    const noAccount = { status: 403, problem: { status: 403, code: 'NO_TRADING_ACCOUNT' } };
+    signedIn()
+      .on('GET /api/v1/portfolio', noAccount)
+      .on('GET /api/v1/portfolio/trades', noAccount)
+      .on('GET /api/v1/orders', noAccount)
+      .on('GET /api/v1/market', { status: 200, json: CLOSED_MARKET })
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } });
+    window.history.pushState({}, '', '/portfolio');
+    render(<App />);
+
+    expect(
+      await screen.findByText(
+        'The market closed on 4 Nov 2026, 17:00:00 UTC. You had no trading account in it, so there is no portfolio to show.',
+        {},
+        { timeout: 5000 },
+      ),
+    ).toHaveAttribute('role', 'status');
+    // No account will ever be created in this market: nothing sends the user to an operator for one.
+    expect(screen.queryByText(/An operator creates accounts/)).toBeNull();
+    expect(screen.queryByText(/no trading account yet/)).toBeNull();
+  });
+
+  it('says nothing of a close while the market is open, and words only the close among the reasons', async () => {
+    signedIn()
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/market', {
+        status: 200,
+        json: { state: 'HALTED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
+      })
+      .on('GET /api/v1/portfolio/trades', { status: 200, json: { trades: [], nextCursor: null } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    window.history.pushState({}, '', '/portfolio');
+    render(<App />);
+
+    await screen.findByRole('region', { name: 'Summary' });
+    await screen.findByText('No orders yet.');
+    expect(screen.queryByRole('region', { name: 'Market closed' })).toBeNull();
+
+    expect(orderReason({ state: 'CANCELED', reason: 'MARKET_CLOSED' })).toBe('the market closed');
+    // An order refused because the market had closed was not cancelled by the close.
+    expect(orderReason({ state: 'REJECTED', reason: 'MARKET_CLOSED' })).toBe('MARKET_CLOSED');
+    expect(orderReason({ state: 'CANCELED', reason: 'IOC_REMAINDER_CANCELED' })).toBe('IOC_REMAINDER_CANCELED');
+    expect(orderReason({ state: 'FILLED', reason: null })).toBeNull();
   });
 
   it('explains a missing trading account instead of calling it an outage', async () => {

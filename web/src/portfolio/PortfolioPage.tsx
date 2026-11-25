@@ -2,10 +2,12 @@ import { useQuery } from '@tanstack/react-query';
 
 import { ApiError, api, pollEvery } from '../api/client';
 import type { Holding, OrderDetail, OwnTrade } from '../api/types';
+import { useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
 import { type Column, PagedTable } from '../app/PagedTable';
 import { type Filter, usePagedList } from '../app/paging';
+import { PRIVATE_QUERIES } from '../app/useAccountEvents';
 import { useKeyboardScroll } from '../app/useKeyboardScroll';
-import { groupDigits, groupInteger, utcTime } from '../format';
+import { groupDigits, groupInteger, utcDateTime, utcTime } from '../format';
 import { TermTip } from '../help/TermTip';
 import { toCents } from '../terminal/money';
 import { Moved } from '../terminal/Moved';
@@ -88,6 +90,14 @@ const EXECUTION_COLUMNS: readonly Column<OwnTrade>[] = [
 
 const orderPrice = (order: OrderDetail) => order.limitPrice ?? order.protectionPrice ?? '0.00';
 
+/**
+ * Why an order ended as it did, beside its state: the exchange's own code, but for an order the market's close
+ * cancelled, which the trader did nothing to cause and reads in words, as on the terminal.
+ */
+export function orderReason(order: Pick<OrderDetail, 'state' | 'reason'>): string | null {
+  return order.state === 'CANCELED' && order.reason === 'MARKET_CLOSED' ? 'the market closed' : order.reason;
+}
+
 const ORDER_COLUMNS: readonly Column<OrderDetail>[] = [
   { key: 'placed', header: 'Placed', cell: (order) => utcTime(order.createdAt), sortValue: (order) => order.createdAt },
   { key: 'symbol', header: 'Symbol', cell: (order) => order.symbol, sortValue: (order) => order.symbol },
@@ -118,7 +128,7 @@ const ORDER_COLUMNS: readonly Column<OrderDetail>[] = [
     cell: (order) => (
       <>
         {order.state.replace('_', ' ').toLowerCase()}
-        {order.reason !== null && <span className="muted"> · {order.reason}</span>}
+        {order.reason !== null && <span className="muted"> · {orderReason(order)}</span>}
       </>
     ),
     sortValue: (order) => order.state,
@@ -145,12 +155,15 @@ const STATE_FILTER: Filter = { name: 'state', label: 'Status', options: STATES, 
 
 export function PortfolioPage() {
   const portfolio = useQuery({ queryKey: ['portfolio'], queryFn: api.portfolio, ...REFRESH });
-  // The instruments to filter by, by symbol; the terminal reads the same list.
-  const instruments = useQuery({ queryKey: ['instruments'], queryFn: api.instruments });
+  // The instruments to filter by, by symbol; the terminal reads the same list, of the same simulation.
+  const market = useMarketStatus();
+  const instruments = useInstruments(market);
+  // A close releases what open orders had reserved and cancels them: read at once, as the terminal does.
+  useRefreshOnMarketChange(market.data, PRIVATE_QUERIES);
   const symbolFilter: Filter = {
     name: 'instrumentId',
     label: 'Symbol',
-    options: (instruments.data?.instruments ?? [])
+    options: instruments.instruments
       .map((instrument) => ({ value: instrument.instrumentId, label: instrument.symbol }))
       .sort((a, b) => a.label.localeCompare(b.label)),
   };
@@ -187,6 +200,15 @@ export function PortfolioPage() {
   }
   if (portfolio.isError) {
     const noAccount = portfolio.error instanceof ApiError && portfolio.error.code === 'NO_TRADING_ACCOUNT';
+    // How to get an account is setup advice, and a closed market is past setting up: none is ever created in it.
+    if (noAccount && market.data?.state === 'CLOSED') {
+      return (
+        <p role="status" className="page-status">
+          The market closed{market.data.closedAt === null ? '' : ` on ${utcDateTime(market.data.closedAt)}`}. You had no
+          trading account in it, so there is no portfolio to show.
+        </p>
+      );
+    }
     return (
       <p role="alert" className="page-status">
         {noAccount
@@ -196,9 +218,24 @@ export function PortfolioPage() {
     );
   }
   const { cash, holdings, equity, costBasis, unrealized, unrealizedPercent } = portfolio.data;
+  // An open order reserves cash or shares, so while anything is reserved in a closed market, the close has not
+  // cancelled every order yet: it is still at it, or the exchange stopped half way and finishes when restarted.
+  const reserved = toCents(cash.reserved) > 0n || holdings.some((holding) => holding.reserved > 0);
 
   return (
     <div className="stack">
+      {market.data?.state === 'CLOSED' && (
+        <section className="panel ended" aria-labelledby="portfolio-closed-title">
+          <h2 id="portfolio-closed-title">Market closed</h2>
+          <p role="status">
+            The market closed{market.data.closedAt === null ? '' : ` on ${utcDateTime(market.data.closedAt)}`}.{' '}
+            {reserved
+              ? 'Nothing trades any more, but some of your orders are still open, with what they reserve. The close cancels them and releases it: it is doing so now, or does when the exchange is restarted if it has stopped. Your balances are final once nothing is reserved.'
+              : 'Nothing trades any more, so this is where your account ended: no order is open and nothing is reserved.'}{' '}
+            Your executions and orders stay below.
+          </p>
+        </section>
+      )}
       <section className="summary" aria-label="Summary">
         <div className="figure">
           <span className="figure-label">

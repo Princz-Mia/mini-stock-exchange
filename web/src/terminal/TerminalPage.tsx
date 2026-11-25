@@ -5,12 +5,14 @@ import { Link, useSearchParams } from 'react-router';
 import { ApiError, api, pollEvery } from '../api/client';
 import type { MarketStatus } from '../api/types';
 import { FeedStatus } from '../app/FeedStatus';
+import { useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
+import { PRIVATE_QUERIES } from '../app/useAccountEvents';
 import { isOperator, useSession } from '../auth/session';
 import { groupDigits } from '../format';
 import { TermTip } from '../help/TermTip';
 import { InstrumentFigures } from './InstrumentFigures';
 import { OrderBook } from './OrderBook';
-import { OrderTicket } from './OrderTicket';
+import { ClosedTicket, OrderTicket } from './OrderTicket';
 import { OwnOrders } from './OwnOrders';
 import { PriceChart } from './PriceChart';
 import { Tape } from './Tape';
@@ -38,27 +40,41 @@ const PAUSED: Record<Exclude<MarketStatus['state'], 'OPEN'>, { badge: string; re
 export function TerminalPage() {
   const [params, setParams] = useSearchParams();
   const create = useContext(StreamContext);
-  const instruments = useQuery({ queryKey: ['instruments'], queryFn: api.instruments, refetchInterval: pollEvery(5_000) });
   const portfolio = useQuery({ queryKey: ['portfolio'], queryFn: api.portfolio, refetchInterval: pollEvery(5_000) });
   // The authoritative phase. The venue state in market data can lag; if this cannot be read, nothing is paused here
   // and the exchange still decides.
-  const market = useQuery({ queryKey: ['market'], queryFn: api.market, refetchInterval: pollEvery(5_000) });
+  const market = useMarketStatus();
+  // The current simulation's instruments, as that status names it: never the list of a simulation before it.
+  const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
   const paused = market.data === undefined || market.data.state === 'OPEN' ? null : PAUSED[market.data.state];
+  // A close cancels every open order and releases what it reserved. The trader's own lists are read again when the
+  // status says so, without waiting for their next poll or for the account's own notification.
+  useRefreshOnMarketChange(market.data, PRIVATE_QUERIES);
   const orders = useQuery({
     queryKey: ['orders', 'active'],
     queryFn: () => api.orders('active'),
     refetchInterval: pollEvery(5_000),
   });
+  // Final, unlike a halt: the ticket gives way to a statement, and nothing here says trading will come back. The
+  // statement goes by the orders still listed as open: the market is closed before the last of them is cancelled.
+  const closed =
+    market.data?.state === 'CLOSED' ? { closedAt: market.data.closedAt, stillOpen: orders.data?.orders.length } : null;
   // A trader login without an account yet, such as an operator who also trades before funding itself: the market is
   // shown, the ticket is not.
   const noAccount = portfolio.error instanceof ApiError && portfolio.error.code === 'NO_TRADING_ACCOUNT';
   const operator = isOperator(useSession().data);
 
-  const list = instruments.data?.instruments ?? [];
-  const selectedId = params.get('instrument') ?? list[0]?.instrumentId ?? null;
-  const selected = list.find((instrument) => instrument.instrumentId === selectedId) ?? null;
+  const list = instruments.instruments;
+  // The instrument the address names, if this market lists it. A bookmark from a simulation that has closed, or a tab
+  // left open over a change of simulation, names one it does not: the first listed instrument is shown then, as with
+  // no instrument in the address, and the page says so.
+  const asked = params.get('instrument');
+  const selected = list.find((instrument) => instrument.instrumentId === asked) ?? list[0] ?? null;
+  const selectedId = selected?.instrumentId ?? null;
+  const notListed = asked !== null && selected !== null && selected.instrumentId !== asked;
   const stream = useMarketStream(selected?.instrumentId ?? null, create === undefined ? {} : { create });
   const frame = stream.frame;
+  const feed = stream.feed ?? instruments.feed;
   // The newer of the live frame and the polled list, by market revision: a stream that dropped leaves its last frame
   // behind the list. The header's price, figures, bid and ask all come from the same one, so they never disagree.
   const latest =
@@ -101,7 +117,11 @@ export function TerminalPage() {
         }
       />
       {selected === null ? (
-        <p className="muted terminal-empty">Choose an instrument to trade.</p>
+        <p className="muted terminal-empty" role="status">
+          {asked === null
+            ? 'This market has no instruments yet, so there is nothing to trade.'
+            : 'The instrument in this address is not part of this market, and the market has no instruments yet.'}
+        </p>
       ) : (
         <>
           <div className="terminal-market">
@@ -114,13 +134,19 @@ export function TerminalPage() {
                 <>
                   <span className="state-badge state-halted">{paused.badge}</span>
                   {market.data?.state === 'HALTED' && <TermTip terms={['halted']} />}
+                  {closed !== null && <TermTip terms={['closed']} />}
                 </>
               )}
-              <FeedStatus feed={stream.feed ?? instruments.data.feed} />
+              {feed !== undefined && <FeedStatus feed={feed} />}
               <span className={`transport transport-${stream.transport}`} role="status">
                 {TRANSPORT_LABELS[stream.transport]}
               </span>
             </div>
+            {notListed && (
+              <p className="chart-note" role="status">
+                The instrument in this address is not part of this market. Showing {selected.symbol} instead.
+              </p>
+            )}
             {latest !== null && (
               <InstrumentFigures session={latest.session} bid={latest.bid ?? null} ask={latest.ask ?? null} />
             )}
@@ -131,13 +157,19 @@ export function TerminalPage() {
             </div>
           </div>
           {noAccount ? (
-            <NoAccount operator={operator} />
+            // Getting an account is setup advice, and a closed market is past setting up.
+            closed !== null ? (
+              <ClosedTicket closedAt={closed.closedAt} account={false} />
+            ) : (
+              <NoAccount operator={operator} />
+            )
           ) : (
             <OrderTicket
               key={selected.instrumentId}
               instrument={selected}
               portfolio={portfolio.data}
               paused={paused?.reason ?? null}
+              closed={closed}
             />
           )}
         </>
@@ -145,7 +177,9 @@ export function TerminalPage() {
       <div className="terminal-orders">
         <OwnOrders
           orders={orders.data?.orders ?? []}
+          read={orders.data !== undefined}
           instrument={selected === null ? null : { instrumentId: selected.instrumentId, symbol: selected.symbol }}
+          closed={closed !== null}
         />
       </div>
     </div>

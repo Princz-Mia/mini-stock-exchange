@@ -17,6 +17,7 @@ import {
   runRequest,
   shortfallText,
   startBlocked,
+  stopRecordedByClose,
   strategiesText,
   taggedSplit,
   timeLeftText,
@@ -254,6 +255,54 @@ describe('the bot run view', () => {
 
     // A confirmed stop is exact, to the confirmation.
     expect(reads(finishedRun())).toEqual(['10 min', 600]);
+  });
+
+  it("tells the close's record of a stop from a stop of the run itself", () => {
+    const closedAt = at(7_200);
+    const recorded = { status: 'STOPPED', desiredState: 'STOPPED', stopRequestedAt: closedAt, stoppedAt: closedAt } as const;
+    const window = (endedBy: BotRun['window']['endedBy']): BotRun['window'] => ({
+      startSequence: '41',
+      stopSequence: null,
+      endSequence: endedBy === 'NOT_KEPT' ? null : '900',
+      endedBy,
+      endedAt: endedBy === 'NOT_KEPT' ? null : at(3_600),
+    });
+    // Ended before the close with no worker confirming: the time on it is the market's, not the run's.
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('NEXT_START') }), closedAt)).toBe(true);
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('NOT_KEPT') }), closedAt)).toBe(true);
+    // The same moment, written with its fraction or in another offset.
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('NEXT_START') }), '2026-11-06T12:00:00.000Z')).toBe(true);
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('NEXT_START') }), '2026-11-06T13:00:00+01:00')).toBe(true);
+    // The run the close itself ended: that time is its end.
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('MARKET_CLOSE') }), closedAt)).toBe(false);
+    // A worker's confirmation is the run's own, whenever it came.
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('WORKER') }), closedAt)).toBe(false);
+    expect(stopRecordedByClose(finishedRun(), closedAt)).toBe(false);
+    // Confirmed late by its worker, at another time than the close.
+    expect(stopRecordedByClose(botRun({ ...recorded, stoppedAt: at(7_199), window: window('NEXT_START') }), closedAt)).toBe(false);
+    // No stop recorded, or a market that has not closed.
+    expect(stopRecordedByClose(botRun({ ...recorded, stoppedAt: null, window: window('NEXT_START') }), closedAt)).toBe(false);
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('NEXT_START') }), null)).toBe(false);
+    expect(stopRecordedByClose(botRun(), closedAt)).toBe(false);
+  });
+
+  it("keeps a run's length when a market's close records a stop on it that it never had", () => {
+    const now = after(9 * 86_400);
+    const reported = (seconds: number) => ({ workerId: 'sim-1', heartbeatAt: at(seconds), leaseExpiresAt: at(seconds + 15) });
+    // An hour's run from before windows were kept: its worker reported once more past its end and never confirmed,
+    // and nobody asked it to stop.
+    const old = botRun({
+      status: 'STOPPED',
+      desiredState: 'STOPPED',
+      endsAt: at(3_600),
+      worker: reported(3_603),
+      window: { startSequence: '41', stopSequence: null, endSequence: null, endedBy: 'NOT_KEPT', endedAt: null },
+    });
+    expect([ranForText(old, now), ranForSeconds(old, now)]).toEqual(['About 1 h 0 min', 3_600]);
+    // Days later the market closes and records a stop asked for, and a stop, at its own time.
+    const closedAt = at(5 * 86_400);
+    const closed = { ...old, stopRequestedAt: closedAt, stoppedAt: closedAt };
+    expect([ranForText(closed, now), ranForSeconds(closed, now)]).toEqual(['About 1 h 0 min', 3_600]);
   });
 
   it('never counts an unconfirmed run past its stop, its end time or its last report, whenever the next run started', () => {

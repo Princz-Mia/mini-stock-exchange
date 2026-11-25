@@ -105,7 +105,7 @@ Find what changed the database outside Execution. If it can't be explained, rest
 
 **It stopped while the market was closing.** Nothing to do. A close cancels resting orders 5,000 to a transaction, and the market is closed from the first one. If Execution stops before the last, the next start cancels the rest before it takes commands, and logs `Finished the market's close at startup` with how many. A start that finds none left to cancel logs no such line. Every start on a closed market also removes its bots' token files, in case the close stopped before it had.
 
-**A close answered `504 COMMAND_OUTCOME_UNKNOWN`.** The request waited 45 seconds and the close had not answered. No lookup by key serves a close, so send the same key again:
+**A close answered `504 COMMAND_OUTCOME_UNKNOWN`.** The request waited 45 seconds and the close had not answered. No lookup by key serves a close, so send the same key again. On the operator screen that is **Ask again**, under the note that the close is taking longer than the exchange waits. The answers:
 - **`200`:** the close is done, and this is its answer.
 - **`504` again:** it is still going on.
 - **`503 MARKET_CLOSE_UNFINISHED` or `503 TRADING_UNAVAILABLE`:** Execution stopped trading meanwhile. Restart it, as the next entry says.
@@ -117,7 +117,7 @@ A close that can't finish usually shows this way first. With the database away, 
 - The Health panel's Writer line says "Halted".
 - The log has an `ERROR` line with `halted the writer`, the close's sequence, the count and the cause. Execution writes it when it stops, whether or not a request was still waiting for the answer.
 
-Every close sent before the restart gets this answer again; other commands get `503 TRADING_UNAVAILABLE`. Nothing needs sending again. The restart cancels the rest before it takes commands, as above, and the key that closed the market then returns the close's answer. If the restart fails with `The market's close could not be finished`, the cause in the log is what to fix first.
+Every close sent before the restart gets this answer again; other commands get `503 TRADING_UNAVAILABLE`. Nothing needs sending again. The restart cancels the rest before it takes commands, as above, and the key that closed the market then returns the close's answer. The operator screen says the same in its Market panel and in the panel that shows the market as ended, with how many orders still rest at most, shows its Health panel's writer as halted, and offers no retry: **Ask for the close's answer** sends the same key once Execution is back. If the answer itself was lost, to a `504` before it or to the proxy, the screen still says the market is closed once the status does, and offers the same button. A page opened afresh has no key to ask with; it says that the exchange has stopped and that orders the close had not cancelled still rest. Traders see those orders listed as waiting for the close, with no cancel offered, and what they reserve still shown as reserved. If the restart fails with `The market's close could not be finished`, the cause in the log is what to fix first.
 
 A close can also halt the writer in its very first transaction, when the outcome of that commit is unknown. Then nobody knows yet whether the market closed: the log line says `halted the writer in its own transaction`, and every command, a close too, answers `503 TRADING_UNAVAILABLE`. Restart Execution and send the close's key again. It returns the close's answer if the market had closed, and closes it if not.
 
