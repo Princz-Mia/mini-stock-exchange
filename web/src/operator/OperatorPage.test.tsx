@@ -4793,6 +4793,92 @@ describe('operator commands across leaving the page', () => {
     expect(await button('Halt trading')).toBeDisabled();
   });
 
+  describe('run and bot job commands across leaving the page', () => {
+    const away = () => act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+
+    it('keeps a run start on its way when the page is left, and shows its answer on coming back', async () => {
+      const { server, state } = exchange('OPEN');
+      state.tagged = { marketMakers: 1, noise: 2, momentum: 0 };
+      const later = answerLater();
+      server.on(`POST ${RUNS}`, () => later.reply);
+      const client = newClient();
+      const first = renderWith(client);
+      await startRun();
+      await waitFor(() => expect(sent(server, RUNS)).toHaveLength(1));
+      first.unmount();
+      await away();
+
+      renderWith(client);
+      const form = await screen.findByRole('form', { name: 'Start a bot run' });
+      expect(await within(form).findByText(/^Starting the run…/)).toHaveTextContent(/^Starting the run… \d+ s$/);
+      expect(within(form).getByRole('button', { name: 'Start run' })).toBeDisabled();
+      state.runs = [starting()];
+      later.answer({ status: 201, json: { runId: botRun().runId, bots: 3, commandSequence: '9' } });
+
+      const panel = await screen.findByRole('region', { name: 'Bot runs' });
+      expect(await within(panel).findByText('Started a run of 3 bots.')).toBeInTheDocument();
+      expect(within(panel).getByRole('group', { name: 'Current run' })).toBeInTheDocument();
+      expect(sent(server, RUNS)).toHaveLength(1);
+    });
+
+    it('keeps an unconfirmed run stop through leaving the page, and sends it again under the same key', async () => {
+      const { server, state } = exchange('OPEN');
+      state.runs = [botRun()];
+      const STOP = `${RUNS}/${botRun().runId}/stop`;
+      let calls = 0;
+      server.on(`POST ${STOP}`, () => {
+        calls += 1;
+        if (calls === 1) {
+          return { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY', detail: 'busy' } };
+        }
+        state.runs = [botRun({ status: 'STOPPING', desiredState: 'STOPPED', stopRequestedAt: '2026-11-06T10:01:00Z' })];
+        return { status: 200, json: { runId: botRun().runId, commandSequence: '12' } };
+      });
+      const client = newClient();
+      const first = renderWith(client);
+      fireEvent.click(await button('Stop run'));
+      expect(await screen.findByText(/Not confirmed/)).toBeInTheDocument();
+      first.unmount();
+      await away();
+
+      renderWith(client);
+      const run = await screen.findByRole('group', { name: 'Current run' });
+      expect(within(run).getByText(/Not confirmed/)).toBeInTheDocument();
+      expect(within(run).getByRole('button', { name: 'Stop run' })).toBeDisabled();
+      fireEvent.click(within(run).getByRole('button', { name: 'Retry' }));
+
+      expect(await screen.findByRole('status', { name: 'Run status: Stopping' })).toBeInTheDocument();
+      const keys = sent(server, STOP).map((request) => request.headers['Idempotency-Key']);
+      expect(keys).toHaveLength(2);
+      expect(keys[1]).toBe(keys[0]);
+    });
+
+    it('keeps a bot job start on its way when the page is left, and shows the job on coming back', async () => {
+      const { server, state } = exchange('SETUP');
+      const later = answerLater();
+      server.on('POST /api/v1/admin/bot-jobs', () => later.reply);
+      const jobs = () => sent(server, '/api/v1/admin/bot-jobs');
+      const client = newClient();
+      const first = renderWith(client);
+      const form = await screen.findByRole('form', { name: 'Create bots' });
+      fireEvent.change(within(form).getByLabelText('Number of bots'), { target: { value: '20000' } });
+      fireEvent.click(within(form).getByRole('button', { name: 'Create bots' }));
+      await waitFor(() => expect(jobs()).toHaveLength(1));
+      first.unmount();
+      await away();
+
+      renderWith(client);
+      const bots = await screen.findByRole('region', { name: 'Bots' });
+      expect(await within(bots).findByText(/^Starting the bot job…/)).toHaveTextContent(/^Starting the bot job… \d+ s$/);
+      expect(within(bots).getByRole('button', { name: 'Create bots' })).toBeDisabled();
+      state.job = botJob();
+      later.answer({ status: 202, json: state.job });
+
+      expect(await within(bots).findByRole('progressbar', { name: 'Creating bots' })).toBeInTheDocument();
+      expect(jobs()).toHaveLength(1);
+    });
+  });
+
   describe('offers nothing from a cache older than the page', () => {
     const before = () => Date.now() - 60_000;
     const checking = 'Checking the exchange…';
