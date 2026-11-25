@@ -46,6 +46,8 @@ export interface KeptCommand<A, T, N = undefined> {
    * operator did the same, and either way nothing is left to send. The next command gets a new key.
    */
   settled: boolean;
+  /** Its final outcome has been on a page: one that only says what became of it need not be said again on the next. */
+  shown: boolean;
 }
 
 const slotKey = (slot: CommandSlot) => ['operator-command', slot] as const;
@@ -94,6 +96,7 @@ async function sendKept<A, T, N>(
         answeredAt: final ? Date.now() : null,
         readsBefore,
         settled: false,
+        shown: false,
       });
     }
   };
@@ -206,6 +209,14 @@ export function useOperatorCommand<A, T, N = undefined>(
     [client, slot, send, note, confirmedBy, current, isOpen],
   );
 
+  /** Records that its final outcome has been on a page. */
+  const markShown = useCallback(() => {
+    const kept = current();
+    if (kept !== null && (kept.outcome.kind === 'done' || kept.outcome.kind === 'refused') && !kept.shown) {
+      client.setQueryData<KeptCommand<A, T, N>>(slotKey(slot), { ...kept, shown: true });
+    }
+  }, [client, slot, current]);
+
   /** Lets go of a command that is not on its way, when another takes its place on screen or it is settled. */
   const forget = useCallback(() => {
     const kept = current();
@@ -220,6 +231,8 @@ export function useOperatorCommand<A, T, N = undefined>(
   const readsBefore = mine?.readsBefore ?? null;
   return {
     outcome,
+    key: mine?.key,
+    shown: mine?.shown ?? false,
     /**
      * Done, and the query that shows what it did has not been read since the answer: what the page shows is still the
      * state from before it, so nothing drawn from that state is offered yet.
@@ -236,5 +249,6 @@ export function useOperatorCommand<A, T, N = undefined>(
     run,
     retry,
     forget,
+    markShown,
   };
 }

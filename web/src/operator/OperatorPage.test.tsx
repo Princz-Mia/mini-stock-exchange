@@ -4271,6 +4271,56 @@ describe('starting a new simulation on the operator screen', () => {
     expect(new Set(keys(server)).size).toBe(1);
   });
 
+  it('says what became of a start once, on the visit it is answered in or the first after, and not on every visit', async () => {
+    const { server, state } = exchange('CLOSED');
+    let answer: (reply: ReturnType<typeof started>) => void = () => {};
+    const reply = new Promise<ReturnType<typeof started>>((resolve) => {
+      answer = resolve;
+    });
+    server.on(`POST ${START}`, () => reply);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const first = renderWith(client);
+    await startAs('Saturday');
+    expect(await within(await panel()).findByText(/^Starting the simulation…/)).toBeInTheDocument();
+    // Answered while the operator looks at another page.
+    first.unmount();
+    state.market = newMarket('Saturday');
+    answer(started('Saturday'));
+    await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+
+    const second = renderWith(client);
+    const notice = await screen.findByRole('region', { name: 'A new simulation' });
+    expect(notice).toHaveTextContent('Saturday has started, in setup.');
+    second.unmount();
+
+    // Every later visit, for as long as the simulation lasts: said already, so not said again.
+    renderWith(client);
+    await screen.findByRole('form', { name: 'Add an instrument' });
+    await screen.findByText('Setup', { selector: '.state-badge' });
+    expect(screen.queryByRole('region', { name: 'A new simulation' })).toBeNull();
+    expect(starts(server)).toHaveLength(1);
+  });
+
+  it('says a refused name once, and not again on the next visit, where a new start can be sent', async () => {
+    const { server } = exchange('CLOSED');
+    server.on(`POST ${START}`, {
+      status: 409,
+      problem: { status: 409, code: 'SIMULATION_NAME_TAKEN', detail: 'A simulation with this name exists' },
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const first = renderWith(client);
+    await startAs('Saturday');
+    const refused = /another simulation already has this name/;
+    expect(await within(await panel()).findByText(refused)).toBeInTheDocument();
+    first.unmount();
+
+    renderWith(client);
+    const form = await screen.findByRole('form', { name: 'Start a new simulation' });
+    await waitFor(() => expect(within(form).getByRole('button', { name: 'Start simulation' })).toBeEnabled());
+    expect(screen.queryByText(refused)).toBeNull();
+    expect(within(form).getByRole('textbox', { name: 'Name' })).not.toHaveAttribute('aria-invalid');
+  });
+
   it('keeps an unanswered start when the page is left, and asks again under the same key', async () => {
     const { server } = exchange('CLOSED');
     server.on(`POST ${START}`, { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN' } });
