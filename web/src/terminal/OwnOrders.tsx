@@ -75,13 +75,14 @@ export function OwnOrders({
     queryKey: ['orders', 'recent', narrowTo?.instrumentId ?? null],
     // The exchange lists finished orders by when they ended, so an order resting for hours and canceled just now is
     // first, not behind every order placed after it.
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const page = await api.orders(
         'finished',
         undefined,
         RECENT_ORDERS,
         undefined,
         narrowTo === null ? {} : { instrumentId: narrowTo.instrumentId },
+        { signal },
       );
       return page.orders;
     },

@@ -311,6 +311,7 @@ function InstrumentRow({
             <div id={saveOutcomeId}>
               <CommandStatus
                 outcome={saveOutcome}
+                action="Saving the instrument"
                 done={(edited) =>
                   `Saved ${edited.symbol}${edited.displayName ? ` as ${edited.displayName}` : ', with no name,'}` +
                   ` at ${groupDigits(edited.referencePrice)}. The list shows it once market data has it.`
@@ -321,7 +322,12 @@ function InstrumentRow({
             {/* A done delete is said by the panel, as this row goes once market data drops it. */}
             <div id={removalOutcomeId}>
               {!deleted && (
-                <CommandStatus outcome={removalOutcome} done={() => ''} onRetry={() => void removal.retry()} />
+                <CommandStatus
+                  outcome={removalOutcome}
+                  action="Deleting the instrument"
+                  done={() => ''}
+                  onRetry={() => void removal.retry()}
+                />
               )}
             </div>
           </td>
@@ -479,6 +485,7 @@ export function InstrumentSetup({
       )}
       <CommandStatus
         outcome={command.outcome}
+        action="Adding the instrument"
         done={(created) =>
           `Added ${created.symbol}${created.displayName ? ` (${created.displayName})` : ''} at ` +
           `${groupDigits(created.referencePrice)}. It appears in the list once market data has it.`

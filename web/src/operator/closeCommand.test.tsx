@@ -38,7 +38,7 @@ describe('the close command', () => {
       result.current.run();
     });
     await waitFor(() => expect(closes()).toHaveLength(1));
-    expect(result.current.outcome).toEqual({ kind: 'sending' });
+    expect(result.current.outcome).toEqual({ kind: 'sending', since: expect.any(Number) });
     // Asked for again from another place on the page, or by a second press that got through.
     act(() => result.current.run());
     await act(() => new Promise((resolve) => setTimeout(resolve, 20)));

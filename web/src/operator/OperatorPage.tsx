@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 import { pollEvery } from '../api/client';
 import { closedPhrase } from '../app/closeTime';
 import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
@@ -5,8 +7,8 @@ import { groupInteger } from '../format';
 import { AccountSetup } from './AccountSetup';
 import { BotRuns } from './BotRuns';
 import { BotSetup } from './BotSetup';
-import { useBotJob } from './useBotJob';
 import { useCloseCommand } from './closeCommand';
+import { freshness, PageOpened } from './freshRead';
 import { HealthPanel, useHealthSummary } from './HealthPanel';
 import { InstrumentSetup } from './InstrumentSetup';
 import { MarketControl } from './MarketControl';
@@ -48,11 +50,12 @@ export function OperatorPage() {
   useForgetInAddress(generation, TICKED);
   // Above the page drawn for each simulation, so that the new one's page can say what became of it.
   const start = useStartCommand();
+  // What is offered is offered from reads made since now: the cache may hold the market as it was before a command
+  // sent from this page, before the operator looked elsewhere, went through.
+  const [opened] = useState(() => Date.now());
+  const marketRead = freshness(market, opened);
   // This market's instruments only: the list is asked for by the simulation the status names.
   const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
-  // Read only while bots can be created; the same job on every operator's screen.
-  const state = market.data?.state;
-  const botJob = useBotJob(state === 'SETUP' || state === 'NOT_SET_UP');
 
   if (market.isPending) {
     return <p className="page-status">Loading the market…</p>;
@@ -71,60 +74,78 @@ export function OperatorPage() {
   const closed = market.data.state === 'CLOSED';
 
   return (
-    <div className="operator" key={generation}>
-      <div className="operator-side">
-        {market.isError && (
-          <p role="alert" className="form-error">
-            The exchange is not answering, so the market state shown may be out of date.
-          </p>
-        )}
-        <MarketControl
-          market={market.data}
-          instruments={instruments.isPending ? undefined : listed.length}
-          botJob={editable ? botJob.data : undefined}
-        />
-        {!editable && (
-          <HealthPanel
-            instruments={listed}
-            feed={
-              instruments.isError
-                ? { kind: 'unreachable' }
-                : instruments.feed === undefined
-                  ? { kind: 'checking' }
-                  : { kind: 'read', feed: instruments.feed }
-            }
+    <PageOpened.Provider value={opened}>
+      <div className="operator" key={generation}>
+        <div className="operator-side">
+          {market.isError && (
+            <p role="alert" className="form-error">
+              The exchange is not answering, so the market state shown may be out of date.
+            </p>
+          )}
+          <MarketControl
+            market={market.data}
+            instruments={instruments.isPending ? undefined : listed.length}
+            read={marketRead}
           />
-        )}
-      </div>
-      <div className="operator-setup">
-        {instruments.isError && (
-          <p role="alert" className="form-error">
-            Market data is not reachable, so the instrument list may be incomplete.
-          </p>
-        )}
-        {market.data.simulationId === null && <StartSimulation start={start} market={market.data} />}
-        <StartNotice start={start} market={market.data} />
-        {closed && (
-          <Ended
-            closedAt={market.data.closedAt}
-            closesAt={market.data.closesAt}
-            onSchedule={market.data.closedOnSchedule}
+          {!editable && (
+            <HealthPanel
+              instruments={listed}
+              feed={
+                instruments.isError
+                  ? { kind: 'unreachable' }
+                  : instruments.feed === undefined
+                    ? { kind: 'checking' }
+                    : { kind: 'read', feed: instruments.feed }
+              }
+            />
+          )}
+        </div>
+        <div className="operator-setup">
+          {instruments.isError && (
+            <p role="alert" className="form-error">
+              Market data is not reachable, so the instrument list may be incomplete.
+            </p>
+          )}
+          {market.data.simulationId === null && (
+            <StartSimulation start={start} market={market.data} read={marketRead} />
+          )}
+          <StartNotice start={start} market={market.data} />
+          {closed && (
+            <Ended
+              closedAt={market.data.closedAt}
+              closesAt={market.data.closesAt}
+              onSchedule={market.data.closedOnSchedule}
+              simulationId={market.data.simulationId}
+            />
+          )}
+          {closed && <StartSimulation start={start} market={market.data} read={marketRead} />}
+          {!editable && (
+            <BotRuns
+              market={market.data.state}
+              simulationId={market.data.simulationId}
+              closedAt={market.data.closedAt}
+              instruments={listed}
+            />
+          )}
+          <InstrumentSetup instruments={listed} editable={editable} closed={closed} />
+          <BotSetup
+            instruments={listed}
+            editable={editable}
+            closed={closed}
             simulationId={market.data.simulationId}
           />
-        )}
-        {closed && <StartSimulation start={start} market={market.data} />}
-        {!editable && <BotRuns market={market.data.state} closedAt={market.data.closedAt} instruments={listed} />}
-        <InstrumentSetup instruments={listed} editable={editable} closed={closed} />
-        <BotSetup
-          instruments={listed}
-          editable={editable}
-          closed={closed}
-          read={{ job: botJob.data, unreachable: botJob.isError }}
-        />
-        <AccountSetup instruments={listed} editable={editable} closed={closed} />
-        {editable && <BotRuns market={market.data.state} closedAt={null} instruments={listed} />}
+          <AccountSetup instruments={listed} editable={editable} closed={closed} />
+          {editable && (
+            <BotRuns
+              market={market.data.state}
+              simulationId={market.data.simulationId}
+              closedAt={null}
+              instruments={listed}
+            />
+          )}
+        </div>
       </div>
-    </div>
+    </PageOpened.Provider>
   );
 }
 

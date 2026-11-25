@@ -42,7 +42,7 @@ export function RunComparePage() {
   const answers = useQueries({
     queries: ids.map((id) => ({
       queryKey: ['bot-run', id],
-      queryFn: () => api.botRun(id),
+      queryFn: ({ signal }: { signal: AbortSignal }) => api.botRun(id, { signal }),
       // Figures never change once worked out; until then, and while the run goes on, ask again. A refusal is final.
       refetchInterval: (query: { state: { data: BotRunDetail | undefined; error: unknown } }) => {
         const { data, error } = query.state;

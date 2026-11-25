@@ -194,8 +194,8 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
   const trades = usePagedList({
     table: 'executions',
     queryKey: ['own-trades'],
-    fetch: async (cursor, { size, order, filters }) => {
-      const page = await api.ownTrades(cursor, size, order, filters);
+    fetch: async (cursor, { size, order, filters }, read) => {
+      const page = await api.ownTrades(cursor, size, order, filters, read);
       return { rows: page.trades, nextCursor: page.nextCursor };
     },
     defaults: { size: 25, order: 'newest' },
@@ -205,8 +205,8 @@ function Portfolio({ market }: { market: ReturnType<typeof useMarketStatus> }) {
   const orders = usePagedList({
     table: 'orders',
     queryKey: ['orders', 'all'],
-    fetch: async (cursor, { size, order, filters }) => {
-      const page = await api.orders('all', cursor, size, order, filters);
+    fetch: async (cursor, { size, order, filters }, read) => {
+      const page = await api.orders('all', cursor, size, order, filters, read);
       return { rows: page.orders, nextCursor: page.nextCursor };
     },
     defaults: { size: 25, order: 'newest' },

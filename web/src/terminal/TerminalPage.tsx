@@ -86,7 +86,7 @@ export function TerminalPage() {
   useAskAgainWhenFunded(market.data, PRIVATE_QUERIES);
   const orders = useQuery({
     queryKey: ['orders', 'active'],
-    queryFn: () => api.orders('active'),
+    queryFn: ({ signal }) => api.orders('active', undefined, undefined, undefined, {}, { signal }),
     refetchInterval: pollEvery(5_000),
   });
   // Final, unlike a halt: the ticket gives way to a statement, and nothing here says trading will come back. The

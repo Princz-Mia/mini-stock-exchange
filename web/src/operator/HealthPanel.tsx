@@ -155,10 +155,15 @@ export function HealthPanel({ instruments, feed }: { instruments: readonly Instr
   const candles = useQueries({
     queries: instruments.map((instrument) => ({
       queryKey: ['health-candles', instrument.instrumentId],
-      queryFn: () => {
+      queryFn: ({ signal }: { signal: AbortSignal }) => {
         const now = Date.now();
         const to = new Date(Math.floor(now / 60_000) * 60_000 + 60_000);
-        return api.candles(instrument.instrumentId, new Date(to.getTime() - 60_000).toISOString(), to.toISOString());
+        return api.candles(
+          instrument.instrumentId,
+          new Date(to.getTime() - 60_000).toISOString(),
+          to.toISOString(),
+          { signal },
+        );
       },
       refetchInterval: pollEvery(10_000),
     })),
