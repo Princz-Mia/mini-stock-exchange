@@ -962,18 +962,24 @@ def test_a_view_says_why_new_orders_pause(view, reason) -> None:
 
 
 @pytest.mark.parametrize(
-    ("change", "reported"),
+    ("change", "reported", "max_age"),
     [
-        ({"live": "CATCHING_UP"}, "pausedStaleData"),
-        ({"state": "HALTED"}, "pausedMarketNotOpen"),
-        ({"listing_down": True}, "pausedStaleData"),
-        ({"earlier_current": True, "simulation": None}, "pausedOther"),
+        ({"live": "CATCHING_UP"}, "pausedStaleData", 5.0),
+        ({"state": "HALTED"}, "pausedMarketNotOpen", 5.0),
+        ({"listing_down": True}, "pausedStaleData", 0.2),
+        ({"earlier_current": True, "simulation": None}, "pausedOther", 5.0),
     ],
 )
-def test_steps_that_place_nothing_new_are_reported_by_why(tmp_path, change, reported) -> None:
+def test_steps_that_place_nothing_new_are_reported_by_why(
+    tmp_path, change, reported, max_age
+) -> None:
     """A run whose bots pause shows why instead of only placing nothing: data not live, a halt,
     market data that stopped answering (the view ages out), or none of the run's instruments
-    listed. The counts are cumulative, continuing from the totals the assignment gave."""
+    listed. The counts are cumulative, continuing from the totals the assignment gave.
+
+    Age is checked before anything else, so only the case that is about an aging view has a
+    short data age. A stall of the test's event loop longer than that would otherwise count steps
+    as stale data in the cases where stale data must stay where it was."""
     accounts = write_tokens(tmp_path / "tokens", 2)
     exchange = Exchange()
     exchange.run = run_body(accounts, ["NOISE", "NOISE"])
@@ -981,7 +987,7 @@ def test_steps_that_place_nothing_new_are_reported_by_why(tmp_path, change, repo
     for name, value in change.items():
         setattr(exchange, name, value)
     paused = ("pausedStaleData", "pausedMarketNotOpen", "pausedOther")
-    quick = settings(tmp_path / "tokens", market_poll_seconds=0.05, max_data_age_seconds=0.2)
+    quick = settings(tmp_path / "tokens", market_poll_seconds=0.05, max_data_age_seconds=max_age)
 
     async def scenario() -> Runner:
         async with httpx.AsyncClient(transport=httpx.MockTransport(exchange.handle)) as http:

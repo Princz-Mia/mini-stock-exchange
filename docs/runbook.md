@@ -163,7 +163,7 @@ The closed simulation stays in the database as it closed, and nothing can write 
 
 The compatibility gate rehearses these steps through the API, after closing a market with orders resting and a bot run trading.
 
-The demo seed does none of this for a simulation an operator started: it logs one line saying so and stops. It sets up only a market with no name, which is how it makes its own on a fresh stack.
+The demo seed does none of this for a simulation an operator started: it logs one line saying so and stops. It sets up only a market with no name, which is how it makes its own on a fresh stack. Even there it does steps 1 to 3 and never step 4: it leaves the market in setup, says so in its last log line, and the operator opens it.
 
 The start's answers:
 - **`409 SIMULATION_NOT_CLOSED`**, with the state: a simulation that has not closed exists. In `SETUP` it is set up further instead; `OPEN` or `HALTED`, close it first. The refusal is that key's answer for good, so start again with a new key.

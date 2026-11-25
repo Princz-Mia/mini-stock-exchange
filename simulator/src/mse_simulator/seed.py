@@ -1,15 +1,18 @@
-"""Sets up the demonstration market through the operator API, once, so a fresh stack can trade.
+"""Sets up the demonstration market through the operator API, once, for the operator to open.
 
 Five instruments at their reference prices, the demo trader added with USD 100,000.00 and
-1,000 shares of each, a population of funded bots, and the market opened. The bots are tagged with
-their strategy: a fifth market makers and a fifth momentum, the rest noise, with at least one market
-maker (see population.strategy_split). It signs in as the operator and goes through the same
-endpoints the operator screen uses.
+1,000 shares of each, and a population of funded bots. The bots are tagged with their strategy: a
+fifth market makers and a fifth momentum, the rest noise, with at least one market maker (see
+population.strategy_split). It signs in as the operator and goes through the same endpoints the
+operator screen uses.
+
+It never opens the market. Opening starts trading, and that is the operator's decision: the seed
+leaves the market in SETUP, where the operator can look it over, add to it, and open it.
 
 Each step has an idempotency key derived from its name, so running the seed again repeats the first
 answers instead of doing anything twice, and a seed interrupted halfway finishes on the next run. A
-market that is already open or halted was set up before, by the seed or by hand, and is left alone.
-So is a closed one: starting a new market after a close is the operator's step, not the seed's.
+market that is already open or halted has been opened, and is left alone. So is a closed one:
+starting a new market after a close is the operator's step, not the seed's.
 
 The seed never sets up a simulation an operator started. It acts when no market exists, and it goes
 on with a market in SETUP only if that market has no name: one made by the first setup command,
@@ -127,8 +130,8 @@ class Operator:
 
 
 def seed(operator: Operator, bots: int, trader_password: str) -> str:
-    """Sets the market up and opens it, unless it is already running or closed, or an operator
-    started it. Returns what it did."""
+    """Sets the market up and leaves it in SETUP for the operator to open, unless it is already
+    running or closed, or an operator started it. Returns what it did."""
     operator.sign_in()
     market = operator.market()
     state = market["state"]
@@ -180,10 +183,10 @@ def seed(operator: Operator, bots: int, trader_password: str) -> str:
             )
             left -= count
             batch += 1
-    operator.command("/api/v1/admin/market/open", "open")
+    # No open command: the market waits in SETUP until the operator opens it.
     return (
         f"seeded {len(ids)} instruments, the {TRADER} account and {bots} bots"
-        f" ({split_text(split)}), and opened the market"
+        f" ({split_text(split)}); the market is left in setup for the operator to open"
     )
 
 

@@ -177,14 +177,14 @@ The files are written on the thread that sends the command, not on the writer, s
 
 The start answered in 42 ms. Each part took about 1.2 s, nearly all of it its 1,000 token files on the Windows disk, made on the job's own thread while the writer took other commands. On ext4 those files took 0.27 s per 1,000 above, so the same job should take nearer 9 s there. The estimate of the time left, read every 2 s, was within a second or two of the end from the second part on. Reconciliation afterwards took 141 ms. Before these changes, 20,000 bots took 200 commands of 100 by hand, and about 171 s of the writer's time.
 
-**Reading a run's bots, 2026-11-24.** The simulator reads a run's bots once, in pages of 1,000, when it takes the run. A scratch integration test starts a run of 20,000 bots among 40,000 and reads all 20 pages over HTTP with the simulator's token, six times in a row; same machine, PostgreSQL in Testcontainers:
+**Reading a run's bots, 2026-11-25.** The simulator reads a run's bots once, in pages of 1,000, when it takes the run. `BotPageBench` starts a run of 20,000 bots among 40,000 bot accounts, analyzes the tables, and reads all 20 pages over HTTP with the simulator's token, six times in a row; same machine, PostgreSQL in Testcontainers. The first row was measured with the earlier statement put back in place for the run:
 
-| | All 20 pages, six reads | One page from the middle |
+| | All 20 pages, six reads | The page after the run's middle bot |
 | --- | --- | --- |
-| Paged by the account's creation time, read through a join | 597, 538, 515, 528, 494, 519 ms | 19.5 ms, 60,344 buffers |
-| Paged by the creation time kept on the assignment | 254, 131, 109, 103, 107, 106 ms | 1.3 ms, 125 buffers |
+| Paged by the account's creation time, read through a join | 307, 239, 234, 227, 218, 241 ms | 9.7 ms: the run's 20,000 assignments joined to 30,001 accounts and sorted |
+| Paged by the creation time kept on the assignment | 209, 121, 119, 106, 100, 101 ms | 0.24 ms: the 1,001 rows of one index range |
 
-Read through the join, every page joined all 20,000 assignments to their accounts again and sorted what was left, so the cost of reading a run grew with the square of its size. Kept on the assignment, each page is one range of an index. Starting a run of 10,000 bots among 30,101 (`BotRunScaleIT`) took 197 and 220 ms before and 177 ms after: copying the time as bots are assigned costs nothing that shows.
+Read through the join, every page read and sorted the whole run again, so the cost of reading a run grew with the square of its size. Kept on the assignment, each page is one range of an index. The bench analyzes the tables as the schema's owning role, because the application's role may not; without statistics the join planned 20,000 index look-ups for every page and took about twice as long. Starting a run of 10,000 bots among 30,101 (`BotRunScaleIT`) took 197 and 220 ms before and 177 ms after: copying the time as bots are assigned costs nothing that shows.
 
 ## Steady load
 

@@ -259,7 +259,8 @@ services:
     mem_limit: 512m
     cpus: 1.0
 
-  # One-shot: sets up the demo market through the operator API, then exits. Repeats nothing on later starts.
+  # One-shot: sets up the demo market through the operator API, then exits, leaving the market in setup for the
+  # operator to open. Repeats nothing on later starts.
   demo-seed:
     profiles: [full]
     build:

@@ -144,12 +144,17 @@ final class MarketStream implements AutoCloseable {
 		}
 	}
 
-	/** One round of frames: each changed instrument that someone watches is read once and sent. */
+	/**
+	 * One round of frames: each changed instrument that someone watches is read once and sent. A read that fails
+	 * marks only its own instrument again, so it is retried on the next tick rather than waiting for the next trade,
+	 * and the round carries on: an instrument whose frame keeps failing holds up no other instrument's frames.
+	 */
 	void tick() {
 		List<UUID> due = new ArrayList<>(changed);
 		changed.removeAll(due);
-		for (int i = 0; i < due.size(); i++) {
-			UUID instrumentId = due.get(i);
+		RuntimeException firstFailure = null;
+		int failures = 0;
+		for (UUID instrumentId : due) {
 			Set<Subscriber> watching = subscribers.get(instrumentId);
 			if (watching == null || watching.isEmpty()) {
 				continue;
@@ -158,10 +163,15 @@ final class MarketStream implements AutoCloseable {
 				frames.frame(instrumentId).ifPresent((frame) -> watching.forEach((s) -> s.offer(new Event("market", frame))));
 			}
 			catch (RuntimeException ex) {
-				// Marked again, so a failed read is retried on the next tick rather than waiting for the next trade.
-				changed.addAll(due.subList(i, due.size()));
-				throw ex;
+				changed.add(instrumentId);
+				failures++;
+				firstFailure = firstFailure != null ? firstFailure : ex;
 			}
+		}
+		if (firstFailure != null) {
+			// One line a round, however many instruments failed in it.
+			log.warn("Market stream frames failed for {} of {} instruments; each is tried again on the next tick",
+					failures, due.size(), firstFailure);
 		}
 	}
 
