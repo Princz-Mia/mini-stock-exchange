@@ -1,3 +1,4 @@
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 import numpy as np
@@ -71,8 +72,9 @@ def test_orders_stay_near_the_anchor_and_within_what_the_bot_holds() -> None:
             continue
         assert isinstance(intent, Place)
         # Within the spread of the anchor, rounded less than a tick away from the other side.
-        away = intent.limit - quoted.anchor()
-        reach = max(CONFIG.spread_bp * BASIS_POINT * quoted.anchor(), quoted.tick)
+        anchor = quoted.anchor(CONFIG.narrow_book_bp * BASIS_POINT)
+        away = intent.limit - anchor
+        reach = max(CONFIG.spread_bp * BASIS_POINT * anchor, quoted.tick)
         if intent.side == "BUY":
             assert -reach - quoted.tick < away <= reach
         else:
@@ -84,11 +86,29 @@ def test_orders_stay_near_the_anchor_and_within_what_the_bot_holds() -> None:
             assert intent.quantity <= holdings.shares[quoted.instrument_id]
 
 
-def test_the_anchor_is_the_mid_then_the_last_trade_then_the_reference() -> None:
-    assert instrument(bid=9_900, ask=10_100, last=5_000).anchor() == 10_000
-    assert instrument(bid=9_900, last=5_000).anchor() == 5_000
-    assert instrument(reference=7_000).anchor() == 7_000
-    assert instrument(bid=10_000, ask=10_003).anchor() == 10_001.5, "exact, not rounded down"
+def test_the_anchor_is_the_mid_of_a_narrow_book_then_the_last_trade_then_the_reference() -> None:
+    narrow = 100 * BASIS_POINT
+    assert instrument(bid=9_951, ask=10_049, last=5_000).anchor(narrow) == 10_000
+    assert instrument(bid=9_949, ask=10_051, last=5_000).anchor(narrow) == 5_000, "just too wide"
+    assert instrument(bid=9_949, ask=10_051).anchor(narrow) == 10_000, "the reference"
+    assert instrument(bid=9_900, last=5_000).anchor(narrow) == 5_000
+    assert instrument(reference=7_000).anchor(narrow) == 7_000
+    assert instrument(bid=10_000, ask=10_003).anchor(narrow) == 10_001.5, "exact, not rounded down"
+    assert instrument(bid=10_000, ask=10_001).anchor(0.0) == 10_000.5, "one tick is never too wide"
+
+
+def test_one_far_order_does_not_move_the_noise_centre() -> None:
+    """A book of a 1.00 bid and a 500.00 offer from a 100.00 reference has a mid of 250.50, a
+    price nobody offered. Orders centre on the last trade instead, or on the reference."""
+    far = instrument(reference=10_000, bid=100, ask=50_000)
+    holdings = Holdings(cash=10**9, shares={far.instrument_id: 10**6})
+    for traded in (None, 10_200):
+        quoted = replace(far, last=traded)
+        centre = 10_000 if traded is None else traded
+        for seed in range(50):
+            intent = bot(seed).decide(view(quoted), True, holdings, [], 0.0)
+            assert isinstance(intent, Place)
+            assert abs(intent.limit / centre - 1) < 0.001, (traded, intent)
 
 
 def test_buys_and_sells_reach_equally_far_across_an_odd_spread() -> None:

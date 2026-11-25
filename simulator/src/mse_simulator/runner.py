@@ -136,7 +136,11 @@ class Runner:
         return str(self._settings.execution_url).rstrip("/")
 
     def _new_signal(self) -> PriceSignal:
-        return PriceSignal(self._settings.momentum_short_polls, self._settings.momentum_long_polls)
+        return PriceSignal(
+            self._settings.momentum_short_polls,
+            self._settings.momentum_long_polls,
+            self._settings.narrow_book_bp,
+        )
 
     def _new_values(self, seed: int) -> FairValues:
         return FairValues(
@@ -144,12 +148,15 @@ class Runner:
             self._settings.fair_value_half_life_hours,
             self._settings.fair_value_volatility,
             self._settings.market_poll_seconds,
+            self._settings.narrow_book_bp,
         )
 
     def _view(self, rng: np.random.Generator) -> View:
         """A bot's own idea of the values: the run's, off by a fraction drawn once from its seed."""
         spread = self._settings.view_spread_bp * BASIS_POINT
-        return View(self._values, float(rng.uniform(-spread, spread)))
+        return View(
+            self._values, float(rng.uniform(-spread, spread)), self._settings.narrow_book_bp
+        )
 
     def _strategy(self, name: str, rng: np.random.Generator, run: Assignment) -> Strategy | None:
         settings = self._settings
@@ -163,6 +170,7 @@ class Runner:
                     quote_lifetime=settings.quote_lifetime_seconds,
                     max_position=run.max_position,
                     value_pull=settings.noise_value_pull,
+                    narrow_book_bp=settings.narrow_book_bp,
                 ),
                 self._view(rng),
             )
@@ -178,6 +186,7 @@ class Runner:
                     min_ticks=settings.momentum_min_ticks,
                     follow=settings.momentum_follow,
                     reach_bp=settings.momentum_reach_bp,
+                    narrow_book_bp=settings.narrow_book_bp,
                 ),
                 self._signal,
             )

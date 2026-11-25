@@ -6,6 +6,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr, model_validator
 
+from mse_simulator.market import NARROW_BOOK_BP
+
 
 class Settings(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -31,6 +33,11 @@ class Settings(BaseModel):
     # deviation with these defaults).
     fair_value_half_life_hours: float = Field(default=4.0, gt=0, le=1_000)
     fair_value_volatility: float = Field(default=0.015, ge=0, le=1)
+    # A book whose two sides are at most this many basis points of its mid apart, or one tick, is
+    # narrow, and the bots take its mid for the market's price. A wider book's mid is no price
+    # anyone offered, so they take the last trade instead, else the reference price. A value
+    # starts at the last trade, else at the mid of a narrow book, else at the reference.
+    narrow_book_bp: float = Field(default=NARROW_BOOK_BP, ge=0, le=10_000)
     # Each bot's own idea of a value lies within this many basis points of the fair value.
     view_spread_bp: float = Field(default=20.0, ge=0, le=1_000)
     # Noise: how many basis points either side of its centre a noise bot may price an order, and
