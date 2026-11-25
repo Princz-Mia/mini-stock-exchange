@@ -84,7 +84,7 @@ export const TOURS: Record<TourRole, TourScript> = {
         title: 'Market state',
         body:
           'Open, halt and resume the market, and in the end close it. Instruments, accounts and bots are set up ' +
-          'before it opens; it opens once, and closing it is final.',
+          'before it opens; it opens once, and closing it is final. After a close, a new simulation starts afresh.',
       },
       {
         anchor: 'section[aria-labelledby="instruments-title"]',

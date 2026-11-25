@@ -1,9 +1,9 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, useLocation } from 'react-router';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { resetSession } from '../api/client';
+import { api, resetSession } from '../api/client';
 import { FillWatch } from '../app/FillNotice';
 import { TOURS } from '../help/tours';
 import { signedIn } from '../test/fakeServer';
@@ -91,6 +91,15 @@ function market() {
     .on('GET /api/v1/orders', { status: 200, json: { orders: [OPEN_ORDER], nextCursor: null } });
 }
 
+/** The address the page is at, so what it keeps there can be read. */
+function Address() {
+  return (
+    <span data-testid="address" hidden>
+      {useLocation().search}
+    </span>
+  );
+}
+
 function renderTerminal(
   at = '/terminal',
   watch: ((order: { orderId: string; filledQuantity: number }) => void) | null = null,
@@ -103,6 +112,7 @@ function renderTerminal(
         <StreamContext.Provider value={streams.create}>
           <FillWatch.Provider value={watch}>
             <TerminalPage />
+            <Address />
           </FillWatch.Provider>
         </StreamContext.Provider>
       </MemoryRouter>
@@ -653,10 +663,125 @@ describe('terminal', () => {
     await client.invalidateQueries({ queryKey: ['market'] });
 
     await screen.findByRole('heading', { name: 'VEGA', level: 1 });
-    expect(screen.getByText('The instrument in this address is not part of this market. Showing VEGA instead.')).toBeInTheDocument();
+    // The instrument chosen in the simulation before is let go of: nothing says it is missing, as nothing asks for it.
+    await waitFor(() => expect(screen.getByTestId('address')).not.toHaveTextContent('instrument='));
+    expect(screen.queryByText(/is not part of this market/)).toBeNull();
     expect(screen.queryByRole('button', { name: /^(NOVA|ORBIT)/ })).toBeNull();
     expect(streams.latest()?.url).toContain(VEGA);
     expect(server.requests.at(-1)?.url).not.toContain(ORBIT);
+  });
+
+  it('shows a trader the next simulation being set up, with nothing of the closed one, until funded in it', async () => {
+    const noAccount = { status: 403, problem: { status: 403, code: 'NO_TRADING_ACCOUNT' } };
+    let status: object = { state: 'CLOSED', simulationId: 's', name: null, openedAt: '2026-11-04T09:00:00Z', closedAt: '2026-11-04T17:00:00Z', commandSequence: '12' };
+    let next: 'closed' | 'empty' | 'funded' = 'closed';
+    const VEGA = '00000000-0000-0000-0000-000000000003';
+    signedIn()
+      .on('GET /api/v1/market', () => ({ status: 200, json: status }))
+      .on('GET /api/v1/instruments', () => ({
+        status: 200,
+        json: {
+          instruments:
+            next === 'closed' ? [instrument(NOVA, 'NOVA', '101.00')] : next === 'funded' ? [instrument(VEGA, 'VEGA', null)] : [],
+          feed: { state: 'LIVE', lag: 0 },
+        },
+      }))
+      .on('GET /api/v1/portfolio', () => (next === 'empty' ? noAccount : { status: 200, json: PORTFOLIO }))
+      .on('GET /api/v1/orders', () =>
+        next === 'empty'
+          ? noAccount
+          : { status: 200, json: { orders: next === 'closed' ? [{ ...OPEN_ORDER, state: 'CANCELED', reason: 'MARKET_CLOSED', workingQuantity: 0, canceledQuantity: 10 }] : [], nextCursor: null } },
+      );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    // NOVA was chosen in the watchlist, which put it in the address.
+    renderTerminal(`/terminal?instrument=${NOVA}`, null, client);
+    expect(await screen.findByRole('region', { name: 'Market closed' })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('tab', { name: /^Recent orders/ }));
+    expect(await screen.findByText(/the market closed/i)).toBeInTheDocument();
+
+    // A new simulation has started, with no instrument yet, and this trader has no account in it.
+    status = { state: 'SETUP', simulationId: 't', name: 'Thursday seminar', openedAt: null, closedAt: null, commandSequence: '1' };
+    next = 'empty';
+    await client.invalidateQueries({ queryKey: ['market'] });
+    expect(
+      await screen.findByText('The market is being set up and has no instruments yet, so there is nothing to trade.'),
+    ).toHaveAttribute('role', 'status');
+    await waitFor(() => expect(screen.getByTestId('address')).not.toHaveTextContent('instrument='));
+    expect(screen.queryByText(/is not part of this market/)).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Market closed' })).toBeNull();
+    expect(screen.queryByText(/the market closed/i)).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'NOVA', level: 1 })).toBeNull();
+    expect(screen.getByRole('tab', { name: 'Open orders (0)' })).toHaveAttribute('aria-selected', 'true');
+
+    // Funded, and with an instrument: the next reads of the status, which says a command was taken, and of the
+    // instrument list, as their polls would. The account is asked for again, as it was refused, with no reload and no
+    // coming back to the tab: the ticket, waiting for the open, and no order from before.
+    next = 'funded';
+    status = { ...status, commandSequence: '3' };
+    await client.invalidateQueries({ queryKey: ['market'] });
+    await client.invalidateQueries({ queryKey: ['instruments'] });
+    const ticket = await screen.findByRole('region', { name: 'Order · VEGA' });
+    expect(within(ticket).getByText('The market has not opened yet.')).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'No trading account' })).toBeNull();
+    expect(screen.getByRole('tab', { name: 'Open orders (0)' })).toBeInTheDocument();
+  });
+
+  it('says a market being set up is being set up, whatever instrument a bookmark names', async () => {
+    market()
+      .on('GET /api/v1/market', {
+        status: 200,
+        json: { state: 'SETUP', simulationId: 't', name: null, openedAt: null, closedAt: null, commandSequence: '1' },
+      })
+      .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } });
+    renderTerminal(`/terminal?instrument=${NOVA}`);
+    expect(
+      await screen.findByText('The market is being set up and has no instruments yet, so there is nothing to trade.'),
+    ).toHaveAttribute('role', 'status');
+  });
+
+  it('shows nothing of the closed market to a trader who comes back to the terminal once the next one has started', async () => {
+    const noAccount = { status: 403, problem: { status: 403, code: 'NO_TRADING_ACCOUNT' } };
+    const closedStatus = { state: 'CLOSED', simulationId: 's', name: null, openedAt: '2026-11-04T09:00:00Z', closedAt: '2026-11-04T17:00:00Z', commandSequence: '12' };
+    let next = false;
+    signedIn()
+      .on('GET /api/v1/market', () => ({
+        status: 200,
+        json: next ? { state: 'SETUP', simulationId: 't', name: null, openedAt: null, closedAt: null, commandSequence: '1' } : closedStatus,
+      }))
+      .on('GET /api/v1/instruments', () => ({
+        status: 200,
+        json: { instruments: next ? [] : [instrument(NOVA, 'NOVA', '101.00')], feed: { state: 'LIVE', lag: 0 } },
+      }))
+      .on('GET /api/v1/portfolio', () => (next ? noAccount : { status: 200, json: PORTFOLIO }))
+      .on('GET /api/v1/orders', () =>
+        next
+          ? noAccount
+          : {
+              status: 200,
+              json: {
+                orders: [{ ...OPEN_ORDER, state: 'CANCELED', reason: 'MARKET_CLOSED', workingQuantity: 0, canceledQuantity: 10 }],
+                nextCursor: null,
+              },
+            },
+      );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const first = renderTerminal('/terminal', null, client);
+    fireEvent.click(await screen.findByRole('tab', { name: /^Recent orders/ }));
+    expect(await screen.findByText(/the market closed/i)).toBeInTheDocument();
+    first.unmount();
+
+    // On help meanwhile, where the top bar keeps reading the status: the next simulation has started. The terminal
+    // opens on it, with the closed market's orders still cached.
+    next = true;
+    await client.fetchQuery({ queryKey: ['market'], queryFn: api.market });
+    renderTerminal('/terminal', null, client);
+    expect(
+      await screen.findByText('The market is being set up and has no instruments yet, so there is nothing to trade.'),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('tab', { name: /^Recent orders/ }));
+    expect(await screen.findByText('Recent orders could not be loaded.')).toBeInTheDocument();
+    expect(screen.queryByText(/the market closed/i)).toBeNull();
+    expect(screen.queryByText(/showing the last loaded/)).toBeNull();
   });
 
   it('keeps the ticket and its unresolved order when the status is read after the list, for the same simulation', async () => {

@@ -197,5 +197,6 @@ describe("the operator's tour on the market's states", () => {
     expect(step.anchor).toBe('section[aria-labelledby="market-title"]');
     expect(step.body).toContain('Open, halt and resume the market, and in the end close it.');
     expect(step.body).toContain('it opens once, and closing it is final.');
+    expect(step.body).toContain('After a close, a new simulation starts afresh.');
   });
 });
