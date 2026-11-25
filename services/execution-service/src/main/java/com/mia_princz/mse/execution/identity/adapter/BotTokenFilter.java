@@ -22,12 +22,12 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 import com.mia_princz.mse.execution.identity.ApiTokens;
 import com.mia_princz.mse.execution.identity.BotPrincipal;
-import com.mia_princz.mse.execution.trading.adapter.ActiveSimulation;
+import com.mia_princz.mse.execution.trading.adapter.CurrentSimulation;
 
 /**
  * Authenticates a request by its bot token, for the stateless bot chain only. A malformed, unknown or revoked token is
  * answered with 401 here, so the request never falls back to a session cookie; so is the token of an account in a
- * closed simulation, revoked or not. The token is never logged.
+ * closed simulation, revoked or not, the current one included. The token is never logged.
  */
 public final class BotTokenFilter extends OncePerRequestFilter {
 
@@ -43,7 +43,10 @@ public final class BotTokenFilter extends OncePerRequestFilter {
 
 	private final SecurityContextHolderStrategy contexts = SecurityContextHolder.getContextHolderStrategy();
 
-	/** {@code writerSimulation} is the active simulation's ID as the writer holds it in memory, or null. */
+	/**
+	 * {@code writerSimulation} is the ID of the simulation the writer holds in memory while that one is not closed, or
+	 * null.
+	 */
 	public BotTokenFilter(JdbcClient jdbc, Supplier<UUID> writerSimulation) {
 		this.jdbc = jdbc;
 		this.writerSimulation = writerSimulation;
@@ -79,11 +82,12 @@ public final class BotTokenFilter extends OncePerRequestFilter {
 		}
 		// The writer rewrites the simulation's row with every run, and while a long snapshot (a backup's) is open the
 		// old versions stay and every read of the row walks them all. So a request never reads it: the writer's own ID
-		// is compared. Only while the writer has none (no market yet, or startup still rebuilding it) is the row read.
+		// is compared. Only while the writer has none that is not closed (no market yet, startup still rebuilding it, or
+		// a closed market, which no bot trades in) is the row read.
 		UUID simulation = writerSimulation.get();
 		byte[] hash = ApiTokens.hash(token);
 		return (simulation != null ? jdbc.sql(TOKEN + "?").params(hash, simulation)
-				: jdbc.sql(TOKEN + ActiveSimulation.ID).param(hash))
+				: jdbc.sql(TOKEN + CurrentSimulation.NOT_CLOSED_ID).param(hash))
 			.query((row, index) -> new BotPrincipal(row.getObject("id", UUID.class),
 					row.getObject("account_id", UUID.class)))
 			.optional();

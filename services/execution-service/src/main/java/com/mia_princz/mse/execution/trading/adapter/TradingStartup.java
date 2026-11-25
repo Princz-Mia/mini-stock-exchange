@@ -46,8 +46,9 @@ public final class TradingStartup implements ApplicationRunner, HealthIndicator 
 		if (!ownership.tryAcquire()) {
 			throw new IllegalStateException("Another execution-service instance owns the market; refusing to start");
 		}
-		// Closed simulations are history, not a market: with none active the writer starts as on an empty database.
-		if (!store.hasActiveSimulation()) {
+		// A closed market is still the market: the writer loads it, so that it answers commands as closed and a setup
+		// command can't start another one by accident. Only a database with no simulation at all has nothing to load.
+		if (!store.hasSimulation()) {
 			engine.startEmpty();
 			state = State.NO_SIMULATION;
 			return;

@@ -69,7 +69,7 @@ final class CommandCalls {
 			if (cause instanceof UnknownInstrumentException) {
 				throw new ApiException(HttpStatus.UNPROCESSABLE_CONTENT, "UNKNOWN_INSTRUMENT", "No such instrument");
 			}
-			// The account was the caller's when the request was authenticated but is not the active simulation's now.
+			// The account was the caller's when the request was authenticated but is not the current simulation's now.
 			if (cause instanceof UnknownAccountException) {
 				throw new ApiException(HttpStatus.FORBIDDEN, "NO_TRADING_ACCOUNT", "This user has no trading account");
 			}

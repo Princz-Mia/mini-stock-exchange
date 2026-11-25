@@ -320,9 +320,17 @@ public final class OrderBook {
 
 	/** The resting orders of one side in priority order. Linear in the book size; for tests and diagnostics. */
 	public List<BookOrder> orders(Side side) {
+		return orders(side, Integer.MAX_VALUE);
+	}
+
+	/** The first {@code limit} resting orders of one side in priority order, or all of them if there are fewer. */
+	public List<BookOrder> orders(Side side, int limit) {
 		List<BookOrder> result = new ArrayList<>();
 		for (PriceLevel level : levels(side).values()) {
 			for (OrderNode node = level.head; node != null; node = node.next) {
+				if (result.size() >= limit) {
+					return result;
+				}
 				result.add(node.snapshot());
 			}
 		}

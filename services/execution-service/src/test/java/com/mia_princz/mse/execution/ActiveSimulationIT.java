@@ -49,6 +49,10 @@ import com.mia_princz.mse.execution.trading.domain.Side;
  * answer under the same idempotency key, and runs no worker ever finished. It does not even reconcile: its open order
  * holds nothing. The active simulation is then set up, opened and traded through the API, and every read and command
  * must mean it alone.
+ * <p>
+ * The writer of this test started on an empty database and is never told of the closed rows, which is the only way to
+ * set a market up beside them until a new simulation can be started after a close. What a writer does when it starts
+ * on a closed market is covered where a market is closed for real.
  */
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT,
@@ -82,8 +86,8 @@ class ActiveSimulationIT {
 	private record Active(UUID simulation, String nova, String orbt, UUID run) {
 	}
 
-	/** What the API said while the closed simulation was the only one. */
-	private record Before(JsonNode status, boolean active, String portfolio, int accounts, String open,
+	/** What the API said while the closed simulations were the only ones. */
+	private record Before(JsonNode status, JsonNode portfolio, List<String> accounts, List<String> runs,
 			boolean assigned, int closedToken) {
 	}
 
@@ -122,18 +126,13 @@ class ActiveSimulationIT {
 		trader = TestBrowser.loggedIn(port, "trader", PASSWORD);
 		synchronized (ActiveSimulationIT.class) {
 			if (active == null) {
-				// Closed long before the fixture's, and stored first: of two closed simulations the status names the newer.
-				owner.update("""
-						INSERT INTO simulation (id, state, opened_at, closed_at, created_at)
-						VALUES (?, 'CLOSED', now() - interval '9 days', now() - interval '8 days',
-						    now() - interval '10 days')""", UUID.randomUUID());
+				// Closed long before the fixture's, and stored first: of two closed simulations the newer is the current one.
+				olderClosedSimulation();
 				closed = closedSimulation();
-				before = new Before(JSON.readTree(operator.get("/api/v1/market").body()), store.hasActiveSimulation(),
-						problem(trader.get("/api/v1/portfolio"), 403),
-						JSON.readTree(operator.get("/api/v1/admin/accounts").body()).get("accounts").size(),
-						problem(operator.post("/api/v1/admin/market/open", "", "Idempotency-Key",
-								UUID.randomUUID().toString()), 409),
-						!assignment().get("run").isNull(),
+				before = new Before(JSON.readTree(operator.get("/api/v1/market").body()),
+						JSON.readTree(trader.get("/api/v1/portfolio").body()),
+						ids(operator.get("/api/v1/admin/accounts?limit=200"), "accounts", "accountId"),
+						ids(operator.get("/api/v1/admin/bot-runs"), "runs", "runId"), !assignment().get("run").isNull(),
 						new TestBrowser(port).get("/api/v1/portfolio", bearer(CLOSED_TOKEN.token())).statusCode());
 				active = activeSimulation();
 			}
@@ -141,21 +140,26 @@ class ActiveSimulationIT {
 	}
 
 	/**
-	 * With every simulation closed there is no market to act on, and only the status still names a closed one: the one
-	 * closed last, not the older one beside it.
+	 * With every simulation closed, the one closed last is still the current one: the status names it, and its
+	 * traders and its operator read what it left, not what the older one beside it did. It is history, though, not
+	 * work: none of its runs is handed to a worker, and none of its tokens authenticates.
 	 */
 	@Test
-	void withNoActiveSimulationOnlyTheStatusNamesTheNewestClosedOne() {
+	void withEverySimulationClosedTheNewestIsReadAndNothingOfItIsWork() {
 		assertThat(before.status().get("state").asString()).isEqualTo("CLOSED");
 		assertThat(before.status().get("simulationId").asString()).isEqualTo(closed.simulation().toString());
-		assertThat(before.active()).isFalse();
-		assertThat(before.portfolio()).isEqualTo("NO_TRADING_ACCOUNT");
-		assertThat(before.accounts()).isZero();
-		assertThat(before.open()).isEqualTo("MARKET_NOT_SET_UP");
+		// The trader has an account in both closed simulations: 5.00 in the newer, 0.01 in the older.
+		assertThat(before.portfolio().get("cash").get("total").asString()).isEqualTo("5.00");
+		assertThat(before.accounts()).containsExactlyInAnyOrderElementsOf(jdbc.queryForList(
+				"SELECT id::text FROM account WHERE simulation_id = ? AND kind <> 'ISSUANCE'", String.class,
+				closed.simulation()))
+			.hasSize(5);
+		assertThat(before.runs()).containsExactlyInAnyOrder(closed.stuckRun().toString(), closed.runningRun().toString());
+		// One of its runs is still marked running and another was never confirmed stopped: a real close ends both.
 		assertThat(before.assigned()).isFalse();
-		// The writer has no simulation to compare, so the token check asks the database, which has none active.
+		// Never revoked, as a real close would have: the token check asks the database, which has none not closed.
 		assertThat(before.closedToken()).isEqualTo(401);
-		assertThat(store.hasActiveSimulation()).isTrue();
+		assertThat(store.hasSimulation()).isTrue();
 	}
 
 	@Test
@@ -360,6 +364,21 @@ class ActiveSimulationIT {
 		return new Active(simulation, nova, orbt, UUID.fromString(run.get("runId").asString()));
 	}
 
+	/** Older than the fixture's, with an account for the same trader that no read may find. */
+	private void olderClosedSimulation() {
+		UUID simulation = UUID.randomUUID();
+		owner.update("""
+				INSERT INTO simulation (id, state, opened_at, closed_at, created_at)
+				VALUES (?, 'CLOSED', now() - interval '9 days', now() - interval '8 days', now() - interval '10 days')""",
+				simulation);
+		UUID account = UUID.randomUUID();
+		owner.update("""
+				INSERT INTO account (id, simulation_id, kind, owner_user_id, display_name, created_at)
+				VALUES (?, ?, 'TRADER', ?, 'trader', now() - interval '10 days')""", account, simulation, user("trader"));
+		owner.update("INSERT INTO cash_balance (account_id, account_kind, total_cents, reserved_cents) VALUES (?, 'TRADER', 1, 0)",
+				account);
+	}
+
 	private Closed closedSimulation() {
 		UUID simulation = UUID.randomUUID();
 		owner.update("""
@@ -466,6 +485,13 @@ class ActiveSimulationIT {
 				UUID.randomUUID().toString())))
 			.get("instrumentId")
 			.asString();
+	}
+
+	private static List<String> ids(HttpResponse<String> response, String list, String field) {
+		assertThat(response.statusCode()).as(response.body()).isEqualTo(200);
+		List<String> ids = new ArrayList<>();
+		JSON.readTree(response.body()).get(list).forEach((row) -> ids.add(row.get(field).asString()));
+		return ids;
 	}
 
 	private JsonNode assignment() throws Exception {
