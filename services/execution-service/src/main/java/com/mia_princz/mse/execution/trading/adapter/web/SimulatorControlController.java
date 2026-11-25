@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -46,12 +47,15 @@ class SimulatorControlController {
 
 	private static final Pattern WORKER_ID = Pattern.compile("[A-Za-z0-9._:-]{1,100}");
 
+	private static final Set<String> PHASES = Set.of("LOADING", "TRADING");
+
 	/** The most bots one page holds: 10,000 bots are ten pages. */
 	static final int MAX_BOTS_PER_PAGE = 1_000;
 
 	private static final String RUN_COLUMNS = """
 			id, desired_state, seed, commands_per_second, max_order_quantity, max_position, ends_at, worker_id,
-			lease_expires_at, stopped_at, placed, canceled, rejected, errors""";
+			lease_expires_at, stopped_at, placed, canceled, rejected, errors, paused_stale_data, paused_market_not_open,
+			paused_other""";
 
 	private final JdbcClient jdbc;
 
@@ -79,7 +83,9 @@ class SimulatorControlController {
 	record Worker(String workerId, Instant leaseExpiresAt) {
 	}
 
-	record Totals(long placed, long canceled, long rejected, long errors) {
+	/** The paused counts are the bots' steps that could place nothing new, by why; see {@link HeartbeatBody}. */
+	record Totals(long placed, long canceled, long rejected, long errors, long pausedStaleData,
+			long pausedMarketNotOpen, long pausedOther) {
 	}
 
 	/**
@@ -149,7 +155,8 @@ class SimulatorControlController {
 
 	/**
 	 * A page of a run's bots, oldest first, as they were assigned. A cursor belongs to its run, and is refused for
-	 * another.
+	 * another. Each assignment keeps its account's creation time, so a page is one range of an index, however large
+	 * the run.
 	 */
 	@GetMapping("/runs/{runId}/bots")
 	BotPage bots(@PathVariable UUID runId, @RequestParam(required = false) String cursor,
@@ -165,17 +172,13 @@ class SimulatorControlController {
 		if (!known) {
 			throw new ApiException(HttpStatus.NOT_FOUND, "RUN_NOT_FOUND", "No such bot run");
 		}
-		List<AssignedBot> page = jdbc.sql("""
-				SELECT b.account_id, b.strategy, a.created_at FROM bot_assignment b JOIN account a ON a.id = b.account_id
-				WHERE b.run_id = :run%s
-				ORDER BY a.created_at, a.id LIMIT :limit""".formatted(
-				after == null ? "" : " AND (a.created_at, a.id) > (:afterAt, :afterId)"))
+		List<AssignedBot> page = jdbc.sql(botPageSql(after != null))
 			.param("run", runId)
 			.param("afterAt", after == null ? null : Timestamp.from(after.createdAt()))
 			.param("afterId", after == null ? null : after.id())
 			.param("limit", limit + 1)
 			.query((row, index) -> new AssignedBot(row.getObject("account_id", UUID.class), row.getString("strategy"),
-					row.getTimestamp("created_at").toInstant()))
+					row.getTimestamp("account_created_at").toInstant()))
 			.list();
 		List<Bot> bots = page.stream()
 			.limit(limit)
@@ -189,6 +192,18 @@ class SimulatorControlController {
 				Cursors.assignedBots(new TradingQueries.AccountPosition(last.createdAt(), last.accountId()), runId));
 	}
 
+	/**
+	 * A page of a run's bots, in the order their accounts were created: one range of bot_assignment_in_order, with no
+	 * sort, so reading every page of a run costs time in proportion to its size.
+	 */
+	static String botPageSql(boolean continued) {
+		return """
+				SELECT account_id, strategy, account_created_at FROM bot_assignment
+				WHERE run_id = :run%s
+				ORDER BY account_created_at, account_id LIMIT :limit""".formatted(
+				continued ? " AND (account_created_at, account_id) > (:afterAt, :afterId)" : "");
+	}
+
 	private record AssignedBot(UUID accountId, String strategy, Instant createdAt) {
 	}
 
@@ -196,9 +211,17 @@ class SimulatorControlController {
 	 * Totals are cumulative for the run. {@code stopped} confirms the stop, with nothing left in flight.
 	 * {@code manifest} is what the worker reports about itself ({@link Manifests}), sent until a beat of the run is
 	 * held; optional, so a worker that sends none still holds its run.
+	 * <p>
+	 * {@code phase} says where the worker is with the run, LOADING {@code botsLoaded} of {@code botsTotal} bots, then
+	 * TRADING; the paused counts are the bots' steps that could place nothing new because the market data was too old
+	 * or not live, the market was not open, or for another reason. All of them are optional, so a worker that knows
+	 * nothing of them still holds its run: a beat without a phase leaves the run with none, and a paused count left
+	 * out stays as it was.
 	 */
 	record HeartbeatBody(UUID runId, String workerId, Long placed, Long canceled, Long rejected, Long errors,
-			Integer inFlight, Integer stopFailures, Boolean stopped, JsonNode manifest) {
+			Integer inFlight, Integer stopFailures, Boolean stopped, JsonNode manifest, String phase,
+			Integer botsLoaded, Integer botsTotal, Long pausedStaleData, Long pausedMarketNotOpen,
+			Long pausedOther) {
 
 		void validate() {
 			List<ApiException.FieldError> errors = new ArrayList<>();
@@ -219,6 +242,10 @@ class SimulatorControlController {
 				errors.add(new ApiException.FieldError("inFlight", "IN_FLIGHT",
 						"a stop is confirmed only with nothing in flight"));
 			}
+			progress(errors);
+			optionalCount("pausedStaleData", pausedStaleData, errors);
+			optionalCount("pausedMarketNotOpen", pausedMarketNotOpen, errors);
+			optionalCount("pausedOther", pausedOther, errors);
 			Manifests.check(manifest, errors);
 			if (!errors.isEmpty()) {
 				throw new ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_FAILED", "The heartbeat is invalid", errors);
@@ -228,6 +255,32 @@ class SimulatorControlController {
 		private static void count(String field, Long value, List<ApiException.FieldError> errors) {
 			if (value == null || value < 0) {
 				errors.add(new ApiException.FieldError(field, "OUT_OF_RANGE", field + " is required and not negative"));
+			}
+		}
+
+		private static void optionalCount(String field, Long value, List<ApiException.FieldError> errors) {
+			if (value != null && value < 0) {
+				errors.add(new ApiException.FieldError(field, "OUT_OF_RANGE", field + " must not be negative"));
+			}
+		}
+
+		/** A phase comes with both counts, and the counts only with a phase. */
+		private void progress(List<ApiException.FieldError> errors) {
+			if (phase == null) {
+				if (botsLoaded != null || botsTotal != null) {
+					errors.add(new ApiException.FieldError("phase", "REQUIRED",
+							"phase is required with botsLoaded and botsTotal"));
+				}
+				return;
+			}
+			if (!PHASES.contains(phase)) {
+				errors.add(new ApiException.FieldError("phase", "INVALID_VALUE", "phase must be LOADING or TRADING"));
+			}
+			count("botsLoaded", botsLoaded == null ? null : botsLoaded.longValue(), errors);
+			count("botsTotal", botsTotal == null ? null : botsTotal.longValue(), errors);
+			if (botsLoaded != null && botsTotal != null && botsLoaded > botsTotal) {
+				errors.add(new ApiException.FieldError("botsLoaded", "OUT_OF_RANGE",
+						"botsLoaded must be at most botsTotal"));
 			}
 		}
 
@@ -282,14 +335,18 @@ class SimulatorControlController {
 		jdbc.sql("""
 				UPDATE bot_run SET worker_id = ?, heartbeat_at = ?, lease_expires_at = ?, placed = GREATEST(placed, ?),
 				    canceled = GREATEST(canceled, ?), rejected = GREATEST(rejected, ?), errors = GREATEST(errors, ?),
-				    in_flight = ?, stop_failures = ?,
+				    in_flight = ?, stop_failures = ?, phase = ?, bots_loaded = ?, bots_total = ?,
+				    paused_stale_data = GREATEST(paused_stale_data, CAST(? AS bigint)),
+				    paused_market_not_open = GREATEST(paused_market_not_open, CAST(? AS bigint)),
+				    paused_other = GREATEST(paused_other, CAST(? AS bigint)),
 				    stopped_at = CASE WHEN ? THEN CAST(? AS timestamptz) END,
 				    desired_state = CASE WHEN ? THEN 'STOPPED' ELSE desired_state END,
 				    stop_requested_at = CASE WHEN ? THEN coalesce(stop_requested_at, ends_at) ELSE stop_requested_at END
 				WHERE id = ?""")
 			.params(body.workerId(), at, Timestamp.from(leaseExpiresAt), body.placed(), body.canceled(),
-					body.rejected(), body.errors(), body.inFlight(), body.stopFailures(), stopping, at, stopping,
-					stopping, run.id())
+					body.rejected(), body.errors(), body.inFlight(), body.stopFailures(), body.phase(), body.botsLoaded(),
+					body.botsTotal(), body.pausedStaleData(), body.pausedMarketNotOpen(), body.pausedOther(), stopping, at,
+					stopping, stopping, run.id())
 			.update();
 		if (body.manifest() != null) {
 			// Only past every refusal above, under the run's row lock: the first manifest stays the run's, the same one
@@ -328,7 +385,8 @@ class SimulatorControlController {
 				row.getBigDecimal("commands_per_second"), row.getInt("max_order_quantity"), row.getInt("max_position"),
 				instant(row.getTimestamp("ends_at")), row.getString("worker_id"),
 				instant(row.getTimestamp("lease_expires_at")), new Totals(row.getLong("placed"), row.getLong("canceled"),
-						row.getLong("rejected"), row.getLong("errors")));
+						row.getLong("rejected"), row.getLong("errors"), row.getLong("paused_stale_data"),
+						row.getLong("paused_market_not_open"), row.getLong("paused_other")));
 	}
 
 	private static String select(String where) {

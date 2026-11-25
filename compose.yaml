@@ -116,6 +116,8 @@ services:
       MSE_EXPORT_TOKEN: ${MSE_EXPORT_TOKEN:-}
       # Optional too; without it the simulator's control routes refuse every request.
       MSE_SIMULATOR_TOKEN: ${MSE_SIMULATOR_TOKEN:-}
+      # The session cookie's name. A second stack on this host needs its own: browsers share cookies across ports.
+      MSE_SESSION_COOKIE: ${MSE_SESSION_COOKIE:-SESSION}
       # Trading commands queued together commit as one transaction of at most this many; each keeps its own
       # answer and sequence. Tests keep 1 unless they set it.
       MSE_TRADING_MAX_BATCH: 32
@@ -257,7 +259,8 @@ services:
     mem_limit: 512m
     cpus: 1.0
 
-  # One-shot: sets up the demo market through the operator API, then exits. Repeats nothing on later starts.
+  # One-shot: sets up the demo market through the operator API, then exits, leaving the market in setup for the
+  # operator to open. Repeats nothing on later starts.
   demo-seed:
     profiles: [full]
     build:

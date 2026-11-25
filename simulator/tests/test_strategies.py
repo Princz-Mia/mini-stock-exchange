@@ -9,7 +9,7 @@ from mse_simulator.market import Instrument, MarketView
 from mse_simulator.market_maker import MarketMaker, MarketMakerConfig
 from mse_simulator.momentum import MomentumBot, MomentumConfig, PriceSignal
 from mse_simulator.prices import BASIS_POINT
-from mse_simulator.strategy import Cancel, Holdings, OpenOrder, Place
+from mse_simulator.strategy import Cancel, Holdings, OpenOrder, Place, Replace
 
 
 def instrument(reference: int = 10_000, bid=None, ask=None, last=None, tick: int = 1) -> Instrument:
@@ -93,6 +93,20 @@ def test_the_signal_samples_the_mid_not_the_last_trade() -> None:
     for last in (9_990, 10_010):
         signal.observe(view(replace(item, last=last)))
     assert signal.strength(item.instrument_id) == 0.0
+
+
+def test_a_far_order_is_no_trend() -> None:
+    """When the side near the price is taken and a far order is briefly the best, the signal
+    samples the last trade, not a mid halfway to that order, so momentum sees no trend; unless
+    the setting counts so wide a book as narrow."""
+    item = instrument(bid=9_990, ask=10_010, last=10_000)
+    gapped = replace(item, ask=50_000)
+    # The mid of 99.90 and 500.00 is 299.95, half again a long average of 199.975.
+    for narrow_book_bp, expected in ((100.0, 0.0), (20_000.0, 29_995 / 19_997.5 - 1)):
+        signal = PriceSignal(1, 2, narrow_book_bp)
+        signal.observe(view(item))
+        signal.observe(view(gapped))
+        assert signal.strength(item.instrument_id) == pytest.approx(expected)
 
 
 def momentum(seed: int, signal: PriceSignal, config: MomentumConfig = MOMENTUM) -> MomentumBot:
@@ -387,9 +401,68 @@ def test_old_quotes_are_cancelled_before_new_ones_are_placed() -> None:
     doubled = [quote(item, "BUY", 9_998, 1.0, "older"), quote(item, "BUY", 9_998, 2.0, "newer")]
     assert bot.decide(view(item), True, holdings, doubled, 3.0) == Cancel("older")
     stale = [quote(item, "BUY", 9_998, 0.0, "stale")]
-    assert bot.decide(view(item), True, holdings, stale, 30.1) == Cancel("stale")
     assert bot.decide(view(item), False, holdings, stale, 30.1) == Cancel("stale"), "paused"
     assert bot.decide(view(item), False, holdings, [], 30.1) is None
+
+
+def test_a_stale_quote_is_replaced_in_the_same_step_by_the_side_without_one() -> None:
+    item = instrument(reference=10_000)
+    bot = maker(1)
+    holdings = rich(item)
+    bid, ask = (
+        Place(item.instrument_id, "BUY", 10, 9_998),
+        Place(item.instrument_id, "SELL", 10, 10_002),
+    )
+    alone = [quote(item, "BUY", 9_998, 0.0, "stale")]
+    assert bot.decide(view(item), True, holdings, alone, 30.1) == Replace(Cancel("stale"), ask), (
+        "the side with no quote first, the cancelled one last"
+    )
+    beside = [quote(item, "BUY", 9_998, 0.0, "stale"), quote(item, "SELL", 10_002, 20.0)]
+    assert bot.decide(view(item), True, holdings, beside, 30.1) == Replace(Cancel("stale"), bid), (
+        "the other side rests: the same side again"
+    )
+    asked = [quote(item, "SELL", 10_002, 0.0, "stale")]
+    assert bot.decide(view(item), True, holdings, asked, 30.1) == Replace(Cancel("stale"), bid)
+    no_shares = Holdings(cash=10**10, shares={}, positions={item.instrument_id: 0})
+    assert bot.decide(view(item), True, no_shares, alone, 30.1) == Replace(Cancel("stale"), bid), (
+        "no ask it can afford: the bid again"
+    )
+    broke = Holdings(cash=0, shares={}, positions={item.instrument_id: 0})
+    assert bot.decide(view(item), True, broke, alone, 30.1) == Cancel("stale"), "nothing to place"
+    other = instrument()
+    elsewhere = [quote(other, "BUY", 9_998, 0.0, "stale")]
+    assert bot.decide(view(item, other), True, holdings, elsewhere, 30.1) == Replace(
+        Cancel("stale"), bid
+    ), "an order on another instrument leaves this one's order alone"
+    assert bot.decide(view(other), True, holdings, alone, 30.1) == Cancel("stale"), (
+        "its instrument left the view: only the cancel"
+    )
+    crossing = [quote(item, "BUY", 9_998, 0.0, "stale"), quote(item, "SELL", 9_990, 20.0)]
+    assert bot.decide(view(item), True, holdings, crossing, 30.1) == Cancel("stale"), (
+        "a quote off its target is cancelled before anything new is placed"
+    )
+
+
+def test_a_maker_whose_turns_come_slower_than_its_quote_lifetime_keeps_quoting_both_sides() -> None:
+    """With a turn every 40 s and quotes that live 30 s, every turn finds the last quote stale.
+    Cancelling it alone used every other turn, and the place after it was always the bid: the
+    maker never asked. Now each turn leaves a fresh quote, bid and ask in turn."""
+    item = instrument(reference=10_000)
+    bot = maker(1)
+    holdings = rich(item)
+    resting: list[OpenOrder] = []
+    sides = []
+    for turn in range(10):
+        now = 40.0 * turn
+        intent = bot.decide(view(item), True, holdings, resting, now)
+        if isinstance(intent, Replace):
+            resting = [order for order in resting if order.order_id != intent.cancel.order_id]
+            intent = intent.place
+        assert isinstance(intent, Place), (turn, intent)
+        resting.append(quote(item, intent.side, intent.limit, now))
+        sides.append(intent.side)
+        assert len(resting) == 1, "the stale quote went in the same step"
+    assert sides == ["BUY", "SELL"] * 5
 
 
 def test_a_maker_never_places_beside_a_live_quote_or_beyond_its_means() -> None:
@@ -409,7 +482,11 @@ def test_a_maker_never_places_beside_a_live_quote_or_beyond_its_means() -> None:
             quote(item, str(draws.choice(["BUY", "SELL"])), item.reference + int(offset))
             for offset in draws.integers(-6, 7, int(draws.integers(0, 3)))
         ]
-        intent = bot.decide(view(item), True, holdings, orders, 1.0)
+        intent = bot.decide(view(item), True, holdings, orders, float(draws.choice([1.0, 31.0])))
+        if isinstance(intent, Replace):
+            # A stale quote's replacement is placed as if the cancelled quote were gone already.
+            orders = [order for order in orders if order.order_id != intent.cancel.order_id]
+            intent = intent.place
         if not isinstance(intent, Place):
             continue
         assert not any(order.side == intent.side for order in orders)

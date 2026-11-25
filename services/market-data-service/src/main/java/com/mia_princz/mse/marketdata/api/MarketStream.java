@@ -36,6 +36,8 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  * longer than the slow limit is disconnected.</li>
  * <li>A subscriber that has been sent nothing for the heartbeat interval gets a heartbeat carrying the feed's state
  * and lag: a live connection is not proof that the data is current.</li>
+ * <li>Frames need database reads and heartbeats do not, so each has its own thread. A slow read delays only the
+ * frames it is building; every subscriber's heartbeat, and the check for stuck clients, carries on.</li>
  * </ul>
  */
 final class MarketStream implements AutoCloseable {
@@ -85,6 +87,9 @@ final class MarketStream implements AutoCloseable {
 	private final ScheduledExecutorService ticker = Executors
 		.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("market-stream").daemon().factory());
 
+	private final ScheduledExecutorService heartbeats = Executors
+		.newSingleThreadScheduledExecutor(Thread.ofPlatform().name("market-stream-heartbeat").daemon().factory());
+
 	MarketStream(Frames frames, Supplier<SseEmitter> emitters, Settings settings, Clock clock) {
 		this.frames = frames;
 		this.emitters = emitters;
@@ -94,7 +99,9 @@ final class MarketStream implements AutoCloseable {
 
 	void start() {
 		long period = settings.tick().toMillis();
-		ticker.scheduleWithFixedDelay(this::tickSafely, period, period, TimeUnit.MILLISECONDS);
+		ticker.scheduleWithFixedDelay(() -> safely("tick", this::tick), period, period, TimeUnit.MILLISECONDS);
+		heartbeats.scheduleWithFixedDelay(() -> safely("heartbeat", this::beat), period, period,
+				TimeUnit.MILLISECONDS);
 	}
 
 	/** Opens a stream for one instrument; its first frame is the current state. */
@@ -128,27 +135,49 @@ final class MarketStream implements AutoCloseable {
 		return open.get();
 	}
 
-	private void tickSafely() {
+	private void safely(String round, Runnable work) {
 		try {
-			tick();
+			work.run();
 		}
 		catch (RuntimeException ex) {
-			log.warn("Market stream tick failed", ex);
+			log.warn("Market stream {} failed", round, ex);
 		}
 	}
 
-	/** One round: frames for changed instruments, heartbeats for idle subscribers, and slow ones dropped. */
+	/**
+	 * One round of frames: each changed instrument that someone watches is read once and sent. A read that fails
+	 * marks only its own instrument again, so it is retried on the next tick rather than waiting for the next trade,
+	 * and the round carries on: an instrument whose frame keeps failing holds up no other instrument's frames.
+	 */
 	void tick() {
-		Instant now = clock.instant();
 		List<UUID> due = new ArrayList<>(changed);
 		changed.removeAll(due);
+		RuntimeException firstFailure = null;
+		int failures = 0;
 		for (UUID instrumentId : due) {
 			Set<Subscriber> watching = subscribers.get(instrumentId);
 			if (watching == null || watching.isEmpty()) {
 				continue;
 			}
-			frames.frame(instrumentId).ifPresent((frame) -> watching.forEach((s) -> s.offer(new Event("market", frame))));
+			try {
+				frames.frame(instrumentId).ifPresent((frame) -> watching.forEach((s) -> s.offer(new Event("market", frame))));
+			}
+			catch (RuntimeException ex) {
+				changed.add(instrumentId);
+				failures++;
+				firstFailure = firstFailure != null ? firstFailure : ex;
+			}
 		}
+		if (firstFailure != null) {
+			// One line a round, however many instruments failed in it.
+			log.warn("Market stream frames failed for {} of {} instruments; each is tried again on the next tick",
+					failures, due.size(), firstFailure);
+		}
+	}
+
+	/** One round of upkeep: stuck subscribers dropped, idle ones sent a heartbeat. No database read happens here. */
+	void beat() {
+		Instant now = clock.instant();
 		Object heartbeat = null;
 		for (Set<Subscriber> watching : subscribers.values()) {
 			for (Subscriber subscriber : watching) {
@@ -158,7 +187,7 @@ final class MarketStream implements AutoCloseable {
 				}
 				else if (subscriber.isIdle(now)) {
 					heartbeat = heartbeat != null ? heartbeat : frames.heartbeat();
-					subscriber.offer(new Event("heartbeat", heartbeat));
+					subscriber.offerHeartbeat(new Event("heartbeat", heartbeat), now);
 				}
 			}
 		}
@@ -167,6 +196,7 @@ final class MarketStream implements AutoCloseable {
 	@Override
 	public void close() {
 		ticker.shutdownNow();
+		heartbeats.shutdownNow();
 		subscribers.values().forEach((watching) -> watching.forEach(Subscriber::disconnect));
 	}
 
@@ -202,8 +232,21 @@ final class MarketStream implements AutoCloseable {
 			synchronized (slot) {
 				slot.clear();
 				slot.offer(event);
+				lastOffered = clock.instant();
 			}
-			lastOffered = clock.instant();
+		}
+
+		/**
+		 * Frames and heartbeats come from different threads, so a heartbeat is only put into an empty slot: it must
+		 * never replace a frame that has not been sent yet.
+		 */
+		void offerHeartbeat(Event heartbeat, Instant now) {
+			synchronized (slot) {
+				if (isIdle(now) && slot.isEmpty()) {
+					slot.offer(heartbeat);
+					lastOffered = clock.instant();
+				}
+			}
 		}
 
 		boolean isIdle(Instant now) {
@@ -236,7 +279,9 @@ final class MarketStream implements AutoCloseable {
 		void disconnect() {
 			remove();
 			sender.interrupt();
-			emitter.complete();
+			// complete() waits for the emitter's write lock, which a send stuck in a write holds; on its own thread
+			// it cannot hold up the heartbeats of everyone else.
+			Thread.ofVirtual().name("market-stream-close-" + instrumentId).start(emitter::complete);
 		}
 
 		void remove() {

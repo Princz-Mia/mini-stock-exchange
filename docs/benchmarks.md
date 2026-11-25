@@ -177,6 +177,15 @@ The files are written on the thread that sends the command, not on the writer, s
 
 The start answered in 42 ms. Each part took about 1.2 s, nearly all of it its 1,000 token files on the Windows disk, made on the job's own thread while the writer took other commands. On ext4 those files took 0.27 s per 1,000 above, so the same job should take nearer 9 s there. The estimate of the time left, read every 2 s, was within a second or two of the end from the second part on. Reconciliation afterwards took 141 ms. Before these changes, 20,000 bots took 200 commands of 100 by hand, and about 171 s of the writer's time.
 
+**Reading a run's bots, 2026-11-25.** The simulator reads a run's bots once, in pages of 1,000, when it takes the run. `BotPageBench` starts a run of 20,000 bots among 40,000 bot accounts, analyzes the tables, and reads all 20 pages over HTTP with the simulator's token, six times in a row; same machine, PostgreSQL in Testcontainers. The first row was measured with the earlier statement put back in place for the run:
+
+| | All 20 pages, six reads | The page after the run's middle bot |
+| --- | --- | --- |
+| Paged by the account's creation time, read through a join | 307, 239, 234, 227, 218, 241 ms | 9.7 ms: the run's 20,000 assignments joined to 30,001 accounts and sorted |
+| Paged by the creation time kept on the assignment | 209, 121, 119, 106, 100, 101 ms | 0.24 ms: the 1,001 rows of one index range |
+
+Read through the join, every page read and sorted the whole run again, so the cost of reading a run grew with the square of its size. Kept on the assignment, each page is one range of an index. The bench analyzes the tables as the schema's owning role, because the application's role may not; without statistics the join planned 20,000 index look-ups for every page and took about twice as long. Starting a run of 10,000 bots among 30,101 (`BotRunScaleIT`) took 197 and 220 ms before and 177 ms after: copying the time as bots are assigned costs nothing that shows.
+
 ## Steady load
 
 **Scenario:** five instruments and 10,000 bots (2,000 market makers, 2,000 momentum, 6,000 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. Until 2026-11-15 the scenario was 1,000 bots; its last result is kept below. Neither is a limit: the exchange limits neither the bot population nor the bots in one run, and `--bots` sets the number.
@@ -306,7 +315,7 @@ All budgets met.
 | Commit | `64f3dbb` |
 | Execution JVM | Oracle JDK 25.0.5, `-XX:MaxRAMPercentage=75` |
 | PostgreSQL | 18.6, `fsync=on`, `synchronous_commit=on` |
-| Container limits | Execution 2 GiB, 2 CPUs; PostgreSQL 2 GiB, 2 CPUs; Kafka 2 GiB, 2 CPUs; Market Data 1.5 GiB, 1.5 CPUs; Flink JobManager 1.5 GiB, 1 CPU; Flink TaskManager 1.8 GiB, 2 CPUs; simulator 512 MiB, 1 CPU; proxy 256 MiB, 0.5 CPU |
+| Container limits | Execution 2 GiB, 2 CPUs; PostgreSQL 2 GiB, 2 CPUs; Kafka 2 GiB, 2 CPUs; Market Data 1.5 GiB, 1.5 CPUs; Flink JobManager 1.5 GiB, 1 CPU; Flink TaskManager 1.8 GiB, 2 CPUs; simulator 512 MiB, 1 CPU; proxy 256 MiB, 0.5 CPU (2 CPUs since 2026-11-19, as in `compose.yaml` today) |
 
 ## Highest rate
 

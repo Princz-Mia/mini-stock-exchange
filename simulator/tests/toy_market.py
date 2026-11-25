@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from uuid import UUID
 
 from mse_simulator.market import Instrument, MarketView
-from mse_simulator.strategy import Cancel, Holdings, OpenOrder, Place, Strategy
+from mse_simulator.strategy import Cancel, Holdings, OpenOrder, Place, Replace, Strategy
 
 MAX_PRICE = 100_000_000
 
@@ -45,6 +45,13 @@ class Book:
     last: int | None = None
 
 
+class Passive:
+    """An account that only holds what was placed for it: a person who placed orders and left."""
+
+    def decide(self, *_) -> None:
+        return None
+
+
 class ToyMarket:
     """Bots take turns, market makers first, at ``rate`` commands a second of simulated time. As in
     the simulator, every bot sees the same market view, refreshed once per poll, while its own
@@ -62,10 +69,15 @@ class ToyMarket:
         self.history: list[dict[UUID, tuple[int | None, int | None, int | None]]] = []
         self.on_poll: list[Callable[[MarketView], None]] = []
         self.on_place: list[Callable[[Account, Place, MarketView], None]] = []
+        # Every fill as it happens, with its instrument and price: the history sees only the last
+        # trade of each poll.
+        self.on_trade: list[Callable[[UUID, int], None]] = []
         self._poll_seconds = poll_seconds
         self._next_poll = 0.0
         self._next_bot = 0
         self._next_order = 0
+        # Commands a replace spent beyond its turn: the turns they stand for pass with no step.
+        self._owed = 0
         self._view = self._snapshot()
 
     def join(self, strategy: Strategy, cash: int, shares: int) -> Account:
@@ -73,12 +85,20 @@ class ToyMarket:
         self.accounts.append(account)
         return account
 
+    def rest(self, account: Account, intent: Place) -> None:
+        """Places an order for an account outside the turns, as a person's order would be: to set
+        up a book before the bots start."""
+        self._place(self.accounts.index(account), account, intent)
+
     def run(self, commands: int, rate: float) -> None:
         for _ in range(commands):
             self.now += 1.0 / rate
             while self.now >= self._next_poll:
                 self._poll()
                 self._next_poll += self._poll_seconds
+            if self._owed:
+                self._owed -= 1
+                continue
             self._command()
 
     def price(self, instrument: UUID) -> float:
@@ -140,19 +160,26 @@ class ToyMarket:
             if isinstance(intent, Cancel):
                 self._cancel(account, intent.order_id)
                 return
+            if isinstance(intent, Replace):
+                if self._cancel(account, intent.cancel.order_id):
+                    self._owed += 1
+                    intent = intent.place
+                else:
+                    return
             if isinstance(intent, Place):
                 for observer in self.on_place:
                     observer(account, intent, self._view)
                 self._place(index, account, intent)
                 return
 
-    def _cancel(self, account: Account, order_id: str) -> None:
+    def _cancel(self, account: Account, order_id: str) -> bool:
         order = account.orders.pop(order_id, None)
         if order is None:
-            return
+            return False
         book = self.books[order.instrument]
         (book.bids if order.side == "BUY" else book.asks).remove(order)
         self._release(account, order, order.working)
+        return True
 
     @staticmethod
     def _release(account: Account, order: Resting, quantity: int) -> None:
@@ -195,6 +222,8 @@ class ToyMarket:
             remaining -= quantity
             book.last = maker.limit
             self.trades += 1
+            for observer in self.on_trade:
+                observer(intent.instrument_id, maker.limit)
             if maker.working == 0:
                 opposite.pop(0)
                 del other.orders[maker.order_id]

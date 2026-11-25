@@ -163,7 +163,7 @@ The closed simulation stays in the database as it closed, and nothing can write 
 
 The compatibility gate rehearses these steps through the API, after closing a market with orders resting and a bot run trading.
 
-The demo seed does none of this for a simulation an operator started: it logs one line saying so and stops. It sets up only a market with no name, which is how it makes its own on a fresh stack.
+The demo seed does none of this for a simulation an operator started: it logs one line saying so and stops. It sets up only a market with no name, which is how it makes its own on a fresh stack. Even there it does steps 1 to 3 and never step 4: it leaves the market in setup, says so in its last log line, and the operator opens it.
 
 The start's answers:
 - **`409 SIMULATION_NOT_CLOSED`**, with the state: a simulation that has not closed exists. In `SETUP` it is set up further instead; `OPEN` or `HALTED`, close it first. The refusal is that key's answer for good, so start again with a new key.
@@ -270,6 +270,8 @@ docker compose restart simulator
 ```
 
 A worker takes the run on its next heartbeat and continues from the totals already reported. A run that stays "Starting" has never had a worker: `no simulator token; bots stay idle` in the log means `MSE_SIMULATOR_TOKEN` is not set in `.env`.
+
+**Running, but nothing is placed.** Read the run from `GET /api/v1/admin/bot-runs`. While `progress.phase` is `LOADING`, the worker is still reading the bots' token files and building them: `botsLoaded` of `botsTotal` grows with each heartbeat, and trading starts at `TRADING`. Once it trades, the paused counts in `activity` say why steps placed nothing new. `pausedStaleData` growing means the worker's view of the market is more than two seconds old or Market Data's feed is not live: look for `market data unavailable` in the simulator's log and at Market Data's health. `pausedMarketNotOpen` means the market is halted or not open yet. `pausedOther` means none of the run's instruments is listed by Market Data yet, as early in a new simulation before its first instrument reaches Market Data. A worker of an older version reports none of this: `progress` stays null and the counts stay 0.
 
 **Ended shows "Not confirmed".** The run was stopped with no worker to confirm it: its worker went away first, or it never had one. A worker that comes along later settles a run its worker left: it cancels the run's remaining quotes and confirms, before it takes any new run. A running simulator does this within seconds; if the simulator is down, start it. A run that never had a worker has nothing to settle and stays "Not confirmed". Meanwhile the run's window has no end, so Recent runs marks it "Not finished" and it can't be compared. Starting the next run ends that window at the new run's start, and the old run becomes comparable. Its **Ran for** in Recent runs does not move with that: without a confirmation it reads "About" a length, counted to the worker's last report and never past the stop or the run's end time, or "Unknown" when no worker ever took the run.
 

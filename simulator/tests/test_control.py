@@ -5,7 +5,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from mse_simulator.control import BOTS_PER_PAGE, Beat, ControlClient, Totals
+from mse_simulator.control import BOTS_PER_PAGE, Assignment, Beat, ControlClient, Progress, Totals
 
 CONTROL = "test-control-token"
 BASE = "http://execution:8080"
@@ -172,11 +172,19 @@ def test_empty_pages_that_name_another_are_refused() -> None:
     assert len(control.pages) == 3
 
 
-TOTALS = Totals(placed=7, canceled=2, rejected=1, errors=0)
+TOTALS = Totals(
+    placed=7,
+    canceled=2,
+    rejected=1,
+    errors=0,
+    paused_stale_data=5,
+    paused_market_not_open=4,
+    paused_other=3,
+)
 
 
 def beat_with(
-    answer: httpx.Response, manifest: dict | None = None
+    answer: httpx.Response, manifest: dict | None = None, progress: Progress | None = None
 ) -> tuple[Beat | None, list[dict]]:
     sent: list[dict] = []
 
@@ -189,7 +197,9 @@ def beat_with(
     async def go() -> Beat | None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
             client = ControlClient(http, BASE, CONTROL)
-            return await client.heartbeat(RUN, "worker-1", TOTALS, 3, 0, manifest=manifest)
+            return await client.heartbeat(
+                RUN, "worker-1", TOTALS, 3, 0, manifest=manifest, progress=progress
+            )
 
     return asyncio.run(go()), sent
 
@@ -221,10 +231,32 @@ def test_a_heartbeat_reports_the_totals_and_carries_a_manifest_only_when_given()
             "inFlight": 3,
             "stopFailures": 0,
             "stopped": False,
+            "pausedStaleData": 5,
+            "pausedMarketNotOpen": 4,
+            "pausedOther": 3,
         }
     ]
     _, with_manifest = beat_with(HELD, {"version": "0.1.0+27a70d6c1e2f"})
     assert with_manifest[0]["manifest"] == {"version": "0.1.0+27a70d6c1e2f"}
+    _, loading = beat_with(HELD, progress=Progress("LOADING", 1_500, 20_000))
+    assert {key: loading[0][key] for key in ("phase", "botsLoaded", "botsTotal")} == {
+        "phase": "LOADING",
+        "botsLoaded": 1_500,
+        "botsTotal": 20_000,
+    }
+
+
+def test_the_paused_counts_continue_from_the_assignment_and_start_at_zero_without_them() -> None:
+    body = run(1)
+    old = Assignment.parse(body, [])
+    assert (old.totals.paused_stale_data, old.totals.paused_other) == (0, 0)
+    body["totals"] |= {"pausedStaleData": 9, "pausedMarketNotOpen": 8, "pausedOther": 7}
+    totals = Assignment.parse(body, []).totals
+    assert (totals.paused_stale_data, totals.paused_market_not_open, totals.paused_other) == (
+        9,
+        8,
+        7,
+    )
 
 
 @pytest.mark.parametrize(

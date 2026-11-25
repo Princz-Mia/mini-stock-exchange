@@ -122,6 +122,10 @@ class SimulatorControlIT {
 		assertThat(run.get("instruments").get(0).get("symbol").asString()).isEqualTo("NOVA");
 		assertThat(run.has("bots")).as("bots come in pages").isFalse();
 		assertThat(run.get("botCount").asInt()).isEqualTo(3);
+		assertThat(jdbc.queryForObject("""
+				SELECT count(*) FROM bot_assignment b JOIN account a ON a.id = b.account_id
+				WHERE b.run_id = ? AND b.account_created_at = a.created_at""", Integer.class, first))
+			.as("each assignment keeps its account's creation time, which orders the pages").isEqualTo(3);
 		List<String> assigned = new ArrayList<>();
 		JsonNode page = botPage(simulator, first, null, 2, 200);
 		assertThat(page.get("bots")).hasSize(2);
@@ -161,9 +165,42 @@ class SimulatorControlIT {
 		JsonNode listed = operatorView(operator, first);
 		assertThat(listed.get("status").asString()).isEqualTo("RUNNING");
 		assertThat(listed.get("worker").get("workerId").asString()).isEqualTo("worker-a");
-		assertThat(listed.get("activity").toString()).isEqualTo(
-				"{\"placed\":10,\"canceled\":2,\"rejected\":1,\"errors\":0,\"inFlight\":1,\"stopFailures\":0}");
+		assertThat(listed.get("activity").toString()).isEqualTo("""
+				{"placed":10,"canceled":2,"rejected":1,"errors":0,"inFlight":1,"stopFailures":0,"pausedStaleData":0,\
+				"pausedMarketNotOpen":0,"pausedOther":0}""");
+		assertThat(listed.get("progress").isNull()).as("a heartbeat with no phase reports no progress").isTrue();
 		assertThat(assignment(simulator).get("run").get("totals").get("placed").asLong()).isEqualTo(10);
+
+		// A worker says where it is with the run: loading so many of its bots, then trading. The steps its bots spent
+		// paused, by why, are cumulative like the totals: lower counts change nothing, and counts left out stay. The
+		// first beat of a run is the one the simulator sends before any bot is loaded: none of them, and every paused
+		// count zero.
+		beat(simulator, first, "worker-a", 10, 2, 1, 0, 1, false, 200, """
+				"phase":"LOADING","botsLoaded":0,"botsTotal":3,"pausedStaleData":0,"pausedMarketNotOpen":0,\
+				"pausedOther":0""");
+		JsonNode loading = operatorView(operator, first);
+		assertThat(loading.get("progress").toString())
+			.isEqualTo("{\"phase\":\"LOADING\",\"botsLoaded\":0,\"botsTotal\":3}");
+		assertThat(paused(loading.get("activity"))).isEqualTo("0 0 0");
+		beat(simulator, first, "worker-a", 10, 2, 1, 0, 1, false, 200, """
+				"phase":"LOADING","botsLoaded":1,"botsTotal":3""");
+		assertThat(operatorView(operator, first).get("progress").toString())
+			.isEqualTo("{\"phase\":\"LOADING\",\"botsLoaded\":1,\"botsTotal\":3}");
+		beat(simulator, first, "worker-a", 10, 2, 1, 0, 1, false, 200, """
+				"phase":"TRADING","botsLoaded":3,"botsTotal":3,"pausedStaleData":7,"pausedMarketNotOpen":5,\
+				"pausedOther":2""");
+		beat(simulator, first, "worker-a", 10, 2, 1, 0, 1, false, 200, """
+				"phase":"TRADING","botsLoaded":3,"botsTotal":3,"pausedStaleData":4,"pausedMarketNotOpen":6""");
+		JsonNode trading = operatorView(operator, first);
+		assertThat(trading.get("progress").toString())
+			.isEqualTo("{\"phase\":\"TRADING\",\"botsLoaded\":3,\"botsTotal\":3}");
+		assertThat(paused(trading.get("activity"))).isEqualTo("7 6 2");
+		assertThat(paused(assignment(simulator).get("run").get("totals")))
+			.as("a worker taking the run over continues from them").isEqualTo("7 6 2");
+		beat(simulator, first, "worker-a", 10, 2, 1, 0, 1, false, 200);
+		JsonNode silent = operatorView(operator, first);
+		assertThat(silent.get("progress").isNull()).as("a worker that says nothing of its phase shows none").isTrue();
+		assertThat(paused(silent.get("activity"))).isEqualTo("7 6 2");
 
 		// Another worker waits until the lease lapses, then takes over.
 		assertThat(problem(beatResponse(simulator, first, "worker-b", 0, 0, 0, 0, 0, false), 409))
@@ -182,6 +219,14 @@ class SimulatorControlIT {
 				bearer(SIMULATOR_TOKEN)))).containsExactlyInAnyOrder("runId", "workerId", "placed", "canceled",
 						"rejected", "errors", "inFlight", "stopFailures");
 		assertThat(fields(beatResponse(simulator, first, "worker-b", 11, 2, 1, 0, 2, true))).containsExactly("inFlight");
+		assertThat(fields(beatResponse(simulator, first, "worker-b", 11, 2, 1, 0, 0, false, """
+				"phase":"WAITING","botsLoaded":4,"botsTotal":3,"pausedStaleData":-1,"pausedMarketNotOpen":-1,\
+				"pausedOther":-1"""))).containsExactlyInAnyOrder("phase", "botsLoaded", "pausedStaleData",
+						"pausedMarketNotOpen", "pausedOther");
+		assertThat(fields(beatResponse(simulator, first, "worker-b", 11, 2, 1, 0, 0, false, "\"phase\":\"LOADING\"")))
+			.containsExactlyInAnyOrder("botsLoaded", "botsTotal");
+		assertThat(fields(beatResponse(simulator, first, "worker-b", 11, 2, 1, 0, 0, false, "\"botsLoaded\":1")))
+			.containsExactly("phase");
 		assertThat(problem(beatResponse(simulator, UUID.randomUUID(), "worker-b", 0, 0, 0, 0, 0, false), 404))
 			.isEqualTo("RUN_NOT_FOUND");
 
@@ -256,25 +301,44 @@ class SimulatorControlIT {
 
 	private static HttpResponse<String> beatResponse(TestBrowser simulator, UUID run, String worker, long placed,
 			long canceled, long rejected, long errors, int inFlight, boolean stopped) throws Exception {
+		return beatResponse(simulator, run, worker, placed, canceled, rejected, errors, inFlight, stopped, null);
+	}
+
+	/** {@code more} is further fields of the body, such as the phase, or null for none. */
+	private static HttpResponse<String> beatResponse(TestBrowser simulator, UUID run, String worker, long placed,
+			long canceled, long rejected, long errors, int inFlight, boolean stopped, String more) throws Exception {
 		return simulator.post(HEARTBEAT, """
 				{"runId":"%s","workerId":"%s","placed":%d,"canceled":%d,"rejected":%d,"errors":%d,"inFlight":%d,
-				"stopFailures":0,"stopped":%s}""".formatted(run, worker, placed, canceled, rejected, errors, inFlight,
-				stopped), bearer(SIMULATOR_TOKEN));
+				"stopFailures":0,"stopped":%s%s}""".formatted(run, worker, placed, canceled, rejected, errors, inFlight,
+				stopped, more == null ? "" : "," + more), bearer(SIMULATOR_TOKEN));
 	}
 
 	private static JsonNode beat(TestBrowser simulator, UUID run, String worker, long placed, long canceled,
 			long rejected, long errors, int inFlight, boolean stopped, int status) throws Exception {
+		return beat(simulator, run, worker, placed, canceled, rejected, errors, inFlight, stopped, status, null);
+	}
+
+	private static JsonNode beat(TestBrowser simulator, UUID run, String worker, long placed, long canceled,
+			long rejected, long errors, int inFlight, boolean stopped, int status, String more) throws Exception {
 		HttpResponse<String> beat = beatResponse(simulator, run, worker, placed, canceled, rejected, errors, inFlight,
-				stopped);
+				stopped, more);
 		assertThat(beat.statusCode()).as(beat.body()).isEqualTo(status);
 		CONTRACT.assertResponse("POST", HEARTBEAT, status, beat.headers().firstValue("Content-Type").orElse(null),
 				beat.body());
 		return JSON.readTree(beat.body());
 	}
 
+	/** The paused counts: stale data, market not open, other. */
+	private static String paused(JsonNode counts) {
+		return counts.get("pausedStaleData").asLong() + " " + counts.get("pausedMarketNotOpen").asLong() + " "
+				+ counts.get("pausedOther").asLong();
+	}
+
 	private static JsonNode operatorView(TestBrowser operator, UUID run) throws Exception {
 		HttpResponse<String> read = operator.get("/api/v1/admin/bot-runs");
 		assertThat(read.statusCode()).as(read.body()).isEqualTo(200);
+		CONTRACT.assertResponse("GET", "/api/v1/admin/bot-runs", 200,
+				read.headers().firstValue("Content-Type").orElse(null), read.body());
 		for (JsonNode listed : JSON.readTree(read.body()).get("runs")) {
 			if (listed.get("runId").asString().equals(run.toString())) {
 				return listed;

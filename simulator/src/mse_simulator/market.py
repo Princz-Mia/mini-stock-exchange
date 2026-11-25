@@ -1,10 +1,15 @@
 """One shared view of the public market, polled once per interval for every bot."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from uuid import UUID
 
 import httpx
+
+# The widest book whose mid the bots take for a price, in basis points of that mid: the default
+# of the setting narrow_book_bp.
+NARROW_BOOK_BP = 100.0
 
 
 def cents(price: str) -> int:
@@ -29,13 +34,24 @@ class Instrument:
     min_quantity: int
     max_quantity: int
 
-    def anchor(self) -> float:
-        """Where the market stands, in cents: the mid if both sides quote, else the last trade,
-        else the reference. The mid is exact, so it may lie half a tick off the grid: rounding it
-        here, one way for every order, would push prices that way. ``prices.limit_price`` rounds
-        each order's limit instead."""
-        if self.bid is not None and self.ask is not None:
-            return (self.bid + self.ask) / 2
+    def mid(self, narrow: float) -> float | None:
+        """The mid of a narrow book, in cents: both sides quoted, at most ``narrow`` of the mid or
+        one tick apart. None otherwise. The mid of a wide book is no price anyone offered to trade
+        at: a single order far from the rest, facing nothing near it, would make it whatever that
+        order says. The mid is exact, so it may lie half a tick off the grid: rounding it here,
+        one way for every order, would push prices that way. ``prices.limit_price`` rounds each
+        order's limit instead."""
+        if self.bid is None or self.ask is None:
+            return None
+        mid = (self.bid + self.ask) / 2
+        return mid if self.ask - self.bid <= max(narrow * mid, self.tick) else None
+
+    def anchor(self, narrow: float) -> float:
+        """Where the market stands, in cents: the mid of a narrow book, else the last trade, else
+        the reference."""
+        mid = self.mid(narrow)
+        if mid is not None:
+            return mid
         if self.last is not None:
             return float(self.last)
         return float(self.reference)
@@ -43,6 +59,12 @@ class Instrument:
 
 OPEN = "OPEN"
 CLOSED = "CLOSED"
+
+# Why new exposure pauses: the data is too old or not live, the market is not open, or anything
+# else, such as none of the run's instruments listed.
+STALE_DATA = "STALE_DATA"
+MARKET_NOT_OPEN = "MARKET_NOT_OPEN"
+OTHER = "OTHER"
 
 
 @dataclass(frozen=True)
@@ -52,6 +74,8 @@ class MarketView:
     state: str
     live: bool
     instruments: tuple[Instrument, ...]
+    # When the answers arrived, on the worker's clock: the data is as old as that, however long
+    # the poll took.
     fetched_at: float
 
     @property
@@ -65,9 +89,20 @@ class MarketView:
 
     def tradable(self, now: float, max_age: float) -> bool:
         """New exposure only while the market is open and the data is live and recent."""
-        return (
-            self.open and self.live and bool(self.instruments) and now - self.fetched_at <= max_age
-        )
+        return self.pause(now, max_age) is None
+
+    def pause(self, now: float, max_age: float) -> str | None:
+        """Why new exposure pauses now, or None if it need not. Data too old comes first: the
+        phase it shows may no longer hold."""
+        if now - self.fetched_at > max_age:
+            return STALE_DATA
+        if not self.open:
+            return MARKET_NOT_OPEN
+        if not self.live:
+            return STALE_DATA
+        if not self.instruments:
+            return OTHER
+        return None
 
     def only(self, instrument_ids: frozenset[UUID]) -> MarketView:
         """The same view, limited to a run's instruments."""
@@ -83,22 +118,36 @@ class MarketView:
 UNSEEN = MarketView(state="UNKNOWN", live=False, instruments=(), fetched_at=float("-inf"))
 
 
-async def phase(http: httpx.AsyncClient, execution_url: str) -> str:
-    """The market's phase, which only Execution decides."""
+async def status(http: httpx.AsyncClient, execution_url: str) -> tuple[str, str | None]:
+    """The market's phase, which only Execution decides, and the simulation it is of: none before
+    the first setup."""
     answer = await http.get(f"{execution_url}/api/v1/market")
     answer.raise_for_status()
-    return answer.json()["state"]
+    body = answer.json()
+    return body["state"], body.get("simulationId")
+
+
+async def phase(http: httpx.AsyncClient, execution_url: str) -> str:
+    state, _ = await status(http, execution_url)
+    return state
 
 
 async def fetch(
-    http: httpx.AsyncClient, execution_url: str, market_data_url: str, now: float
+    http: httpx.AsyncClient, execution_url: str, market_data_url: str, clock: Callable[[], float]
 ) -> MarketView:
-    """The authoritative phase from Execution, quotes from Market Data. Public, no credentials."""
-    state = await phase(http, execution_url)
+    """The authoritative phase from Execution, quotes from Market Data. Public, no credentials.
+    Stamped by ``clock`` once both have answered: stamped when the poll began, a slow poll would
+    make fresh data look old and pause the bots."""
+    state, simulation = await status(http, execution_url)
     if state == CLOSED:
         # Nothing is quoted any more, and the end of the market must not wait for Market Data.
-        return MarketView(state=state, live=False, instruments=(), fetched_at=now)
-    listing = await http.get(f"{market_data_url}/api/v1/instruments")
+        return MarketView(state=state, live=False, instruments=(), fetched_at=clock())
+    # The simulation Execution names, not the one Market Data takes for current: that is the one
+    # whose instrument changed last, which early in a new simulation can still be the old one.
+    listing = await http.get(
+        f"{market_data_url}/api/v1/instruments",
+        params=None if simulation is None else {"simulationId": simulation},
+    )
     listing.raise_for_status()
     body = listing.json()
 
@@ -124,5 +173,5 @@ async def fetch(
         state=state,
         live=body["feed"]["state"] == "LIVE",
         instruments=instruments,
-        fetched_at=now,
+        fetched_at=clock(),
     )

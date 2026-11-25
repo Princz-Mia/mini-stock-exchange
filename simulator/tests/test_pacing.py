@@ -49,6 +49,16 @@ def test_a_step_that_sends_nothing_gives_its_command_back() -> None:
     assert pacer.take(), "the refunded command is spent again"
 
 
+def test_a_second_command_in_one_step_is_paid_for_by_the_steps_after_it() -> None:
+    pacer = Pacer(10.0, 0.0)
+    assert pacer.take()
+    pacer.charge()
+    pacer.accrue(0.1)
+    assert not pacer.take(), "the tenth of a second paid for the second command"
+    pacer.accrue(0.2)
+    assert pacer.take()
+
+
 def test_refunds_cannot_repeat_steps_beyond_their_own_budget() -> None:
     pacer = Pacer(10.0, 0.0)
     while pacer.take():
