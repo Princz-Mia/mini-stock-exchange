@@ -6,12 +6,15 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 @Import(TestcontainersConfiguration.class)
 @SpringBootTest(webEnvironment = WebEnvironment.RANDOM_PORT)
@@ -19,6 +22,28 @@ class ExecutionServiceApplicationIT {
 
 	@LocalServerPort
 	int port;
+
+	@Autowired
+	JdbcTemplate jdbc;
+
+	/** The relay reads the backlog on the outbox's own connections, whose reads time out, and on no others. */
+	@Test
+	void theRelayReadsOnTheOutboxConnections() throws Exception {
+		List<String> readers = List.of();
+		for (int attempt = 0; attempt < 100 && readers.isEmpty(); attempt++) {
+			Thread.sleep(100);
+			readers = backlogReaders(jdbc);
+		}
+		assertThat(readers).isNotEmpty().containsOnly("mse-outbox");
+	}
+
+	/** The application name of every other session whose latest statement read the outbox backlog. */
+	static List<String> backlogReaders(JdbcTemplate jdbc) {
+		return jdbc.queryForList("""
+				SELECT application_name FROM pg_stat_activity
+				WHERE datname = current_database() AND pid <> pg_backend_pid()
+				    AND query LIKE '%octet_length(payload)%FROM outbox%'""", String.class);
+	}
 
 	@Test
 	void healthProbesAreUpAndOpen() throws Exception {

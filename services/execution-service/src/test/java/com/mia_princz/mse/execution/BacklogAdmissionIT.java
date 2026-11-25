@@ -67,6 +67,9 @@ class BacklogAdmissionIT {
 		HttpResponse<String> resting = place(trader, instrument);
 		assertThat(resting.statusCode()).as(resting.body()).isEqualTo(201);
 		assertThat(pending()).as("the resting order's snapshot").isEqualTo(1);
+		assertThat(ExecutionServiceApplicationIT.backlogReaders(jdbc)).as("admission reads on the outbox connections")
+			.isNotEmpty()
+			.containsOnly("mse-outbox");
 		unpublishedEvents(2);
 
 		HttpResponse<String> refused = place(trader, instrument);
