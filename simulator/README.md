@@ -7,8 +7,10 @@ same public and authenticated API as people use.
   lease with a heartbeat that reports cumulative totals. One worker holds a run at a time; `MSE_WORKER_ID`
   (default: the host name) names it. Without the token the bots stay idle. Each heartbeat also says where the
   worker is with the run: `LOADING` so many bots of so many while it reads their token files and builds them, 500
-  at a time, then `TRADING`. Among the totals are the bots' steps that could place nothing new, by why: market data
-  too old or not live, the market not open, or another reason, such as none of the run's instruments listed yet.
+  at a time, then `TRADING`. A stop that comes during the loading is taken once every bot is loaded: the worker
+  then places nothing and cancels the bots' quotes, and the heartbeats go on reporting the loading until then.
+  Among the totals are the bots' steps that could place nothing new, by why: market data too old or not live, the
+  market not open, or another reason, such as none of the run's instruments listed yet.
 - **Credentials:** one `<accountId>.token` file per bot, written once by the exchange when the operator
   provisions bots. Compose mounts that volume read-only at `/run/mse/bot-tokens`. The assignment names each
   bot's file, never its token.

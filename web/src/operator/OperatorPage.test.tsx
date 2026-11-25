@@ -2492,7 +2492,111 @@ describe('bot runs on the operator screen', () => {
     // Its worker hasn't reported its simulator yet: nothing to open.
     expect(counters).toHaveTextContent('SimulatorNot reported yet');
     expect(within(panel).queryByText('Simulator settings')).toBeNull();
+    // No step paused, so there is no reason to count them by.
+    expect(counters).toHaveTextContent('Paused0');
+    expect(within(panel).queryByText(/Paused steps by reason/)).toBeNull();
   });
+
+  it('shows the run waiting, loading and trading as its heartbeats say, and announces only phases and quarters', async () => {
+    const { state } = exchange('OPEN');
+    const loading = (botsLoaded: number) =>
+      botRun({
+        activity: { ...botRun().activity, placed: 0, canceled: 0, rejected: 0, errors: 0, inFlight: 0 },
+        progress: { phase: 'LOADING', botsLoaded, botsTotal: 20_000 },
+      });
+    state.runs = [botRun({ status: 'STARTING', worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null }, progress: null })];
+    renderPage();
+
+    const panel = await runs();
+    expect(await within(panel).findByRole('progressbar', { name: 'Waiting for a simulator worker' })).not.toHaveAttribute(
+      'aria-valuenow',
+    );
+    const announcements = within(panel).getAllByRole('status').find((node) => node.className === 'visually-hidden')!;
+    // A run found on its way on opening the page is shown, not announced.
+    expect(announcements).toHaveTextContent('');
+
+    state.runs = [loading(0)];
+    const loadingBar = await within(panel).findByRole('progressbar', { name: 'Loading bots' }, { timeout: 3_000 });
+    expect(loadingBar).toHaveAttribute('aria-valuetext', '0 of 20,000 bots loaded (0%)');
+    await waitFor(() => expect(announcements.textContent).toBe('Loading 20,000 bots.'));
+
+    state.runs = [loading(6_000)];
+    await waitFor(() => expect(within(panel).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '6000'), {
+      timeout: 3_000,
+    });
+    expect(within(panel).getByText('Step 2 of 3 · 6,000 of 20,000 bots loaded (30%)')).toBeInTheDocument();
+    await waitFor(() => expect(announcements.textContent).toBe('25% of the 20,000 bots are loaded.'));
+
+    // Within the same quarter the bar moves and nothing more is said.
+    state.runs = [loading(9_000)];
+    await waitFor(() => expect(within(panel).getByRole('progressbar')).toHaveAttribute('aria-valuenow', '9000'), {
+      timeout: 3_000,
+    });
+    expect(announcements.textContent).toBe('25% of the 20,000 bots are loaded.');
+
+    state.runs = [botRun({ activity: { ...botRun().activity, placed: 0, pausedStaleData: 1_204, pausedOther: 3 } })];
+    await waitFor(() => expect(announcements).toHaveTextContent('Every bot is loaded; the run is trading.'), {
+      timeout: 3_000,
+    });
+    expect(within(panel).queryByRole('progressbar')).toBeNull();
+    expect(within(panel).getByRole('heading', { name: 'Trading' })).toBeInTheDocument();
+    // It has placed nothing, and its paused steps say why.
+    expect(within(panel).getByText(/^Paused: market data is stale\./)).toHaveAttribute('role', 'status');
+    const counters = within(panel).getByRole('group', { name: 'Current run' });
+    expect(counters).toHaveTextContent('Paused1,207');
+    expect(within(panel).getByText('Paused steps by reason: market data stale 1,204 · other 3.')).toBeInTheDocument();
+
+    state.runs = [botRun({ status: 'STOPPING', desiredState: 'STOPPED', stopRequestedAt: '2026-11-06T10:01:30Z' })];
+    await waitFor(() => expect(announcements).toHaveTextContent('The run is stopping.'), { timeout: 3_000 });
+    expect(within(panel).getByRole('heading', { name: 'Stopping' })).toBeInTheDocument();
+
+    state.runs = [botRun({ status: 'STALE' })];
+    await waitFor(() => expect(announcements).toHaveTextContent("The run's heartbeats stopped; its bots place nothing."), {
+      timeout: 3_000,
+    });
+    expect(within(panel).getByRole('heading', { name: 'Heartbeats stopped' })).toBeInTheDocument();
+    // Eight reads two seconds apart, each waited for.
+  }, 24_000);
+
+  it('announces a run started after the page opened, from its first phase', async () => {
+    const { state } = exchange('OPEN');
+    state.bots = 3;
+    state.runs = [];
+    renderPage();
+
+    const panel = await runs();
+    expect(await within(panel).findByRole('form', { name: 'Start a bot run' })).toBeInTheDocument();
+    const announcements = within(panel).getAllByRole('status').find((node) => node.className === 'visually-hidden')!;
+    expect(announcements).toHaveTextContent('');
+
+    // Started elsewhere, as from another operator's screen: this page learns of it on its next read.
+    const worker = { workerId: null, heartbeatAt: null, leaseExpiresAt: null };
+    state.runs = [botRun({ status: 'STARTING', worker, progress: null })];
+    expect(
+      await within(panel).findByRole('progressbar', { name: 'Waiting for a simulator worker' }, { timeout: 3_000 }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(announcements.textContent).toBe('The run is waiting for a simulator worker.'));
+
+    // Its end is said too, as the run gives way to the form.
+    state.runs = [finishedRun()];
+    expect(await within(panel).findByRole('form', { name: 'Start a bot run' }, { timeout: 3_000 })).toBeInTheDocument();
+    await waitFor(() => expect(announcements.textContent).toBe('The run has stopped.'));
+  });
+
+  it('does not announce a run that had already stopped when the page opened', async () => {
+    const { server, state } = exchange('OPEN');
+    state.bots = 3;
+    state.runs = [finishedRun()];
+    renderPage();
+
+    const panel = await runs();
+    expect(await within(panel).findByRole('form', { name: 'Start a bot run' })).toBeInTheDocument();
+    const announcements = within(panel).getAllByRole('status').find((node) => node.className === 'visually-hidden')!;
+    // Two more reads: what was there on opening stays unsaid.
+    const reads = () => server.requests.filter((request) => request.url === '/api/v1/admin/bot-runs?limit=10').length;
+    await waitFor(() => expect(reads()).toBeGreaterThanOrEqual(3), { timeout: 6_000 });
+    expect(announcements).toHaveTextContent('');
+  }, 10_000);
 
   it('says how long the run has been going and how long a timed one has left, as of the last answer', async () => {
     const { state } = exchange('OPEN');
