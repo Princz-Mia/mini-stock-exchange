@@ -268,11 +268,31 @@ public interface TradingStore {
 	 */
 	int endBotRunsAtClose(UUID simulationId, long sequence, Instant at);
 
-	/** Every bot is created with its strategy; bots made untagged before it was required keep a null one. */
-	void insertBotAccount(UUID simulationId, UUID accountId, String displayName, BotStrategy strategy);
+	/** A bot to create: its account, its name, and the hash of the token handed over for it. */
+	record NewBot(UUID accountId, String displayName, byte[] tokenHash) {
+	}
 
-	/** Stores a bot's token hash; the token itself is never stored. */
-	void insertApiToken(UUID tokenId, UUID accountId, byte[] tokenHash);
+	/**
+	 * Creates bots, all with this strategy and endowment, in a fixed number of statements however many there are.
+	 * Each gets its account, its own GENESIS batch from the issuance account with its initial allocations, its cash
+	 * and position rows, and its token hash; the token itself is never stored. They are created in the order given,
+	 * each a microsecond after the one before and after every bot already in the simulation, so that bots list in the
+	 * order they were made. Bots made untagged before a strategy was required keep a null one.
+	 */
+	void insertBots(UUID simulationId, long commandSequence, BotStrategy strategy, long cashCents,
+			List<ProvisionAccount.Holding> holdings, List<NewBot> bots);
+
+	/** Records a bot job as it starts. */
+	void insertBotJob(BotJob job);
+
+	/** Writes a job's state, progress and the fields of the run that has it, as {@code job} holds them. */
+	void updateBotJob(BotJob job);
+
+	/** The job, if it is this simulation's. */
+	Optional<BotJob> botJob(UUID simulationId, UUID jobId);
+
+	/** The simulation's running job, if one runs: there is at most one. */
+	Optional<BotJob> runningBotJob(UUID simulationId);
 
 	/** Whether the account is a bot in this market. */
 	boolean isBotAccount(UUID simulationId, UUID accountId);

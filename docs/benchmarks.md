@@ -150,6 +150,33 @@ That is about 0.13 to 0.15 ms an order, nearly all of it in the statements: of t
 
 So 5,000 it is: larger transactions make the whole close no faster and hold the writer for seconds at a time, and smaller ones make it slower. The second close in each pair was the slower one; it ran beside the first market's rows, and other work shared the machine during these runs, so the figures are a range, not a limit. The close's request waits 45 seconds for the answer (`mse.market.close-timeout`); a close that takes longer answers `504` and goes on.
 
+## Creating bots
+
+Each bot is an account, a genesis batch funding it (four ledger rows for cash and one instrument), its balance rows, a token hash, and a token file in the simulator's secret directory, synced before the commit that creates the bot. Measured on 2026-11-24, Windows 11 and Docker Desktop, PostgreSQL 18.6 in Testcontainers with fsync on; each command made 100 bots with cash and one holding.
+
+| | Answer, per 100 bots | Writer's statements | Commit | Token files |
+| --- | --- | --- | --- | --- |
+| One statement after another, files synced one at a time on the writer | 857 ms | 841 ms (files included) | 4.9 ms | 365 ms |
+| One statement for all the bots, files synced together before the command is queued | 173 ms | 56 ms | 4.9 ms | 94 ms |
+
+- **The statements:** a dozen round trips for each bot, about 0.38 ms each through Docker Desktop's port, became one statement with the bots' arrays. Seven statements, one per table, still took 146 ms: each statement carrying large arrays cost about 45 ms more on this machine.
+- **The token files:** each file still gets its own sync before it is renamed into place, and the directory is synced once the names are in place. Writing a batch's files first and then syncing them on 32 threads lets the syncs share the file system's journal commits. Per 100 and per 1,000 files:
+
+| Token files | One at a time | 32 at once |
+| --- | --- | --- |
+| Windows NTFS, 100 / 1,000 | 336 ms / 3.37 s | 94 ms / 0.97 s |
+| ext4 in Docker Desktop's VM, 100 / 1,000 | 348 ms / 3.49 s | 33 ms / 0.27 s |
+
+The files are written on the thread that sends the command, not on the writer, so other commands no longer wait behind them. Database round trips here go through Docker Desktop's port forwarding, and "ext4" is the disk inside its VM, not a native Linux host.
+
+**A job of 20,000 bots, 2026-11-24.** `BotJobBench` starts one job over HTTP (4,000 market makers, 12,000 noise, 4,000 momentum, each with cash and one holding, in parts of 1,000) and adds an instrument every 100 ms while it runs; same machine, fsync on, token files on the Windows disk:
+
+| Whole job | Rate | Parts | Longest part on the writer | Other commands meanwhile |
+| --- | --- | --- | --- | --- |
+| 23.5 s | 852 bots a second | 20 | 158 ms of statements, about 7 ms of commit | 182, median 16 ms, p95 133 ms, max 194 ms |
+
+The start answered in 42 ms. Each part took about 1.2 s, nearly all of it its 1,000 token files on the Windows disk, made on the job's own thread while the writer took other commands. On ext4 those files took 0.27 s per 1,000 above, so the same job should take nearer 9 s there. The estimate of the time left, read every 2 s, was within a second or two of the end from the second part on. Reconciliation afterwards took 141 ms. Before these changes, 20,000 bots took 200 commands of 100 by hand, and about 171 s of the writer's time.
+
 ## Steady load
 
 **Scenario:** five instruments and 10,000 bots (2,000 market makers, 2,000 momentum, 6,000 noise) trading at 100 commands a second. Placements and cancels are mixed. There is a two-minute warm-up, then ten minutes are measured. Until 2026-11-15 the scenario was 1,000 bots; its last result is kept below. Neither is a limit: the exchange limits neither the bot population nor the bots in one run, and `--bots` sets the number.

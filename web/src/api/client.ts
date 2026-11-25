@@ -3,6 +3,8 @@ import type {
   AccountCreated,
   AccountPage,
   AccountRequest,
+  BotJob,
+  BotJobRequest,
   BotPopulation,
   BotRunDetail,
   BotRunList,
@@ -277,6 +279,17 @@ export const api = {
 
   provisionBots: (bots: BotsRequest, idempotencyKey: string) =>
     request<BotsCreated>('POST', '/api/v1/admin/bots', { body: bots, idempotencyKey }),
+
+  /** Starts creating any number of bots in the background; answered with the job before any bot is made. */
+  startBotJob: (job: BotJobRequest, idempotencyKey: string) =>
+    request<BotJob>('POST', '/api/v1/admin/bot-jobs', { body: job, idempotencyKey }),
+
+  /** The current simulation's newest bot job, whatever its state; null while it has had none. */
+  currentBotJob: async (): Promise<BotJob | null> =>
+    (await request<BotJob | undefined>('GET', '/api/v1/admin/bot-jobs/current')) ?? null,
+
+  stopBotJob: (jobId: string, idempotencyKey: string) =>
+    request<BotJob>('POST', `/api/v1/admin/bot-jobs/${jobId}/stop`, { idempotencyKey }),
 
   /**
    * The newest runs first, with what their workers last reported, and when the exchange answered, on its own clock:

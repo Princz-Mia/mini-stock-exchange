@@ -24,6 +24,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 import com.mia_princz.mse.execution.trading.application.AccountChanges;
 import com.mia_princz.mse.execution.trading.application.BotCredentials;
+import com.mia_princz.mse.execution.trading.application.BotJobWorker;
 import com.mia_princz.mse.execution.trading.application.CommandWriter;
 import com.mia_princz.mse.execution.trading.application.SimulationChanges;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
@@ -85,9 +86,12 @@ class TradingConfiguration {
 		return writer;
 	}
 
-	/** Plaintext bot tokens go to the simulator's secret directory, once, and nowhere else. */
-	@Bean
-	BotCredentials botCredentials(@Value("${mse.bots.token-directory}") Path directory) {
+	/**
+	 * Plaintext bot tokens go to the simulator's secret directory, once, and nowhere else. Closing it stops the threads
+	 * that sync the files.
+	 */
+	@Bean(destroyMethod = "close")
+	FileBotCredentials botCredentials(@Value("${mse.bots.token-directory}") Path directory) {
 		return new FileBotCredentials(directory);
 	}
 
@@ -98,14 +102,27 @@ class TradingConfiguration {
 	@Bean
 	TradingEngine tradingEngine(TradingStore store, WriterConnections connections, CommandWriter writer, Clock clock,
 			BotCredentials botCredentials, AccountChanges accountChanges, List<SimulationChanges> simulationChanges,
-			ScheduledClose scheduledClose, MeterRegistry meters,
-			@Value("${mse.market.close-chunk-orders:" + TradingEngine.CLOSE_CHUNK_ORDERS + "}") int closeChunkOrders) {
+			ScheduledClose scheduledClose, BotJobWorker botJobs, MeterRegistry meters,
+			@Value("${mse.market.close-chunk-orders:" + TradingEngine.CLOSE_CHUNK_ORDERS + "}") int closeChunkOrders,
+			@Value("${mse.bots.job-part-size:" + TradingEngine.BOT_JOB_PART_SIZE + "}") int botJobPartSize) {
 		// The store and the transactions share the writer's data source, so a command's statements join its transaction.
 		return new TradingEngine(store,
 				new SpringTransactionRunner(new JdbcTransactionManager(connections.dataSource())), writer, clock,
 				botCredentials, accountChanges, new MicrometerWriterTimings(meters), System::nanoTime,
 				new RestingOrders(), closeChunkOrders, Thread::sleep, SimulationChanges.all(simulationChanges),
-				scheduledClose);
+				scheduledClose, botJobPartSize, botJobs);
+	}
+
+	/**
+	 * Makes bot jobs' parts on a thread of its own, one command at a time, only in the process whose engine started:
+	 * the one that owns the writer. The engine tells it of each job, and it asks the engine back, so the engine is
+	 * looked up when the first job runs. A part waits as long as any command for its answer before it is asked for
+	 * again under its key.
+	 */
+	@Bean(destroyMethod = "close")
+	BotJobWorker botJobWorker(ObjectProvider<TradingEngine> engine,
+			@Value("${mse.trading.command-timeout:5s}") Duration partWait) {
+		return new BotJobWorker(engine::getObject, partWait);
 	}
 
 	/**
