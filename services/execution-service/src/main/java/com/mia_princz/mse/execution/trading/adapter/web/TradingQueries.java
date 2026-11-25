@@ -314,13 +314,6 @@ class TradingQueries {
 		return statement.query((row, index) -> orderView(row)).list();
 	}
 
-	/**
-	 * The order history statement. Every condition is fixed text added only when it applies: a filter that is set,
-	 * and the keyset position on a page after the first. An optional condition such as {@code (:x IS NULL OR ...)}
-	 * would hide the equality or the row comparison from the planner, which could then not start the scan at the
-	 * filter's index range or at the page's position; once the driver prepares the statement on the server and the
-	 * server settles on a generic plan, every later page would be read from the head of the range.
-	 */
 	/** A page of the current simulation's accounts: one range of account_by_simulation, either way, with no sort. */
 	static String accountsSql(PageOrder order, boolean continued) {
 		return """
@@ -335,6 +328,13 @@ class TradingQueries {
 				order.direction(), CurrentSimulation.ID);
 	}
 
+	/**
+	 * The order history statement. Every condition is fixed text added only when it applies: a filter that is set,
+	 * and the keyset position on a page after the first. An optional condition such as {@code (:x IS NULL OR ...)}
+	 * would hide the equality or the row comparison from the planner, which could then not start the scan at the
+	 * filter's index range or at the page's position; once the driver prepares the statement on the server and the
+	 * server settles on a generic plan, every later page would be read from the head of the range.
+	 */
 	static String ordersSql(PageOrder order, HistoryFilter filter, boolean continued) {
 		String conditions = (filter.instrumentId() == null ? "" : " AND o.instrument_id = :instrument")
 				+ (filter.side() == null ? "" : " AND o.side = :side")
