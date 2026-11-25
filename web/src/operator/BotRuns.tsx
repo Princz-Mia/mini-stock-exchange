@@ -1,18 +1,31 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router';
 
-import { api, pollEvery } from '../api/client';
-import type { BotPopulation, BotRun, BotRunManifest, BotRunRequest, Instrument, MarketStatus } from '../api/types';
+import { api, pollEvery, pollUntilRead } from '../api/client';
+import type {
+  BotPopulation,
+  BotRun,
+  BotRunManifest,
+  BotRunRequest,
+  BotRunStarted,
+  BotRunStopping,
+  Instrument,
+  MarketStatus,
+} from '../api/types';
 import { type Column, PagedTable } from '../app/PagedTable';
+import { SkeletonRows } from '../app/Skeleton';
 import { usePagedList } from '../app/paging';
 import { useKeyboardScroll } from '../app/useKeyboardScroll';
 import { groupInteger, utcTime } from '../format';
 import {
   activeRun,
   averageRate,
+  botsAskedFor,
+  defaultRate,
   elapsedSeconds,
   leftRunning,
+  paceText,
   ranForSeconds,
   ranForText,
   type RunForm,
@@ -29,17 +42,18 @@ import {
 } from './runView';
 import { populationText } from './strategies';
 import { CommandStatus } from './CommandStatus';
-import { useCommand } from './useCommand';
+import { type Freshness, notReadYet, useFreshRead } from './freshRead';
+import { useOperatorCommand } from './operatorCommands';
 import { comparability, durationText, MAX_COMPARED, parseRunIds, withTick } from './compare';
 import { SimulatorSettings } from './SimulatorSettings';
 
 type Typed = Partial<Omit<RunForm, 'instrumentIds'>> & { instrumentIds?: readonly string[] };
 type TextField = Exclude<keyof RunForm, 'instrumentIds' | 'untilStopped'>;
 
-// A run ends by itself after an hour unless the operator says otherwise: one with no end is easy to forget.
+// A run ends by itself after an hour unless the operator says otherwise: one with no end is easy to forget. Its rate
+// follows the bots asked for until one is typed.
 const DEFAULTS = {
   seed: '',
-  commandsPerSecond: '4.00',
   maxOrderQuantity: '10',
   maxPosition: '100',
   durationMinutes: '60',
@@ -49,34 +63,63 @@ const DEFAULTS = {
 /**
  * Bot runs: the one that is running with its worker and activity, a form to start the next, and every run a page at a
  * time. Everything shown is what Execution committed and what the worker last reported. The current run is refetched
- * every two seconds; the history every five, and at once whenever the newest run changes, so the two agree. How long
- * the run has been going is counted up to the last answer, on the exchange's clock as that answer gave it: it moves
- * with each refetch, needs no timer of its own, and does not depend on the browser's clock.
+ * every two seconds; the history every five, and at once whenever the newest run changes, so the two agree. Neither
+ * is polled once the market has closed and a read has come back, as nothing about its runs can change any more. How
+ * long the run has been going is counted up to the last answer, on the exchange's clock as that answer gave it: it
+ * moves with each refetch, needs no timer of its own, and does not depend on the browser's clock.
  */
 export function BotRuns({
   market,
+  simulationId = null,
   closedAt,
   instruments,
 }: {
   market: MarketStatus['state'];
+  /** The simulation on screen, whose start and stop commands are kept for it. */
+  simulationId?: string | null;
   /** When the market closed, or null while it has not: the close leaves its time on runs it did not end. */
   closedAt: string | null;
   instruments: readonly Instrument[];
 }) {
-  const runs = useQuery({ queryKey: ['bot-runs'], queryFn: api.botRuns, refetchInterval: pollEvery(2_000) });
+  // A close ends every run in its own transaction, and a worker's report on an ended run is refused, so a closed
+  // market's runs are read once, when the page opens or the market closes, and polled only until a read comes back.
+  const closed = market === 'CLOSED';
+  const runs = useQuery({
+    queryKey: ['bot-runs'],
+    queryFn: api.botRuns,
+    refetchInterval: closed ? pollUntilRead(2_000) : pollEvery(2_000),
+  });
   const population = useQuery({ queryKey: ['bots'], queryFn: api.botPopulation });
   const list = runs.data?.runs ?? [];
   const active = activeRun(list);
   const now = runs.data?.answeredAt ?? runs.dataUpdatedAt;
+  // The runs as cached may be from before this page opened, and a start sent meanwhile may have gone through: no form
+  // is offered until they have been read since.
+  const read = useFreshRead(runs);
+  const start = useStartRun(simulationId ?? '', read === 'fresh' && active !== undefined);
+  // A start that is answered, or settled by a run seen going, is let go of once the run has ended, so the form comes
+  // back as new: a started run once it is listed as ended, and otherwise once a read made after the answer shows no
+  // run going. A refusal of what was typed stays with the form.
+  const { forget, outcome: started } = start;
+  const finished =
+    started.kind === 'done'
+      ? list.some((run) => run.runId === started.result.runId)
+      : start.settled || (started.kind === 'refused' && started.code === 'RUN_ACTIVE');
+  const readAfter = start.answeredAt !== null && runs.dataUpdatedAt > start.answeredAt;
+  useEffect(() => {
+    if (finished && readAfter && read === 'fresh' && active === undefined) {
+      forget();
+    }
+  }, [finished, readAfter, read, active, forget]);
   const history = usePagedList({
     table: 'runs',
     queryKey: ['bot-runs', 'history'],
-    fetch: async (cursor, { size, order }) => {
-      const page = await api.botRunPage(cursor, size, order);
+    fetch: async (cursor, { size, order }, read) => {
+      const page = await api.botRunPage(cursor, size, order, read);
       return { rows: page.runs, nextCursor: page.nextCursor };
     },
     defaults: { size: 10, order: 'newest' },
-    refetchInterval: pollEvery(5_000),
+    refetchInterval: closed ? pollUntilRead(5_000) : pollEvery(5_000),
   });
   const client = useQueryClient();
   const newest = list[0];
@@ -122,9 +165,17 @@ export function BotRuns({
         </p>
       )}
       {runs.isPending ? (
-        <p className="muted">Loading…</p>
+        <SkeletonRows />
       ) : active !== undefined ? (
-        <ActiveRun run={active} now={now} />
+        <>
+          {/* The start's answer stays in sight once its form has given way to the run. */}
+          <StartStatus start={start} active />
+          <ActiveRun run={active} now={now} simulationId={simulationId ?? ''} read={read} />
+        </>
+      ) : read !== 'fresh' && !runs.isError ? (
+        <p className="muted" role="status">
+          {notReadYet(read)}
+        </p>
       ) : market === 'CLOSED' ? (
         // No form: nothing in it could be sent. The runs the market had stay below, with their comparison.
         <p className="muted">The market has closed, so no run can start. Its runs stay listed, and can still be compared.</p>
@@ -134,6 +185,7 @@ export function BotRuns({
           instruments={instruments}
           population={population.data}
           blocked={runs.isError ? 'The bot runs could not be loaded.' : null}
+          start={start}
         />
       )}
       {list.length > 0 && (
@@ -167,20 +219,90 @@ export function BotRuns({
   );
 }
 
-function ActiveRun({ run, now }: { run: BotRun; now: number }) {
-  const client = useQueryClient();
-  const send = useCallback(
-    async (runId: string, key: string) => {
-      try {
-        return await api.stopBotRun(runId, key);
-      } finally {
-        void client.invalidateQueries({ queryKey: ['bot-runs'] });
-      }
-    },
-    [client],
+/** The runs, which show what a start or a stop did. Read again with each answer, with the history under them. */
+const RUNS = ['bot-runs'] as const;
+
+/**
+ * A bot run's start, kept beside the cached queries rather than in its form, which gives way to the run once it is
+ * going: leaving the page and coming back finds it on its way or with its answer, under the same key. `going` says a
+ * run has been read as going since the page opened, which settles a start whose answer never came.
+ */
+function useStartRun(simulationId: string, going: boolean) {
+  return useOperatorCommand<BotRunRequest, BotRunStarted>('run-start', simulationId, api.startBotRun, {
+    reached: () => going,
+    confirmedBy: RUNS,
+  });
+}
+
+type StartRun = ReturnType<typeof useStartRun>;
+
+/**
+ * What became of a start. One with no answer is said to have gone through once a run is read as going; one refused
+ * because a run is going is said as an earlier start having gone through, whoever's it was. A start with no answer is
+ * never followed by one under a new key while it is open, so a refusal is never the operator's own earlier start.
+ */
+function StartStatus({ start, active }: { start: StartRun; active: boolean }) {
+  const { outcome } = start;
+  if (start.settled) {
+    return (
+      <p role="status" className="outcome outcome-ok">
+        Your earlier start already went through: the run is going.
+      </p>
+    );
+  }
+  if (outcome.kind === 'refused' && outcome.code === 'RUN_ACTIVE' && active) {
+    return (
+      <p role="alert" className="outcome outcome-rejected">
+        A run is already going: an earlier start already went through, so nothing new was started.
+      </p>
+    );
+  }
+  return (
+    <CommandStatus
+      outcome={outcome}
+      action="Starting the run"
+      done={(started) => `Started a run of ${groupInteger(started.bots)} bots.`}
+      onRetry={() => start.retry()}
+    />
   );
-  const command = useCommand(send);
+}
+
+function ActiveRun({
+  run,
+  now,
+  simulationId,
+  read,
+}: {
+  run: BotRun;
+  now: number;
+  simulationId: string;
+  read: Freshness;
+}) {
   const stopping = run.desiredState === 'STOPPED';
+  const command = useOperatorCommand<string, BotRunStopping>('run-stop', simulationId, api.stopBotRun, {
+    reached: (runId) => read === 'fresh' && runId === run.runId && stopping,
+    confirmedBy: RUNS,
+  });
+  // The stop kept is one run's, and outlives that run's panel. A stop sent for a run that has since ended is finished
+  // business: never shown beside the next run, never sent again for it, and let go of once it has an answer, if any.
+  const earlier = command.args !== undefined && command.args !== run.runId;
+  const earlierSending = earlier && command.outcome.kind === 'sending';
+  const { forget } = command;
+  useEffect(() => {
+    if (earlier && !earlierSending) {
+      forget();
+    }
+  }, [earlier, earlierSending, forget]);
+  const stop = () => {
+    if (earlier) {
+      forget();
+    }
+    command.run(run.runId);
+  };
+  // A stop answered but not read back yet: the run as shown is not stopping yet, and is not offered a second stop.
+  const ownSending = !earlier && (command.outcome.kind === 'sending' || command.awaitingRead);
+  const ownUnresolved = !earlier && command.unresolved;
+  const unread = notReadYet(read);
   const rate = averageRate(run);
   const timeLeft = timeLeftText(run, now);
   const forgotten = leftRunning(run, now);
@@ -195,13 +317,46 @@ function ActiveRun({ run, now }: { run: BotRun; now: number }) {
         <button
           type="button"
           className="primary danger"
-          disabled={stopping || command.outcome.kind === 'sending' || command.unresolved}
-          aria-describedby={stopping ? 'stop-hint' : forgotten ? 'left-running' : undefined}
-          onClick={() => void command.run(run.runId)}
+          disabled={stopping || unread !== null || earlierSending || ownSending || ownUnresolved}
+          aria-describedby={
+            stopping
+              ? 'stop-hint'
+              : unread !== null
+                ? 'stop-unread'
+                : earlierSending
+                  ? 'stop-earlier'
+                  : forgotten
+                    ? 'left-running'
+                    : undefined
+          }
+          onClick={stop}
         >
           Stop run
         </button>
       </div>
+      {unread !== null && !stopping && (
+        <p id="stop-unread" className="muted">
+          {unread}
+        </p>
+      )}
+      {earlierSending && !stopping && (
+        <p id="stop-earlier" className="muted">
+          A stop sent for the run before is still waiting for its answer.
+        </p>
+      )}
+      {/* Beside the button that sent it, and only this run's. */}
+      {earlier ? null : command.settled ? (
+        <p role="status" className="outcome outcome-ok">
+          Your earlier stop already went through: the run is stopping.
+        </p>
+      ) : (
+        <CommandStatus
+          outcome={command.outcome}
+          action="Stopping the run"
+          done={() => 'Stop requested. New orders stop now; quotes are canceled before the worker confirms.'}
+          onRetry={() => command.retry()}
+        />
+      )}
       {/* The words never change while it shows, so a screen reader says it once, not with every refetch. */}
       {forgotten && (
         <p id="left-running" className="chart-note" role="status">
@@ -285,11 +440,6 @@ function ActiveRun({ run, now }: { run: BotRun; now: number }) {
           canceled while stopping.
         </p>
       )}
-      <CommandStatus
-        outcome={command.outcome}
-        done={() => 'Stop requested. New orders stop now; quotes are canceled before the worker confirms.'}
-        onRetry={() => void command.retry()}
-      />
     </div>
   );
 }
@@ -299,32 +449,25 @@ function StartForm({
   instruments,
   population,
   blocked: unavailable,
+  start: command,
 }: {
   market: MarketStatus['state'];
   instruments: readonly Instrument[];
   population: BotPopulation | undefined;
   blocked: string | null;
+  start: StartRun;
 }) {
-  const client = useQueryClient();
   const [typed, setTyped] = useState<Typed>({});
   const [invalid, setInvalid] = useState<string | null>(null);
-  const send = useCallback(
-    async (request: BotRunRequest, key: string) => {
-      try {
-        return await api.startBotRun(request, key);
-      } finally {
-        void client.invalidateQueries({ queryKey: ['bot-runs'] });
-      }
-    },
-    [client],
-  );
-  const command = useCommand(send);
+  const counts = { ...taggedSplit(population?.byStrategy), ...typed };
   const form: RunForm = {
     ...taggedSplit(population?.byStrategy),
     ...DEFAULTS,
+    commandsPerSecond: defaultRate(botsAskedFor(counts)),
     instrumentIds: instruments.map((item) => item.instrumentId),
     ...typed,
   };
+  const pace = paceText(form);
   const blocked =
     unavailable ?? startBlocked(market, undefined, population?.byStrategy) ?? shortfallText(form, population?.byStrategy);
   const field = (name: TextField) => ({
@@ -347,12 +490,14 @@ function StartForm({
       return;
     }
     setInvalid(null);
-    void command.run(built.request);
+    command.run(built.request);
   };
+  // A start answered but not read back yet: the runs as shown have none going, and a second start would be refused.
+  const locked = command.outcome.kind === 'sending' || command.unresolved || command.awaitingRead;
 
   return (
     <form onSubmit={submit} className="setup-form" aria-label="Start a bot run">
-      <fieldset disabled={command.outcome.kind === 'sending' || command.unresolved}>
+      <fieldset disabled={locked}>
         <div className="field-row">
           <label>
             Market makers
@@ -370,7 +515,11 @@ function StartForm({
         <div className="field-row">
           <label>
             Commands per second
-            <input {...field('commandsPerSecond')} inputMode="decimal" />
+            <input
+              {...field('commandsPerSecond')}
+              inputMode="decimal"
+              aria-describedby={pace === null ? undefined : 'run-pace'}
+            />
           </label>
           <label>
             Largest order
@@ -381,6 +530,11 @@ function StartForm({
             <input {...field('maxPosition')} inputMode="numeric" />
           </label>
         </div>
+        {pace !== null && (
+          <p id="run-pace" className="muted hint">
+            {pace}
+          </p>
+        )}
         <div className="field-row">
           <label>
             Seed
@@ -452,25 +606,24 @@ function StartForm({
             {blocked}
           </p>
         )}
+      </fieldset>
+      {/* Outside the fieldset, so that Retry stays usable while the form is locked, and beside the button. */}
+      <div className="command-row">
         <button
           type="submit"
           className="primary"
-          disabled={blocked !== null}
+          disabled={blocked !== null || locked}
           aria-describedby={blocked === null ? undefined : 'start-blocked'}
         >
           Start run
         </button>
-      </fieldset>
+        <StartStatus start={command} active={false} />
+      </div>
       {invalid !== null && (
         <p role="alert" className="outcome outcome-rejected">
           {invalid}
         </p>
       )}
-      <CommandStatus
-        outcome={command.outcome}
-        done={(started) => `Started a run of ${groupInteger(started.bots)} bots.`}
-        onRetry={() => void command.retry()}
-      />
     </form>
   );
 }

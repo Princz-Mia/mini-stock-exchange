@@ -4,6 +4,7 @@ import { type FormEvent, type RefObject, useCallback, useEffect, useId, useRef, 
 import { api } from '../api/client';
 import type { Instrument, InstrumentEdited, InstrumentEditRequest, InstrumentRequest, InstrumentUsage } from '../api/types';
 import { groupDigits, groupInteger } from '../format';
+import { type AddedInstrument, takingLonger, useAddedInstruments, WAITING_FAST_FOR_MS } from './addedInstruments';
 import { CommandStatus } from './CommandStatus';
 import { refusedFields } from './refusals';
 import { type CommandOutcome, useCommand } from './useCommand';
@@ -311,6 +312,7 @@ function InstrumentRow({
             <div id={saveOutcomeId}>
               <CommandStatus
                 outcome={saveOutcome}
+                action="Saving the instrument"
                 done={(edited) =>
                   `Saved ${edited.symbol}${edited.displayName ? ` as ${edited.displayName}` : ', with no name,'}` +
                   ` at ${groupDigits(edited.referencePrice)}. The list shows it once market data has it.`
@@ -321,7 +323,12 @@ function InstrumentRow({
             {/* A done delete is said by the panel, as this row goes once market data drops it. */}
             <div id={removalOutcomeId}>
               {!deleted && (
-                <CommandStatus outcome={removalOutcome} done={() => ''} onRetry={() => void removal.retry()} />
+                <CommandStatus
+                  outcome={removalOutcome}
+                  action="Deleting the instrument"
+                  done={() => ''}
+                  onRetry={() => void removal.retry()}
+                />
               )}
             </div>
           </td>
@@ -331,33 +338,90 @@ function InstrumentRow({
   );
 }
 
+/**
+ * An instrument the exchange has added that Market Data does not list yet: the exchange's answer, labelled as such,
+ * with no controls until the list has it, as editing and deleting go by the list's own values. Once Market Data has
+ * taken longer than usual, it says so.
+ */
+function WaitingRow({ added, editable }: { added: AddedInstrument; editable: boolean }) {
+  const [longer, setLonger] = useState(() => takingLonger(added, Date.now()));
+  useEffect(() => {
+    if (longer) {
+      return;
+    }
+    const timer = setTimeout(() => setLonger(true), added.answeredAt + WAITING_FAST_FOR_MS - Date.now());
+    return () => clearTimeout(timer);
+  }, [longer, added.answeredAt]);
+  const label = longer ? 'Added; market data is taking longer than usual to list it' : 'Added, waiting for market data';
+  return (
+    <tr className="row-waiting">
+      <th scope="row">
+        {added.symbol}
+        {added.displayName ? <> <span className="instrument-name">{added.displayName}</span></> : null}
+        {!editable && <span className="instrument-name">{label}</span>}
+      </th>
+      <td className="num">{groupDigits(added.referencePrice)}</td>
+      {editable && (
+        <td>
+          <span className="muted">{label}</span>
+        </td>
+      )}
+    </tr>
+  );
+}
+
+/** Why an add is not sent: the symbol is listed already, or was just added and waits for market data. */
+export function duplicateText(symbol: string, listed: ReadonlySet<string>, waiting: ReadonlySet<string>): string | null {
+  if (listed.has(symbol)) {
+    return `${symbol} is already in this market, and a symbol is listed only once.`;
+  }
+  if (waiting.has(symbol)) {
+    return `${symbol} was just added, and is waiting for market data to list it.`;
+  }
+  return null;
+}
+
 /** The catalogue and, while the market is being set up, a form to add to it and a way to edit or delete each entry. */
 export function InstrumentSetup({
   instruments,
   editable,
   closed = false,
+  simulationId = null,
 }: {
   instruments: readonly Instrument[];
   editable: boolean;
   /** The market has closed: the catalogue is what it was, and stays. */
   closed?: boolean;
+  /** The simulation on screen, which an add goes to; null while there is no market, which an add then creates. */
+  simulationId?: string | null;
 }) {
   const client = useQueryClient();
   const [symbol, setSymbol] = useState('');
   const [price, setPrice] = useState('');
   const [name, setName] = useState('');
-  const send = useCallback(async (request: InstrumentRequest, key: string) => {
-    const created = await api.addInstrument(request, key);
-    setSymbol('');
-    setPrice('');
-    setName('');
-    void client.invalidateQueries({ queryKey: ['instruments'] });
-    void client.invalidateQueries({ queryKey: ['market'] });
-    return created;
-  }, [client]);
+  const { waiting, add } = useAddedInstruments(simulationId, instruments);
+  const send = useCallback(
+    async (request: InstrumentRequest, key: string) => {
+      const created = await api.addInstrument(request, key);
+      // Shown at once from the answer, and the list read quickly until Market Data has it.
+      add(created, simulationId);
+      setSymbol('');
+      setPrice('');
+      setName('');
+      void client.invalidateQueries({ queryKey: ['instruments'] });
+      void client.invalidateQueries({ queryKey: ['market'] });
+      return created;
+    },
+    [client, add, simulationId],
+  );
   const command = useCommand(send);
+  const { forget } = command;
   const symbolField = useRef<HTMLInputElement>(null);
   useFocusOnAnswer(command.outcome.kind, symbolField);
+  // The symbol last sent, and the one last stopped before sending as a duplicate.
+  const [sentSymbol, setSentSymbol] = useState<string | null>(null);
+  const [duplicate, setDuplicate] = useState<string | null>(null);
+  const duplicateId = useId();
   // Said here rather than in the row, which goes once market data drops it. The row loses its controls, and focus with
   // them, so focus goes to the add form, the next thing to do here, unless the user has moved it meanwhile.
   const [deletedSymbol, setDeletedSymbol] = useState<string | null>(null);
@@ -368,14 +432,58 @@ export function InstrumentSetup({
     }
   }, []);
   const listed = new Set(instruments.map((instrument) => instrument.symbol));
-  const suggestions = DEFAULT_INSTRUMENTS.filter((suggestion) => !listed.has(suggestion.symbol));
+  const waitingSymbols = new Set(waiting.map((each) => each.symbol));
+  const suggestions = DEFAULT_INSTRUMENTS.filter(
+    (suggestion) => !listed.has(suggestion.symbol) && !waitingSymbols.has(suggestion.symbol),
+  );
+  // Worked out as it is now: a symbol that was waiting is said to be listed once it is, and one deleted since is fine.
+  const stopped = duplicate === null ? null : duplicateText(duplicate, listed, waitingSymbols);
+
+  // A refusal of a symbol already taken is out of date once the list shows that symbol: the row says it all.
+  const refusedNowListed =
+    command.outcome.kind === 'refused' &&
+    command.outcome.code === 'SYMBOL_TAKEN' &&
+    sentSymbol !== null &&
+    listed.has(sentSymbol);
+  useEffect(() => {
+    if (refusedNowListed) {
+      forget();
+    }
+  }, [refusedNowListed, forget]);
+
+  /** What was said of the last attempt goes once the form is changed: it was about what the form held then. */
+  const changed = () => {
+    setDuplicate(null);
+    if (command.outcome.kind === 'refused') {
+      forget();
+    }
+  };
+  /** Dismissed by hand: focus, lost with the button, goes back to the symbol. */
+  const dismiss = () => {
+    setDuplicate(null);
+    if (command.outcome.kind === 'refused') {
+      forget();
+    }
+    symbolField.current?.focus();
+  };
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
+    const wanted = symbol.trim().toUpperCase();
+    // Checked against what is listed and what was just added before anything is sent: the exchange would refuse it.
+    if (duplicateText(wanted, listed, waitingSymbols) !== null) {
+      if (command.outcome.kind === 'refused') {
+        forget();
+      }
+      setDuplicate(wanted);
+      return;
+    }
+    setDuplicate(null);
+    setSentSymbol(wanted);
     const trimmed = name.trim();
     // Without a name, the request is the one it was before names existed, so its key's answer is too.
     void command.run({
-      symbol: symbol.trim().toUpperCase(),
+      symbol: wanted,
       referencePrice: price.trim(),
       ...(trimmed === '' ? {} : { displayName: trimmed }),
     });
@@ -384,7 +492,7 @@ export function InstrumentSetup({
   return (
     <section className="panel" aria-labelledby="instruments-title">
       <h2 id="instruments-title">Instruments</h2>
-      {instruments.length === 0 ? (
+      {instruments.length === 0 && waiting.length === 0 ? (
         <p className="muted">No instruments yet.</p>
       ) : (
         <table aria-label="Instruments" className="setup-table">
@@ -410,6 +518,9 @@ export function InstrumentSetup({
                 onDeleted={announceDeleted}
               />
             ))}
+            {waiting.map((added) => (
+              <WaitingRow key={added.instrumentId} added={added} editable={editable} />
+            ))}
           </tbody>
         </table>
       )}
@@ -434,17 +545,36 @@ export function InstrumentSetup({
                 <input
                   ref={symbolField}
                   value={symbol}
-                  onChange={(event) => setSymbol(event.target.value)}
+                  onChange={(event) => {
+                    changed();
+                    setSymbol(event.target.value);
+                  }}
+                  aria-invalid={stopped !== null || undefined}
+                  aria-describedby={stopped !== null ? duplicateId : undefined}
                   autoComplete="off"
                 />
               </label>
               <label>
                 Reference price
-                <input value={price} onChange={(event) => setPrice(event.target.value)} inputMode="decimal" />
+                <input
+                  value={price}
+                  onChange={(event) => {
+                    changed();
+                    setPrice(event.target.value);
+                  }}
+                  inputMode="decimal"
+                />
               </label>
               <label>
                 Name (optional)
-                <input value={name} onChange={(event) => setName(event.target.value)} autoComplete="off" />
+                <input
+                  value={name}
+                  onChange={(event) => {
+                    changed();
+                    setName(event.target.value);
+                  }}
+                  autoComplete="off"
+                />
               </label>
               <button type="submit" className="primary">
                 Add instrument
@@ -460,6 +590,7 @@ export function InstrumentSetup({
                   type="button"
                   className="chip"
                   onClick={() => {
+                    changed();
                     setSymbol(suggestion.symbol);
                     setPrice(suggestion.referencePrice);
                   }}
@@ -477,14 +608,25 @@ export function InstrumentSetup({
             : 'The catalogue is frozen once the market opens.'}
         </p>
       )}
-      <CommandStatus
-        outcome={command.outcome}
-        done={(created) =>
-          `Added ${created.symbol}${created.displayName ? ` (${created.displayName})` : ''} at ` +
-          `${groupDigits(created.referencePrice)}. It appears in the list once market data has it.`
-        }
-        onRetry={() => void command.retry()}
-      />
+      {stopped !== null ? (
+        <div id={duplicateId} role="alert" className="outcome outcome-rejected">
+          <p>{stopped} Nothing was sent.</p>
+          <button type="button" className="quiet" onClick={dismiss}>
+            Dismiss
+          </button>
+        </div>
+      ) : (
+        <CommandStatus
+          outcome={command.outcome}
+          action="Adding the instrument"
+          done={(created) =>
+            `Added ${created.symbol}${created.displayName ? ` (${created.displayName})` : ''} at ` +
+            `${groupDigits(created.referencePrice)}. The list shows it as waiting until market data has it.`
+          }
+          onRetry={() => void command.retry()}
+          onDismiss={dismiss}
+        />
+      )}
     </section>
   );
 }

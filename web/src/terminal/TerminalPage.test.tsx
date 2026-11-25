@@ -374,7 +374,8 @@ describe('terminal', () => {
     expect(closed).toHaveTextContent(
       'The close cancels any order of yours that was still open, and releases what it had reserved.',
     );
-    expect(await screen.findByText('No open orders.')).toBeInTheDocument();
+    expect(await screen.findByText('Your open orders could not be loaded.')).toHaveAttribute('role', 'alert');
+    expect(screen.queryByText('No open orders.')).toBeNull();
     await waitFor(() =>
       expect(screen.queryByText(/was cancelled|still open, with what/)).toBeNull(),
     );
@@ -576,8 +577,12 @@ describe('terminal', () => {
 
     await screen.findByRole('heading', { name: 'NOVA', level: 1 });
     const asked = server.requests.filter((request) => request.url.split('?')[0] === '/api/v1/instruments');
-    expect(asked.length).toBeGreaterThan(0);
-    expect(asked.every((request) => request.url === '/api/v1/instruments?simulationId=s')).toBe(true);
+    expect(asked.some((request) => request.url === '/api/v1/instruments?simulationId=s')).toBe(true);
+    // Market Data's own list is asked for once, at the same time as the status. It says of no simulation whose it is,
+    // so it is never shown.
+    expect(asked.filter((request) => !request.url.includes('simulationId')).map((request) => request.url)).toEqual([
+      '/api/v1/instruments',
+    ]);
   });
 
   it("shows Market Data's own current simulation when the exchange cannot say which one it is", async () => {
@@ -635,6 +640,28 @@ describe('terminal', () => {
     expect(screen.getByText('Spread 1.00')).toBeInTheDocument();
     expect(within(screen.getByRole('table', { name: 'Recent trades' })).getByText('Sell')).toBeInTheDocument();
     expect(screen.getByText('Connected')).toBeInTheDocument();
+  });
+
+  it('says the live market is reconnecting once its stream fails, and connected again once it is back', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      market();
+      const streams = renderTerminal();
+      await screen.findByRole('heading', { name: 'NOVA', level: 1 });
+      act(() => streams.latest()?.emit('market', frame(NOVA, '5')));
+      expect(screen.getByText('Connected')).toBeInTheDocument();
+
+      // Market data restarts and the proxy answers 502: the browser gives the stream up, the page opens it again.
+      act(() => streams.latest()?.fail('refused'));
+      expect(screen.getByText('Reconnecting…')).toHaveAttribute('role', 'status');
+      expect(within(screen.getByRole('table', { name: 'Bids' })).getByText('99.50')).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(streams.opened).toHaveLength(2);
+      act(() => streams.latest()?.emit('market', frame(NOVA, '6')));
+      expect(screen.getByText('Connected')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('shows the session figures from the instrument list, then from the live frame once it comes', async () => {
@@ -929,6 +956,103 @@ describe('terminal', () => {
       .filter((request) => request.method === 'POST' && request.url === '/api/v1/orders')
       .map((request) => request.headers['Idempotency-Key']);
     expect(keys[1]).toBe(keys[0]);
+  });
+
+  it('keeps the page and the order being typed when a refresh of the list fails, saying when it was read', async () => {
+    let down = false;
+    signedIn()
+      .on('GET /api/v1/market', { status: 200, json: OPEN })
+      .on('GET /api/v1/instruments', () =>
+        down
+          ? { status: 502, problem: { status: 502, code: 'BAD_GATEWAY' } }
+          : { status: 200, json: { simulationId: 's', instruments: [instrument(NOVA, 'NOVA', null)], feed: { state: 'LIVE', lag: 0 } } },
+      )
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    renderTerminal('/terminal', null, client);
+    const ticket = await screen.findByRole('region', { name: 'Order · NOVA' });
+    fireEvent.change(within(ticket).getByLabelText('Shares'), { target: { value: '7' } });
+    const read = client.getQueryState(['instruments', 's'])?.dataUpdatedAt ?? 0;
+
+    down = true;
+    await client.refetchQueries({ queryKey: ['instruments'] });
+
+    const note = await screen.findByText(/^Last updated \d\d:\d\d:\d\d UTC, retrying$/);
+    expect(note).toHaveAttribute('role', 'status');
+    expect(note).toHaveTextContent(new Date(read).toISOString().slice(11, 19));
+    expect(screen.queryByText('Market data is not reachable right now.')).toBeNull();
+    expect(screen.getByRole('region', { name: 'Order · NOVA' })).toBe(ticket);
+    expect(within(ticket).getByLabelText('Shares')).toHaveValue('7');
+    expect(screen.getByRole('heading', { name: 'NOVA', level: 1 })).toBeInTheDocument();
+
+    down = false;
+    await client.refetchQueries({ queryKey: ['instruments'] });
+    await waitFor(() => expect(screen.queryByText(/^Last updated/)).toBeNull());
+    expect(within(ticket).getByLabelText('Shares')).toHaveValue('7');
+  });
+
+  it('says market data is not reachable when no list was ever read, rather than an empty market', async () => {
+    signedIn()
+      .on('GET /api/v1/market', { status: 200, json: OPEN })
+      .on('GET /api/v1/instruments', { status: 502, problem: { status: 502, code: 'BAD_GATEWAY' } })
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    renderTerminal();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Market data is not reachable right now.');
+    expect(screen.queryByText(/^Last updated/)).toBeNull();
+  });
+
+  it('draws its layout at once while the list is read, and fills the orders panel as soon as its own read comes', async () => {
+    let listed: (reply: { status: number; json: unknown }) => void = () => undefined;
+    signedIn()
+      .on('GET /api/v1/market', { status: 200, json: OPEN })
+      .on('GET /api/v1/instruments', () => new Promise((resolve) => (listed = resolve)))
+      .on('GET /api/v1/portfolio', { status: 200, json: PORTFOLIO })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [OPEN_ORDER], nextCursor: null } });
+    const view = renderTerminal();
+    const terminal = view.container.querySelector('.terminal');
+
+    // No page-wide words in place of the page: its panels, as bars, in their places, and the orders filled meanwhile.
+    expect(screen.getByText('Loading markets…')).toHaveAttribute('role', 'status');
+    expect(screen.getByText('Loading markets…')).toHaveClass('visually-hidden');
+    expect(view.container.querySelector('.page-status')).toBeNull();
+    expect(terminal?.querySelector('.watchlist[aria-busy="true"]')).not.toBeNull();
+    expect(terminal?.querySelector('.ticket[aria-busy="true"]')).not.toBeNull();
+    expect(terminal?.querySelector('.terminal-market[aria-busy="true"]')).not.toBeNull();
+    const orders = await screen.findByRole('table', { name: 'Open orders' });
+    expect(within(orders).getByText('105.00')).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'NOVA', level: 1 })).toBeNull();
+
+    // The list comes: each panel is filled in its place, and the orders panel is the very same.
+    act(() =>
+      listed({
+        status: 200,
+        json: { simulationId: 's', instruments: [instrument(NOVA, 'NOVA', null)], feed: { state: 'LIVE', lag: 0 } },
+      }),
+    );
+    expect(await screen.findByRole('heading', { name: 'NOVA', level: 1 })).toBeInTheDocument();
+    expect(view.container.querySelector('[aria-busy="true"]')).toBeNull();
+    expect(screen.queryByText('Loading markets…')).toBeNull();
+    expect(screen.getByRole('table', { name: 'Open orders' })).toBe(orders);
+    expect(view.container.querySelector('.terminal')).toBe(terminal);
+  });
+
+  it('shows the open orders as bars until they are read, rather than saying none is open', async () => {
+    let read: (reply: { status: number; json: unknown }) => void = () => undefined;
+    market()
+      .on('GET /api/v1/market', { status: 200, json: OPEN })
+      .on('GET /api/v1/orders', () => new Promise((resolve) => (read = resolve)));
+    renderTerminal();
+    const panel = await screen.findByRole('tabpanel', { name: /^Open orders/ });
+
+    expect(within(panel).queryByText('No open orders.')).toBeNull();
+    expect(panel.querySelector('[aria-busy="true"]')).not.toBeNull();
+    expect(within(panel).getByText('Loading…')).toHaveClass('visually-hidden');
+    act(() => read({ status: 200, json: { orders: [], nextCursor: null } }));
+    expect(await within(panel).findByText('No open orders.')).toBeInTheDocument();
+    expect(panel.querySelector('[aria-busy="true"]')).toBeNull();
   });
 
   it('says there is nothing to trade when the market lists no instrument, instead of showing nothing', async () => {

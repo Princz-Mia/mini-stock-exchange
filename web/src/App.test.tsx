@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { App } from './App';
@@ -102,6 +102,27 @@ describe('signing in', () => {
     await screen.findByRole('heading', { name: 'NOVA', level: 1 });
     expect(badge('Simulation')).toHaveTextContent('Simulation · Virtual funds');
     expect(badge('Simulation')).not.toHaveAttribute('title');
+  });
+
+  it('draws the frame and the layout of the page asked for while the session is read, then the whole page', async () => {
+    let me: (reply: { status: number; json: unknown }) => void = () => undefined;
+    signedIn()
+      .on('GET /api/v1/me', () => new Promise((resolve) => (me = resolve)))
+      .on('GET /api/v1/instruments', { status: 200, json: INSTRUMENTS })
+      .on('GET /api/v1/portfolio', { status: 503, problem: { status: 503, code: 'TRADING_UNAVAILABLE' } })
+      .on('GET /api/v1/orders', { status: 200, json: { orders: [], nextCursor: null } });
+    const view = openAt('/portfolio');
+
+    // The top bar with the name only, and the portfolio's own panels as bars: nothing in place of the page.
+    expect(within(view.container.querySelector('.topbar')!).getByText('Mini Stock Exchange')).toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Main' })).toBeNull();
+    expect(view.container.querySelector('.page-status')).toBeNull();
+    expect(view.container.querySelectorAll('main .summary[aria-busy="true"] .figure')).toHaveLength(5);
+    expect(screen.getByText('Loading portfolio…')).toHaveAttribute('role', 'status');
+
+    act(() => me({ status: 200, json: { username: 'trader', roles: ['TRADER'] } }));
+    expect(await screen.findByRole('navigation', { name: 'Main' })).toBeInTheDocument();
+    expect(view.container.querySelector('.topbar-skeleton')).toBeNull();
   });
 
   it('keeps the typed username after wrong credentials', async () => {

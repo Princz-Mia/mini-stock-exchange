@@ -1,12 +1,19 @@
-import { pollEvery } from '../api/client';
+import { type QueryClient, useQueryClient } from '@tanstack/react-query';
+import { useState } from 'react';
+
+import { isRefusal } from '../api/client';
+import type { Instruments } from '../api/types';
 import { closedPhrase } from '../app/closeTime';
+import { lastUpdatedText } from '../app/LastUpdated';
+import { OperatorSkeleton } from '../app/Skeleton';
 import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
 import { groupInteger } from '../format';
 import { AccountSetup } from './AccountSetup';
+import { addedInstruments, readQuickly, WAITING_POLL_MS, waitingFor } from './addedInstruments';
 import { BotRuns } from './BotRuns';
 import { BotSetup } from './BotSetup';
-import { useBotJob } from './useBotJob';
 import { useCloseCommand } from './closeCommand';
+import { freshness, PageOpened } from './freshRead';
 import { HealthPanel, useHealthSummary } from './HealthPanel';
 import { InstrumentSetup } from './InstrumentSetup';
 import { MarketControl } from './MarketControl';
@@ -32,6 +39,32 @@ const PER_SIMULATION = [
 /** The runs ticked for a comparison are in the address, and are the simulation's they were ticked in. */
 const TICKED = ['compare'] as const;
 
+/** How often the setup list is read otherwise. */
+export const LIST_POLL_MS = 5_000;
+
+/**
+ * How often the setup list is read: quickly while an instrument the exchange has added is not in it yet, for a
+ * while, and otherwise every five seconds. Worked out again with every read, so it slows down by itself once the
+ * instrument is listed or has waited long enough.
+ *
+ * A closed market's list is read no more once market data has caught up with it: the catalogue is frozen and nothing
+ * trades, so nothing this page shows of it can change. Until then the feed it reports may still be behind, with the
+ * close's own last events. A read that failed is asked again, whatever the list read before it said.
+ */
+export function instrumentPace(client: QueryClient, simulation: string | null, closed = false) {
+  return (query: { state: { data: Instruments | undefined; error: unknown } }): number | false => {
+    if (isRefusal(query.state.error)) {
+      return false;
+    }
+    const waiting = waitingFor(addedInstruments(client), simulation, query.state.data?.instruments ?? []);
+    if (readQuickly(waiting, Date.now())) {
+      return WAITING_POLL_MS;
+    }
+    const feed = query.state.data?.feed;
+    return closed && feed?.state === 'LIVE' && feed.lag === 0 && query.state.error == null ? false : LIST_POLL_MS;
+  };
+}
+
 /**
  * The operator's screen: the authoritative trading phase with its controls and, once open, how trading is keeping
  * up; bot runs, and the SETUP editor for
@@ -41,6 +74,7 @@ const TICKED = ['compare'] as const;
  * refetched after each command and every five seconds.
  */
 export function OperatorPage() {
+  const client = useQueryClient();
   const market = useMarketStatus();
   // Goes up when the exchange names another simulation. The page is drawn anew then, so that nothing typed, answered
   // or paged through in the simulation before is left on the page of the new one.
@@ -48,14 +82,18 @@ export function OperatorPage() {
   useForgetInAddress(generation, TICKED);
   // Above the page drawn for each simulation, so that the new one's page can say what became of it.
   const start = useStartCommand();
+  // What is offered is offered from reads made since now: the cache may hold the market as it was before a command
+  // sent from this page, before the operator looked elsewhere, went through.
+  const [opened] = useState(() => Date.now());
+  const marketRead = freshness(market, opened);
   // This market's instruments only: the list is asked for by the simulation the status names.
-  const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
-  // Read only while bots can be created; the same job on every operator's screen.
-  const state = market.data?.state;
-  const botJob = useBotJob(state === 'SETUP' || state === 'NOT_SET_UP');
+  const instruments = useInstruments(market, {
+    refetchInterval: instrumentPace(client, market.data?.simulationId ?? null, market.data?.state === 'CLOSED'),
+  });
 
+  // Every panel here waits for the market's status, so the page's layout is drawn as bars until it comes.
   if (market.isPending) {
-    return <p className="page-status">Loading the market…</p>;
+    return <OperatorSkeleton />;
   }
   // Only when there is nothing to show: a failed poll after a good read keeps the page, and every form's unconfirmed
   // command with its key and Retry, on screen with the last known state.
@@ -71,60 +109,86 @@ export function OperatorPage() {
   const closed = market.data.state === 'CLOSED';
 
   return (
-    <div className="operator" key={generation}>
-      <div className="operator-side">
-        {market.isError && (
-          <p role="alert" className="form-error">
-            The exchange is not answering, so the market state shown may be out of date.
-          </p>
-        )}
-        <MarketControl
-          market={market.data}
-          instruments={instruments.isPending ? undefined : listed.length}
-          botJob={editable ? botJob.data : undefined}
-        />
-        {!editable && (
-          <HealthPanel
-            instruments={listed}
-            feed={
-              instruments.isError
-                ? { kind: 'unreachable' }
-                : instruments.feed === undefined
-                  ? { kind: 'checking' }
-                  : { kind: 'read', feed: instruments.feed }
-            }
+    <PageOpened.Provider value={opened}>
+      <div className="operator" key={generation}>
+        <div className="operator-side">
+          {market.isError && (
+            <p role="alert" className="form-error">
+              The exchange is not answering, so the market state shown may be out of date.{' '}
+              {lastUpdatedText(market.dataUpdatedAt, !isRefusal(market.error))}.
+            </p>
+          )}
+          <MarketControl
+            market={market.data}
+            instruments={instruments.isPending ? undefined : listed.length}
+            read={marketRead}
           />
-        )}
-      </div>
-      <div className="operator-setup">
-        {instruments.isError && (
-          <p role="alert" className="form-error">
-            Market data is not reachable, so the instrument list may be incomplete.
-          </p>
-        )}
-        {market.data.simulationId === null && <StartSimulation start={start} market={market.data} />}
-        <StartNotice start={start} market={market.data} />
-        {closed && (
-          <Ended
-            closedAt={market.data.closedAt}
-            closesAt={market.data.closesAt}
-            onSchedule={market.data.closedOnSchedule}
+          {!editable && (
+            <HealthPanel
+              instruments={listed}
+              closed={closed}
+              feed={
+                instruments.isError
+                  ? { kind: 'unreachable' }
+                  : instruments.feed === undefined
+                    ? { kind: 'checking' }
+                    : { kind: 'read', feed: instruments.feed }
+              }
+            />
+          )}
+        </div>
+        <div className="operator-setup">
+          {instruments.isError && (
+            <p role="alert" className="form-error">
+              Market data is not reachable, so the instrument list may be incomplete.
+              {instruments.updatedAt !== undefined && <> {lastUpdatedText(instruments.updatedAt, !instruments.refused)}.</>}
+            </p>
+          )}
+          {market.data.simulationId === null && (
+            <StartSimulation start={start} market={market.data} read={marketRead} />
+          )}
+          <StartNotice start={start} market={market.data} />
+          {closed && (
+            <Ended
+              closedAt={market.data.closedAt}
+              closesAt={market.data.closesAt}
+              onSchedule={market.data.closedOnSchedule}
+              simulationId={market.data.simulationId}
+            />
+          )}
+          {closed && <StartSimulation start={start} market={market.data} read={marketRead} />}
+          {!editable && (
+            <BotRuns
+              market={market.data.state}
+              simulationId={market.data.simulationId}
+              closedAt={market.data.closedAt}
+              instruments={listed}
+            />
+          )}
+          <InstrumentSetup
+            instruments={listed}
+            editable={editable}
+            closed={closed}
             simulationId={market.data.simulationId}
           />
-        )}
-        {closed && <StartSimulation start={start} market={market.data} />}
-        {!editable && <BotRuns market={market.data.state} closedAt={market.data.closedAt} instruments={listed} />}
-        <InstrumentSetup instruments={listed} editable={editable} closed={closed} />
-        <BotSetup
-          instruments={listed}
-          editable={editable}
-          closed={closed}
-          read={{ job: botJob.data, unreachable: botJob.isError }}
-        />
-        <AccountSetup instruments={listed} editable={editable} closed={closed} />
-        {editable && <BotRuns market={market.data.state} closedAt={null} instruments={listed} />}
+          <BotSetup
+            instruments={listed}
+            editable={editable}
+            closed={closed}
+            simulationId={market.data.simulationId}
+          />
+          <AccountSetup instruments={listed} editable={editable} closed={closed} />
+          {editable && (
+            <BotRuns
+              market={market.data.state}
+              simulationId={market.data.simulationId}
+              closedAt={null}
+              instruments={listed}
+            />
+          )}
+        </div>
       </div>
-    </div>
+    </PageOpened.Provider>
   );
 }
 

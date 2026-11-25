@@ -2,6 +2,7 @@ import { type ReactNode, useId, useState } from 'react';
 
 import { groupInteger } from '../format';
 import { type ListOrder, PAGE_SIZES, type PageSize, type PagedList } from './paging';
+import { SkeletonRows } from './Skeleton';
 
 export interface Column<T> {
   key: string;
@@ -89,7 +90,7 @@ export function PagedTable<T>({
   });
 
   if (list.isPending && !list.hasLoaded) {
-    return <p className="muted">Loading…</p>;
+    return <SkeletonRows />;
   }
   if (!list.isPending && !list.isError && list.rows.length === 0 && list.offset === 0 && active.length === 0) {
     return <p className="muted">{empty}</p>;

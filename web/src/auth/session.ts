@@ -9,9 +9,9 @@ const ME = ['me'] as const;
 export function useSession() {
   return useQuery({
     queryKey: ME,
-    queryFn: async (): Promise<Identity | null> => {
+    queryFn: async ({ signal }): Promise<Identity | null> => {
       try {
-        return await api.me();
+        return await api.me({ signal });
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) {
           return null;

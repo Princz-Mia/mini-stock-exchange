@@ -5,6 +5,7 @@ import type { StreamFactory, StreamSource } from '../terminal/useMarketStream';
 export class FakeStream implements StreamSource {
   readonly url: string;
   closed = false;
+  readyState = 0;
   onerror: ((event: Event) => void) | null = null;
   private readonly listeners = new Map<string, ((event: MessageEvent<string>) => void)[]>();
 
@@ -22,8 +23,15 @@ export class FakeStream implements StreamSource {
     }
   }
 
+  /** Fails as the browser would: dropped, which it reconnects by itself, or refused, which it gives up on for good. */
+  fail(way: 'dropped' | 'refused') {
+    this.readyState = way === 'refused' ? 2 : 0;
+    this.onerror?.(new Event('error'));
+  }
+
   close() {
     this.closed = true;
+    this.readyState = 2;
   }
 }
 
