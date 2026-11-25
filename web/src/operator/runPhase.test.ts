@@ -110,6 +110,13 @@ describe('runMilestone', () => {
       'The run is waiting for a simulator worker.',
     );
     expect(runMilestone(botRun({ status: 'STALE' }))).toBe("The run's heartbeats stopped; its bots place nothing.");
+    expect(runMilestone(botRun({ status: 'STOPPING', desiredState: 'STOPPED' }))).toBe('The run is stopping.');
+    // A stop during loading is a change of phase too, said once, and not followed by the loading's quarters.
+    const loadingWhenStopped = { phase: 'LOADING', botsLoaded: 15_000, botsTotal: 20_000 } as const;
+    expect(runMilestone(botRun({ status: 'STOPPING', desiredState: 'STOPPED', progress: loadingWhenStopped }))).toBe(
+      'The run is stopping.',
+    );
+    expect(runMilestone(botRun({ progress: null }))).toBe('A simulator worker holds the run.');
     expect(runMilestone(botRun({ progress: { phase: 'LOADING', botsLoaded: 0, botsTotal: 1 } }))).toBe('Loading 1 bot.');
   });
 });
@@ -137,6 +144,10 @@ describe('the paused counts', () => {
     const activity = { ...botRun().activity, pausedStaleData: 1_204, pausedMarketNotOpen: 0, pausedOther: 3 };
     expect(pausedTotal(activity)).toBe(1_207);
     expect(pausedByReasonText(activity)).toBe('market data stale 1,204 · other 3');
+    const every = { ...activity, pausedMarketNotOpen: 12 };
+    expect(pausedTotal(every)).toBe(1_219);
+    expect(pausedByReasonText(every)).toBe('market data stale 1,204 · market not open 12 · other 3');
+    expect(pausedByReasonText(botRun().activity)).toBe('');
   });
 });
 
