@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from mse_simulator.market import MarketView
+from mse_simulator.market import NARROW_BOOK_BP, MarketView
 from mse_simulator.prices import BASIS_POINT, limit_price
 from mse_simulator.strategy import (
     Cancel,
@@ -31,6 +31,8 @@ class NoiseConfig:
     # The centre is the market's price moved this share of the way to the bot's own idea of the
     # value: 0 follows the market alone.
     value_pull: float = 0.0
+    # The widest book whose mid counts as the market's price (``Instrument.mid``).
+    narrow_book_bp: float = NARROW_BOOK_BP
 
 
 class NoiseBot:
@@ -41,7 +43,8 @@ class NoiseBot:
     ) -> None:
         self._rng = rng
         self._config = config
-        self._view = view or View(None)
+        self._view = view or View(None, narrow_book_bp=config.narrow_book_bp)
+        self._narrow = config.narrow_book_bp * BASIS_POINT
         self._positions = Positions(config.max_position)
 
     def decide(
@@ -62,7 +65,7 @@ class NoiseBot:
             return Cancel(min(orders, key=lambda order: order.created_at).order_id)
         instrument = market.instruments[int(self._rng.integers(len(market.instruments)))]
         side = "BUY" if self._rng.random() < 0.5 else "SELL"
-        anchor = instrument.anchor()
+        anchor = instrument.anchor(self._narrow)
         centre = anchor + self._config.value_pull * (self._view.of(instrument) - anchor)
         reach = max(self._config.spread_bp * BASIS_POINT * centre, instrument.tick)
         limit = limit_price(centre + float(self._rng.uniform(-reach, reach)), side, instrument)

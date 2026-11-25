@@ -45,6 +45,13 @@ class Book:
     last: int | None = None
 
 
+class Passive:
+    """An account that only holds what was placed for it: a person who placed orders and left."""
+
+    def decide(self, *_) -> None:
+        return None
+
+
 class ToyMarket:
     """Bots take turns, market makers first, at ``rate`` commands a second of simulated time. As in
     the simulator, every bot sees the same market view, refreshed once per poll, while its own
@@ -62,6 +69,9 @@ class ToyMarket:
         self.history: list[dict[UUID, tuple[int | None, int | None, int | None]]] = []
         self.on_poll: list[Callable[[MarketView], None]] = []
         self.on_place: list[Callable[[Account, Place, MarketView], None]] = []
+        # Every fill as it happens, with its instrument and price: the history sees only the last
+        # trade of each poll.
+        self.on_trade: list[Callable[[UUID, int], None]] = []
         self._poll_seconds = poll_seconds
         self._next_poll = 0.0
         self._next_bot = 0
@@ -72,6 +82,11 @@ class ToyMarket:
         account = Account(strategy, cash, {instrument: shares for instrument in self.books})
         self.accounts.append(account)
         return account
+
+    def rest(self, account: Account, intent: Place) -> None:
+        """Places an order for an account outside the turns, as a person's order would be: to set
+        up a book before the bots start."""
+        self._place(self.accounts.index(account), account, intent)
 
     def run(self, commands: int, rate: float) -> None:
         for _ in range(commands):
@@ -195,6 +210,8 @@ class ToyMarket:
             remaining -= quantity
             book.last = maker.limit
             self.trades += 1
+            for observer in self.on_trade:
+                observer(intent.instrument_id, maker.limit)
             if maker.working == 0:
                 opposite.pop(0)
                 del other.orders[maker.order_id]
