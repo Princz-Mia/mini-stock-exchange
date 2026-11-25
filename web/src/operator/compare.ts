@@ -67,12 +67,14 @@ export function runSeconds(run: BotRun): { seconds: number; approximate: boolean
   return seconds <= 0 ? null : { seconds, approximate: run.window.endedAt === null };
 }
 
-/** "1 h 5 min", "12 min 30 s", "45 s": whole seconds. */
+/** "13 d 4 h", "1 h 5 min", "12 min 30 s", "45 s": whole seconds. */
 export function durationText(seconds: number): string {
   const whole = Math.round(seconds);
-  const hours = Math.floor(whole / 3600);
+  const days = Math.floor(whole / 86_400);
+  const hours = Math.floor((whole % 86_400) / 3600);
   const minutes = Math.floor((whole % 3600) / 60);
   const rest = whole % 60;
+  if (days > 0) return `${days} d ${hours} h`;
   if (hours > 0) return `${hours} h ${minutes} min`;
   if (minutes > 0) return rest === 0 ? `${minutes} min` : `${minutes} min ${rest} s`;
   return `${rest} s`;

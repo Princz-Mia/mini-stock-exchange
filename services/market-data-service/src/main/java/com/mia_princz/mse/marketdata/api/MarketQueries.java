@@ -31,9 +31,17 @@ class MarketQueries {
 	}
 
 	/** {@code displayName} is null for none, here and in {@link Book} and {@link Live}. */
-	record Instrument(UUID instrumentId, String symbol, String displayName, String venueState, long referencePriceCents,
-			long tickCents, long lotSize, long minQuantity, long maxQuantity, long maxPriceCents, Long lastPriceCents,
-			Level bestBid, Level bestAsk, long lastTradeSequence, long sourceCommandSequence, Instant generatedAt) {
+	record Instrument(UUID instrumentId, UUID simulationId, String symbol, String displayName, String venueState,
+			long referencePriceCents, long tickCents, long lotSize, long minQuantity, long maxQuantity,
+			long maxPriceCents, Long lastPriceCents, Level bestBid, Level bestAsk, long lastTradeSequence,
+			long sourceCommandSequence, Instant generatedAt) {
+	}
+
+	/**
+	 * One simulation's instruments. {@code simulationId} is the one asked for, or else the current one; null when none
+	 * was asked for and no instrument is known at all.
+	 */
+	record Listing(UUID simulationId, List<Instrument> instruments) {
 	}
 
 	record Book(UUID instrumentId, String symbol, String displayName, String venueState, List<Level> bids,
@@ -74,15 +82,43 @@ class MarketQueries {
 		this.jdbc = jdbc;
 	}
 
-	List<Instrument> instruments() {
-		return jdbc.sql("""
-				SELECT i.instrument_id, i.symbol, i.display_name, m.venue_state, i.reference_price_cents, i.tick_cents,
-				    i.lot_size,
+	/**
+	 * The current simulation: the one whose instrument holds the newest snapshot by the exchange's clock. This service
+	 * hears of a simulation only through its instruments' snapshots, and a simulation's first snapshot is written after
+	 * the one before it closed, so every instrument of a newer simulation is newer than any instrument of an older one.
+	 * <p>
+	 * Each market row holds its instrument's highest snapshot whatever order the snapshots arrived in, and
+	 * {@code generated_at} came with that snapshot, so a rebuild from the topic gives the same answer in any partition
+	 * order. Nothing else stored does. {@code projected_at} and {@code updated_at} are this service's clock when it
+	 * wrote the row, so a rebuild that reads an old simulation last would make it the newest. Command sequences start
+	 * again at 1 in every simulation. The venue state is not asked either: an old simulation with an instrument that
+	 * never got its closing snapshot would pass for one still running, and for good, as nothing newer ever comes to
+	 * correct a simulation that has ended. A clock stepping back over a close misleads the time as well, but only until
+	 * the running simulation's next snapshot is past the close.
+	 * <p>
+	 * Two simulations whose newest snapshots share a microsecond are told apart by id, only so that the answer is the
+	 * same every time. A simulation with no instrument has no row and cannot be the current one: before its first
+	 * instrument arrives, or once its last one is removed, the current simulation is the one before it.
+	 */
+	private static final String CURRENT_SIMULATION = """
+			SELECT simulation_id FROM market_snapshot ORDER BY generated_at DESC, simulation_id DESC LIMIT 1""";
+
+	/**
+	 * The instruments of the simulation asked for, or of the current one for null, by symbol. One statement, so the
+	 * list and the simulation it is of come from the same moment. A simulation never heard of has none.
+	 */
+	Listing instruments(UUID simulationId) {
+		List<Instrument> listed = jdbc.sql("""
+				SELECT i.instrument_id, i.simulation_id, i.symbol, i.display_name, m.venue_state,
+				    i.reference_price_cents, i.tick_cents, i.lot_size,
 				    i.min_quantity, i.max_quantity, i.max_price_cents, m.last_price_cents, m.bids -> 0 AS best_bid,
 				    m.asks -> 0 AS best_ask, m.last_trade_sequence, m.source_command_sequence, m.generated_at
 				FROM instrument_projection i JOIN market_snapshot m ON m.instrument_id = i.instrument_id
-				ORDER BY i.symbol""")
-			.query((row, index) -> new Instrument(row.getObject("instrument_id", UUID.class), row.getString("symbol"),
+				WHERE i.simulation_id = coalesce(CAST(:simulation AS UUID), (%s))
+				ORDER BY i.symbol""".formatted(CURRENT_SIMULATION))
+			.param("simulation", simulationId)
+			.query((row, index) -> new Instrument(row.getObject("instrument_id", UUID.class),
+					row.getObject("simulation_id", UUID.class), row.getString("symbol"),
 					row.getString("display_name"), row.getString("venue_state"), row.getLong("reference_price_cents"), row.getLong("tick_cents"),
 					row.getLong("lot_size"), row.getLong("min_quantity"), row.getLong("max_quantity"),
 					row.getLong("max_price_cents"), row.getObject("last_price_cents", Long.class),
@@ -90,6 +126,9 @@ class MarketQueries {
 					row.getLong("last_trade_sequence"), row.getLong("source_command_sequence"),
 					row.getTimestamp("generated_at").toInstant()))
 			.list();
+		UUID listedSimulation = simulationId != null ? simulationId
+				: listed.isEmpty() ? null : listed.getFirst().simulationId();
+		return new Listing(listedSimulation, listed);
 	}
 
 	/** A live frame's market row and session figures, read together. */

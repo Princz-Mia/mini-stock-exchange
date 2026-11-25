@@ -4,6 +4,7 @@ import numpy as np
 
 from mse_simulator.market import Instrument, MarketView
 from mse_simulator.noise import NoiseBot, NoiseConfig
+from mse_simulator.prices import BASIS_POINT
 from mse_simulator.strategy import (
     Cancel,
     Holdings,
@@ -12,7 +13,8 @@ from mse_simulator.strategy import (
     Positions,
 )
 
-CONFIG = NoiseConfig(max_quantity=10, spread_ticks=5, max_open_orders=3, quote_lifetime=10.0)
+# Five basis points: five ticks either side at 100.00, the tests' usual price.
+CONFIG = NoiseConfig(max_quantity=10, spread_bp=5.0, max_open_orders=3, quote_lifetime=10.0)
 
 
 def instrument(reference: int = 10_000, bid=None, ask=None, last=None) -> Instrument:
@@ -31,7 +33,7 @@ def instrument(reference: int = 10_000, bid=None, ask=None, last=None) -> Instru
 
 
 def view(*instruments: Instrument) -> MarketView:
-    return MarketView(open=True, live=True, instruments=instruments, fetched_at=0.0)
+    return MarketView(state="OPEN", live=True, instruments=instruments, fetched_at=0.0)
 
 
 def bot(seed: int) -> NoiseBot:
@@ -68,7 +70,13 @@ def test_orders_stay_near_the_anchor_and_within_what_the_bot_holds() -> None:
         if intent is None:
             continue
         assert isinstance(intent, Place)
-        assert abs(intent.limit - quoted.anchor()) <= CONFIG.spread_ticks * quoted.tick
+        # Within the spread of the anchor, rounded less than a tick away from the other side.
+        away = intent.limit - quoted.anchor()
+        reach = max(CONFIG.spread_bp * BASIS_POINT * quoted.anchor(), quoted.tick)
+        if intent.side == "BUY":
+            assert -reach - quoted.tick < away <= reach
+        else:
+            assert -reach <= away < reach + quoted.tick
         assert 1 <= intent.quantity <= CONFIG.max_quantity
         if intent.side == "BUY":
             assert intent.quantity * intent.limit <= holdings.cash
@@ -80,6 +88,68 @@ def test_the_anchor_is_the_mid_then_the_last_trade_then_the_reference() -> None:
     assert instrument(bid=9_900, ask=10_100, last=5_000).anchor() == 10_000
     assert instrument(bid=9_900, last=5_000).anchor() == 5_000
     assert instrument(reference=7_000).anchor() == 7_000
+    assert instrument(bid=10_000, ask=10_003).anchor() == 10_001.5, "exact, not rounded down"
+
+
+def test_buys_and_sells_reach_equally_far_across_an_odd_spread() -> None:
+    """With the mid half a tick off the grid, as many buy prices reach the ask as sell prices
+    reach the bid. A mid rounded down gave sells one more, and prices fell."""
+    quoted = instrument(bid=10_000, ask=10_003)
+    holdings = Holdings(cash=10**9, shares={quoted.instrument_id: 10**6})
+    limits: dict[str, set[int]] = {"BUY": set(), "SELL": set()}
+    for seed in range(1_000):
+        intent = bot(seed).decide(view(quoted), True, holdings, [], 0.0)
+        assert isinstance(intent, Place)
+        limits[intent.side].add(intent.limit)
+    assert limits["BUY"] == set(range(9_996, 10_007))
+    assert limits["SELL"] == set(range(9_997, 10_008))
+    crossing_buys = {limit for limit in limits["BUY"] if limit >= quoted.ask}
+    crossing_sells = {limit for limit in limits["SELL"] if limit <= quoted.bid}
+    assert len(crossing_buys) == len(crossing_sells) == 4
+
+
+def test_the_reach_is_a_share_of_the_price_and_at_least_a_tick() -> None:
+    """Thirty basis points is 60 ticks at 200.00 and 7.5 at 25.00; at 0.05 it would be a small
+    fraction of a tick, so there the reach is one tick."""
+    config = NoiseConfig(max_quantity=10, spread_bp=30.0, max_open_orders=3, quote_lifetime=10.0)
+    for reference, reach in [(20_000, 60), (2_500, 7.5), (5, 1)]:
+        quoted = instrument(reference=reference)
+        holdings = Holdings(cash=10**9, shares={quoted.instrument_id: 10**6})
+        away = []
+        for seed in range(400):
+            intent = NoiseBot(np.random.default_rng([seed, 5]), config).decide(
+                view(quoted), True, holdings, [], 0.0
+            )
+            assert isinstance(intent, Place)
+            away.append(intent.limit - reference)
+        assert -reach - 1 < min(away) and max(away) < reach + 1
+        assert min(away) <= -0.8 * reach and max(away) >= 0.8 * reach, "the whole reach is used"
+
+
+class Worth:
+    """A view that holds one value for every instrument."""
+
+    def __init__(self, value: float) -> None:
+        self._value = value
+
+    def of(self, instrument) -> float:
+        return self._value
+
+
+def test_orders_centre_between_the_market_and_what_the_bot_thinks_it_is_worth() -> None:
+    quoted = instrument(bid=9_990, ask=10_010)
+    holdings = Holdings(cash=10**9, shares={quoted.instrument_id: 10**6})
+    for pull, centre in [(0.0, 10_000), (0.25, 10_050), (1.0, 10_200)]:
+        config = NoiseConfig(10, 5.0, 3, 10.0, value_pull=pull)
+        limits = []
+        for seed in range(400):
+            strategy = NoiseBot(np.random.default_rng([seed, 5]), config, Worth(10_200.0))
+            intent = strategy.decide(view(quoted), True, holdings, [], 0.0)
+            assert isinstance(intent, Place)
+            limits.append(intent.limit)
+        reach = 5.0 * BASIS_POINT * centre
+        assert centre - reach - 1 < min(limits) and max(limits) < centre + reach + 1
+        assert abs(sum(limits) / len(limits) - centre) < 1
 
 
 def test_stale_quotes_are_cancelled_first_even_while_exposure_is_paused() -> None:
@@ -131,7 +201,7 @@ def test_noise_orders_stay_within_the_position_limit() -> None:
     market = view(instrument(bid=9_990, ask=10_010))
     i = market.instruments[0].instrument_id
     config = NoiseConfig(
-        max_quantity=50, spread_ticks=5, max_open_orders=3, quote_lifetime=10.0, max_position=4
+        max_quantity=50, spread_bp=5.0, max_open_orders=3, quote_lifetime=10.0, max_position=4
     )
     sizes = set()
     for seed in range(200):

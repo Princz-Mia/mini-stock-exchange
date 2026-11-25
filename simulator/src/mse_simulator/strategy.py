@@ -112,8 +112,3 @@ def oldest_stale(orders: list[OpenOrder], now: float, lifetime: float) -> Cancel
     """The oldest order past its lifetime. Cancelling is allowed even while new exposure pauses."""
     stale = [order for order in orders if now - order.created_at > lifetime]
     return Cancel(min(stale, key=lambda order: order.created_at).order_id) if stale else None
-
-
-def clamp(limit: int, instrument: Instrument) -> int:
-    """A limit inside the instrument's price band: at least one tick, at most its maximum."""
-    return min(max(limit, instrument.tick), instrument.max_price)

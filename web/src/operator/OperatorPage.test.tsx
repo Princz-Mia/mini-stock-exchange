@@ -51,6 +51,8 @@ function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
     bots: 0,
     tagged: { marketMakers: 0, noise: 0, momentum: 0 },
     runs: [] as BotRun[],
+    // The exchange's clock, sent with its answers about the runs as the Date header; none when null.
+    clock: null as string | null,
     // Trader logins without an account yet.
     unfunded: [] as string[],
   };
@@ -70,7 +72,11 @@ function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
         byStrategy: { ...state.tagged, untagged: state.bots },
       },
     }))
-    .on('GET /api/v1/admin/bot-runs', () => ({ status: 200, json: { runs: state.runs, nextCursor: null } }));
+    .on('GET /api/v1/admin/bot-runs', () => ({
+      status: 200,
+      json: { runs: state.runs, nextCursor: null },
+      ...(state.clock === null ? {} : { headers: { Date: new Date(state.clock).toUTCString() } }),
+    }));
   return { server, state };
 }
 
@@ -1336,9 +1342,12 @@ describe('adding traders on the operator screen', () => {
 
 describe('bot runs on the operator screen', () => {
   beforeEach(() => resetSession());
+  afterEach(() => vi.useRealTimers());
 
   const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
   const runs = () => screen.findByRole('region', { name: 'Bot runs' });
+  /** Sets the browser's clock and nothing else: timers still run, so the screen keeps asking every two seconds. */
+  const clockAt = (time: string) => vi.setSystemTime(new Date(time));
 
   it('ticks finished runs for a comparison, four at most, and links to it', async () => {
     const { state } = exchange('OPEN');
@@ -1430,6 +1439,131 @@ describe('bot runs on the operator screen', () => {
       commandsPerSecond: '4.00',
       maxOrderQuantity: 10,
       maxPosition: 100,
+      durationMinutes: 60,
+    });
+  });
+
+  it('starts a run for an hour unless told otherwise, and never reads an empty duration as no end', async () => {
+    const { server, state } = exchange('OPEN');
+    state.tagged = { marketMakers: 1, noise: 1, momentum: 0 };
+    server.on('POST /api/v1/admin/bot-runs', {
+      status: 201,
+      json: { runId: botRun().runId, bots: 2, commandSequence: '9' },
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    await waitFor(() => expect(within(form).getByLabelText('Noise')).toHaveValue('1'));
+    const length = within(form).getByRole('group', { name: 'Run length' });
+    expect(within(length).getByRole('radio', { name: 'For a set time' })).toBeChecked();
+    expect(within(length).getByRole('radio', { name: 'For a set time' })).toHaveAccessibleDescription(
+      'Ends by itself after the minutes given, from 1 to 1440 (24 hours).',
+    );
+    expect(within(length).getByRole('radio', { name: 'Until I stop it' })).not.toBeChecked();
+    const minutes = within(length).getByLabelText('Duration in minutes');
+    expect(minutes).toHaveValue('60');
+    expect(minutes).toBeEnabled();
+
+    const posted = () => server.requests.filter((request) => request.method === 'POST' && request.url.endsWith('/bot-runs'));
+    fireEvent.change(minutes, { target: { value: '' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    expect(await within(form).findByText('Duration must be a whole number.')).toBeInTheDocument();
+    expect(posted()).toHaveLength(0);
+
+    fireEvent.change(minutes, { target: { value: '15' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    expect(await within(form).findByText('Started a run of 2 bots.')).toBeInTheDocument();
+    expect(within(form).queryByText('Duration must be a whole number.')).toBeNull();
+    expect(posted()).toHaveLength(1);
+    expect(posted()[0]?.body).toEqual({
+      marketMakers: 1,
+      noise: 1,
+      momentum: 0,
+      commandsPerSecond: '4.00',
+      maxOrderQuantity: 10,
+      maxPosition: 100,
+      durationMinutes: 15,
+    });
+  });
+
+  it('starts a run with no end only when that is chosen, and says what it means', async () => {
+    const { server, state } = exchange('OPEN');
+    state.tagged = { marketMakers: 1, noise: 1, momentum: 0 };
+    server.on('POST /api/v1/admin/bot-runs', {
+      status: 201,
+      json: { runId: botRun().runId, bots: 2, commandSequence: '9' },
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    await waitFor(() => expect(within(form).getByLabelText('Noise')).toHaveValue('1'));
+    const untilStopped = within(form).getByRole('radio', { name: 'Until I stop it' });
+    const timed = within(form).getByRole('radio', { name: 'For a set time' });
+    const minutes = within(form).getByLabelText('Duration in minutes');
+    // One group of two, so the arrow keys move between them.
+    expect(untilStopped).toHaveAttribute('name', 'run-length');
+    expect(timed).toHaveAttribute('name', 'run-length');
+    fireEvent.click(untilStopped);
+    expect(untilStopped).toBeChecked();
+    expect(timed).not.toBeChecked();
+    expect(untilStopped).toHaveAccessibleDescription(
+      'Keeps trading until someone selects Stop run, and takes up again after every restart.',
+    );
+    // The minutes stay as they were for a change of mind, but can't be typed and aren't sent.
+    expect(minutes).toBeDisabled();
+    expect(minutes).toHaveValue('60');
+
+    const posted = () => server.requests.filter((request) => request.method === 'POST' && request.url.endsWith('/bot-runs'));
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    await waitFor(() => expect(posted()).toHaveLength(1));
+    expect(posted()[0]?.body).toEqual({
+      marketMakers: 1,
+      noise: 1,
+      momentum: 0,
+      commandsPerSecond: '4.00',
+      maxOrderQuantity: 10,
+      maxPosition: 100,
+    });
+    expect(await within(form).findByText('Started a run of 2 bots.')).toBeInTheDocument();
+
+    fireEvent.click(timed);
+    expect(minutes).toBeEnabled();
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    await waitFor(() => expect(posted()).toHaveLength(2));
+    expect(posted()[1]?.body).toMatchObject({ durationMinutes: 60 });
+  });
+
+  it('keeps the minutes typed through a change of mind about the run length', async () => {
+    const { server, state } = exchange('OPEN');
+    state.tagged = { marketMakers: 1, noise: 1, momentum: 0 };
+    server.on('POST /api/v1/admin/bot-runs', {
+      status: 201,
+      json: { runId: botRun().runId, bots: 2, commandSequence: '9' },
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    await waitFor(() => expect(within(form).getByLabelText('Noise')).toHaveValue('1'));
+    const minutes = within(form).getByLabelText('Duration in minutes');
+    fireEvent.change(minutes, { target: { value: '15' } });
+    fireEvent.click(within(form).getByRole('radio', { name: 'Until I stop it' }));
+    expect(minutes).toBeDisabled();
+    expect(minutes).toHaveValue('15');
+    fireEvent.click(within(form).getByRole('radio', { name: 'For a set time' }));
+    expect(minutes).toBeEnabled();
+    expect(minutes).toHaveValue('15');
+
+    const posted = () => server.requests.filter((request) => request.method === 'POST' && request.url.endsWith('/bot-runs'));
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    await waitFor(() => expect(posted()).toHaveLength(1));
+    expect(posted()[0]?.body).toEqual({
+      marketMakers: 1,
+      noise: 1,
+      momentum: 0,
+      commandsPerSecond: '4.00',
+      maxOrderQuantity: 10,
+      maxPosition: 100,
+      durationMinutes: 15,
     });
   });
 
@@ -1541,6 +1675,150 @@ describe('bot runs on the operator screen', () => {
     expect(within(panel).queryByText('Simulator settings')).toBeNull();
   });
 
+  it('says how long the run has been going and how long a timed one has left, as of the last answer', async () => {
+    const { state } = exchange('OPEN');
+    const timed = botRun({ endsAt: '2026-11-06T11:00:00Z' });
+    state.runs = [timed];
+    // Its worker last reported at 10:01:20; the run is twelve and a half minutes old all the same.
+    clockAt('2026-11-06T10:12:30Z');
+    renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(current).toHaveTextContent('Started10:00:00 UTCElapsed12 min 30 sEnds11:00:00 UTCTime left47 min 30 sLast');
+    // Each answer moves both; nothing on the screen counts between answers.
+    clockAt('2026-11-06T10:59:59Z');
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed59 min 59 sEnds11:00:00 UTCTime left1 sLast'), {
+      timeout: 10_000,
+    });
+    // Past its end the exchange shows the run as stopping, and as still wanting to run until its worker confirms.
+    // Nothing is left to count, and it can still be stopped by hand should the worker hang.
+    clockAt('2026-11-06T11:00:04Z');
+    state.runs = [{ ...timed, status: 'STOPPING' }];
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed1 h 0 minEnds11:00:00 UTCTime leftEnding now'), {
+      timeout: 10_000,
+    });
+    expect(within(current).getByRole('status', { name: 'Run status: Stopping' })).toBeInTheDocument();
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toBeEnabled();
+    expect(within(current).getByRole('button', { name: 'Stop run' })).not.toHaveAccessibleDescription();
+    // Once the operator asks for the stop, the end time decides nothing and is no longer counted down to.
+    state.runs = [{ ...timed, status: 'STOPPING', desiredState: 'STOPPED', stopRequestedAt: '2026-11-06T11:00:06Z' }];
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed1 h 0 minEnds11:00:00 UTCLast heartbeat'), {
+      timeout: 10_000,
+    });
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toBeDisabled();
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toHaveAccessibleDescription(
+      'A stop was asked for at 11:00:06 UTC; the run shows Stopped once the worker confirms.',
+    );
+  }, 30_000);
+
+  it("counts on the exchange's clock, whichever way the browser's is off", async () => {
+    const { state } = exchange('OPEN');
+    // A two-minute run two seconds old, on a browser six minutes ahead of the exchange.
+    state.runs = [botRun({ endsAt: '2026-11-06T10:02:00Z' })];
+    state.clock = '2026-11-06T10:00:02Z';
+    clockAt('2026-11-06T10:06:02Z');
+    const view = renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(current).toHaveTextContent('Elapsed2 sEnds10:02:00 UTCTime left1 min 58 sLast');
+    // The exchange's answers move the readout; the browser's clock, moved alone, does not.
+    clockAt('2026-11-06T10:30:00Z');
+    state.clock = '2026-11-06T10:00:40Z';
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed40 sEnds10:02:00 UTCTime left1 min 20 sLast'), {
+      timeout: 10_000,
+    });
+    view.unmount();
+
+    // A run with no end, a minute short of a day old, on a browser five minutes ahead: no warning yet. Then a minute
+    // past the day on a browser a quarter of an hour behind: warned about.
+    state.runs = [botRun()];
+    state.clock = '2026-11-07T09:59:00Z';
+    clockAt('2026-11-07T10:04:00Z');
+    renderPage();
+    const old = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(old).toHaveTextContent('Elapsed23 h 59 minEndsWhen stopped');
+    expect(within(old).queryByText(/no end time/)).toBeNull();
+    state.clock = '2026-11-07T10:01:00Z';
+    clockAt('2026-11-07T09:46:00Z');
+    expect(await within(old).findByText(/no end time/, {}, { timeout: 10_000 })).toBeInTheDocument();
+    expect(old).toHaveTextContent('Elapsed1 d 0 hEndsWhen stopped');
+    // The history counts the run to the same answer.
+    const history = within(await runs()).getByRole('table', { name: 'Recent runs' });
+    await waitFor(() => expect(within(history).getAllByRole('row')[1]).toHaveTextContent('1 d 0 h so far'), {
+      timeout: 10_000,
+    });
+  }, 30_000);
+
+  it('counts a run with no end from its start, in days once it is that old, with no time left to show', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [botRun({ startedAt: '2026-11-10T10:00:00Z', status: 'STALE' })];
+    clockAt('2026-11-23T14:30:00Z');
+    renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(current).toHaveTextContent('Started10:00:00 UTCElapsed13 d 4 hEndsWhen stoppedLast heartbeat');
+    expect(current).not.toHaveTextContent('Time left');
+  });
+
+  const LEFT_RUNNING =
+    'Running for more than a day with no end time. It keeps trading until someone stops it, and takes up again ' +
+    'after every restart. Select Stop run to end it.';
+
+  it('warns once a run with no end has traded for more than a day, in words that stay the same', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [botRun()];
+    // A day to the second: not yet.
+    clockAt('2026-11-07T10:00:00Z');
+    renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(current).toHaveTextContent('Elapsed1 d 0 hEndsWhen stopped');
+    expect(within(current).queryByText(/no end time/)).toBeNull();
+    expect(within(current).getByRole('button', { name: 'Stop run' })).not.toHaveAccessibleDescription();
+
+    clockAt('2026-11-07T10:00:01Z');
+    const lead = await within(current).findByText('Running for more than a day with no end time.', {}, { timeout: 10_000 });
+    const warning = lead.closest('p');
+    expect(warning).toHaveTextContent(LEFT_RUNNING);
+    // Said in words and marked up as a warning, not by its tint alone; announced politely, and read with the action.
+    expect(lead.tagName).toBe('STRONG');
+    expect(warning).toHaveClass('chart-note');
+    expect(warning).toHaveAttribute('role', 'status');
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toHaveAccessibleDescription(LEFT_RUNNING);
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toBeEnabled();
+
+    // Later answers move the time elapsed and leave the warning as it is, so it is announced once.
+    clockAt('2026-11-08T13:00:00Z');
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed2 d 3 h'), { timeout: 10_000 });
+    expect(within(current).getByText('Running for more than a day with no end time.').closest('p')).toBe(warning);
+    expect(warning?.textContent).toBe(LEFT_RUNNING);
+  }, 20_000);
+
+  it('does not warn once a stop is asked for, nor ever about a timed run', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [botRun()];
+    clockAt('2026-11-08T10:00:00Z');
+    const view = renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(await within(current).findByText(/no end time/)).toBeInTheDocument();
+    state.runs = [botRun({ status: 'STOPPING', desiredState: 'STOPPED', stopRequestedAt: '2026-11-08T09:59:50Z' })];
+    await waitFor(() => expect(within(current).queryByText(/no end time/)).toBeNull(), { timeout: 10_000 });
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toHaveAccessibleDescription(
+      'A stop was asked for at 09:59:50 UTC; the run shows Stopped once the worker confirms.',
+    );
+    view.unmount();
+
+    // The longest timed run, a day, half a minute past its end and not yet confirmed: it ends by itself.
+    state.runs = [botRun({ endsAt: '2026-11-07T10:00:00Z', status: 'STOPPING' })];
+    clockAt('2026-11-07T10:00:30Z');
+    renderPage();
+    const timed = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(timed).toHaveTextContent('Elapsed1 d 0 hEnds10:00:00 UTCTime leftEnding now');
+    expect(within(timed).queryByText(/no end time/)).toBeNull();
+    expect(within(timed).getByRole('button', { name: 'Stop run' })).not.toHaveAccessibleDescription();
+  }, 20_000);
+
   it("shows the simulator a running run's worker reported, and when another took over", async () => {
     const { state } = exchange('OPEN');
     state.runs = [botRun({ manifest: manifest() })];
@@ -1648,6 +1926,124 @@ describe('bot runs on the operator screen', () => {
     expect(within(recent).getByRole('row', { name: /09:00:00 UTC/ })).toHaveTextContent(
       'Not confirmed · 1 not canceled',
     );
+  });
+
+  it('says how long each run lasted in the history, and how long the one still going has been', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [
+      // Still going, its worker lost on the first day.
+      botRun({ runId: 'c', startedAt: '2026-11-10T10:00:00Z', status: 'STALE' }),
+      // Confirmed by its worker ten minutes in.
+      finishedRun({ runId: 'b' }),
+      // Stopped without ever having had a worker.
+      botRun({
+        runId: 'a',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        startedAt: '2026-11-06T09:00:00Z',
+        worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null },
+      }),
+    ];
+    clockAt('2026-11-23T14:30:00Z');
+    renderPage();
+
+    const history = await within(await runs()).findByRole('table', { name: 'Recent runs' });
+    expect(within(history).getAllByRole('columnheader').map((header) => header.textContent)).toEqual([
+      'Compare',
+      'Started',
+      'Ran for',
+      'Bots',
+      'Placed',
+      'Canceled',
+      'Ended',
+    ]);
+    // After the tick box: how long, then the bots.
+    const ranFor = () =>
+      within(history)
+        .getAllByRole('row')
+        .slice(1)
+        .map((row) => within(row).getAllByRole('cell')[1]?.textContent);
+    expect(ranFor()).toEqual(['13 d 4 h so far', '10 min', 'Unknown']);
+
+    // The run still going is counted to the same answer as its readout above.
+    clockAt('2026-11-23T15:30:00Z');
+    await waitFor(() => expect(ranFor()).toEqual(['13 d 5 h so far', '10 min', 'Unknown']), { timeout: 10_000 });
+    expect(within(await runs()).getByRole('group', { name: 'Current run' })).toHaveTextContent('Elapsed13 d 5 h');
+
+    // Sorted by length, shortest first: the one of unknown length, then ten minutes, then thirteen days.
+    fireEvent.click(within(history).getByRole('button', { name: 'Ran for' }));
+    expect(ranFor()).toEqual(['Unknown', '10 min', '13 d 5 h so far']);
+    fireEvent.click(within(history).getByRole('button', { name: 'Ran for' }));
+    expect(ranFor()).toEqual(['13 d 5 h so far', '10 min', 'Unknown']);
+  }, 15_000);
+
+  it('keeps an unconfirmed run at its own length in the history once the next run has started', async () => {
+    const { state } = exchange('OPEN');
+    // Each window ended when the run after it started, three days and two days after the run's own start.
+    const nextStart = (endedAt: string) => ({
+      startSequence: '41',
+      stopSequence: null,
+      endSequence: '900',
+      endedBy: 'NEXT_START' as const,
+      endedAt,
+    });
+    state.runs = [
+      finishedRun({
+        runId: 'd',
+        startedAt: '2026-11-09T10:00:00Z',
+        stoppedAt: '2026-11-09T10:10:00Z',
+        window: { ...finishedRun().window, endedAt: '2026-11-09T10:10:00Z' },
+      }),
+      // No end; its worker last reported 80 seconds in, and it was stopped half an hour in with none to confirm.
+      botRun({
+        runId: 'c',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        startedAt: '2026-11-07T10:00:00Z',
+        stopRequestedAt: '2026-11-07T10:30:00Z',
+        worker: { workerId: 'sim-1', heartbeatAt: '2026-11-07T10:01:20Z', leaseExpiresAt: '2026-11-07T10:01:35Z' },
+        window: nextStart('2026-11-09T10:00:00Z'),
+      }),
+      // For 60 minutes, its worker gone two seconds before the end.
+      botRun({
+        runId: 'b',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        startedAt: '2026-11-06T12:00:00Z',
+        endsAt: '2026-11-06T13:00:00Z',
+        stopRequestedAt: '2026-11-06T13:00:00Z',
+        worker: { workerId: 'sim-1', heartbeatAt: '2026-11-06T12:59:58Z', leaseExpiresAt: '2026-11-06T13:00:13Z' },
+        window: nextStart('2026-11-07T10:00:00Z'),
+      }),
+      // For 60 minutes, and no worker ever took it.
+      botRun({
+        runId: 'a',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        endsAt: '2026-11-06T11:00:00Z',
+        stopRequestedAt: '2026-11-06T11:00:00Z',
+        worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null },
+        window: nextStart('2026-11-06T12:00:00Z'),
+      }),
+    ];
+    clockAt('2026-11-23T14:30:00Z');
+    renderPage();
+
+    const history = await within(await runs()).findByRole('table', { name: 'Recent runs' });
+    const cells = within(history)
+      .getAllByRole('row')
+      .slice(1)
+      .map((row) => {
+        const all = within(row).getAllByRole('cell');
+        return [all[1]?.textContent, all[all.length - 1]?.textContent];
+      });
+    // Not the two days and the day until the next start: what each run's own stop, end and last report allow.
+    expect(cells).toEqual([
+      ['10 min', '10:10:00 UTC'],
+      ['About 1 min 20 s', 'Not confirmed'],
+      ['About 59 min 58 s', 'Not confirmed'],
+      ['Unknown', 'Not confirmed'],
+    ]);
   });
 
   it('pages the run history and the accounts with the cursor, size and order they were given', async () => {
