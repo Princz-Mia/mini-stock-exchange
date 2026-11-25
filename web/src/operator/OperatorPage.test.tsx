@@ -4793,6 +4793,74 @@ describe('operator commands across leaving the page', () => {
     expect(await button('Halt trading')).toBeDisabled();
   });
 
+  describe('offers nothing from a cache older than the page', () => {
+    const before = () => Date.now() - 60_000;
+    const checking = 'Checking the exchange…';
+
+    it('offers no new simulation from a closed market cached before, and says when the exchange does not answer', async () => {
+      const { server } = exchange('CLOSED');
+      const client = newClient();
+      client.setQueryData(['market'], market('CLOSED'), { updatedAt: before() });
+      const marketRead = answerLater();
+      server.on('GET /api/v1/market', () => marketRead.reply);
+      const first = renderWith(client);
+
+      const start = await screen.findByRole('region', { name: 'Start a new simulation' });
+      const send = within(start).getByRole('button', { name: 'Start simulation' });
+      expect(send).toBeDisabled();
+      expect(send).toHaveAccessibleDescription(checking);
+      marketRead.answer({ status: 200, json: market('CLOSED') });
+      await waitFor(() => expect(within(start).getByRole('button', { name: 'Start simulation' })).toBeEnabled());
+      first.unmount();
+
+      // Back again, and this time the exchange does not answer: still nothing is offered, and the page says why.
+      client.setQueryData(['market'], market('CLOSED'), { updatedAt: before() });
+      server.on('GET /api/v1/market', { status: 502, problem: { status: 502, code: 'BAD_GATEWAY', detail: 'Bad gateway' } });
+      renderWith(client);
+      const again = await screen.findByRole('region', { name: 'Start a new simulation' });
+      const unreachable = 'The exchange has not answered since this page opened, so nothing is offered until it does.';
+      await waitFor(() =>
+        expect(within(again).getByRole('button', { name: 'Start simulation' })).toHaveAccessibleDescription(unreachable),
+      );
+      expect(within(again).getByRole('button', { name: 'Start simulation' })).toBeDisabled();
+    });
+
+    it('offers no bot job from a job cached before, until the job has been read', async () => {
+      const { server } = exchange('SETUP');
+      const client = newClient();
+      // None was running when the page was left; another operator has started one since.
+      client.setQueryData(['bot-job'], null, { updatedAt: before() });
+      const jobRead = answerLater();
+      server.on('GET /api/v1/admin/bot-jobs/current', () => jobRead.reply);
+      renderWith(client);
+
+      const bots = await screen.findByRole('region', { name: 'Bots' });
+      expect(await within(bots).findByText(checking)).toHaveAttribute('role', 'status');
+      expect(within(bots).queryByRole('form', { name: 'Create bots' })).toBeNull();
+      jobRead.answer({ status: 200, json: botJob({ created: 1_000, partsDone: 1 }) });
+
+      expect(await within(bots).findByRole('progressbar')).toBeInTheDocument();
+      expect(within(bots).queryByRole('form', { name: 'Create bots' })).toBeNull();
+      expect(within(bots).queryByText(checking)).toBeNull();
+    });
+
+    it('offers no stop from a run cached before, until the runs have been read', async () => {
+      const { server, state } = exchange('OPEN');
+      state.runs = [botRun()];
+      const client = newClient();
+      client.setQueryData(['bot-runs'], { runs: [botRun()], nextCursor: null, answeredAt: before() }, { updatedAt: before() });
+      const runsRead = answerLater();
+      server.on(`GET ${RUNS}`, () => runsRead.reply);
+      renderWith(client);
+
+      const stop = await button('Stop run');
+      expect(stop).toBeDisabled();
+      expect(stop).toHaveAccessibleDescription(checking);
+      runsRead.answer({ status: 200, json: { runs: state.runs, nextCursor: null } });
+      await waitFor(async () => expect(await button('Stop run')).toBeEnabled());
+    });
+  });
+
   it('says a start with no answer went through once the run is read as going', async () => {
     const { server, state } = exchange('OPEN');
     state.tagged = { marketMakers: 1, noise: 2, momentum: 0 };
