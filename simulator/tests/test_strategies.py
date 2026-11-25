@@ -95,6 +95,20 @@ def test_the_signal_samples_the_mid_not_the_last_trade() -> None:
     assert signal.strength(item.instrument_id) == 0.0
 
 
+def test_a_far_order_is_no_trend() -> None:
+    """When the side near the price is taken and a far order is briefly the best, the signal
+    samples the last trade, not a mid halfway to that order, so momentum sees no trend; unless
+    the setting counts so wide a book as narrow."""
+    item = instrument(bid=9_990, ask=10_010, last=10_000)
+    gapped = replace(item, ask=50_000)
+    # The mid of 99.90 and 500.00 is 299.95, half again a long average of 199.975.
+    for narrow_book_bp, expected in ((100.0, 0.0), (20_000.0, 29_995 / 19_997.5 - 1)):
+        signal = PriceSignal(1, 2, narrow_book_bp)
+        signal.observe(view(item))
+        signal.observe(view(gapped))
+        assert signal.strength(item.instrument_id) == pytest.approx(expected)
+
+
 def momentum(seed: int, signal: PriceSignal, config: MomentumConfig = MOMENTUM) -> MomentumBot:
     return MomentumBot(np.random.default_rng([seed, 42]), config, signal)
 

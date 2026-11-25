@@ -7,7 +7,7 @@ from uuid import UUID
 
 import numpy as np
 
-from mse_simulator.market import Instrument, MarketView
+from mse_simulator.market import NARROW_BOOK_BP, Instrument, MarketView
 from mse_simulator.prices import BASIS_POINT, limit_price
 from mse_simulator.strategy import (
     Holdings,
@@ -22,15 +22,16 @@ from mse_simulator.strategy import (
 
 class PriceSignal:
     """Each instrument's price, one sample per market poll, shared by every momentum bot of a run:
-    the mid, or the last trade or the reference while a side is empty. The mid, because the last
-    trade alternates between the bid and the ask while the price stands still, which would read
-    as movement."""
+    the mid, or the last trade or the reference while the book is wide or a side is empty
+    (``Instrument.anchor``). The mid, because the last trade alternates between the bid and the
+    ask while the price stands still, which would read as movement."""
 
-    def __init__(self, short: int, long: int) -> None:
+    def __init__(self, short: int, long: int, narrow_book_bp: float = NARROW_BOOK_BP) -> None:
         if not 1 <= short < long:
             raise ValueError("the short window must be shorter than the long one")
         self._short = short
         self._long = long
+        self._narrow = narrow_book_bp * BASIS_POINT
         self._prices: dict[UUID, deque[float]] = {}
 
     def observe(self, market: MarketView) -> None:
@@ -42,7 +43,7 @@ class PriceSignal:
             return
         for item in market.instruments:
             self._prices.setdefault(item.instrument_id, deque(maxlen=self._long)).append(
-                item.anchor()
+                item.anchor(self._narrow)
             )
 
     def averages(self, instrument_id: UUID) -> tuple[float, float] | None:
@@ -78,6 +79,8 @@ class MomentumConfig:
     # An order reaches at most this far past the current price, in basis points. Within that it
     # takes the best opposite quote; beyond it, it rests, so it can't chase a thin book upward.
     reach_bp: float = 20.0
+    # The widest book whose mid counts as the market's price (``Instrument.mid``).
+    narrow_book_bp: float = NARROW_BOOK_BP
 
 
 class MomentumBot:
@@ -95,6 +98,7 @@ class MomentumBot:
         self._signal = signal
         self._positions = Positions(config.max_position)
         self._ready_at = float("-inf")
+        self._narrow = config.narrow_book_bp * BASIS_POINT
 
     def decide(
         self,
@@ -151,9 +155,10 @@ class MomentumBot:
     def _limit(self, instrument: Instrument, side: str) -> int:
         """The best opposite quote if it is within reach of the current price, else the edge of
         that reach, where the order rests."""
-        reach = max(self._config.reach_bp * BASIS_POINT * instrument.anchor(), instrument.tick)
+        anchor = instrument.anchor(self._narrow)
+        reach = max(self._config.reach_bp * BASIS_POINT * anchor, instrument.tick)
         if side == "BUY":
-            edge = limit_price(instrument.anchor() + reach, side, instrument)
+            edge = limit_price(anchor + reach, side, instrument)
             return instrument.ask if instrument.ask is not None and instrument.ask <= edge else edge
-        edge = limit_price(instrument.anchor() - reach, side, instrument)
+        edge = limit_price(anchor - reach, side, instrument)
         return instrument.bid if instrument.bid is not None and instrument.bid >= edge else edge

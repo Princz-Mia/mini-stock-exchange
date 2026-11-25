@@ -71,6 +71,7 @@ def manifest(settings: Settings) -> dict[str, Any]:
         "defaults": {
             "fairValueHalfLifeHours": settings.fair_value_half_life_hours,
             "fairValueVolatility": settings.fair_value_volatility,
+            "narrowBookBp": settings.narrow_book_bp,
             "viewSpreadBp": settings.view_spread_bp,
             "marketPollSeconds": settings.market_poll_seconds,
             "maxDataAgeSeconds": settings.max_data_age_seconds,
