@@ -32,6 +32,17 @@ const DONE: Record<Transition, string> = {
   resume: 'Trading has resumed.',
 };
 
+/**
+ * What the market is called on this page: the name it was started with. One nobody named, which the first setup
+ * command created, is said to have none, and no name is shown before any market exists.
+ */
+function marketName(market: Pick<MarketStatus, 'name' | 'simulationId'>): string {
+  if (market.name !== null && market.name !== undefined) {
+    return market.name;
+  }
+  return market.simulationId === null ? 'No market yet' : 'Not named';
+}
+
 /** What a close did, from its answer: how many resting orders it cancelled and how many bot runs it ended. */
 export function closedText(closed: MarketClosed): string {
   const orders =
@@ -52,7 +63,7 @@ export function closedText(closed: MarketClosed): string {
 function blocked(action: Action, state: MarketStatus['state'], instruments: number | undefined): string | null {
   switch (action) {
     case 'open':
-      if (state === 'NOT_SET_UP') return 'Add an instrument first; that creates the market.';
+      if (state === 'NOT_SET_UP') return 'Start a simulation or add an instrument first; either creates the market.';
       if (state !== 'SETUP') return 'The market has already opened. It opens only once.';
       if (instruments === undefined) return 'Reading the instruments…';
       return instruments === 0 ? 'Add at least one instrument first.' : null;
@@ -71,6 +82,23 @@ const ACTIONS: readonly { action: Action; label: string }[] = [
   { action: 'resume', label: 'Resume trading' },
   { action: 'close', label: 'Close the market' },
 ];
+
+/**
+ * A close left unfinished, in words. The count is an upper bound: it is the exchange's own from when it stopped, and
+ * a transaction of the close whose outcome it could not learn may have cancelled some of those orders already. So it
+ * is said as "at most", never as how many rest.
+ */
+export function unfinishedText(stillResting: number | null): string {
+  if (stillResting === 0) {
+    return 'The market is closed and the exchange counted no order still resting, but the close did not finish. The exchange has stopped trading and finishes the close when it is restarted.';
+  }
+  const resting =
+    stillResting === null
+      ? 'some orders still rest'
+      : `at most ${groupInteger(stillResting)} ${stillResting === 1 ? 'order still rests' : 'orders still rest'}`;
+  const bound = stillResting === null ? '' : " The count is the exchange's own from when it stopped; fewer may rest.";
+  return `The market is closed, but ${resting}. The exchange has stopped trading and cancels ${stillResting === 1 ? 'it' : 'them'} when it is restarted.${bound}`;
+}
 
 /**
  * A refused close, in words. The exchange says which state the market was in: a close that found it closed already
@@ -144,13 +172,7 @@ function CloseStatus({
       if (stillResting !== undefined) {
         return (
           <div role="alert" className="outcome outcome-pending">
-            <p>
-              The market is closed, but{' '}
-              {stillResting === null
-                ? 'some orders still rest'
-                : `${groupInteger(stillResting)} ${stillResting === 1 ? 'order still rests' : 'orders still rest'}`}
-              . The exchange has stopped trading and cancels them when it is restarted. Nothing needs to be sent again.
-            </p>
+            <p>{unfinishedText(stillResting)} Nothing needs to be sent again.</p>
             <p>After the restart, the close&apos;s answer says how many orders it cancelled and how many runs it ended.</p>
             <button type="button" className="quiet" onClick={onRetry}>
               Ask for the close&apos;s answer
@@ -285,6 +307,8 @@ export function MarketControl({ market, instruments }: { market: MarketStatus; i
         </span>
       </div>
       <dl className="balances">
+        <dt>Name</dt>
+        <dd>{marketName(market)}</dd>
         <dt>Opened</dt>
         <dd>{market.openedAt === null ? 'Not yet' : when(market.openedAt)}</dd>
         {market.closedAt !== null && (

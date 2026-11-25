@@ -1,5 +1,5 @@
 import { pollEvery } from '../api/client';
-import { useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
+import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
 import { groupInteger, utcDateTime } from '../format';
 import { AccountSetup } from './AccountSetup';
 import { BotRuns } from './BotRuns';
@@ -8,25 +8,36 @@ import { useCloseCommand } from './closeCommand';
 import { HealthPanel, useHealthSummary } from './HealthPanel';
 import { InstrumentSetup } from './InstrumentSetup';
 import { MarketControl } from './MarketControl';
+import { StartNotice, StartSimulation, useStartCommand } from './StartSimulation';
 import type { CommandOutcome } from './useCommand';
 
 /**
  * What this page shows of one simulation and no other. All of it is read again when the market closes, whoever closed
- * it, and when the exchange names another simulation: a close ends the runs and revokes the bots' tokens, and each of
- * these lists would otherwise show the market as it was until its own next poll, or for good where it has none.
+ * it: a close ends the runs and revokes the bots' tokens, and each of these lists would otherwise show the market as it
+ * was until its own next poll, or for good where it has none. When the exchange names another simulation, all of it is
+ * dropped first: none of it is the new market's.
  */
 const PER_SIMULATION = [['instruments'], ['bot-runs'], ['bots'], ['accounts'], ['traders'], ['admin-health']] as const;
+
+/** The runs ticked for a comparison are in the address, and are the simulation's they were ticked in. */
+const TICKED = ['compare'] as const;
 
 /**
  * The operator's screen: the authoritative trading phase with its controls and, once open, how trading is keeping
  * up; bot runs, and the SETUP editor for
  * instruments, bots and endowments. Once the market opens, bot runs come first. A market that has closed is shown as
- * ended: what it left is listed read-only, and nothing is offered that a closed market would refuse. Everything shown
- * is what the exchange committed, refetched after each command and every five seconds.
+ * ended: what it left is listed read-only, nothing is offered that a closed market would refuse, and a new simulation
+ * can be started, as the first one can on a stack with none. Everything shown is what the exchange committed,
+ * refetched after each command and every five seconds.
  */
 export function OperatorPage() {
   const market = useMarketStatus();
-  useRefreshOnMarketChange(market.data, PER_SIMULATION);
+  // Goes up when the exchange names another simulation. The page is drawn anew then, so that nothing typed, answered
+  // or paged through in the simulation before is left on the page of the new one.
+  const generation = useRefreshOnMarketChange(market.data, PER_SIMULATION);
+  useForgetInAddress(generation, TICKED);
+  // Above the page drawn for each simulation, so that the new one's page can say what became of it.
+  const start = useStartCommand();
   // This market's instruments only: the list is asked for by the simulation the status names.
   const instruments = useInstruments(market, { refetchInterval: pollEvery(5_000) });
 
@@ -47,7 +58,7 @@ export function OperatorPage() {
   const closed = market.data.state === 'CLOSED';
 
   return (
-    <div className="operator">
+    <div className="operator" key={generation}>
       <div className="operator-side">
         {market.isError && (
           <p role="alert" className="form-error">
@@ -74,7 +85,10 @@ export function OperatorPage() {
             Market data is not reachable, so the instrument list may be incomplete.
           </p>
         )}
+        {market.data.simulationId === null && <StartSimulation start={start} market={market.data} />}
+        <StartNotice start={start} market={market.data} />
         {closed && <Ended closedAt={market.data.closedAt} simulationId={market.data.simulationId} />}
+        {closed && <StartSimulation start={start} market={market.data} />}
         {!editable && <BotRuns market={market.data.state} closedAt={market.data.closedAt} instruments={listed} />}
         <InstrumentSetup instruments={listed} editable={editable} closed={closed} />
         <BotSetup instruments={listed} editable={editable} closed={closed} />
@@ -92,19 +106,26 @@ export function OperatorPage() {
  */
 export function restingOrdersText(known: {
   close: CommandOutcome<unknown>['kind'];
-  /** How many orders an unfinished close left resting, null if it did not say; undefined when it was not unfinished. */
+  /**
+   * At most how many orders an unfinished close left resting, null if it did not say; undefined when it was not
+   * unfinished.
+   */
   stillResting: number | null | undefined;
   /** The exchange says it has stopped taking commands. */
   writerHalted: boolean;
 }): string {
   if (known.stillResting !== undefined) {
+    if (known.stillResting === 0) {
+      return 'The close was left unfinished, though the exchange counted no order still resting when it stopped. It finishes the close when it is restarted.';
+    }
+    // What the exchange gives is an upper bound: its own count when it stopped, of which some may be cancelled already.
     const count =
       known.stillResting === null
         ? 'Some orders still rest, with their holds'
         : known.stillResting === 1
-          ? '1 order still rests, with its hold'
-          : `${groupInteger(known.stillResting)} orders still rest, with their holds`;
-    return `${count}: the close was left unfinished. The exchange has stopped, and cancels them when it is restarted.`;
+          ? 'At most 1 order still rests, with its hold'
+          : `At most ${groupInteger(known.stillResting)} orders still rest, with their holds`;
+    return `${count}: the close was left unfinished. The exchange has stopped, and cancels ${known.stillResting === 1 ? 'it' : 'them'} when it is restarted.`;
   }
   switch (known.close) {
     case 'done':

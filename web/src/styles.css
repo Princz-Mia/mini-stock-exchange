@@ -222,12 +222,27 @@ input[aria-invalid='true'] {
 }
 
 .context-badge {
+  display: inline-flex;
+  gap: 0.3em;
   font-size: 12px;
   white-space: nowrap;
+  /* A market's name can be long: it is cut short on a narrow screen rather than widening the page. */
+  min-width: 0;
+  max-width: 100%;
   padding: 2px var(--space-2);
   border-radius: 999px;
   background: var(--surface-sunken);
   color: var(--secondary);
+}
+
+.context-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-funds {
+  flex-shrink: 0;
 }
 
 .topbar nav {

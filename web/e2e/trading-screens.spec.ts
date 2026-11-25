@@ -86,9 +86,9 @@ const INSTRUMENT_LIST = /\/api\/v1\/instruments(\?|$)/;
  * by it.
  */
 async function setupMarket(route: Route): Promise<void> {
-  const live = (await (await route.fetch()).json()) as { simulationId: string | null };
+  const live = (await (await route.fetch()).json()) as { simulationId: string | null; name: string | null };
   await route.fulfill({
-    json: { state: 'SETUP', simulationId: live.simulationId, openedAt: null, closedAt: null, commandSequence: '7' },
+    json: { state: 'SETUP', simulationId: live.simulationId, name: live.name, openedAt: null, closedAt: null, commandSequence: '7' },
   });
 }
 
@@ -130,12 +130,13 @@ async function afterClose(page: Page): Promise<void> {
 }
 
 /**
- * The one request no browser test may send: the tests share one market, and a closed market stays closed for every
- * test after it. Anything that would send it is refused in the browser and recorded.
+ * The requests no browser test may send: the tests share one market, and a closed market stays closed for every test
+ * after it, as a new simulation would replace it for them. Anything that would send one is refused in the browser and
+ * recorded.
  */
-async function refuseCloses(page: Page, sent: string[]): Promise<void> {
-  await page.route(/\/api\/v1\/admin\/market\/close$/, (route) => {
-    sent.push(route.request().method());
+async function refuseClosesAndStarts(page: Page, sent: string[]): Promise<void> {
+  await page.route(/\/api\/v1\/admin\/(market\/close|simulations)$/, (route) => {
+    sent.push(`${route.request().method()} ${new URL(route.request().url()).pathname}`);
     return route.abort();
   });
 }
@@ -786,7 +787,7 @@ for (const size of SIZES) {
       // The live market stays open: the confirmation is opened and left by the keyboard, never confirmed, and the
       // closed market is the live one read as closed, answered in the browser.
       const closes: string[] = [];
-      const page = await at(browser, size, 'operator', (fresh) => refuseCloses(fresh, closes));
+      const page = await at(browser, size, 'operator', (fresh) => refuseClosesAndStarts(fresh, closes));
       const close = page.getByRole('region', { name: 'Market', exact: true }).getByRole('button', { name: 'Close the market' });
       await expect(close).toBeEnabled();
       await expect(close).toHaveAccessibleDescription('Ends this market for good. Asks first.');
@@ -818,7 +819,7 @@ for (const size of SIZES) {
       await page.context().close();
 
       const operator = await at(browser, size, 'operator', async (fresh) => {
-        await refuseCloses(fresh, closes);
+        await refuseClosesAndStarts(fresh, closes);
         await fresh.route(/\/api\/v1\/market$/, closedMarket);
         await afterClose(fresh);
       });
@@ -831,14 +832,18 @@ for (const size of SIZES) {
       await expect(operator.getByRole('button', { name: /^Revoke / })).toHaveCount(0);
       await expect(operator.getByRole('button', { name: 'Close the market' })).toHaveCount(0);
       await expect(operator.getByRole('button', { name: 'Halt trading' })).toHaveCount(0);
-      await expect(operator.getByRole('form')).toHaveCount(0);
+      // The one form left starts the next simulation; it is filled in here, never sent.
+      await expect(operator.getByRole('form')).toHaveCount(1);
+      const start = operator.getByRole('form', { name: 'Start a new simulation' });
+      await start.getByRole('textbox', { name: 'Name' }).fill('A seminar with a rather long name to see how it wraps');
+      await expect(start.getByRole('button', { name: 'Start simulation' })).toBeEnabled();
       await expect(operator.getByRole('table', { name: 'Instruments' })).toBeVisible();
       await expect(operator.getByText('Checking…')).toHaveCount(0, { timeout: 15_000 });
       await capture(operator, size, 'operator-closed');
       await operator.context().close();
 
       const trader = await at(browser, size, 'trader', async (fresh) => {
-        await refuseCloses(fresh, closes);
+        await refuseClosesAndStarts(fresh, closes);
         await fresh.route(/\/api\/v1\/market$/, closedMarket);
         await afterClose(fresh);
       });

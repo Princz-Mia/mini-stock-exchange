@@ -62,6 +62,12 @@ export const GLOSSARY = {
       'The operator has ended the market for good. No order is taken any more, and the bots have stopped. The close cancels every order that was still open ' +
       'and releases what it had reserved. Portfolios, orders and trades stay readable. A closed market never opens again.',
   },
+  simulation: {
+    term: 'New simulation',
+    definition:
+      'Once a market has closed, the operator can start a new simulation: a fresh market in setup, with its own instruments, accounts and bots, ' +
+      'all set up again. Logins stay, but each trader needs a new account in it. The closed market and its history are kept, and the screens show the new one.',
+  },
   spread: {
     term: 'Spread',
     definition:
