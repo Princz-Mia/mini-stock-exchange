@@ -172,7 +172,16 @@ class SimulatorControlIT {
 		assertThat(assignment(simulator).get("run").get("totals").get("placed").asLong()).isEqualTo(10);
 
 		// A worker says where it is with the run: loading so many of its bots, then trading. The steps its bots spent
-		// paused, by why, are cumulative like the totals: lower counts change nothing, and counts left out stay.
+		// paused, by why, are cumulative like the totals: lower counts change nothing, and counts left out stay. The
+		// first beat of a run is the one the simulator sends before any bot is loaded: none of them, and every paused
+		// count zero.
+		beat(simulator, first, "worker-a", 10, 2, 1, 0, 1, false, 200, """
+				"phase":"LOADING","botsLoaded":0,"botsTotal":3,"pausedStaleData":0,"pausedMarketNotOpen":0,\
+				"pausedOther":0""");
+		JsonNode loading = operatorView(operator, first);
+		assertThat(loading.get("progress").toString())
+			.isEqualTo("{\"phase\":\"LOADING\",\"botsLoaded\":0,\"botsTotal\":3}");
+		assertThat(paused(loading.get("activity"))).isEqualTo("0 0 0");
 		beat(simulator, first, "worker-a", 10, 2, 1, 0, 1, false, 200, """
 				"phase":"LOADING","botsLoaded":1,"botsTotal":3""");
 		assertThat(operatorView(operator, first).get("progress").toString())
