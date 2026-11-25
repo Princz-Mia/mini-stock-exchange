@@ -338,10 +338,35 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public void scheduleClose(UUID simulationId, Instant closesAt) {
+		expectOne(jdbc.sql("UPDATE simulation SET closes_at = ? WHERE id = ?")
+			.params(Timestamp.from(closesAt), simulationId)
+			.update(), "schedule the close");
+	}
+
+	@Override
+	public Optional<Instant> closesAt(UUID simulationId) {
+		return jdbc.sql("SELECT closes_at FROM simulation WHERE id = ?")
+			.param(simulationId)
+			.query((row, index) -> Optional.ofNullable(row.getTimestamp(1)).map(Timestamp::toInstant))
+			.single();
+	}
+
+	@Override
+	public Optional<UUID> openedBy(UUID simulationId) {
+		return jdbc.sql("""
+				SELECT actor_user_id FROM audit_log
+				WHERE simulation_id = ? AND action = 'MARKET_OPEN' AND outcome = 'APPLIED'""")
+			.param(simulationId)
+			.query(UUID.class)
+			.optional();
+	}
+
+	@Override
 	public Optional<AppliedClose> appliedClose(UUID simulationId) {
 		return jdbc.sql("""
 				SELECT actor_user_id, command_sequence FROM audit_log
-				WHERE simulation_id = ? AND action = 'MARKET_CLOSE' AND outcome = 'APPLIED'""")
+				WHERE simulation_id = ? AND action IN ('MARKET_CLOSE', 'MARKET_CLOSE_SCHEDULED') AND outcome = 'APPLIED'""")
 			.param(simulationId)
 			.query((row, index) -> new AppliedClose(row.getObject(1, UUID.class), row.getLong(2)))
 			.optional();

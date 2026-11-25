@@ -87,24 +87,30 @@ class TradingQueries {
 	/**
 	 * The trading phase as the writer last committed it, for the current simulation. Empty before a market has been
 	 * set up. {@code name} is what the operator who started the simulation called it, null for one that the first
-	 * setup command created.
+	 * setup command created. {@code closesAt} is when the exchange closes it by itself, null for a market opened
+	 * without a duration; {@code closedOnSchedule} says the exchange made the close at that time, and no operator.
 	 */
-	record MarketStatus(UUID simulationId, String name, String state, Instant openedAt, Instant closedAt,
-			long commandSequence) {
+	record MarketStatus(UUID simulationId, String name, String state, Instant openedAt, Instant closesAt,
+			Instant closedAt, boolean closedOnSchedule, long commandSequence) {
 	}
 
+	/** One probe of the audit log's index for a closed market, by the simulation; none for any other. */
 	Optional<MarketStatus> market() {
-		return jdbc
-			.sql("SELECT id, name, state, opened_at, closed_at, last_command_sequence FROM simulation "
-					+ CurrentSimulation.FIRST)
-			.query((row, index) -> {
-				Timestamp openedAt = row.getTimestamp("opened_at");
-				Timestamp closedAt = row.getTimestamp("closed_at");
-				return new MarketStatus(row.getObject("id", UUID.class), row.getString("name"), row.getString("state"),
-						openedAt == null ? null : openedAt.toInstant(), closedAt == null ? null : closedAt.toInstant(),
-						row.getLong("last_command_sequence"));
-			})
+		return jdbc.sql("""
+				SELECT id, name, state, opened_at, closes_at, closed_at, last_command_sequence,
+				    state = 'CLOSED' AND EXISTS (SELECT 1 FROM audit_log a WHERE a.simulation_id = s.id
+				        AND a.action = 'MARKET_CLOSE_SCHEDULED' AND a.outcome = 'APPLIED') AS closed_on_schedule
+				FROM simulation s
+				""" + CurrentSimulation.FIRST)
+			.query((row, index) -> new MarketStatus(row.getObject("id", UUID.class), row.getString("name"),
+					row.getString("state"), instant(row.getTimestamp("opened_at")),
+					instant(row.getTimestamp("closes_at")), instant(row.getTimestamp("closed_at")),
+					row.getBoolean("closed_on_schedule"), row.getLong("last_command_sequence")))
 			.optional();
+	}
+
+	private static Instant instant(Timestamp timestamp) {
+		return timestamp == null ? null : timestamp.toInstant();
 	}
 
 	/** Any signed-in user's ID, trading account or not; operators act as themselves. */

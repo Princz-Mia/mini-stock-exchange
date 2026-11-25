@@ -245,7 +245,8 @@ paths:
             Rejected and committed, with the reason as code: INSUFFICIENT_CASH, INSUFFICIENT_SHARES,
             MARKET_NOT_OPEN, MARKET_CLOSED, ORDER_LIMIT_EXCEEDED, EXECUTION_LIMIT_EXCEEDED; plus orderId and
             commandSequence. MARKET_NOT_OPEN may pass (the market is being set up, or is halted); MARKET_CLOSED is
-            final, so trying again later gains nothing. UNKNOWN_INSTRUMENT is not committed.
+            final, so trying again later gains nothing. It is also the answer from the market's closesAt on, before
+            the exchange has closed it. UNKNOWN_INSTRUMENT is not committed.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -836,8 +837,8 @@ paths:
           description: Not an operator, or missing CSRF token. No body.
         '409':
           description: |
-            MARKET_NOT_OPEN, MARKET_CLOSED (final: no run starts in a closed market) or RUN_ACTIVE (committed and
-            audited once a market exists), or IDEMPOTENCY_CONFLICT.
+            MARKET_NOT_OPEN, MARKET_CLOSED (final: no run starts in a closed market, nor from its closesAt on) or
+            RUN_ACTIVE (committed and audited once a market exists), or IDEMPOTENCY_CONFLICT.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -928,23 +929,43 @@ paths:
     post:
       tags: [execution]
       operationId: openMarket
-      summary: Open the market for trading, once.
+      summary: Open the market for trading, once, optionally for a set time.
       description: |
         Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
         key returns the first answer, even a refusal. Allowed only from SETUP.
 
-        The request has no body, so its key alone says which command it is. A key that was answered in an earlier
-        simulation is that command sent again: it returns the answer it was first given and changes nothing in the
-        current market. A new transition needs a new key.
+        The body is optional. With a duration, the exchange closes the market by itself once it has run out:
+        closesAt is the opening's time on the exchange's clock plus the duration, and the close made then is the
+        one an operator would send, audited as scheduled under the operator who opened the market. From closesAt
+        on, orders and bot run starts are refused with MARKET_CLOSED, even before the close has run; cancels are
+        still taken, and an operator may still close the market sooner. With no body, or a body without a
+        duration, the market stays open until an operator closes it.
+
+        A key that was answered in an earlier simulation is that command sent again: it returns the answer it was
+        first given and changes nothing in the current market. The duration is part of the request, so the same
+        key with another duration is IDEMPOTENCY_CONFLICT; no body and a body without a duration are the same
+        request. A new transition needs a new key.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MarketOpenRequest' }
       responses:
         '200':
           description: Applied. The market is OPEN from this command's sequence on.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/MarketTransition' }
-        '400': { $ref: '#/components/responses/Problem' }
+        '400':
+          description: |
+            IDEMPOTENCY_KEY_REQUIRED, or VALIDATION_FAILED for a duration out of range (OUT_OF_RANGE). A body that
+            cannot be read as this request (not JSON, a duration that is not a whole number, or an unknown field) is
+            refused by the framework, with no code.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
         '401':
           description: No session. No body.
         '403':
@@ -1044,6 +1065,10 @@ paths:
         Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
         key returns the first answer, even a refusal. Allowed from OPEN and from HALTED. CLOSED is final: no
         transition leads out of it, and a market still in SETUP is not closed.
+
+        A market opened with a duration is closed this way by the exchange itself at its closesAt, under a key of
+        its own and the operator who opened it. Only one close applies: one sent after it is refused with
+        MARKET_TRANSITION_NOT_ALLOWED and state CLOSED, and a close sent first means the exchange makes none.
 
         From this command's sequence on, an order is rejected with MARKET_CLOSED and no bot run starts. In the
         same transaction every bot run that has not ended ends (endedBy MARKET_CLOSE), every bot token is revoked,
@@ -2662,7 +2687,7 @@ components:
     MarketStatus:
       type: object
       additionalProperties: false
-      required: [state, simulationId, name, openedAt, closedAt, commandSequence]
+      required: [state, simulationId, name, openedAt, closesAt, closedAt, closedOnSchedule, commandSequence]
       description: |
         The current simulation's phase: the one that is not closed or, after a close, the one closed last, until
         another is started.
@@ -2681,9 +2706,22 @@ components:
         openedAt:
           oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
           description: When the market first opened; null in SETUP.
+        closesAt:
+          oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: |
+            When the exchange closes the market by itself, on its own clock; null for a market opened without a
+            duration, and before it opens. From then on orders are refused with MARKET_CLOSED, even while the state
+            still says OPEN or HALTED because the close has not run yet. A closed market keeps it, as the time it
+            was meant to close.
         closedAt:
           oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
           description: When the market closed; null unless the state is CLOSED.
+        closedOnSchedule:
+          type: boolean
+          description: |
+            True when the exchange itself closed the market because its closesAt had come: at that time, or later
+            when it was not running then or could not close it at once (closedAt says when it did). False while it
+            is not closed, and when an operator closed it.
         commandSequence:
           oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }]
           description: The last committed command's sequence.
@@ -2695,6 +2733,23 @@ components:
       properties:
         state: { type: string, enum: [OPEN, HALTED] }
         commandSequence: { $ref: '#/components/schemas/Sequence' }
+        closesAt:
+          oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: |
+            When the exchange closes the market by itself: set by an opening with a duration, null for any other
+            transition.
+
+    MarketOpenRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        durationMinutes:
+          type: integer
+          minimum: 5
+          maximum: 43200
+          description: |
+            How long the market stays open before the exchange closes it, from 5 minutes to 30 days. Left out, it
+            stays open until an operator closes it.
 
     SimulationName:
       type: string

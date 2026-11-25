@@ -21,6 +21,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.security.authentication.TestingAuthenticationToken;
 import org.springframework.security.core.Authentication;
 
+import tools.jackson.databind.json.JsonMapper;
+
 import com.mia_princz.mse.execution.trading.application.CommandWriter;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
 import com.mia_princz.mse.execution.trading.application.TradingStore;
@@ -44,7 +46,7 @@ class MarketControllerTest {
 					Clock.systemUTC(), (account) -> new byte[0]);
 			engine.startEmpty();
 			MarketController controller = new MarketController(engine, queries, Duration.ofMillis(100),
-					Duration.ofSeconds(30));
+					Duration.ofSeconds(30), JsonMapper.builder().build());
 			CountDownLatch running = new CountDownLatch(1);
 			writer.submit(() -> {
 				running.countDown();
@@ -88,7 +90,7 @@ class MarketControllerTest {
 					Clock.systemUTC(), (account) -> new byte[0]);
 			engine.startEmpty();
 			MarketController controller = new MarketController(engine, queries, Duration.ofMillis(100),
-					Duration.ofMillis(100));
+					Duration.ofMillis(100), JsonMapper.builder().build());
 			CountDownLatch running = new CountDownLatch(1);
 			writer.submit(() -> {
 				running.countDown();

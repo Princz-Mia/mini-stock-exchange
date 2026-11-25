@@ -1,6 +1,7 @@
 import { pollEvery } from '../api/client';
+import { closedPhrase } from '../app/closeTime';
 import { useForgetInAddress, useInstruments, useMarketStatus, useRefreshOnMarketChange } from '../app/market';
-import { groupInteger, utcDateTime } from '../format';
+import { groupInteger } from '../format';
 import { AccountSetup } from './AccountSetup';
 import { BotRuns } from './BotRuns';
 import { BotSetup } from './BotSetup';
@@ -87,7 +88,14 @@ export function OperatorPage() {
         )}
         {market.data.simulationId === null && <StartSimulation start={start} market={market.data} />}
         <StartNotice start={start} market={market.data} />
-        {closed && <Ended closedAt={market.data.closedAt} simulationId={market.data.simulationId} />}
+        {closed && (
+          <Ended
+            closedAt={market.data.closedAt}
+            closesAt={market.data.closesAt}
+            onSchedule={market.data.closedOnSchedule}
+            simulationId={market.data.simulationId}
+          />
+        )}
         {closed && <StartSimulation start={start} market={market.data} />}
         {!editable && <BotRuns market={market.data.state} closedAt={market.data.closedAt} instruments={listed} />}
         <InstrumentSetup instruments={listed} editable={editable} closed={closed} />
@@ -113,6 +121,11 @@ export function restingOrdersText(known: {
   stillResting: number | null | undefined;
   /** The exchange says it has stopped taking commands. */
   writerHalted: boolean;
+  /**
+   * The exchange closed the market because its set time had come. A close sent from here then closed nothing, and
+   * whether it ever answers says nothing of the orders: the exchange's own close cancels them.
+   */
+  closedOnSchedule?: boolean;
 }): string {
   if (known.stillResting !== undefined) {
     if (known.stillResting === 0) {
@@ -127,7 +140,10 @@ export function restingOrdersText(known: {
           : `At most ${groupInteger(known.stillResting)} orders still rest, with their holds`;
     return `${count}: the close was left unfinished. The exchange has stopped, and cancels ${known.stillResting === 1 ? 'it' : 'them'} when it is restarted.`;
   }
-  switch (known.close) {
+  // The exchange's own close for the set time cancels the orders, so one sent from here and never answered, or still
+  // on its way, says nothing of them.
+  const close = known.closedOnSchedule === true && known.close !== 'done' ? 'idle' : known.close;
+  switch (close) {
     case 'done':
       return 'Every order that still rested was cancelled and its hold released.';
     case 'sending':
@@ -145,14 +161,26 @@ export function restingOrdersText(known: {
  * First on the page of a market that has closed: that it has ended and when, what the close did, and what is still
  * here to read. The panels under it say the same of themselves in a line each, in place of their forms.
  */
-function Ended({ closedAt, simulationId }: { closedAt: string | null; simulationId: string | null }) {
+function Ended({
+  closedAt,
+  closesAt,
+  onSchedule,
+  simulationId,
+}: {
+  closedAt: string | null;
+  /** The time it was set to close at, if it had one. */
+  closesAt: string | null;
+  /** The exchange closed it because its set time had come, and no operator. */
+  onSchedule: boolean;
+  simulationId: string | null;
+}) {
   const close = useCloseCommand(simulationId);
   const health = useHealthSummary();
   return (
     <section className="panel ended" aria-labelledby="ended-title">
       <h2 id="ended-title">This market has ended</h2>
       <p>
-        It closed{closedAt === null ? '' : ` on ${utcDateTime(closedAt)}`}. Trading is over for good: every bot run
+        It {closedPhrase(closedAt, onSchedule, closesAt)}. Trading is over for good: every bot run
         ended, and every bot&apos;s token stopped working.
       </p>
       <p>
@@ -160,6 +188,7 @@ function Ended({ closedAt, simulationId }: { closedAt: string | null; simulation
           close: close.outcome.kind,
           stillResting: close.stillResting,
           writerHalted: health.data?.writer.available === false,
+          closedOnSchedule: onSchedule,
         })}
       </p>
       <p className="muted">

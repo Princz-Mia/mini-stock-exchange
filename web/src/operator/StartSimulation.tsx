@@ -53,7 +53,9 @@ export function useStartCommand(): StartCommand {
             simulationId: started.simulationId,
             name: started.name,
             openedAt: null,
+            closesAt: null,
             closedAt: null,
+            closedOnSchedule: false,
             commandSequence: started.commandSequence,
           });
         }

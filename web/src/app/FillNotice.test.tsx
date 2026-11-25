@@ -526,7 +526,7 @@ describe('the fill notice', () => {
           feed: { state: 'LIVE', lag: 0 },
         },
       })
-      .on('GET /api/v1/market', { status: 200, json: { state: 'OPEN', simulationId: 's', openedAt: null, closedAt: null, commandSequence: '1' } });
+      .on('GET /api/v1/market', { status: 200, json: { state: 'OPEN', simulationId: 's', openedAt: null, closesAt: null, closedAt: null, closedOnSchedule: false, commandSequence: '1' } });
     window.history.pushState({}, '', '/terminal');
     render(<App />);
     await waitFor(() => expect(streams.some((stream) => stream.url === '/api/v1/account-events')).toBe(true));
