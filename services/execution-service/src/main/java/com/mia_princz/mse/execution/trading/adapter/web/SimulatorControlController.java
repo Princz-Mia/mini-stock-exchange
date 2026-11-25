@@ -172,11 +172,7 @@ class SimulatorControlController {
 		if (!known) {
 			throw new ApiException(HttpStatus.NOT_FOUND, "RUN_NOT_FOUND", "No such bot run");
 		}
-		List<AssignedBot> page = jdbc.sql("""
-				SELECT account_id, strategy, account_created_at FROM bot_assignment
-				WHERE run_id = :run%s
-				ORDER BY account_created_at, account_id LIMIT :limit""".formatted(
-				after == null ? "" : " AND (account_created_at, account_id) > (:afterAt, :afterId)"))
+		List<AssignedBot> page = jdbc.sql(botPageSql(after != null))
 			.param("run", runId)
 			.param("afterAt", after == null ? null : Timestamp.from(after.createdAt()))
 			.param("afterId", after == null ? null : after.id())
@@ -194,6 +190,18 @@ class SimulatorControlController {
 		AssignedBot last = page.get(limit - 1);
 		return new BotPage(bots,
 				Cursors.assignedBots(new TradingQueries.AccountPosition(last.createdAt(), last.accountId()), runId));
+	}
+
+	/**
+	 * A page of a run's bots, in the order their accounts were created: one range of bot_assignment_in_order, with no
+	 * sort, so reading every page of a run costs time in proportion to its size.
+	 */
+	static String botPageSql(boolean continued) {
+		return """
+				SELECT account_id, strategy, account_created_at FROM bot_assignment
+				WHERE run_id = :run%s
+				ORDER BY account_created_at, account_id LIMIT :limit""".formatted(
+				continued ? " AND (account_created_at, account_id) > (:afterAt, :afterId)" : "");
 	}
 
 	private record AssignedBot(UUID accountId, String strategy, Instant createdAt) {

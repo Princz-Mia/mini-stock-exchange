@@ -21,8 +21,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 import com.mia_princz.mse.execution.TestcontainersConfiguration;
 
 /**
- * How the history statements the API really sends, and the operator's account list, are planned. Each is explained as a generic plan, the plan the
- * server may settle on once the driver prepares a statement it has run a few times, which knows no parameter values.
+ * How the history statements the API really sends, the operator's account list and a run's bot pages are planned.
+ * Each is explained as a generic plan, the plan the server may settle on once the driver prepares a statement it has
+ * run a few times, which knows no parameter values.
  * A later page of a filtered list must still start at its filter's index range and at the page's position, in either
  * order, with no sort. The test tables are nearly empty, so sequential and bitmap scans are turned off to make the
  * planner show which index fits; this proves the statements can be served this way, not that every data set is.
@@ -95,6 +96,17 @@ class HistoryPlanIT {
 					.doesNotContainPattern("Sort Key: (account\\.)?(created_at|id)");
 			}
 		}
+	}
+
+	@Test
+	void everyPageOfARunsBotsIsOneRangeOfItsIndex() {
+		for (boolean continued : new boolean[] { false, true }) {
+			assertThat(plan(SimulatorControlController.botPageSql(continued))).as(continued ? "later page" : "first page")
+				.contains("Index Scan using bot_assignment_in_order", "(run_id = $")
+				.doesNotContain("Sort");
+		}
+		assertThat(plan(SimulatorControlController.botPageSql(true)))
+			.contains("ROW(account_created_at, account_id) > ROW($");
 	}
 
 	@Test
