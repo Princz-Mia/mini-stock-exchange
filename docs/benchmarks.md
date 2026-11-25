@@ -315,7 +315,7 @@ All budgets met.
 | Commit | `64f3dbb` |
 | Execution JVM | Oracle JDK 25.0.5, `-XX:MaxRAMPercentage=75` |
 | PostgreSQL | 18.6, `fsync=on`, `synchronous_commit=on` |
-| Container limits | Execution 2 GiB, 2 CPUs; PostgreSQL 2 GiB, 2 CPUs; Kafka 2 GiB, 2 CPUs; Market Data 1.5 GiB, 1.5 CPUs; Flink JobManager 1.5 GiB, 1 CPU; Flink TaskManager 1.8 GiB, 2 CPUs; simulator 512 MiB, 1 CPU; proxy 256 MiB, 0.5 CPU |
+| Container limits | Execution 2 GiB, 2 CPUs; PostgreSQL 2 GiB, 2 CPUs; Kafka 2 GiB, 2 CPUs; Market Data 1.5 GiB, 1.5 CPUs; Flink JobManager 1.5 GiB, 1 CPU; Flink TaskManager 1.8 GiB, 2 CPUs; simulator 512 MiB, 1 CPU; proxy 256 MiB, 0.5 CPU (2 CPUs since 2026-11-19, as in `compose.yaml` today) |
 
 ## Highest rate
 
