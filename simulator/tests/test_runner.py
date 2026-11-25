@@ -6,13 +6,14 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import httpx
+import numpy as np
 import pytest
 
 from mse_simulator import runner as runner_module
 from mse_simulator.control import Assignment
 from mse_simulator.credentials import load_token
 from mse_simulator.manifest import manifest
-from mse_simulator.market import UNSEEN, fetch
+from mse_simulator.market import UNSEEN, Instrument, MarketView, fetch
 from mse_simulator.market_maker import MarketMaker
 from mse_simulator.pacing import Pacer
 from mse_simulator.runner import Activity, Runner
@@ -938,6 +939,38 @@ def test_each_run_has_its_own_fair_values_from_its_seed_and_numbers_its_makers_a
             assert again == first, "the same seed repeats it"
 
     asyncio.run(scenario())
+
+
+def test_the_narrow_book_setting_reaches_the_values_and_every_strategy(tmp_path) -> None:
+    """A book 200 basis points wide, from a reference of 80.00: narrow enough at 250, so every
+    part of the run takes its mid of 100.00 for the price; at the default of 100 they would take
+    the reference."""
+    runner = Runner(settings(tmp_path, narrow_book_bp=250.0), httpx.AsyncClient())
+    run = assigned(run_body({}, []))
+    runner.start_run(run)
+
+    def book(number: int) -> Instrument:
+        return Instrument(UUID(int=number), "NOVA", 1, 8_000, None, 9_900, 10_100, 10**8, 1, 10**6)
+
+    item, unseen = book(1), book(2)
+    market = MarketView(state="OPEN", live=True, instruments=(item,), fetched_at=0.0)
+    runner._signal.observe(market)
+    runner._values.observe(market)
+    assert runner._values.of(item.instrument_id) == pytest.approx(10_000)
+    assert runner._signal._prices[item.instrument_id][-1] == 10_000
+
+    def built(name: str):
+        return runner._strategy(name, np.random.default_rng([7, 1]), run)
+
+    # With no value for an instrument, a view goes by the market's price.
+    assert built("MARKET_MAKER")._view.of(unseen) == 10_000
+    assert built("NOISE")._view.of(unseen) == 10_000
+    # Momentum reaches 20 basis points past the price: 100.20, short of the ask at 101.00.
+    assert built("MOMENTUM")._limit(item, "BUY") == 10_020
+    holdings = Holdings(cash=10**9, shares={item.instrument_id: 10**6})
+    noise = built("NOISE").decide(market, True, holdings, [], 0.0)
+    # Within 30 basis points of the bot's view, itself within 20 of the value at 100.00.
+    assert abs(noise.limit / 10_000 - 1) <= 0.0051
 
 
 @pytest.mark.parametrize("strategy", ["MARKET_MAKER", "MOMENTUM", "NOISE"])

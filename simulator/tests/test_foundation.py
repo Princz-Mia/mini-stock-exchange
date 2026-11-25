@@ -23,6 +23,15 @@ def test_settings_reject_unknown_fields_and_unbounded_concurrency() -> None:
         settings(max_in_flight=0)
 
 
+def test_a_book_may_be_required_to_be_one_tick_wide_but_not_less() -> None:
+    assert settings().narrow_book_bp == 100
+    assert settings(narrow_book_bp=0).narrow_book_bp == 0
+    assert settings(narrow_book_bp=10_000).narrow_book_bp == 10_000
+    for refused in (-1, 10_001, float("nan")):
+        with pytest.raises(ValidationError):
+            settings(narrow_book_bp=refused)
+
+
 def test_seeded_generators_repeat_decisions() -> None:
     first = np.random.default_rng(42).integers(1, 10_000, size=5)
     second = np.random.default_rng(42).integers(1, 10_000, size=5)
