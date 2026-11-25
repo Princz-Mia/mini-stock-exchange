@@ -78,6 +78,69 @@ async function force(page: Page, theme: 'light' | 'dark' | null): Promise<void> 
   }, theme);
 }
 
+/** The instrument list as the pages ask for it: by the simulation the market status names. */
+const INSTRUMENT_LIST = /\/api\/v1\/instruments(\?|$)/;
+
+/**
+ * The live market, read as still being set up. The simulation is the live one, since the pages ask for the instruments
+ * by it.
+ */
+async function setupMarket(route: Route): Promise<void> {
+  const live = (await (await route.fetch()).json()) as { simulationId: string | null; name: string | null };
+  await route.fulfill({
+    json: { state: 'SETUP', simulationId: live.simulationId, name: live.name, openedAt: null, closedAt: null, commandSequence: '7' },
+  });
+}
+
+/** The live market, read as closed: its own simulation, so the instruments, orders and runs shown are the live ones. */
+async function closedMarket(route: Route): Promise<void> {
+  const live = (await (await route.fetch()).json()) as Record<string, unknown>;
+  await route.fulfill({ json: { ...live, state: 'CLOSED', closedAt: '2026-11-06T16:00:00Z' } });
+}
+
+/**
+ * What a close leaves of the live market's accounts, orders and balances, since reading the status as closed changes
+ * none of them: every bot's token revoked, no order open, and nothing reserved.
+ */
+async function afterClose(page: Page): Promise<void> {
+  await page.route(/\/api\/v1\/admin\/accounts(\?|$)/, async (route) => {
+    const live = (await (await route.fetch()).json()) as { accounts: { kind: string; token: string | null }[] };
+    live.accounts.forEach((account) => {
+      if (account.kind === 'BOT') {
+        account.token = 'REVOKED';
+      }
+    });
+    await route.fulfill({ json: live });
+  });
+  await page.route(/\/api\/v1\/orders\?(.*&)?status=active(&|$)/, (route) =>
+    route.fulfill({ json: { orders: [], nextCursor: null } }),
+  );
+  await page.route(/\/api\/v1\/portfolio$/, async (route) => {
+    const live = (await (await route.fetch()).json()) as {
+      cash: { total: string; available: string; reserved: string };
+      holdings: { total: number; available: number; reserved: number }[];
+    };
+    live.cash = { total: live.cash.total, available: live.cash.total, reserved: '0.00' };
+    live.holdings.forEach((holding) => {
+      holding.available = holding.total;
+      holding.reserved = 0;
+    });
+    await route.fulfill({ json: live });
+  });
+}
+
+/**
+ * The requests no browser test may send: the tests share one market, and a closed market stays closed for every test
+ * after it, as a new simulation would replace it for them. Anything that would send one is refused in the browser and
+ * recorded.
+ */
+async function refuseClosesAndStarts(page: Page, sent: string[]): Promise<void> {
+  await page.route(/\/api\/v1\/admin\/(market\/close|simulations)$/, (route) => {
+    sent.push(`${route.request().method()} ${new URL(route.request().url()).pathname}`);
+    return route.abort();
+  });
+}
+
 /**
  * No sideways scrolling, nothing stored but preferences, and no accessibility violation in either forced theme, each
  * forced against the other system scheme so the forced one has to win. Screenshots of the light page and the dark one
@@ -230,7 +293,7 @@ for (const size of SIZES) {
       // too: stale data and a lost connection show together, as they would.
       const page = await at(browser, size, 'trader', async (fresh) => {
         await fresh.route('**/api/v1/market-events*', (route) => route.abort());
-        await fresh.route(/\/api\/v1\/instruments$/, async (route) => {
+        await fresh.route(INSTRUMENT_LIST, async (route) => {
           const response = await route.fetch();
           const listing = (await response.json()) as { feed: { state: string; lag: number } };
           listing.feed = { state: 'STALE', lag: 12 };
@@ -256,7 +319,7 @@ for (const size of SIZES) {
 
       // Market Data is down.
       const down = await at(browser, size, 'trader', async (fresh) => {
-        await fresh.route(/\/api\/v1\/instruments$/, problem(503, 'UNAVAILABLE'));
+        await fresh.route(INSTRUMENT_LIST, problem(503, 'UNAVAILABLE'));
       });
       await down.getByRole('link', { name: 'Terminal' }).click();
       await expect(down.getByRole('alert')).toContainText('Market data is not reachable');
@@ -505,12 +568,8 @@ for (const size of SIZES) {
       // as it is.
       const edits: unknown[] = [];
       const page = await at(browser, size, 'operator', async (fresh) => {
-        await fresh.route(/\/api\/v1\/market$/, (route) =>
-          route.fulfill({
-            json: { state: 'SETUP', simulationId: '10000000-0000-0000-0000-000000000001', openedAt: null, commandSequence: '7' },
-          }),
-        );
-        await fresh.route(/\/api\/v1\/instruments$/, async (route) => {
+        await fresh.route(/\/api\/v1\/market$/, setupMarket);
+        await fresh.route(INSTRUMENT_LIST, async (route) => {
           const live = (await (await route.fetch()).json()) as { instruments: { symbol: string; displayName: string | null }[] };
           live.instruments.forEach((instrument) => {
             if (instrument.symbol === 'NOVA') {
@@ -610,11 +669,7 @@ for (const size of SIZES) {
       // is. The holders are the ones the live market has.
       const deletes: string[] = [];
       const page = await at(browser, size, 'operator', async (fresh) => {
-        await fresh.route(/\/api\/v1\/market$/, (route) =>
-          route.fulfill({
-            json: { state: 'SETUP', simulationId: '10000000-0000-0000-0000-000000000001', openedAt: null, commandSequence: '7' },
-          }),
-        );
+        await fresh.route(/\/api\/v1\/market$/, setupMarket);
         await fresh.route(/\/api\/v1\/admin\/instruments\/[0-9a-f-]+$/, (route) => {
           if (route.request().method() !== 'DELETE') {
             return route.fallback();
@@ -726,6 +781,85 @@ for (const size of SIZES) {
       await expect(down.getByRole('alert')).toContainText('The exchange is not reachable');
       await capture(down, size, 'operator-unreachable');
       await down.context().close();
+    });
+
+    test('the confirmation before a close, and a closed market on each screen', async ({ browser }) => {
+      // The live market stays open: the confirmation is opened and left by the keyboard, never confirmed, and the
+      // closed market is the live one read as closed, answered in the browser.
+      const closes: string[] = [];
+      const page = await at(browser, size, 'operator', (fresh) => refuseClosesAndStarts(fresh, closes));
+      const close = page.getByRole('region', { name: 'Market', exact: true }).getByRole('button', { name: 'Close the market' });
+      await expect(close).toBeEnabled();
+      await expect(close).toHaveAccessibleDescription('Ends this market for good. Asks first.');
+      await close.focus();
+      await page.keyboard.press('Enter');
+      const confirmation = page.getByRole('alertdialog', { name: 'Close the market for good?' });
+      await expect(confirmation).toBeVisible();
+      // Focus is in the confirmation, on the button that changes nothing.
+      await expect(confirmation.getByRole('button', { name: 'Do not close' })).toBeFocused();
+      // And the keyboard stays with the confirmation. Tab goes to its other button, then out of the page to the
+      // browser's own controls, and back to its first button: never to anything on the page behind it.
+      await page.keyboard.press('Tab');
+      await expect(confirmation.getByRole('button', { name: 'Close the market for good' })).toBeFocused();
+      await page.keyboard.press('Tab');
+      expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true);
+      await page.keyboard.press('Tab');
+      await expect(confirmation.getByRole('button', { name: 'Do not close' })).toBeFocused();
+      await capture(page, size, 'operator-close-confirm');
+      await page.keyboard.press('Escape');
+      await expect(confirmation).toBeHidden();
+      await expect(close).toBeFocused();
+      // Enter on the button focus starts on keeps the market, too.
+      await page.keyboard.press('Enter');
+      await expect(confirmation.getByRole('button', { name: 'Do not close' })).toBeFocused();
+      await page.keyboard.press('Enter');
+      await expect(confirmation).toBeHidden();
+      await expect(close).toBeFocused();
+      expect(closes).toEqual([]);
+      await page.context().close();
+
+      const operator = await at(browser, size, 'operator', async (fresh) => {
+        await refuseClosesAndStarts(fresh, closes);
+        await fresh.route(/\/api\/v1\/market$/, closedMarket);
+        await afterClose(fresh);
+      });
+      const ended = operator.getByRole('region', { name: 'This market has ended' });
+      await expect(ended).toContainText('It closed on 6 Nov 2026, 16:00:00 UTC.');
+      // The status alone does not say the orders are all cancelled, so the page does not either.
+      await expect(ended).toContainText('A close cancels every order that still rested and releases its hold');
+      // The bots' tokens went with the close: none reads as active, and none is offered for revoking.
+      await expect(operator.getByRole('table', { name: 'Accounts' })).toBeVisible();
+      await expect(operator.getByRole('button', { name: /^Revoke / })).toHaveCount(0);
+      await expect(operator.getByRole('button', { name: 'Close the market' })).toHaveCount(0);
+      await expect(operator.getByRole('button', { name: 'Halt trading' })).toHaveCount(0);
+      // The one form left starts the next simulation; it is filled in here, never sent.
+      await expect(operator.getByRole('form')).toHaveCount(1);
+      const start = operator.getByRole('form', { name: 'Start a new simulation' });
+      await start.getByRole('textbox', { name: 'Name' }).fill('A seminar with a rather long name to see how it wraps');
+      await expect(start.getByRole('button', { name: 'Start simulation' })).toBeEnabled();
+      await expect(operator.getByRole('table', { name: 'Instruments' })).toBeVisible();
+      await expect(operator.getByText('Checking…')).toHaveCount(0, { timeout: 15_000 });
+      await capture(operator, size, 'operator-closed');
+      await operator.context().close();
+
+      const trader = await at(browser, size, 'trader', async (fresh) => {
+        await refuseClosesAndStarts(fresh, closes);
+        await fresh.route(/\/api\/v1\/market$/, closedMarket);
+        await afterClose(fresh);
+      });
+      await openTerminal(trader);
+      const ticket = trader.getByRole('region', { name: 'Market closed', exact: true });
+      await expect(ticket).toContainText('The market closed on 6 Nov 2026, 16:00:00 UTC and takes no more orders.');
+      await expect(ticket).toContainText('Any order of yours that was still open was cancelled');
+      await expect(trader.getByRole('button', { name: /^Cancel / })).toHaveCount(0);
+      await expect(trader.getByRole('region', { name: 'Order · NOVA' })).toHaveCount(0);
+      await capture(trader, size, 'terminal-closed');
+      await ticket.getByRole('link', { name: 'portfolio' }).click();
+      await expect(trader.getByRole('region', { name: 'Market closed', exact: true })).toContainText('this is where your account ended');
+      await expect(trader.getByRole('table', { name: 'Holdings' })).toBeVisible();
+      await capture(trader, size, 'portfolio-closed');
+      await trader.context().close();
+      expect(closes).toEqual([]);
     });
 
     test('the run comparison, and each state it can be in', async ({ browser }) => {

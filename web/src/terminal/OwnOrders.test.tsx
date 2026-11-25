@@ -38,15 +38,19 @@ function order(changes: Partial<OrderDetail> = {}): OrderDetail {
 
 type Instrument = { instrumentId: string; symbol: string } | null;
 
-function renderOrders(orders: readonly OrderDetail[], instrument: Instrument) {
+function renderOrders(orders: readonly OrderDetail[], instrument: Instrument, closed = false) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const ui = (on: Instrument) => (
+  const ui = (on: Instrument, marketClosed = closed) => (
     <QueryClientProvider client={client}>
-      <OwnOrders orders={orders} instrument={on} />
+      <OwnOrders orders={orders} instrument={on} closed={marketClosed} />
     </QueryClientProvider>
   );
   const rendered = render(ui(instrument));
-  return { client, select: (on: Instrument) => rendered.rerender(ui(on)) };
+  return {
+    client,
+    select: (on: Instrument) => rendered.rerender(ui(on)),
+    close: () => rendered.rerender(ui(instrument, true)),
+  };
 }
 
 const tab = (name: RegExp) => screen.getByRole('tab', { name });
@@ -217,10 +221,62 @@ describe('OwnOrders', () => {
   });
 });
 
+describe('OwnOrders in a closed market', () => {
+  it('lists an order the close has not cancelled yet as waiting for it, with no cancel to press', () => {
+    const server = fakeServer();
+    renderOrders([order(), order({ instrumentId: ORBIT, symbol: 'ORBIT', side: 'SELL' })], { instrumentId: NOVA, symbol: 'NOVA' }, true);
+
+    expect(tab(/Open orders/)).toHaveTextContent('Open orders (2)');
+    const rows = within(screen.getByRole('table', { name: 'Open orders' })).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row).toHaveTextContent('Waiting for the close to cancel it');
+    }
+    expect(screen.queryByRole('button', { name: /Cancel/ })).toBeNull();
+    // The last column is no longer one of actions, and says so to a screen reader.
+    expect(screen.getByRole('columnheader', { name: 'Status' })).toBeInTheDocument();
+    expect(screen.queryByRole('columnheader', { name: 'Action' })).toBeNull();
+    expect(screen.getByText(/What they reserve is released as each is cancelled\.$/)).toBeInTheDocument();
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it('does not say every open order was cancelled while one in another instrument still waits', () => {
+    fakeServer();
+    renderOrders([order({ instrumentId: ORBIT, symbol: 'ORBIT' })], { instrumentId: NOVA, symbol: 'NOVA' }, true);
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only NOVA' }));
+
+    expect(screen.getByText('No open orders in NOVA.')).toBeInTheDocument();
+    expect(screen.queryByText(/was cancelled by the close/)).toBeNull();
+  });
+
+  it('drops the advice to try a failed cancel again once the market has closed', async () => {
+    const resting = order();
+    fakeServer()
+      .on('GET /api/v1/auth/csrf', { status: 200, json: { headerName: 'X-CSRF-TOKEN', token: 't' } })
+      .on(`POST /api/v1/orders/${resting.orderId}/cancel`, { status: 503, problem: { status: 503, code: 'TRADING_UNAVAILABLE' } });
+    const view = renderOrders([resting], { instrumentId: NOVA, symbol: 'NOVA' });
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel buy NOVA at 100.00' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('The cancel did not go through. Try again');
+
+    view.close();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(/Try again/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Cancel/ })).toBeNull();
+  });
+});
+
 describe('outcome', () => {
   it('says a rejection without a reason plainly, and shows a reason it does not know', () => {
     expect(outcome(order({ state: 'REJECTED', reason: null }))).toBe('Rejected');
     expect(outcome(order({ state: 'CANCELED', reason: 'SOMETHING_NEW' }))).toBe('Canceled · SOMETHING_NEW');
     expect(outcome(order({ state: 'CANCELED', reason: 'IOC_REMAINDER_CANCELED' }))).toBe('Canceled · the rest found no match');
+  });
+
+  it('says the market closed for an order that still rested then, with what had filled', () => {
+    expect(outcome(order({ state: 'CANCELED', reason: 'MARKET_CLOSED' }))).toBe('Canceled · the market closed');
+    expect(outcome(order({ state: 'CANCELED', filledQuantity: 4, canceledQuantity: 6, reason: 'MARKET_CLOSED' }))).toBe(
+      'Canceled · 4 of 10 filled · the market closed',
+    );
+    expect(outcome(order({ state: 'REJECTED', reason: 'MARKET_CLOSED' }))).toBe('Rejected · MARKET_CLOSED');
   });
 });

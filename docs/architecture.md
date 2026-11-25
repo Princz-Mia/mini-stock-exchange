@@ -122,8 +122,8 @@ stateDiagram-v2
   OPEN --> PARTIALLY_FILLED: some filled
   OPEN --> FILLED
   PARTIALLY_FILLED --> FILLED
-  OPEN --> CANCELED: owner cancels
-  PARTIALLY_FILLED --> CANCELED: owner cancels the rest
+  OPEN --> CANCELED: owner cancels, or the market closes
+  PARTIALLY_FILLED --> CANCELED: owner cancels the rest, or the market closes
 ```
 
 Orders keep `quantity = filled + working + canceled`.
@@ -135,15 +135,39 @@ Orders keep `quantity = filled + working + canceled`.
 ```mermaid
 stateDiagram-v2
   direction LR
-  [*] --> SETUP: first setup command
+  [*] --> SETUP: a simulation is started, or the first setup command
   SETUP --> OPEN: operator opens, once
   OPEN --> HALTED: operator halts
   HALTED --> OPEN: operator resumes
+  OPEN --> CLOSED: operator closes
+  HALTED --> CLOSED: operator closes
+  CLOSED --> [*]
 ```
+
+These are the states of one simulation. Simulations follow each other: once one is CLOSED the operator starts the next, which begins in SETUP. At most one simulation is not closed, which a unique index guarantees, and every read and command means the **current** one: the one that is not closed or, once every one is, the one created last.
 
 **In each state:**
 - **SETUP:** instruments, trader accounts and bots are configured. Each batch of bots is tagged with a strategy (market maker, noise or momentum), fixed once the bot exists. An instrument's reference price and display name can still be changed, and an instrument nothing uses yet can be deleted: no account was given its shares and no order named it. Nothing trades. Once the market opens, the catalogue is frozen; a database trigger refuses a change or a delete outside SETUP too.
 - **HALTED:** keeps the books. Cancels are accepted, new orders aren't.
+- **CLOSED:** final. Nothing rests and nothing trades: an order is rejected with `MARKET_CLOSED`, no bot run starts, and no transition leads out. Nothing is deleted, so portfolios, orders, trades, accounts and runs stay readable.
+
+**Closing** is one command on the writer, allowed from OPEN and from HALTED, that nothing else comes between:
+- **In its own transaction,** at its sequence: the state and the time it closed; every bot run that had not ended ends there, with no worker to confirm it; every bot token is revoked; and each instrument's snapshot says `CLOSED`, its last price being its final one.
+- **Every resting order is cancelled** with the reason `MARKET_CLOSED` and its hold released, exactly as its owner's cancel would. The first 5,000 go with the close; the rest follow in further transactions of 5,000, each with its own sequence, stored answer and audit row, because all of them in one would hold the writer for one very large commit. The books change after each commit, as for every command. Orders not yet cancelled keep their holds, so the market reconciles between two of them.
+- **If the process stops in between,** the next one finishes cancelling while it starts, before it takes a command. A restart finds the closed market and loads it like any other, so that it goes on answering as closed, and removes its bots' token files if the close had not.
+- **A running writer never keeps a market half closed.** One of the later transactions that fails and rolls back is tried again, three times in all. If the orders still cannot all be cancelled, the writer halts, as it does whenever it can't trust what it holds, and the restart finishes the close. So a writer that takes commands for a closed market has nothing resting.
+- **A close that halted is on record and is answered, whoever is still waiting.** The request waits 45 seconds and then answers `504`, and a close that can't finish may take longer than that to give up. So the writer itself logs the halt, with the close's sequence, how many orders its books still hold and the cause, and keeps the unfinished close. Health goes down, and every close sent until the restart is answered `503 MARKET_CLOSE_UNFINISHED`: the request that closed, if it is still waiting, and its key sent again after a `504`. The count in the answer is an upper bound, because a transaction whose outcome is unknown may have cancelled up to 5,000 of those orders already. Other commands are answered `503 TRADING_UNAVAILABLE`.
+
+**Starting a new simulation** is one command on the writer, allowed when the current simulation is CLOSED and when none exists, and one transaction:
+- **The closed simulation is retired.** Its row is locked while this writer still owns it, and its writer epoch is set to 0. A market is created at epoch 1 and every takeover adds one, so no writer ever holds 0: every command opens by matching its epoch against the row, and nothing matches 0, so no process can open a command in a closed simulation that has a successor. A process that still holds the closed simulation's ID halts at its next command, as any stale writer does.
+- **The new simulation is written** in SETUP with its name, its own issuance account, and the writer's epoch, so every later command opens with the same one statement as before. The start is its first command: sequence 1, with its stored answer and its audit row in the new simulation.
+- **Nothing in memory changes before the commit.** After it the engine writes for the new simulation and has dropped every book, instrument, tape, count of resting orders and account of the closed one, and tells whoever keeps something per account: the rate limits forget every account, and the private streams are closed and their versions forgotten.
+- **A start is refused** while a simulation that has not closed exists, with that simulation's state, and when another simulation has the name. A refusal is a command of the current simulation: sequenced, stored and audited there.
+- **Its key is looked up in every simulation,** where an order's key is looked up in the current one only. After another start the first answer is out of the current simulation's reach, and the same request would start one more. So a start's first answer, started or refused, is its answer for good.
+- **So is the key of an open, halt, resume or close.** These have no body, so nothing in the request says which market it means, and a close's key is the one a caller is told to send again when its answer did not come. A key answered in an earlier simulation returns that answer before any command is opened in the current one: an old close never closes the market that trades now. The other commands name something of their simulation or set one up, and their keys stay the simulation's own.
+- **A takeover checks which simulation is current once it holds the row.** Startup locks the current simulation's row and claims its epoch. If the writer it takes over from commits a start while it waits for that lock, the row it then holds is the retired one, and the new simulation was added beside it. So it reads the current simulation again under the lock and locks again until the two agree, and only then claims: the new simulation's epoch moves on, and the writer that started it is fenced like any other.
+
+**What is kept.** Everything. A closed simulation keeps its accounts, orders, trades, ledger, runs, stored answers and audit rows, and is never written again. Command sequences, trade sequences and idempotency keys belong to one simulation, so each starts again and the same key in two simulations is two commands, except for a start and the market's transitions, as above. Logins are global and accounts belong to one simulation, so a trader is funded again in each, and a symbol is free again. A process that starts with closed simulations and a newer one loads the newer one only: it rebuilds and reconciles that one and claims its epoch. Reading a closed simulation that has a successor through the API is not there yet.
 
 ## Data
 
@@ -243,7 +267,7 @@ flowchart TD
 | A projection write fails | The batch rolls back and is retried; nothing skipped | The cause is fixed |
 | Execution's database is lost | — | Restore a backup; everything derived is rebuilt from it |
 
-The gate rehearses each of these, and compares Execution's trade totals with Market Data's and reconciles every candle with Execution's trade export afterwards.
+The gate rehearses each of these, and compares Execution's trade totals with Market Data's and reconciles every candle with Execution's trade export afterwards. Before it stops Kafka, it closes the market and starts a second simulation: the rehearsals from then on run with two simulations in the database, the first closed, and compare both.
 
 ## Decisions
 
@@ -266,7 +290,7 @@ The main decisions, each with its consequences and the condition for revisiting 
 | F03 | Matching | Price then acceptance sequence; the resting order's price; partial fills; self-trade prevention (`domain/OrderBook`) |
 | F04 | Accounting | Reservations, executions, transfers and releases as balanced ledger batches in one transaction; no negative balances, enforced by checks and reconciled at startup |
 | F05 | Terminal | Live depth, tape and chart from the public stream; ticket, own orders, holdings and cash from REST, refreshed by the private stream; a notice when a resting order fills; under Help, a tour for each role, shown once by itself, and a "How this exchange works" page; term tips that explain the market's words where they appear |
-| F06 | Market control | Instruments, endowments and bots in SETUP; open, halt and resume as sequenced, audited commands |
+| F06 | Market control | Instruments, endowments and bots in SETUP; open, halt, resume and close, and starting the next simulation, as sequenced, audited commands |
 | F07 | Simulation | Market-maker, noise and momentum bots; seeded runs with rate, limits and duration; heartbeats and activity telemetry; each run's window of command sequences; figures per instrument and strategy, computed once a run finishes (`RunFigures`); the simulator's manifest with each run; two to four finished runs compared side by side, with their market quality from Market Data |
 | F08 | Analytics | Outbox, Kafka and Avro, the Flink job, Kafka again, then PostgreSQL candles, reconciled exactly with the trade export |
 | F09 | Reliability | Idempotent commands; restart rebuild and reconciliation; bounded queue and rate limits; outbox admission; analytics isolated from trading; backup and restore |

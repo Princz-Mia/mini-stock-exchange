@@ -222,12 +222,27 @@ input[aria-invalid='true'] {
 }
 
 .context-badge {
+  display: inline-flex;
+  gap: 0.3em;
   font-size: 12px;
   white-space: nowrap;
+  /* A market's name can be long: it is cut short on a narrow screen rather than widening the page. */
+  min-width: 0;
+  max-width: 100%;
   padding: 2px var(--space-2);
   border-radius: 999px;
   background: var(--surface-sunken);
   color: var(--secondary);
+}
+
+.context-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-funds {
+  flex-shrink: 0;
 }
 
 .topbar nav {
@@ -676,24 +691,41 @@ tr.differs td {
   gap: var(--space-1);
 }
 
-/* One strategy a line, its description under its label, lined up with the label's text. */
-.setup-form .choices.strategies {
+/* One strategy a line, its description under its label, lined up with the label's text. A run's length is chosen the
+   same way. */
+.setup-form .choices.strategies,
+.setup-form .choices.run-length {
   display: grid;
   gap: var(--space-2);
 }
 
 /* The radio's margin is set here, not left to the browser, so the description can line up with the label's text. */
-.strategy input[type='radio'] {
+.strategy input[type='radio'],
+.run-length-choice input[type='radio'] {
   width: 13px;
   height: 13px;
   margin: 0;
 }
 
-.strategy p {
+.strategy p,
+.run-length-choice p {
   margin: 0;
   padding-left: calc(13px + var(--space-1));
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+/* The minutes belong to the timed choice: under its description and lined up with it, the field wrapping under its
+   label on a narrow screen. */
+.choices label.run-length-minutes {
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  margin-top: var(--space-1);
+  padding-left: calc(13px + var(--space-1));
+}
+
+.run-length-minutes input {
+  width: 6em;
 }
 
 .control-list {
@@ -1517,6 +1549,80 @@ dialog.tour p {
   .help-list {
     left: 0;
     right: auto;
+  }
+}
+
+/*
+ * The first panel on the page of a market that has closed, and the ticket's place in its terminal: set apart from
+ * the lists beside it by a rule down its side, as something said about the whole market.
+ */
+.panel.ended {
+  border-left: 4px solid var(--control-line);
+}
+
+.panel.ended p {
+  margin: 0;
+}
+
+/* The market panel's heading takes focus when a close is answered, so that a screen reader is beside the answer. */
+.market-control h2:focus {
+  outline: none;
+}
+
+/*
+ * A confirmation of something that cannot be undone: a card in the middle of the screen over a dimmed page, what it
+ * does as a short list, and the button that changes nothing first.
+ */
+dialog.confirm {
+  box-sizing: border-box;
+  width: min(460px, calc(100vw - 2 * var(--space-4)));
+  padding: var(--space-4);
+  gap: var(--space-3);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--control-line, var(--line));
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 25%);
+}
+
+/* Only while open: an author display would otherwise show a closed dialog too. */
+dialog.confirm[open] {
+  display: grid;
+}
+
+dialog.confirm::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+dialog.confirm h2 {
+  margin: 0;
+}
+
+.confirm-body {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.confirm-body p,
+.confirm-body ul {
+  margin: 0;
+}
+
+.confirm-body ul {
+  padding-left: var(--space-4);
+}
+
+.confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+@media (max-width: 640px) {
+  .confirm-actions {
+    flex-direction: column;
+    align-items: stretch;
   }
 }
 

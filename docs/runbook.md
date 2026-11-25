@@ -39,7 +39,22 @@ On Windows, use `.\scripts\backup.ps1` and `.\scripts\restore.ps1 backups\202611
 
 **Backup** writes `backups/<UTC time>/` with:
 - `execution_db.dump`: Execution's database, taken from one consistent snapshot, so trading can go on meanwhile;
-- `manifest.txt`: the snapshot's time, the commit, the schema version, the last command and trade sequence, and how many events the outbox holds. Its figures are read in the same snapshot as the dump, so they describe exactly what the dump holds, however much trading went on while it was taken.
+- `manifest.txt`: the snapshot's time, the commit, the schema version, how many simulations the database holds, the current simulation's figures, and how many events the outbox holds. Its figures are read in the same snapshot as the dump, so they describe exactly what the dump holds, however much trading went on while it was taken.
+
+Command and trade sequences start again from 1 in every simulation, so the manifest gives them for one simulation and says which: the current one, which is the one that has not closed or, once every one has, the one created last. Its lines are named `current_simulation_*`:
+
+| Line | What it is |
+| --- | --- |
+| `simulations` | How many simulations the database holds, closed ones included |
+| `current_simulation` | The current simulation's ID; nothing after the `=` on a database with no market yet |
+| `current_simulation_name` | Its name, with any character outside ASCII shown as `?`; nothing for one nobody named |
+| `current_simulation_state` | `SETUP`, `OPEN`, `HALTED` or `CLOSED` |
+| `current_simulation_last_command_sequence` | Its last committed command, as `GET /api/v1/market` reports it |
+| `current_simulation_trades` | How many trades it has |
+| `current_simulation_last_trade_sequence` | The highest trade sequence any of its instruments has reached |
+| `outbox_events` | Every simulation's events: the whole outbox, which a restore republishes |
+
+A manifest written before simulations could follow each other has `last_command_sequence`, `trades` and `last_trade_sequence` instead, taken over the whole database, which then held one simulation. Such a backup restores as before: a restore reads only `outbox_events` from the manifest.
 
 That one database is all a restore into the same stack needs; on another machine, or into a new stack, copy the bots' tokens too (see [Restoring on another machine, or into a new stack](#restoring-on-another-machine-or-into-a-new-stack)). It holds the bot runs too: their windows, their figures and the simulator manifest each run's worker reported, so a restore brings them all back. `backups/` is ignored by Git, and holds real data, so keep it private.
 
@@ -86,7 +101,8 @@ In PowerShell, write the folder as `"${PWD}\backups\20261109T220342Z:/backup"`. 
 **Its writer halted.** Look for `halted the writer` in its log. The writer stops when the database and the in-memory book might disagree:
 - a commit whose outcome is unknown;
 - another process claiming the market;
-- a committed change the book couldn't apply.
+- a committed change the book couldn't apply;
+- a market close that committed and then couldn't cancel every resting order (see below).
 
 Commands answer `503 TRADING_UNAVAILABLE` meanwhile, and nothing more is written. **Restart it:**
 
@@ -101,6 +117,55 @@ A new process takes writer ownership, rebuilds every book from the database and 
 Find what changed the database outside Execution. If it can't be explained, restore the last backup taken before it.
 
 **Another instance owns the market.** `refusing to start` means one Execution is already running against the database; only one may.
+
+**It stopped while the market was closing.** Nothing to do. A close cancels resting orders 5,000 to a transaction, and the market is closed from the first one. If Execution stops before the last, the next start cancels the rest before it takes commands, and logs `Finished the market's close at startup` with how many. A start that finds none left to cancel logs no such line. Every start on a closed market also removes its bots' token files, in case the close stopped before it had.
+
+**A close answered `504 COMMAND_OUTCOME_UNKNOWN`.** The request waited 45 seconds and the close had not answered. No lookup by key serves a close, so send the same key again. On the operator screen that is **Ask again**, under the note that the close is taking longer than the exchange waits. The key stays that close's for good: sent after a new simulation has started, it still returns the close of the market it closed and leaves the new one alone. The answers:
+- **`200`:** the close is done, and this is its answer.
+- **`504` again:** it is still going on.
+- **`503 MARKET_CLOSE_UNFINISHED` or `503 TRADING_UNAVAILABLE`:** Execution stopped trading meanwhile. Restart it, as the next entry says.
+
+A close that can't finish usually shows this way first. With the database away, each further attempt at a transaction waits up to 30 seconds for a connection, so the close gives up after about a minute, when the request has stopped waiting.
+
+**A close answered `503 MARKET_CLOSE_UNFINISHED`,** at once or when its key was sent again after a `504`. Restart Execution. The market is closed: its runs have ended and its bot tokens are revoked, but orders may still rest with their holds. `restingOrders` in the answer is an upper bound: it is Execution's own count when it stopped, and up to one transaction of the close (5,000 orders) fewer may rest in the database. A transaction of the close failed three times in a row (the database was away, say), or its outcome could not be known, and Execution stopped trading. What shows it:
+- `docker compose ps` has Execution unhealthy. Its health check answers only `DOWN`, without a reason.
+- The Health panel's Writer line says "Halted".
+- The log has an `ERROR` line with `halted the writer`, the close's sequence, the count and the cause. Execution writes it when it stops, whether or not a request was still waiting for the answer.
+
+Every close sent before the restart gets this answer again; other commands get `503 TRADING_UNAVAILABLE`. Nothing needs sending again. The restart cancels the rest before it takes commands, as above, and the key that closed the market then returns the close's answer. The operator screen says the same in its Market panel and in the panel that shows the market as ended, with how many orders still rest at most, shows its Health panel's writer as halted, and offers no retry: **Ask for the close's answer** sends the same key once Execution is back. If the answer itself was lost, to a `504` before it or to the proxy, the screen still says the market is closed once the status does, and offers the same button. A page opened afresh has no key to ask with; it says that the exchange has stopped and that orders the close had not cancelled still rest. Traders see those orders listed as waiting for the close, with no cancel offered, and what they reserve still shown as reserved. If the restart fails with `The market's close could not be finished`, the cause in the log is what to fix first.
+
+A close can also halt the writer in its very first transaction, when the outcome of that commit is unknown. Then nobody knows yet whether the market closed: the log line says `halted the writer in its own transaction`, and every command, a close too, answers `503 TRADING_UNAVAILABLE`. Restart Execution and send the close's key again. It returns the close's answer if the market had closed, and closes it if not.
+
+## Starting again: a new simulation, or wiping the stack
+
+Two ways lead to a market that can trade again, and they keep very different things.
+
+**A new simulation** keeps everything. Close the market, then, signed in as the operator, send `POST /api/v1/admin/simulations` with a name, `{"name": "Thursday seminar"}`, and an `Idempotency-Key`, as for the other operator commands. On the operator screen it is the **Start a new simulation** form under the panel that says the market has ended.
+
+The closed simulation stays in the database as it closed, and nothing can write into it again. The new one is empty and in setup. What the operator does next, on the operator screen or through the API, in this order:
+1. add the instruments (the symbols the closed simulation used are free again);
+2. fund each trader, with the **Fund a trader** form or `POST /api/v1/admin/accounts`: logins are kept, accounts are not, and until then a trader who signs in is told they have no trading account. Adding a login that exists is refused with `USERNAME_TAKEN`;
+3. provision the bots. They are new accounts with new tokens; the closed simulation's tokens stay revoked and its token files are gone;
+4. open the market, and start a bot run.
+
+The compatibility gate rehearses these steps through the API, after closing a market with orders resting and a bot run trading.
+
+The demo seed does none of this for a simulation an operator started: it logs one line saying so and stops. It sets up only a market with no name, which is how it makes its own on a fresh stack.
+
+The start's answers:
+- **`409 SIMULATION_NOT_CLOSED`**, with the state: a simulation that has not closed exists. In `SETUP` it is set up further instead; `OPEN` or `HALTED`, close it first. The refusal is that key's answer for good, so start again with a new key.
+- **`409 SIMULATION_NAME_TAKEN`:** names differ, whatever their case. Choose another, with a new key.
+- **`504 COMMAND_OUTCOME_UNKNOWN`:** send the same key again; on the operator screen, **Ask again**. No lookup by key serves a start; the same key returns its first answer, even after later starts.
+- **`503 TRADING_UNAVAILABLE`** after a start: Execution could not learn whether the start committed, and stopped. Restart it; it loads whichever simulation is current, and the same key then returns the start's answer or starts the simulation.
+
+**Keys from the simulation before.** Every command of the new simulation needs a new `Idempotency-Key`. What an old key does when it is sent again after the start:
+- **Open, halt, resume and close:** it returns the answer it was given in the simulation it was sent to, and changes nothing in the new one. This is what makes it safe to ask for a close's answer late: the key that closed Tuesday's market never closes Wednesday's.
+- **The start of a simulation:** its first answer, as above.
+- **Every other operator command** (instruments, accounts, traders, bots, bot runs): it is a new command in the new simulation. A script that derives its keys from its steps therefore sets up each simulation afresh, and a request sent again by mistake adds its instrument, account or bots to the new simulation. Do not send these again once a new simulation has started.
+
+**Wiping the stack** (`docker compose down -v`) deletes every simulation, every login but the configured ones, and all history. It is for a development stack that should be empty again, not for running the next session.
+
+A backup taken with several simulations in the database holds them all, and a restore brings them all back; see the manifest under [Back up and restore](#back-up-and-restore).
 
 ## A command's outcome is unknown
 
@@ -177,7 +242,9 @@ docker compose restart simulator
 
 A worker takes the run on its next heartbeat and continues from the totals already reported. A run that stays "Starting" has never had a worker: `no simulator token; bots stay idle` in the log means `MSE_SIMULATOR_TOKEN` is not set in `.env`.
 
-**Ended shows "Not confirmed".** The run was stopped with no worker to confirm it: its worker went away first, or it never had one. A worker that comes along later settles a run its worker left: it cancels the run's remaining quotes and confirms, before it takes any new run. A running simulator does this within seconds; if the simulator is down, start it. A run that never had a worker has nothing to settle and stays "Not confirmed". Meanwhile the run's window has no end, so Recent runs marks it "Not finished" and it can't be compared. Starting the next run ends that window at the new run's start, and the old run becomes comparable.
+**Ended shows "Not confirmed".** The run was stopped with no worker to confirm it: its worker went away first, or it never had one. A worker that comes along later settles a run its worker left: it cancels the run's remaining quotes and confirms, before it takes any new run. A running simulator does this within seconds; if the simulator is down, start it. A run that never had a worker has nothing to settle and stays "Not confirmed". Meanwhile the run's window has no end, so Recent runs marks it "Not finished" and it can't be compared. Starting the next run ends that window at the new run's start, and the old run becomes comparable. Its **Ran for** in Recent runs does not move with that: without a confirmation it reads "About" a length, counted to the worker's last report and never past the stop or the run's end time, or "Unknown" when no worker ever took the run.
+
+**"Running for more than a day with no end time".** A run started with **Until I stop it** has no end: it trades until someone stops it, and a worker takes it up again after every restart of the simulator or the stack. The run in progress shows how long it has been going under **Elapsed**, and carries this warning once that is more than 24 hours. Elapsed, and a timed run's **Time left**, are counted on the exchange's clock as of its last answer, so a wrong clock on the operator's machine does not change them. If nobody meant it to run on, select **Stop run**. A run started **For a set time** ends by itself, and the form starts there, at 60 minutes.
 
 **Figures never appear.** Execution works out each finished run's figures once, in a pass every five seconds, off the writer. Until then the comparison shows "Being worked out…". If that lasts, look in Execution's log:
 - `Bot run figures could not be computed; trying again on the next pass`: the whole pass failed, for example because the database was unreachable;

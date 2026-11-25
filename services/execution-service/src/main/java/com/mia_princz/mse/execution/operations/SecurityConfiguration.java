@@ -42,6 +42,7 @@ import org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository;
 import com.mia_princz.mse.execution.identity.adapter.BotTokenFilter;
 import com.mia_princz.mse.execution.identity.adapter.PasswordVersionFilter;
 import com.mia_princz.mse.execution.identity.adapter.ServiceTokenFilter;
+import com.mia_princz.mse.execution.trading.application.TradingEngine;
 
 /**
  * Three chains, each deny by default: other services by a service token, bots by bearer token, people by session.
@@ -94,7 +95,7 @@ class SecurityConfiguration {
 	 */
 	@Bean
 	@Order(1)
-	SecurityFilterChain botChain(HttpSecurity http, JdbcClient jdbc) throws Exception {
+	SecurityFilterChain botChain(HttpSecurity http, JdbcClient jdbc, TradingEngine engine) throws Exception {
 		return http.securityMatcher(BotTokenFilter::offersBearer)
 			.authorizeHttpRequests((requests) -> requests.requestMatchers(HttpMethod.GET, "/api/v1/market")
 				.permitAll()
@@ -104,7 +105,7 @@ class SecurityConfiguration {
 				.hasRole("BOT")
 				.anyRequest()
 				.denyAll())
-			.addFilterAt(new BotTokenFilter(jdbc), BasicAuthenticationFilter.class)
+			.addFilterAt(new BotTokenFilter(jdbc, engine::simulationIdUnlessClosed), BasicAuthenticationFilter.class)
 			.csrf(AbstractHttpConfigurer::disable)
 			.sessionManagement((sessions) -> sessions.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 			.securityContext((context) -> context.securityContextRepository(new RequestAttributeSecurityContextRepository()))
@@ -145,7 +146,8 @@ class SecurityConfiguration {
 						"/api/v1/admin/health")
 				.hasRole("OPERATOR")
 				.requestMatchers(HttpMethod.POST, "/api/v1/admin/market/open", "/api/v1/admin/market/halt",
-						"/api/v1/admin/market/resume", "/api/v1/admin/instruments",
+						"/api/v1/admin/market/resume", "/api/v1/admin/market/close", "/api/v1/admin/simulations",
+						"/api/v1/admin/instruments",
 						"/api/v1/admin/accounts", "/api/v1/admin/traders", "/api/v1/admin/bots", "/api/v1/admin/bot-runs",
 						"/api/v1/admin/bot-runs/*/stop", "/api/v1/admin/bots/*/revoke-token")
 				.hasRole("OPERATOR")

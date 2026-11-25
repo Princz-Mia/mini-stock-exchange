@@ -28,7 +28,7 @@ const INSTRUMENT = {
   session: noTrades('100.00'),
 };
 
-const MARKET = { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '9' };
+const MARKET = { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' };
 
 /** A trader's exchange, with the tour seen up to `seen`, or the read failing. */
 function trader(seen: number | 'fails') {
@@ -193,7 +193,7 @@ describe('the first-login tour', () => {
   it("shows the operator's own tour on the operator screen", async () => {
     signedIn('operator', ['OPERATOR'])
       .on('GET /api/v1/me/tour', { status: 200, json: { seenVersion: 0 } })
-      .on('GET /api/v1/market', { status: 200, json: { state: 'SETUP', simulationId: 's', openedAt: null, commandSequence: '1' } })
+      .on('GET /api/v1/market', { status: 200, json: { state: 'SETUP', simulationId: 's', openedAt: null, closedAt: null, commandSequence: '1' } })
       .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
       .on('GET /api/v1/admin/accounts', { status: 200, json: { accounts: [], nextCursor: null } })
       .on('GET /api/v1/admin/traders', { status: 200, json: { traders: [], nextCursor: null } })
@@ -211,7 +211,7 @@ describe('the first-login tour', () => {
   it('shows on the operator screen with a trailing slash too', async () => {
     signedIn('operator', ['OPERATOR'])
       .on('GET /api/v1/me/tour', { status: 200, json: { seenVersion: 0 } })
-      .on('GET /api/v1/market', { status: 200, json: { state: 'SETUP', simulationId: 's', openedAt: null, commandSequence: '1' } })
+      .on('GET /api/v1/market', { status: 200, json: { state: 'SETUP', simulationId: 's', openedAt: null, closedAt: null, commandSequence: '1' } })
       .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
       .on('GET /api/v1/admin/accounts', { status: 200, json: { accounts: [], nextCursor: null } })
       .on('GET /api/v1/admin/traders', { status: 200, json: { traders: [], nextCursor: null } })

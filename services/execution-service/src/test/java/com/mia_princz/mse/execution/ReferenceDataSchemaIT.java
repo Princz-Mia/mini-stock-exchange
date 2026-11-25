@@ -23,6 +23,9 @@ import org.springframework.transaction.PlatformTransactionManager;
 @SpringBootTest
 class ReferenceDataSchemaIT {
 
+	/** As the runtime role closes a simulation: the state and both times are columns it may update. */
+	private static final String CLOSE = "UPDATE simulation SET state = 'CLOSED', opened_at = now(), closed_at = now() WHERE id = ?";
+
 	@Autowired
 	JdbcTemplate jdbcTemplate;
 
@@ -48,12 +51,53 @@ class ReferenceDataSchemaIT {
 		});
 	}
 
+	/** Closed simulations pile up beside the one that is not closed, and the runtime role may close the one it runs. */
 	@Test
-	void thereIsOnlyOneSimulation() {
+	void onlyOneSimulationIsNotClosed() {
 		db.inRolledBackTransaction((f) -> {
+			f.jdbc.update(CLOSE, f.simulation());
+			f.jdbc.update(CLOSE, f.simulation());
 			f.simulation();
 			assertFails(UNIQUE_VIOLATION, f::simulation);
 		});
+		for (String state : new String[] { "OPEN", "HALTED" }) {
+			db.inRolledBackTransaction((f) -> {
+				f.jdbc.update("UPDATE simulation SET state = ?, opened_at = now() WHERE id = ?", state, f.simulation());
+				assertFails(UNIQUE_VIOLATION, f::simulation);
+			});
+		}
+	}
+
+	@Test
+	void closedAtMatchesTheStateAndOnlyAnOpenedSimulationCloses() {
+		String insert = "INSERT INTO simulation (id, state, opened_at, closed_at) VALUES (?, ?, %s, %s)";
+		db.inRolledBackTransaction((f) -> assertThat(
+				f.jdbc.update(insert.formatted("now()", "now()"), UUID.randomUUID(), "CLOSED")).isEqualTo(1));
+		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION,
+				() -> f.jdbc.update(insert.formatted("now()", "NULL"), UUID.randomUUID(), "CLOSED")));
+		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION,
+				() -> f.jdbc.update(insert.formatted("NULL", "now()"), UUID.randomUUID(), "CLOSED")));
+		for (String state : new String[] { "OPEN", "HALTED" }) {
+			db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION,
+					() -> f.jdbc.update(insert.formatted("now()", "now()"), UUID.randomUUID(), state)));
+		}
+		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION,
+				() -> f.jdbc.update(insert.formatted("NULL", "NULL"), UUID.randomUUID(), "ENDED")));
+	}
+
+	/** The catalogue is frozen in every state but SETUP, so a closed simulation's instruments are history. */
+	@Test
+	void aClosedSimulationsInstrumentsStayFrozen() {
+		for (String change : new String[] { "UPDATE instrument SET reference_price_cents = 12050 WHERE id = ?",
+				"UPDATE instrument SET display_name = 'Nova Dynamics' WHERE id = ?",
+				"DELETE FROM instrument WHERE id = ?" }) {
+			db.inRolledBackTransaction((f) -> {
+				UUID simulation = f.simulation();
+				UUID instrument = f.instrument(simulation, "NOVA");
+				f.jdbc.update(CLOSE, simulation);
+				assertFails(NOT_IN_PREREQUISITE_STATE, () -> f.jdbc.update(change, instrument));
+			});
+		}
 	}
 
 	@Test
@@ -113,6 +157,50 @@ class ReferenceDataSchemaIT {
 	@Test
 	void accountsNeedAnExistingSimulation() {
 		db.inRolledBackTransaction((f) -> assertFails(FOREIGN_KEY_VIOLATION, () -> f.bot(UUID.randomUUID())));
+	}
+
+	/**
+	 * A simulation may have a name, written with its row: 1 to 80 characters with no space at either end, and no two
+	 * alike whatever their case. Any number have none. The runtime role cannot rename one.
+	 */
+	@Test
+	void aSimulationsNameIsTrimmedUniqueAndNeverChanged() {
+		String named = "INSERT INTO simulation (id, state, opened_at, closed_at, name) VALUES (?, 'CLOSED', now(), now(), ?)";
+		db.inRolledBackTransaction((f) -> {
+			f.jdbc.update(CLOSE, f.simulation());
+			f.jdbc.update(CLOSE, f.simulation());
+			f.jdbc.update(named, UUID.randomUUID(), "Thursday seminar");
+			f.jdbc.update(named, UUID.randomUUID(), "x".repeat(80));
+			assertFails(UNIQUE_VIOLATION, () -> f.jdbc.update(named, UUID.randomUUID(), "THURSDAY Seminar"));
+		});
+		for (String refused : new String[] { "", " padded", "padded ", "x".repeat(81) }) {
+			db.inRolledBackTransaction(
+					(f) -> assertFails(CHECK_VIOLATION, () -> f.jdbc.update(named, UUID.randomUUID(), refused)));
+		}
+		db.inRolledBackTransaction((f) -> {
+			UUID simulation = UUID.randomUUID();
+			f.jdbc.update(named, simulation, "Named once");
+			assertFails(INSUFFICIENT_PRIVILEGE,
+					() -> f.jdbc.update("UPDATE simulation SET name = 'Renamed' WHERE id = ?", simulation));
+		});
+	}
+
+	/**
+	 * A closed simulation is retired by setting its writer epoch to 0, which the runtime role may do. A market is
+	 * created at 1 and every takeover adds one, so no writer holds 0; the column allows nothing below it.
+	 */
+	@Test
+	void aClosedSimulationsWriterEpochCanBeSetToZero() {
+		db.inRolledBackTransaction((f) -> {
+			UUID simulation = f.simulation();
+			f.jdbc.update("UPDATE simulation SET writer_epoch = 7 WHERE id = ?", simulation);
+			f.jdbc.update(CLOSE, simulation);
+			assertThat(f.jdbc.update(
+					"UPDATE simulation SET writer_epoch = 0 WHERE id = ? AND writer_epoch = 7 AND state = 'CLOSED'",
+					simulation)).isEqualTo(1);
+			assertFails(CHECK_VIOLATION,
+					() -> f.jdbc.update("UPDATE simulation SET writer_epoch = -1 WHERE id = ?", simulation));
+		});
 	}
 
 	@Test

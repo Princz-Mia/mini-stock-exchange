@@ -188,6 +188,31 @@ class ApiContractIT {
 		check(operator.post(accounts, "{\"username\":\"trader\",\"cash\":\"1.00\"}", "Idempotency-Key",
 				UUID.randomUUID().toString()), "POST", accounts, 409);
 
+		// Closing is final, so it comes last: the answer, a second close, an order after it and the status it leaves.
+		String close = "/api/v1/admin/market/close";
+		check(operator.post(close, ""), "POST", close, 400);
+		check(trader.post(close, "", "Idempotency-Key", UUID.randomUUID().toString()), "POST", close, 403);
+		check(operator.post(close, "", "Idempotency-Key", UUID.randomUUID().toString()), "POST", close, 200);
+		check(operator.post(close, "", "Idempotency-Key", UUID.randomUUID().toString()), "POST", close, 409);
+		check(operator.post(halt, "", "Idempotency-Key", UUID.randomUUID().toString()), "POST", halt, 409);
+		check(trader.post(place, limit(instrument, "BUY", 1, "90.00"), "Idempotency-Key", UUID.randomUUID().toString()),
+				"POST", place, 422);
+		check(anonymous.get("/api/v1/market"), "GET", "/api/v1/market", 200);
+
+		// A new simulation follows a close: the refusals, the start, one more while it is in SETUP, and the status
+		// with its name.
+		String simulations = "/api/v1/admin/simulations";
+		String named = "{\"name\":\"After the close\"}";
+		check(operator.post(simulations, named), "POST", simulations, 400);
+		check(operator.post(simulations, "{\"name\":\" \"}", "Idempotency-Key", UUID.randomUUID().toString()), "POST",
+				simulations, 400);
+		check(trader.post(simulations, named, "Idempotency-Key", UUID.randomUUID().toString()), "POST", simulations, 403);
+		check(operator.post(simulations, named, "Idempotency-Key", UUID.randomUUID().toString()), "POST", simulations,
+				201);
+		check(operator.post(simulations, "{\"name\":\"One more\"}", "Idempotency-Key", UUID.randomUUID().toString()),
+				"POST", simulations, 409);
+		check(anonymous.get("/api/v1/market"), "GET", "/api/v1/market", 200);
+
 		trader.csrfToken = null;
 		check(trader.post("/api/v1/auth/logout", ""), "POST", "/api/v1/auth/logout", 403);
 		trader.fetchCsrfToken();

@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter, useLocation } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resetSession } from '../api/client';
@@ -10,7 +10,8 @@ import { botRun, finishedRun, manifest } from '../test/botRun';
 import { signedIn } from '../test/fakeServer';
 import { noTrades } from '../test/fakeStream';
 import { inUseMessage } from './InstrumentSetup';
-import { OperatorPage } from './OperatorPage';
+import { closedText, unfinishedText } from './MarketControl';
+import { OperatorPage, restingOrdersText } from './OperatorPage';
 
 const NOVA = {
   instrumentId: '00000000-0000-0000-0000-000000000001',
@@ -32,13 +33,19 @@ const NOVA = {
   session: noTrades('100.00'),
 };
 
+const SIMULATION = '10000000-0000-0000-0000-000000000001';
+/** The instrument list as the page asks for it: this market's, by its simulation. */
+const LIST = `/api/v1/instruments?simulationId=${SIMULATION}`;
+
 function market(state: MarketStatus['state']): MarketStatus {
   return state === 'NOT_SET_UP'
-    ? { state, simulationId: null, openedAt: null, commandSequence: null }
+    ? { state, simulationId: null, name: null, openedAt: null, closedAt: null, commandSequence: null }
     : {
         state,
-        simulationId: '10000000-0000-0000-0000-000000000001',
+        simulationId: SIMULATION,
+        name: null,
         openedAt: state === 'SETUP' ? null : '2026-11-05T09:30:00Z',
+        closedAt: state === 'CLOSED' ? '2026-11-05T16:00:00Z' : null,
         commandSequence: '7',
       };
 }
@@ -51,6 +58,8 @@ function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
     bots: 0,
     tagged: { marketMakers: 0, noise: 0, momentum: 0 },
     runs: [] as BotRun[],
+    // The exchange's clock, sent with its answers about the runs as the Date header; none when null.
+    clock: null as string | null,
     // Trader logins without an account yet.
     unfunded: [] as string[],
   };
@@ -70,7 +79,11 @@ function exchange(initial: MarketStatus['state'], instruments = [NOVA]) {
         byStrategy: { ...state.tagged, untagged: state.bots },
       },
     }))
-    .on('GET /api/v1/admin/bot-runs', () => ({ status: 200, json: { runs: state.runs, nextCursor: null } }));
+    .on('GET /api/v1/admin/bot-runs', () => ({
+      status: 200,
+      json: { runs: state.runs, nextCursor: null },
+      ...(state.clock === null ? {} : { headers: { Date: new Date(state.clock).toUTCString() } }),
+    }));
   return { server, state };
 }
 
@@ -103,11 +116,30 @@ describe('the operator screen', () => {
     exchange('SETUP');
     renderPage();
 
-    expect(await button('Open market')).toBeEnabled();
+    // Not before the instruments are read: a market is not said to have none while its list is on its way.
+    expect(await button('Open market')).toHaveAccessibleDescription('Reading the instruments…');
+    await waitFor(async () => expect(await button('Open market')).toBeEnabled());
     expect(await button('Halt trading')).toBeDisabled();
     expect(await button('Halt trading')).toHaveAccessibleDescription('Only an open market can be halted.');
     expect(await button('Resume trading')).toHaveAccessibleDescription('Only a halted market can be resumed.');
     expect(screen.getByText('Opening freezes the instruments and every account\'s endowment.')).toBeInTheDocument();
+  });
+
+  it("names the market in its panel, and says when it has no name or there is no market", async () => {
+    const { state } = exchange('SETUP');
+    state.market = { ...market('SETUP'), name: 'Thursday seminar' };
+    const named = renderPage();
+    const panel = await screen.findByRole('region', { name: 'Market' });
+    await waitFor(() => expect(within(panel).getByText('Name', { selector: 'dt' }).nextElementSibling).toHaveTextContent('Thursday seminar'));
+    named.unmount();
+
+    for (const [state, said] of [['OPEN', 'Not named'], ['NOT_SET_UP', 'No market yet']] as const) {
+      exchange(state, state === 'OPEN' ? [NOVA] : []);
+      const view = renderPage();
+      const each = await screen.findByRole('region', { name: 'Market' });
+      expect(within(each).getByText('Name', { selector: 'dt' }).nextElementSibling).toHaveTextContent(said);
+      view.unmount();
+    }
   });
 
   it('cannot open a market without instruments', async () => {
@@ -115,7 +147,7 @@ describe('the operator screen', () => {
     renderPage();
 
     expect(await button('Open market')).toHaveAccessibleDescription(
-      'Add an instrument first; that creates the market.',
+      'Start a simulation or add an instrument first; either creates the market.',
     );
   });
 
@@ -125,6 +157,183 @@ describe('the operator screen', () => {
 
     expect(await button('Open market')).toBeDisabled();
     expect(await button('Open market')).toHaveAccessibleDescription('Add at least one instrument first.');
+  });
+
+  it("lists this market's instruments, asked for by the simulation the status names", async () => {
+    const { server } = exchange('SETUP');
+    renderPage();
+
+    await screen.findByRole('table', { name: 'Instruments' });
+    const asked = server.requests.filter((request) => request.url.split('?')[0] === '/api/v1/instruments');
+    expect(asked.length).toBeGreaterThan(0);
+    // Never without the simulation, not even before the status was read.
+    expect(asked.every((request) => request.url === LIST)).toBe(true);
+  });
+
+  it('asks Market Data for no list while there is no market, whatever it still holds', async () => {
+    // Market Data would answer with NOVA, of some simulation the exchange no longer has.
+    const { server } = exchange('NOT_SET_UP');
+    renderPage();
+
+    expect(await button('Open market')).toHaveAccessibleDescription('Start a simulation or add an instrument first; either creates the market.');
+    await screen.findByText('No accounts yet.');
+    expect(screen.getByText('No instruments yet.')).toBeInTheDocument();
+    expect(server.requests.filter((request) => request.url.startsWith('/api/v1/instruments'))).toHaveLength(0);
+  });
+
+  it('reads the instruments again when the exchange names another simulation, showing none of the one before', async () => {
+    const NEXT = '10000000-0000-0000-0000-000000000002';
+    const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
+    const { server, state } = exchange('CLOSED');
+    server.on('GET /api/v1/instruments', (request) => ({
+      status: 200,
+      json: { instruments: request.url.endsWith(NEXT) ? [ORBT] : [NOVA], feed: { state: 'LIVE', lag: 0 } },
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+    expect(await screen.findByRole('rowheader', { name: 'NOVA' })).toBeInTheDocument();
+
+    state.market = { ...market('SETUP'), simulationId: NEXT };
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    expect(await screen.findByRole('rowheader', { name: 'ORBT' })).toBeInTheDocument();
+    expect(screen.queryByRole('rowheader', { name: 'NOVA' })).toBeNull();
+    expect(server.requests.at(-1)?.url).toBe(`/api/v1/instruments?simulationId=${NEXT}`);
+  });
+
+  it('shows a closed market as ended: when it closed, what stays to read, and nothing to operate', async () => {
+    const { server, state } = exchange('CLOSED');
+    state.tagged = { marketMakers: 1, noise: 2, momentum: 0 };
+    renderPage();
+
+    expect(await screen.findByText('Closed', { selector: '.state-badge' })).toHaveClass('state-closed');
+    // Read days later, perhaps: both times carry their dates.
+    expect(screen.getByText('Closed', { selector: 'dt' }).nextElementSibling).toHaveTextContent('5 Nov 2026, 16:00:00 UTC');
+    expect(screen.getByText('Opened', { selector: 'dt' }).nextElementSibling).toHaveTextContent('5 Nov 2026, 09:30:00 UTC');
+    // No transition leads out of it, so none is drawn, not even disabled.
+    for (const name of ['Open market', 'Halt trading', 'Resume trading', 'Close the market']) {
+      expect(screen.queryByRole('button', { name })).toBeNull();
+    }
+    expect(screen.getByText('Closing is final: this market cannot be opened, halted or resumed again.')).toBeInTheDocument();
+    expect(screen.queryByText("Opening freezes the instruments and every account's endowment.")).toBeNull();
+    expect(screen.getByRole('button', { name: 'What is closed?' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /halted/ })).toBeNull();
+
+    // First on the page: that it ended, when, and what is still here.
+    const ended = screen.getByRole('region', { name: 'This market has ended' });
+    expect(ended).toHaveTextContent('It closed on 5 Nov 2026, 16:00:00 UTC.');
+    // The runs and the tokens end with the close itself. The orders are cancelled after it, and the status does not
+    // say how far that is: the page says what a close does, not that it is done.
+    expect(ended).toHaveTextContent("Trading is over for good: every bot run ended, and every bot's token stopped working.");
+    expect(ended).toHaveTextContent(
+      'A close cancels every order that still rested and releases its hold, which on a full market takes up to about half a minute.',
+    );
+    expect(ended).not.toHaveTextContent('was cancelled');
+    expect(ended).toHaveTextContent('Nothing was deleted.');
+    const order = screen.getAllByRole('region').map((region) => region.getAttribute('aria-labelledby'));
+    expect(order.indexOf('ended-title')).toBeLessThan(order.indexOf('runs-title'));
+    expect(order.indexOf('runs-title')).toBeLessThan(order.indexOf('instruments-title'));
+
+    // What it left is listed, read-only: a line in place of each form, and no form at all.
+    await screen.findByRole('table', { name: 'Instruments' });
+    expect(screen.queryByRole('button', { name: 'Edit NOVA' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Delete NOVA' })).toBeNull();
+    expect(
+      screen.getByText('The market has closed, so nothing can be added or changed. The instruments stay as they were.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "The market has closed, so no bot can be created. These bots trade no more: the close revoked every bot's token.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'The market has closed, so no trader can be added or funded. The accounts stay listed with what they started with.',
+      ),
+    ).toBeInTheDocument();
+    expect(await screen.findByText('3 bots')).toBeInTheDocument();
+    expect(
+      await screen.findByText('The market has closed, so no run can start. Its runs stay listed, and can still be compared.'),
+    ).toBeInTheDocument();
+    // The one form left starts the next simulation, under the panel that says this one has ended.
+    expect(screen.getAllByRole('form').map((form) => form.getAttribute('aria-label'))).toEqual(['Start a new simulation']);
+    expect(order.indexOf('start-title')).toBe(order.indexOf('ended-title') + 1);
+    for (const name of ['Add instrument', 'Create bots', 'Fund account', 'Add trader', 'Start run']) {
+      expect(screen.queryByRole('button', { name })).toBeNull();
+    }
+    expect(screen.queryByText(/frozen once the market opens/)).toBeNull();
+    // Reading is all the page does: no command was sent.
+    expect(server.requests.some((request) => request.method !== 'GET')).toBe(false);
+  });
+
+  it('keeps how trading is doing on the page of a closed market, where a stopped exchange would show', async () => {
+    const { server } = exchange('CLOSED');
+    server.on('GET /api/v1/admin/health', {
+      status: 200,
+      json: {
+        writer: { available: false, queueDepth: 0, queueCapacity: 256 },
+        lastMinute: { committed: 0, failed: 0, withinBudget: 0, refused: 0 },
+        outbox: { admitting: true, pendingEvents: 0, oldestPendingMillis: 0 },
+      },
+    });
+    renderPage();
+
+    const health = await screen.findByRole('region', { name: 'Health' });
+    expect(await within(health).findByText('Trading stopped until Execution restarts')).toBeInTheDocument();
+    // A reload, or another operator's page, knows nothing of the close's answer. A stopped exchange is what it can
+    // see, and with it that the close may not have got to every order.
+    expect(screen.getByRole('region', { name: 'This market has ended' })).toHaveTextContent(
+      'The exchange has stopped taking commands: any order the close had not cancelled by then rests, with its hold, until the exchange is restarted.',
+    );
+  });
+
+  it('says of the orders of a closed market only what is known of them', () => {
+    const text = (close: Parameters<typeof restingOrdersText>[0]['close'], stillResting?: number | null, writerHalted = false) =>
+      restingOrdersText({ close, stillResting, writerHalted });
+    expect(text('done')).toBe('Every order that still rested was cancelled and its hold released.');
+    expect(text('sending')).toMatch(/^The orders that still rested are being cancelled .* until the close answers, some still rest\.$/);
+    expect(text('unresolved')).toBe('The close has not answered yet, so some orders may still rest with their holds.');
+    // Left unfinished: said with the count whatever came after it under the same key, and whatever the writer says.
+    for (const close of ['unresolved', 'sending'] as const) {
+      expect(text(close, 4200, true)).toBe(
+        'At most 4,200 orders still rest, with their holds: the close was left unfinished. The exchange has stopped, and cancels them when it is restarted.',
+      );
+    }
+    // The exchange's count is an upper bound, and is never printed as how many rest.
+    expect(text('unresolved', 1)).toBe(
+      'At most 1 order still rests, with its hold: the close was left unfinished. The exchange has stopped, and cancels it when it is restarted.',
+    );
+    expect(text('unresolved', null)).toMatch(/^Some orders still rest, with their holds: /);
+    expect(text('unresolved', 0)).toBe(
+      'The close was left unfinished, though the exchange counted no order still resting when it stopped. It finishes the close when it is restarted.',
+    );
+    // Nothing known of the close: what a close does, and a stopped exchange if there is one. Never that it is done.
+    for (const close of ['idle', 'refused'] as const) {
+      expect(text(close)).toMatch(/^A close cancels every order that still rested and releases its hold, which/);
+      expect(text(close, undefined, true)).toMatch(/The exchange has stopped taking commands: any order the close had not cancelled/);
+      expect(text(close, undefined, true)).not.toMatch(/was cancelled|were cancelled/);
+    }
+  });
+
+  it("reads the traders without an account again when the exchange names another simulation", async () => {
+    const NEXT = '10000000-0000-0000-0000-000000000002';
+    const { server, state } = exchange('SETUP');
+    state.unfunded = ['dana'];
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+    expect(await screen.findByRole('rowheader', { name: 'dana' })).toBeInTheDocument();
+    const reads = () => server.requests.filter((request) => request.url.split('?')[0] === '/api/v1/admin/traders').length;
+    const before = reads();
+
+    // Still in setup, so the list stays on screen: only the simulation is another, and its logins' accounts with it.
+    state.unfunded = ['erin'];
+    state.market = { ...market('SETUP'), simulationId: NEXT };
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    // The list has no poll of its own: without this it would show the other simulation's until the page is left.
+    expect(await screen.findByRole('rowheader', { name: 'erin' }, { timeout: 900 })).toBeInTheDocument();
+    expect(screen.queryByRole('rowheader', { name: 'dana' })).toBeNull();
+    expect(reads()).toBeGreaterThan(before);
   });
 
   it('opens the market with a key and shows the committed state', async () => {
@@ -196,6 +405,7 @@ describe('the operator screen', () => {
     renderPage();
 
     const form = await screen.findByRole('form', { name: 'Add an instrument' });
+    await screen.findByRole('table', { name: 'Instruments' });
     expect(within(form).queryByRole('button', { name: 'NOVA 100.00' })).toBeNull();
     fireEvent.click(within(form).getByRole('button', { name: 'ORBT 50.00' }));
     fireEvent.click(within(form).getByRole('button', { name: 'Add instrument' }));
@@ -268,7 +478,7 @@ describe('the operator screen', () => {
     expect(server.requests.at(-1)?.body).toEqual({ referencePrice: '1205.5x', displayName: 'Nova  Dyn' });
 
     // An empty name removes it; a save closes the form and puts focus back on Edit.
-    const listReads = () => server.requests.filter((request) => request.url === '/api/v1/instruments').length;
+    const listReads = () => server.requests.filter((request) => request.url === LIST).length;
     const readsBefore = listReads();
     fireEvent.change(name, { target: { value: '   ' } });
     fireEvent.change(price, { target: { value: '1205.50' } });
@@ -582,7 +792,7 @@ describe('the operator screen', () => {
     expect(await button('Delete NOVA')).toHaveFocus();
     expect(deletes()).toHaveLength(0);
 
-    const listReads = server.requests.filter((request) => request.url === '/api/v1/instruments').length;
+    const listReads = server.requests.filter((request) => request.url === LIST).length;
     fireEvent.click(await button('Delete NOVA'));
     fireEvent.click(screen.getByRole('button', { name: 'Confirm delete of NOVA' }));
 
@@ -602,7 +812,7 @@ describe('the operator screen', () => {
     // The row's controls are gone, so focus goes to the add form.
     expect(screen.getByRole('textbox', { name: 'Symbol' })).toHaveFocus();
     await waitFor(() =>
-      expect(server.requests.filter((request) => request.url === '/api/v1/instruments').length).toBeGreaterThan(listReads),
+      expect(server.requests.filter((request) => request.url === LIST).length).toBeGreaterThan(listReads),
     );
   });
 
@@ -1321,9 +1531,12 @@ describe('adding traders on the operator screen', () => {
 
 describe('bot runs on the operator screen', () => {
   beforeEach(() => resetSession());
+  afterEach(() => vi.useRealTimers());
 
   const ORBT = { ...NOVA, instrumentId: '00000000-0000-0000-0000-000000000002', symbol: 'ORBT' };
   const runs = () => screen.findByRole('region', { name: 'Bot runs' });
+  /** Sets the browser's clock and nothing else: timers still run, so the screen keeps asking every two seconds. */
+  const clockAt = (time: string) => vi.setSystemTime(new Date(time));
 
   it('ticks finished runs for a comparison, four at most, and links to it', async () => {
     const { state } = exchange('OPEN');
@@ -1415,6 +1628,131 @@ describe('bot runs on the operator screen', () => {
       commandsPerSecond: '4.00',
       maxOrderQuantity: 10,
       maxPosition: 100,
+      durationMinutes: 60,
+    });
+  });
+
+  it('starts a run for an hour unless told otherwise, and never reads an empty duration as no end', async () => {
+    const { server, state } = exchange('OPEN');
+    state.tagged = { marketMakers: 1, noise: 1, momentum: 0 };
+    server.on('POST /api/v1/admin/bot-runs', {
+      status: 201,
+      json: { runId: botRun().runId, bots: 2, commandSequence: '9' },
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    await waitFor(() => expect(within(form).getByLabelText('Noise')).toHaveValue('1'));
+    const length = within(form).getByRole('group', { name: 'Run length' });
+    expect(within(length).getByRole('radio', { name: 'For a set time' })).toBeChecked();
+    expect(within(length).getByRole('radio', { name: 'For a set time' })).toHaveAccessibleDescription(
+      'Ends by itself after the minutes given, from 1 to 1440 (24 hours).',
+    );
+    expect(within(length).getByRole('radio', { name: 'Until I stop it' })).not.toBeChecked();
+    const minutes = within(length).getByLabelText('Duration in minutes');
+    expect(minutes).toHaveValue('60');
+    expect(minutes).toBeEnabled();
+
+    const posted = () => server.requests.filter((request) => request.method === 'POST' && request.url.endsWith('/bot-runs'));
+    fireEvent.change(minutes, { target: { value: '' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    expect(await within(form).findByText('Duration must be a whole number.')).toBeInTheDocument();
+    expect(posted()).toHaveLength(0);
+
+    fireEvent.change(minutes, { target: { value: '15' } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    expect(await within(form).findByText('Started a run of 2 bots.')).toBeInTheDocument();
+    expect(within(form).queryByText('Duration must be a whole number.')).toBeNull();
+    expect(posted()).toHaveLength(1);
+    expect(posted()[0]?.body).toEqual({
+      marketMakers: 1,
+      noise: 1,
+      momentum: 0,
+      commandsPerSecond: '4.00',
+      maxOrderQuantity: 10,
+      maxPosition: 100,
+      durationMinutes: 15,
+    });
+  });
+
+  it('starts a run with no end only when that is chosen, and says what it means', async () => {
+    const { server, state } = exchange('OPEN');
+    state.tagged = { marketMakers: 1, noise: 1, momentum: 0 };
+    server.on('POST /api/v1/admin/bot-runs', {
+      status: 201,
+      json: { runId: botRun().runId, bots: 2, commandSequence: '9' },
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    await waitFor(() => expect(within(form).getByLabelText('Noise')).toHaveValue('1'));
+    const untilStopped = within(form).getByRole('radio', { name: 'Until I stop it' });
+    const timed = within(form).getByRole('radio', { name: 'For a set time' });
+    const minutes = within(form).getByLabelText('Duration in minutes');
+    // One group of two, so the arrow keys move between them.
+    expect(untilStopped).toHaveAttribute('name', 'run-length');
+    expect(timed).toHaveAttribute('name', 'run-length');
+    fireEvent.click(untilStopped);
+    expect(untilStopped).toBeChecked();
+    expect(timed).not.toBeChecked();
+    expect(untilStopped).toHaveAccessibleDescription(
+      'Keeps trading until someone selects Stop run, and takes up again after every restart.',
+    );
+    // The minutes stay as they were for a change of mind, but can't be typed and aren't sent.
+    expect(minutes).toBeDisabled();
+    expect(minutes).toHaveValue('60');
+
+    const posted = () => server.requests.filter((request) => request.method === 'POST' && request.url.endsWith('/bot-runs'));
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    await waitFor(() => expect(posted()).toHaveLength(1));
+    expect(posted()[0]?.body).toEqual({
+      marketMakers: 1,
+      noise: 1,
+      momentum: 0,
+      commandsPerSecond: '4.00',
+      maxOrderQuantity: 10,
+      maxPosition: 100,
+    });
+    expect(await within(form).findByText('Started a run of 2 bots.')).toBeInTheDocument();
+
+    fireEvent.click(timed);
+    expect(minutes).toBeEnabled();
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    await waitFor(() => expect(posted()).toHaveLength(2));
+    expect(posted()[1]?.body).toMatchObject({ durationMinutes: 60 });
+  });
+
+  it('keeps the minutes typed through a change of mind about the run length', async () => {
+    const { server, state } = exchange('OPEN');
+    state.tagged = { marketMakers: 1, noise: 1, momentum: 0 };
+    server.on('POST /api/v1/admin/bot-runs', {
+      status: 201,
+      json: { runId: botRun().runId, bots: 2, commandSequence: '9' },
+    });
+    renderPage();
+
+    const form = await screen.findByRole('form', { name: 'Start a bot run' });
+    await waitFor(() => expect(within(form).getByLabelText('Noise')).toHaveValue('1'));
+    const minutes = within(form).getByLabelText('Duration in minutes');
+    fireEvent.change(minutes, { target: { value: '15' } });
+    fireEvent.click(within(form).getByRole('radio', { name: 'Until I stop it' }));
+    expect(minutes).toBeDisabled();
+    expect(minutes).toHaveValue('15');
+    fireEvent.click(within(form).getByRole('radio', { name: 'For a set time' }));
+    expect(minutes).toBeEnabled();
+    expect(minutes).toHaveValue('15');
+
+    const posted = () => server.requests.filter((request) => request.method === 'POST' && request.url.endsWith('/bot-runs'));
+    fireEvent.click(within(form).getByRole('button', { name: 'Start run' }));
+    await waitFor(() => expect(posted()).toHaveLength(1));
+    expect(posted()[0]?.body).toEqual({
+      marketMakers: 1,
+      noise: 1,
+      momentum: 0,
+      commandsPerSecond: '4.00',
+      maxOrderQuantity: 10,
+      maxPosition: 100,
+      durationMinutes: 15,
     });
   });
 
@@ -1464,6 +1802,35 @@ describe('bot runs on the operator screen', () => {
     renderPage();
     expect(await button('Start run')).toBeDisabled();
     expect(await button('Start run')).toHaveAccessibleDescription('Bots trade only once the market has opened.');
+  });
+
+  it('offers no run to start once the market has closed, and keeps its runs and their comparison', async () => {
+    const { state } = exchange('CLOSED');
+    state.tagged = { marketMakers: 1, noise: 2, momentum: 0 };
+    state.runs = [
+      finishedRun({ runId: '20000000-0000-0000-0000-000000000002', startedAt: '2026-11-05T11:00:00Z' }),
+      finishedRun({ runId: '20000000-0000-0000-0000-000000000001', startedAt: '2026-11-05T10:00:00Z' }),
+    ];
+    renderPage();
+
+    const panel = await runs();
+    expect(
+      await within(panel).findByText('The market has closed, so no run can start. Its runs stay listed, and can still be compared.'),
+    ).toBeInTheDocument();
+    expect(within(panel).queryByRole('form', { name: 'Start a bot run' })).toBeNull();
+    expect(within(panel).queryByRole('button', { name: 'Start run' })).toBeNull();
+
+    // The history and its comparison are what a closed market is kept for.
+    const recent = await within(panel).findByRole('table', { name: 'Recent runs' });
+    expect(within(recent).getAllByRole('row')).toHaveLength(3);
+    for (const box of within(recent).getAllByRole('checkbox')) {
+      expect(box).toBeEnabled();
+      fireEvent.click(box);
+    }
+    expect(within(panel).getByRole('link', { name: 'Compare 2 runs' })).toHaveAttribute(
+      'href',
+      '/operator/runs/compare?runs=20000000-0000-0000-0000-000000000002,20000000-0000-0000-0000-000000000001',
+    );
   });
 
   it('cannot start without bots once open, and says why', async () => {
@@ -1517,6 +1884,150 @@ describe('bot runs on the operator screen', () => {
     expect(counters).toHaveTextContent('SimulatorNot reported yet');
     expect(within(panel).queryByText('Simulator settings')).toBeNull();
   });
+
+  it('says how long the run has been going and how long a timed one has left, as of the last answer', async () => {
+    const { state } = exchange('OPEN');
+    const timed = botRun({ endsAt: '2026-11-06T11:00:00Z' });
+    state.runs = [timed];
+    // Its worker last reported at 10:01:20; the run is twelve and a half minutes old all the same.
+    clockAt('2026-11-06T10:12:30Z');
+    renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(current).toHaveTextContent('Started10:00:00 UTCElapsed12 min 30 sEnds11:00:00 UTCTime left47 min 30 sLast');
+    // Each answer moves both; nothing on the screen counts between answers.
+    clockAt('2026-11-06T10:59:59Z');
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed59 min 59 sEnds11:00:00 UTCTime left1 sLast'), {
+      timeout: 10_000,
+    });
+    // Past its end the exchange shows the run as stopping, and as still wanting to run until its worker confirms.
+    // Nothing is left to count, and it can still be stopped by hand should the worker hang.
+    clockAt('2026-11-06T11:00:04Z');
+    state.runs = [{ ...timed, status: 'STOPPING' }];
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed1 h 0 minEnds11:00:00 UTCTime leftEnding now'), {
+      timeout: 10_000,
+    });
+    expect(within(current).getByRole('status', { name: 'Run status: Stopping' })).toBeInTheDocument();
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toBeEnabled();
+    expect(within(current).getByRole('button', { name: 'Stop run' })).not.toHaveAccessibleDescription();
+    // Once the operator asks for the stop, the end time decides nothing and is no longer counted down to.
+    state.runs = [{ ...timed, status: 'STOPPING', desiredState: 'STOPPED', stopRequestedAt: '2026-11-06T11:00:06Z' }];
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed1 h 0 minEnds11:00:00 UTCLast heartbeat'), {
+      timeout: 10_000,
+    });
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toBeDisabled();
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toHaveAccessibleDescription(
+      'A stop was asked for at 11:00:06 UTC; the run shows Stopped once the worker confirms.',
+    );
+  }, 30_000);
+
+  it("counts on the exchange's clock, whichever way the browser's is off", async () => {
+    const { state } = exchange('OPEN');
+    // A two-minute run two seconds old, on a browser six minutes ahead of the exchange.
+    state.runs = [botRun({ endsAt: '2026-11-06T10:02:00Z' })];
+    state.clock = '2026-11-06T10:00:02Z';
+    clockAt('2026-11-06T10:06:02Z');
+    const view = renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(current).toHaveTextContent('Elapsed2 sEnds10:02:00 UTCTime left1 min 58 sLast');
+    // The exchange's answers move the readout; the browser's clock, moved alone, does not.
+    clockAt('2026-11-06T10:30:00Z');
+    state.clock = '2026-11-06T10:00:40Z';
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed40 sEnds10:02:00 UTCTime left1 min 20 sLast'), {
+      timeout: 10_000,
+    });
+    view.unmount();
+
+    // A run with no end, a minute short of a day old, on a browser five minutes ahead: no warning yet. Then a minute
+    // past the day on a browser a quarter of an hour behind: warned about.
+    state.runs = [botRun()];
+    state.clock = '2026-11-07T09:59:00Z';
+    clockAt('2026-11-07T10:04:00Z');
+    renderPage();
+    const old = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(old).toHaveTextContent('Elapsed23 h 59 minEndsWhen stopped');
+    expect(within(old).queryByText(/no end time/)).toBeNull();
+    state.clock = '2026-11-07T10:01:00Z';
+    clockAt('2026-11-07T09:46:00Z');
+    expect(await within(old).findByText(/no end time/, {}, { timeout: 10_000 })).toBeInTheDocument();
+    expect(old).toHaveTextContent('Elapsed1 d 0 hEndsWhen stopped');
+    // The history counts the run to the same answer.
+    const history = within(await runs()).getByRole('table', { name: 'Recent runs' });
+    await waitFor(() => expect(within(history).getAllByRole('row')[1]).toHaveTextContent('1 d 0 h so far'), {
+      timeout: 10_000,
+    });
+  }, 30_000);
+
+  it('counts a run with no end from its start, in days once it is that old, with no time left to show', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [botRun({ startedAt: '2026-11-10T10:00:00Z', status: 'STALE' })];
+    clockAt('2026-11-23T14:30:00Z');
+    renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(current).toHaveTextContent('Started10:00:00 UTCElapsed13 d 4 hEndsWhen stoppedLast heartbeat');
+    expect(current).not.toHaveTextContent('Time left');
+  });
+
+  const LEFT_RUNNING =
+    'Running for more than a day with no end time. It keeps trading until someone stops it, and takes up again ' +
+    'after every restart. Select Stop run to end it.';
+
+  it('warns once a run with no end has traded for more than a day, in words that stay the same', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [botRun()];
+    // A day to the second: not yet.
+    clockAt('2026-11-07T10:00:00Z');
+    renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(current).toHaveTextContent('Elapsed1 d 0 hEndsWhen stopped');
+    expect(within(current).queryByText(/no end time/)).toBeNull();
+    expect(within(current).getByRole('button', { name: 'Stop run' })).not.toHaveAccessibleDescription();
+
+    clockAt('2026-11-07T10:00:01Z');
+    const lead = await within(current).findByText('Running for more than a day with no end time.', {}, { timeout: 10_000 });
+    const warning = lead.closest('p');
+    expect(warning).toHaveTextContent(LEFT_RUNNING);
+    // Said in words and marked up as a warning, not by its tint alone; announced politely, and read with the action.
+    expect(lead.tagName).toBe('STRONG');
+    expect(warning).toHaveClass('chart-note');
+    expect(warning).toHaveAttribute('role', 'status');
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toHaveAccessibleDescription(LEFT_RUNNING);
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toBeEnabled();
+
+    // Later answers move the time elapsed and leave the warning as it is, so it is announced once.
+    clockAt('2026-11-08T13:00:00Z');
+    await waitFor(() => expect(current).toHaveTextContent('Elapsed2 d 3 h'), { timeout: 10_000 });
+    expect(within(current).getByText('Running for more than a day with no end time.').closest('p')).toBe(warning);
+    expect(warning?.textContent).toBe(LEFT_RUNNING);
+  }, 20_000);
+
+  it('does not warn once a stop is asked for, nor ever about a timed run', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [botRun()];
+    clockAt('2026-11-08T10:00:00Z');
+    const view = renderPage();
+
+    const current = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(await within(current).findByText(/no end time/)).toBeInTheDocument();
+    state.runs = [botRun({ status: 'STOPPING', desiredState: 'STOPPED', stopRequestedAt: '2026-11-08T09:59:50Z' })];
+    await waitFor(() => expect(within(current).queryByText(/no end time/)).toBeNull(), { timeout: 10_000 });
+    expect(within(current).getByRole('button', { name: 'Stop run' })).toHaveAccessibleDescription(
+      'A stop was asked for at 09:59:50 UTC; the run shows Stopped once the worker confirms.',
+    );
+    view.unmount();
+
+    // The longest timed run, a day, half a minute past its end and not yet confirmed: it ends by itself.
+    state.runs = [botRun({ endsAt: '2026-11-07T10:00:00Z', status: 'STOPPING' })];
+    clockAt('2026-11-07T10:00:30Z');
+    renderPage();
+    const timed = await within(await runs()).findByRole('group', { name: 'Current run' });
+    expect(timed).toHaveTextContent('Elapsed1 d 0 hEnds10:00:00 UTCTime leftEnding now');
+    expect(within(timed).queryByText(/no end time/)).toBeNull();
+    expect(within(timed).getByRole('button', { name: 'Stop run' })).not.toHaveAccessibleDescription();
+  }, 20_000);
 
   it("shows the simulator a running run's worker reported, and when another took over", async () => {
     const { state } = exchange('OPEN');
@@ -1625,6 +2136,192 @@ describe('bot runs on the operator screen', () => {
     expect(within(recent).getByRole('row', { name: /09:00:00 UTC/ })).toHaveTextContent(
       'Not confirmed · 1 not canceled',
     );
+    expect(recent).not.toHaveTextContent('Market close');
+  });
+
+  it('says which run the market close ended, since no worker confirmed that stop', async () => {
+    const { state } = exchange('CLOSED');
+    state.bots = 3;
+    state.runs = [
+      botRun({
+        runId: 'b',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        stopRequestedAt: '2026-11-06T10:05:00Z',
+        stoppedAt: '2026-11-06T10:05:00Z',
+        window: {
+          startSequence: '41',
+          stopSequence: '90',
+          endSequence: '90',
+          endedBy: 'MARKET_CLOSE',
+          endedAt: '2026-11-06T10:05:00Z',
+        },
+      }),
+    ];
+    renderPage();
+
+    const recent = await screen.findByRole('table', { name: 'Recent runs' });
+    expect(within(recent).getByRole('row', { name: /10:00:00 UTC/ })).toHaveTextContent('10:05:00 UTC · Market close');
+  });
+
+  it("keeps a run that ended before the close as not confirmed, though the close left its time on it", async () => {
+    const { state } = exchange('CLOSED');
+    const closedAt = '2026-11-06T12:00:00Z';
+    state.market = { ...market('CLOSED'), closedAt };
+    state.bots = 3;
+    // What the close records on every run no worker had confirmed: a stop, at the time it closed.
+    const recorded = { status: 'STOPPED', desiredState: 'STOPPED', stopRequestedAt: closedAt, stoppedAt: closedAt } as const;
+    const window = (endedBy: BotRun['window']['endedBy'], endedAt: string | null): BotRun['window'] => ({
+      startSequence: '41',
+      stopSequence: null,
+      endSequence: endedAt === null ? null : '90',
+      endedBy,
+      endedAt,
+    });
+    state.runs = [
+      // Still going when the market closed: the close ended it.
+      botRun({ runId: 'd', startedAt: '2026-11-06T11:00:00Z', ...recorded, window: window('MARKET_CLOSE', closedAt) }),
+      // Ended by the next run's start, its worker never heard from again.
+      botRun({ runId: 'c', startedAt: '2026-11-06T10:00:00Z', ...recorded, window: window('NEXT_START', '2026-11-06T11:00:00Z') }),
+      // Confirmed by its worker long before.
+      finishedRun({ runId: 'b', startedAt: '2026-11-06T09:00:00Z', stoppedAt: '2026-11-06T09:10:00Z' }),
+      // From before windows were kept, never confirmed; the exchange writes the same moment with its fraction.
+      botRun({
+        runId: 'a',
+        startedAt: '2026-11-06T08:00:00Z',
+        ...recorded,
+        stoppedAt: '2026-11-06T12:00:00.000Z',
+        window: window('NOT_KEPT', null),
+        activity: { ...botRun().activity, stopFailures: 1 },
+      }),
+    ];
+    renderPage();
+
+    const recent = await screen.findByRole('table', { name: 'Recent runs' });
+    const endedCell = (started: RegExp) => within(recent).getByRole('row', { name: started }).lastElementChild;
+    expect(endedCell(/11:00:00 UTC/)).toHaveTextContent(/^12:00:00 UTC · Market close$/);
+    // No worker confirmed a stop at noon: that is when the market closed, and says nothing of these runs.
+    expect(endedCell(/10:00:00 UTC/)).toHaveTextContent(/^Not confirmed$/);
+    expect(endedCell(/08:00:00 UTC/)).toHaveTextContent(/^Not confirmed · 1 not canceled$/);
+    expect(endedCell(/09:00:00 UTC/)).toHaveTextContent(/^09:10:00 UTC$/);
+  });
+
+  it('says how long each run lasted in the history, and how long the one still going has been', async () => {
+    const { state } = exchange('OPEN');
+    state.runs = [
+      // Still going, its worker lost on the first day.
+      botRun({ runId: 'c', startedAt: '2026-11-10T10:00:00Z', status: 'STALE' }),
+      // Confirmed by its worker ten minutes in.
+      finishedRun({ runId: 'b' }),
+      // Stopped without ever having had a worker.
+      botRun({
+        runId: 'a',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        startedAt: '2026-11-06T09:00:00Z',
+        worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null },
+      }),
+    ];
+    clockAt('2026-11-23T14:30:00Z');
+    renderPage();
+
+    const history = await within(await runs()).findByRole('table', { name: 'Recent runs' });
+    expect(within(history).getAllByRole('columnheader').map((header) => header.textContent)).toEqual([
+      'Compare',
+      'Started',
+      'Ran for',
+      'Bots',
+      'Placed',
+      'Canceled',
+      'Ended',
+    ]);
+    // After the tick box: how long, then the bots.
+    const ranFor = () =>
+      within(history)
+        .getAllByRole('row')
+        .slice(1)
+        .map((row) => within(row).getAllByRole('cell')[1]?.textContent);
+    expect(ranFor()).toEqual(['13 d 4 h so far', '10 min', 'Unknown']);
+
+    // The run still going is counted to the same answer as its readout above.
+    clockAt('2026-11-23T15:30:00Z');
+    await waitFor(() => expect(ranFor()).toEqual(['13 d 5 h so far', '10 min', 'Unknown']), { timeout: 10_000 });
+    expect(within(await runs()).getByRole('group', { name: 'Current run' })).toHaveTextContent('Elapsed13 d 5 h');
+
+    // Sorted by length, shortest first: the one of unknown length, then ten minutes, then thirteen days.
+    fireEvent.click(within(history).getByRole('button', { name: 'Ran for' }));
+    expect(ranFor()).toEqual(['Unknown', '10 min', '13 d 5 h so far']);
+    fireEvent.click(within(history).getByRole('button', { name: 'Ran for' }));
+    expect(ranFor()).toEqual(['13 d 5 h so far', '10 min', 'Unknown']);
+  }, 15_000);
+
+  it('keeps an unconfirmed run at its own length in the history once the next run has started', async () => {
+    const { state } = exchange('OPEN');
+    // Each window ended when the run after it started, three days and two days after the run's own start.
+    const nextStart = (endedAt: string) => ({
+      startSequence: '41',
+      stopSequence: null,
+      endSequence: '900',
+      endedBy: 'NEXT_START' as const,
+      endedAt,
+    });
+    state.runs = [
+      finishedRun({
+        runId: 'd',
+        startedAt: '2026-11-09T10:00:00Z',
+        stoppedAt: '2026-11-09T10:10:00Z',
+        window: { ...finishedRun().window, endedAt: '2026-11-09T10:10:00Z' },
+      }),
+      // No end; its worker last reported 80 seconds in, and it was stopped half an hour in with none to confirm.
+      botRun({
+        runId: 'c',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        startedAt: '2026-11-07T10:00:00Z',
+        stopRequestedAt: '2026-11-07T10:30:00Z',
+        worker: { workerId: 'sim-1', heartbeatAt: '2026-11-07T10:01:20Z', leaseExpiresAt: '2026-11-07T10:01:35Z' },
+        window: nextStart('2026-11-09T10:00:00Z'),
+      }),
+      // For 60 minutes, its worker gone two seconds before the end.
+      botRun({
+        runId: 'b',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        startedAt: '2026-11-06T12:00:00Z',
+        endsAt: '2026-11-06T13:00:00Z',
+        stopRequestedAt: '2026-11-06T13:00:00Z',
+        worker: { workerId: 'sim-1', heartbeatAt: '2026-11-06T12:59:58Z', leaseExpiresAt: '2026-11-06T13:00:13Z' },
+        window: nextStart('2026-11-07T10:00:00Z'),
+      }),
+      // For 60 minutes, and no worker ever took it.
+      botRun({
+        runId: 'a',
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        endsAt: '2026-11-06T11:00:00Z',
+        stopRequestedAt: '2026-11-06T11:00:00Z',
+        worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null },
+        window: nextStart('2026-11-06T12:00:00Z'),
+      }),
+    ];
+    clockAt('2026-11-23T14:30:00Z');
+    renderPage();
+
+    const history = await within(await runs()).findByRole('table', { name: 'Recent runs' });
+    const cells = within(history)
+      .getAllByRole('row')
+      .slice(1)
+      .map((row) => {
+        const all = within(row).getAllByRole('cell');
+        return [all[1]?.textContent, all[all.length - 1]?.textContent];
+      });
+    // Not the two days and the day until the next start: what each run's own stop, end and last report allow.
+    expect(cells).toEqual([
+      ['10 min', '10:10:00 UTC'],
+      ['About 1 min 20 s', 'Not confirmed'],
+      ['About 59 min 58 s', 'Not confirmed'],
+      ['Unknown', 'Not confirmed'],
+    ]);
   });
 
   it('pages the run history and the accounts with the cursor, size and order they were given', async () => {
@@ -1713,7 +2410,8 @@ describe('bot runs on the operator screen', () => {
     for (const step of TOURS.OPERATOR.steps) {
       expect(document.querySelector(step.anchor), step.title).not.toBeNull();
     }
-    expect(screen.getByRole('button', { name: 'What is halted?' })).toBeInTheDocument();
+    // The states the market can be put in from here are explained beside its controls.
+    expect(screen.getByRole('button', { name: 'What are halted and closed?' })).toBeInTheDocument();
   });
 
   it('puts bot runs first once the market is open, and after the setup editor before', async () => {
@@ -1729,5 +2427,1190 @@ describe('bot runs on the operator screen', () => {
     await runs();
     const setupOrder = screen.getAllByRole('region').map((region) => region.getAttribute('aria-labelledby'));
     expect(setupOrder.indexOf('runs-title')).toBeGreaterThan(setupOrder.indexOf('accounts-title'));
+  });
+});
+
+describe('closing the market on the operator screen', () => {
+  beforeEach(() => resetSession());
+
+  const CLOSE = '/api/v1/admin/market/close';
+  const closes = (server: ReturnType<typeof exchange>['server']) =>
+    server.requests.filter((request) => request.method === 'POST' && request.url === CLOSE);
+  const keys = (server: ReturnType<typeof exchange>['server']) =>
+    closes(server).map((request) => request.headers['Idempotency-Key']);
+  const dialog = () => screen.getByRole('alertdialog', { name: 'Close the market for good?' });
+  /** Opens the confirmation and confirms it. */
+  const confirmClose = async () => {
+    fireEvent.click(await button('Close the market'));
+    fireEvent.click(within(dialog()).getByRole('button', { name: 'Close the market for good' }));
+  };
+  /** What the market panel says of the last command, when it is a warning; other panels have alerts of their own. */
+  const said = () => within(screen.getByRole('region', { name: 'Market' })).findByRole('alert');
+  const closedAnswer = { state: 'CLOSED', commandSequence: '8', canceledOrders: 1234, endedRuns: 1 };
+  /** An answer the test gives when it chooses to: the request stays on its way until then. */
+  const answerLater = () => {
+    type Reply = { status: number; json?: unknown; problem?: unknown };
+    let answer: (reply: Reply) => void = () => {};
+    const reply = new Promise<Reply>((resolve) => {
+      answer = resolve;
+    });
+    return { reply, answer: (given: Reply) => answer(given) };
+  };
+
+  it('offers a close only for a market that has opened, and says why not before', async () => {
+    exchange('SETUP');
+    const setup = renderPage();
+    expect(await button('Close the market')).toBeDisabled();
+    expect(await button('Close the market')).toHaveAccessibleDescription('Only a market that has opened can be closed.');
+    setup.unmount();
+
+    exchange('NOT_SET_UP', []);
+    const none = renderPage();
+    expect(await button('Close the market')).toBeDisabled();
+    none.unmount();
+
+    for (const state of ['OPEN', 'HALTED'] as const) {
+      exchange(state);
+      const opened = renderPage();
+      expect(await button('Close the market')).toBeEnabled();
+      // Said before it is pressed: this one has no way back, and pressing it does not close yet.
+      expect(await button('Close the market')).toHaveAccessibleDescription('Ends this market for good. Asks first.');
+      opened.unmount();
+    }
+  });
+
+  it('asks first, saying what a close does and that it cannot be undone, and sends nothing until confirmed', async () => {
+    const { server } = exchange('OPEN');
+    renderPage();
+
+    const close = await button('Close the market');
+    close.focus();
+    fireEvent.click(close);
+
+    const asked = dialog();
+    expect(asked).toHaveAttribute('open');
+    for (const said of [
+      'This cannot be undone.',
+      'A closed market never opens again.',
+      'Trading ends for good: no order is taken after the close.',
+      'Every resting order is cancelled, and what it had reserved is released.',
+      'Every bot run ends.',
+      "Every bot's token stops working.",
+      'Nothing is deleted: portfolios, orders, trades, accounts and bot runs stay readable.',
+    ]) {
+      expect(asked).toHaveAccessibleDescription(expect.stringContaining(said));
+    }
+    // Focus moves into the confirmation, onto the button that changes nothing: the close is never the default.
+    const keep = within(asked).getByRole('button', { name: 'Do not close' });
+    expect(keep).toHaveFocus();
+    expect(within(asked).getAllByRole('button').map((each) => each.textContent)).toEqual([
+      'Do not close',
+      'Close the market for good',
+    ]);
+    expect(closes(server)).toHaveLength(0);
+
+    // Not closing puts focus back on the button the confirmation came from.
+    fireEvent.click(keep);
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(await button('Close the market')).toHaveFocus();
+    expect(closes(server)).toHaveLength(0);
+    expect(screen.getByText('Open', { selector: '.state-badge' })).toBeInTheDocument();
+  });
+
+  it('opens the confirmation as a modal, and closes it while it is still on the page', async () => {
+    // The stand-in for a browser's dialog cannot hold the keyboard in or hand focus back, so what the page relies on
+    // is checked as what it calls: a modal, which does both, closed before it is removed, or nothing is handed back.
+    const showModal = vi.spyOn(HTMLDialogElement.prototype, 'showModal');
+    const closing = HTMLDialogElement.prototype.close;
+    const closedWhile: boolean[] = [];
+    const close = vi.spyOn(HTMLDialogElement.prototype, 'close').mockImplementation(function (this: HTMLDialogElement) {
+      closedWhile.push(this.isConnected);
+      closing.call(this);
+    });
+    try {
+      exchange('OPEN');
+      renderPage();
+
+      fireEvent.click(await button('Close the market'));
+      expect(showModal).toHaveBeenCalledTimes(1);
+      expect(showModal.mock.contexts[0]).toBe(dialog());
+      expect(dialog()).toHaveAttribute('open');
+
+      fireEvent.click(within(dialog()).getByRole('button', { name: 'Do not close' }));
+      expect(screen.queryByRole('alertdialog')).toBeNull();
+      expect(closedWhile).toEqual([true]);
+    } finally {
+      showModal.mockRestore();
+      close.mockRestore();
+    }
+  });
+
+  it('leaves the market as it is on Escape, with focus back where it was', async () => {
+    const { server } = exchange('HALTED');
+    renderPage();
+
+    fireEvent.click(await button('Close the market'));
+    // What a browser sends a modal dialog for Escape.
+    const escape = new Event('cancel', { cancelable: true });
+    fireEvent(dialog(), escape);
+
+    expect(escape.defaultPrevented).toBe(true);
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(await button('Close the market')).toHaveFocus();
+    expect(closes(server)).toHaveLength(0);
+    // And it can be asked again.
+    fireEvent.click(await button('Close the market'));
+    expect(within(dialog()).getByRole('button', { name: 'Do not close' })).toHaveFocus();
+  });
+
+  it('closes once confirmed, under one key, and says what the close did from its answer', async () => {
+    const { server, state } = exchange('OPEN');
+    server.on(`POST ${CLOSE}`, () => {
+      state.market = market('CLOSED');
+      return { status: 200, json: closedAnswer };
+    });
+    renderPage();
+
+    await confirmClose();
+    // On its way: said so, the confirmation gone, and neither a second close nor another transition on offer.
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(
+      screen.getByText(/^Closing the market… Every resting order is being cancelled, which can take up to about half a minute/),
+    ).toHaveAttribute('role', 'status');
+    for (const name of ['Close the market', 'Halt trading', 'Open market', 'Resume trading']) {
+      expect(screen.getByRole('button', { name })).toBeDisabled();
+    }
+
+    expect(
+      await screen.findByText('The market is closed. 1,234 resting orders were cancelled, and 1 bot run ended.'),
+    ).toHaveAttribute('role', 'status');
+    expect(closes(server)).toHaveLength(1);
+    expect(keys(server)[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(closes(server)[0]?.body).toBeUndefined();
+    // The page turns into the ended market's, and what the close did stays on it.
+    await waitFor(() => expect(screen.getByText('Closed', { selector: '.state-badge' })).toBeInTheDocument());
+    expect(await screen.findByRole('region', { name: 'This market has ended' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Close the market' })).toBeNull();
+    expect(screen.getByText('The market is closed. 1,234 resting orders were cancelled, and 1 bot run ended.')).toBeInTheDocument();
+    // The button the close was started from is gone, so focus goes to the panel's heading, beside the answer.
+    expect(screen.getByRole('heading', { name: 'Market' })).toHaveFocus();
+  });
+
+  it('counts what a close did in words, whatever the numbers', () => {
+    const closed = (canceledOrders: number, endedRuns: number) =>
+      closedText({ state: 'CLOSED', commandSequence: '8', canceledOrders, endedRuns });
+    expect(closed(0, 0)).toBe('The market is closed. No order was resting, and no bot run was going.');
+    expect(closed(1, 1)).toBe('The market is closed. 1 resting order was cancelled, and 1 bot run ended.');
+    expect(closed(200000, 2)).toBe('The market is closed. 200,000 resting orders were cancelled, and 2 bot runs ended.');
+    expect(closed(0, 1)).toBe('The market is closed. No order was resting, and 1 bot run ended.');
+  });
+
+  it('reads everything of the simulation again once the market has closed, whoever closed it', async () => {
+    const { server, state } = exchange('OPEN');
+    server.on('GET /api/v1/admin/health', {
+      status: 200,
+      json: {
+        writer: { available: true, queueDepth: 0, queueCapacity: 256 },
+        lastMinute: { committed: 0, failed: 0, withinBudget: 0, refused: 0 },
+        outbox: { admitting: true, pendingEvents: 0, oldestPendingMillis: 0 },
+      },
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+    await screen.findByRole('table', { name: 'Instruments' });
+    await screen.findByText('No accounts yet.');
+    const lists = ['/api/v1/instruments', '/api/v1/admin/accounts', '/api/v1/admin/bots', '/api/v1/admin/bot-runs', '/api/v1/admin/health'];
+    const reads = () => lists.map((path) => server.requests.filter((request) => request.url.split('?')[0] === path).length);
+    await waitFor(() => expect(reads().every((count) => count > 0)).toBe(true));
+    const before = reads();
+
+    // Closed elsewhere: by another operator, or from another tab. This page only hears of it from the status.
+    state.market = market('CLOSED');
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    await screen.findByRole('region', { name: 'This market has ended' });
+    // Each list at once, not at its own next poll; the accounts and the bots have none.
+    await waitFor(() => expect(reads().every((count, index) => count > before[index]!)).toBe(true), { timeout: 900 });
+  });
+
+  it('says a close that found the market already closed changed nothing, and one refused in setup why', async () => {
+    const { server } = exchange('OPEN');
+    const refusal = (state: string | undefined) => ({
+      status: 409,
+      problem: {
+        status: 409,
+        code: 'MARKET_TRANSITION_NOT_ALLOWED',
+        detail: `The market is ${state}; it cannot close from there`,
+        ...(state === undefined ? {} : { state }),
+        commandSequence: '9',
+      },
+    });
+    const answers = [
+      refusal('CLOSED'),
+      refusal('SETUP'),
+      refusal(undefined),
+      { status: 409, problem: { status: 409, code: 'MARKET_NOT_SET_UP', detail: 'No market has been set up yet' } },
+    ];
+    server.on(`POST ${CLOSE}`, () => answers[closes(server).length - 1]!);
+    renderPage();
+
+    await confirmClose();
+    expect(await screen.findByText('The market had already closed, so this close changed nothing.')).toHaveAttribute('role', 'alert');
+    // Answered for good: the next attempt is a new command under a new key.
+    await confirmClose();
+    expect(
+      await screen.findByText(
+        'The market has not opened yet, and only a market that has opened can be closed. Nothing was changed.',
+      ),
+    ).toHaveAttribute('role', 'alert');
+    // A state this page does not know of, or none: the exchange's own words.
+    await confirmClose();
+    expect(await screen.findByText('The market is undefined; it cannot close from there')).toBeInTheDocument();
+    await confirmClose();
+    expect(await screen.findByText('No market has been set up yet')).toBeInTheDocument();
+    expect(new Set(keys(server)).size).toBe(4);
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it('asks again under the same key when the close outlasts the wait for its answer', async () => {
+    const { server, state } = exchange('OPEN');
+    server.on(`POST ${CLOSE}`, () => {
+      if (closes(server).length === 1) {
+        return {
+          status: 504,
+          problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN', detail: 'The outcome is not known yet', commandKey: 'k' },
+        };
+      }
+      state.market = market('CLOSED');
+      return { status: 200, json: closedAnswer };
+    });
+    renderPage();
+
+    await confirmClose();
+    const unknown = await said();
+    expect(unknown).toHaveTextContent(
+      'The close is taking longer than the exchange waits before it answers, so its outcome is not known yet. It goes on by itself.',
+    );
+    expect(unknown).toHaveTextContent('Asking again sends the same key, so the market can never be closed twice.');
+    // No second close while this one is not known, and no other transition either.
+    expect(await button('Close the market')).toBeDisabled();
+    expect(await button('Halt trading')).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+
+    fireEvent.click(within(unknown).getByRole('button', { name: 'Ask again' }));
+    expect(
+      await screen.findByText('The market is closed. 1,234 resting orders were cancelled, and 1 bot run ended.'),
+    ).toBeInTheDocument();
+    expect(keys(server)).toHaveLength(2);
+    expect(keys(server)[1]).toBe(keys(server)[0]);
+  });
+
+  it('says a close left unfinished is a closed market, with no retry as if nothing had happened', async () => {
+    const { server, state } = exchange('OPEN');
+    const answers = [
+      {
+        status: 503,
+        problem: {
+          status: 503,
+          code: 'MARKET_CLOSE_UNFINISHED',
+          detail: 'The market is closed, but 4200 orders still rest.',
+          state: 'CLOSED',
+          commandSequence: '8',
+          restingOrders: 4200,
+          commandKey: 'k',
+        },
+      },
+      // Asked again before the restart: the exchange is still stopped.
+      { status: 503, problem: { status: 503, code: 'TRADING_UNAVAILABLE', detail: 'Trading is unavailable' } },
+      { status: 200, json: { ...closedAnswer, canceledOrders: 9000 } },
+    ];
+    server.on(`POST ${CLOSE}`, () => {
+      state.market = market('CLOSED');
+      return answers[closes(server).length - 1]!;
+    });
+    renderPage();
+
+    await confirmClose();
+    const unfinished = await said();
+    expect(unfinished).toHaveTextContent(
+      "The market is closed, but at most 4,200 orders still rest. The exchange has stopped trading and cancels them when it is restarted. The count is the exchange's own from when it stopped; fewer may rest. Nothing needs to be sent again.",
+    );
+    // An upper bound is never said as a count: no sentence on the page has the number without "at most".
+    expect(document.body.textContent).not.toMatch(/(?<!at most )4,200 orders still rest/i);
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+    expect(screen.queryByText(/Not confirmed/)).toBeNull();
+    // The market is closed, and the page shows it so: with the orders that still rest, not as if all were cancelled.
+    const ended = await screen.findByRole('region', { name: 'This market has ended' });
+    expect(ended).toHaveTextContent(
+      'At most 4,200 orders still rest, with their holds: the close was left unfinished. The exchange has stopped, and cancels them when it is restarted.',
+    );
+    expect(ended).not.toHaveTextContent(/was cancelled|A close cancels/);
+    expect(screen.queryByRole('button', { name: 'Close the market' })).toBeNull();
+
+    // What is left to ask for is the close's answer, after the restart, under the same key. Asked too early, the
+    // exchange is still stopped, and the market is no less closed for that.
+    fireEvent.click(screen.getByRole('button', { name: "Ask for the close's answer" }));
+    await waitFor(() => expect(closes(server)).toHaveLength(2));
+    expect(await said()).toHaveTextContent('The market is closed, but at most 4,200 orders still rest.');
+    expect(screen.queryByText(/whether the market closed is not known/)).toBeNull();
+    expect(ended).toHaveTextContent('At most 4,200 orders still rest, with their holds');
+
+    fireEvent.click(await button("Ask for the close's answer"));
+    expect(
+      await screen.findByText('The market is closed. 9,000 resting orders were cancelled, and 1 bot run ended.'),
+    ).toBeInTheDocument();
+    expect(new Set(keys(server)).size).toBe(1);
+    expect(keys(server)).toHaveLength(3);
+    // Only now, with the close's own answer, does the page say they were all cancelled.
+    expect(ended).toHaveTextContent('Every order that still rested was cancelled and its hold released.');
+    expect(ended).not.toHaveTextContent('still rest,');
+  });
+
+  it('asks for the answer of an unfinished close without saying anything is being cancelled', async () => {
+    const { server, state } = exchange('OPEN');
+    const later = answerLater();
+    server.on(`POST ${CLOSE}`, () => {
+      state.market = market('CLOSED');
+      return closes(server).length === 1
+        ? { status: 503, problem: { status: 503, code: 'MARKET_CLOSE_UNFINISHED', detail: 'unfinished', restingOrders: 7 } }
+        : later.reply;
+    });
+    renderPage();
+
+    await confirmClose();
+    fireEvent.click(await button("Ask for the close's answer"));
+
+    // The exchange is stopped, or just back: nothing is being cancelled by this request, which only asks.
+    expect(await screen.findByText("Asking for the close's answer…")).toHaveAttribute('role', 'status');
+    expect(screen.queryByText(/Closing the market…/)).toBeNull();
+    expect(screen.getByRole('region', { name: 'This market has ended' })).toHaveTextContent('At most 7 orders still rest, with their holds');
+    later.answer({ status: 200, json: closedAnswer });
+    expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
+  });
+
+  it('does not say every order was cancelled while the close is still cancelling them', async () => {
+    const { server, state } = exchange('OPEN');
+    const later = answerLater();
+    server.on(`POST ${CLOSE}`, () => {
+      // Closed from the close's first transaction; the answer comes once the last order is cancelled.
+      state.market = market('CLOSED');
+      return later.reply;
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+
+    await confirmClose();
+    await waitFor(() => expect(closes(server)).toHaveLength(1));
+    // The status is polled meanwhile, and says CLOSED well before the close answers.
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    const ended = await screen.findByRole('region', { name: 'This market has ended' });
+    expect(ended).toHaveTextContent(
+      'The orders that still rested are being cancelled and their holds released; until the close answers, some still rest.',
+    );
+    expect(ended).not.toHaveTextContent(/was cancelled|A close cancels/);
+    expect(screen.getByText(/^Closing the market… Every resting order is being cancelled/)).toBeInTheDocument();
+
+    later.answer({ status: 200, json: closedAnswer });
+    expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
+    expect(ended).toHaveTextContent('Every order that still rested was cancelled and its hold released.');
+  });
+
+  it('says the market is closed once the status says so, whatever the close was answered or was not', async () => {
+    const { server, state } = exchange('OPEN');
+    const later = answerLater();
+    const answers = [
+      // The answer of a close that went on, stopped half way and was answered unfinished is lost with this one.
+      {
+        status: 504,
+        problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN', detail: 'The outcome is not known yet', commandKey: 'k' },
+      },
+      // The same key then meets the stopped exchange,
+      { status: 503, problem: { status: 503, code: 'TRADING_UNAVAILABLE', detail: 'Trading is unavailable' } },
+      // then the proxy, with the exchange being restarted: no problem body at all.
+      { status: 502 },
+    ];
+    server.on(`POST ${CLOSE}`, () => {
+      state.market = market('CLOSED');
+      return answers[closes(server).length - 1] ?? later.reply;
+    });
+    renderPage();
+
+    await confirmClose();
+    const closedUnanswered =
+      'The market is closed, but the close has not given its answer here, so how many orders it cancelled and how many runs it ended is not known yet. Until it answers, some orders may still rest';
+    for (const sent of [1, 2, 3]) {
+      await waitFor(() => expect(closes(server)).toHaveLength(sent));
+      await waitFor(async () => expect(await said()).toHaveTextContent(closedUnanswered));
+      // Nothing that doubts the close itself, beside a badge that says Closed, and no retry as if nothing happened.
+      const note = await said();
+      expect(note).toHaveTextContent('Asking sends the same key, so nothing is closed twice.');
+      expect(note).not.toHaveTextContent(/is not known here|outcome is not known yet|Not confirmed/);
+      expect(screen.getByText('Closed', { selector: '.state-badge' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Ask again' })).toBeNull();
+      expect(screen.getByRole('region', { name: 'This market has ended' })).toHaveTextContent(
+        'The close has not answered yet, so some orders may still rest with their holds.',
+      );
+      fireEvent.click(within(note).getByRole('button', { name: "Ask for the close's answer" }));
+    }
+
+    // Asked a fourth time, and this one waits: the market being closed, it asks, and closes nothing.
+    expect(await screen.findByText("Asking for the close's answer…")).toHaveAttribute('role', 'status');
+    expect(screen.queryByText(/Closing the market…/)).toBeNull();
+    later.answer({ status: 200, json: closedAnswer });
+    expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
+    expect(keys(server)).toHaveLength(4);
+    expect(new Set(keys(server)).size).toBe(1);
+  });
+
+  it('finds a close with no answer as it was on coming back to the page, and sends the same key', async () => {
+    const { server, state } = exchange('OPEN');
+    server.on(`POST ${CLOSE}`, () => {
+      if (closes(server).length === 1) {
+        return {
+          status: 504,
+          problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN', detail: 'The outcome is not known yet', commandKey: 'k' },
+        };
+      }
+      state.market = market('CLOSED');
+      return { status: 200, json: closedAnswer };
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const before = renderWith(client);
+    await confirmClose();
+    expect(await said()).toHaveTextContent('The close is taking longer than the exchange waits before it answers');
+
+    // To the terminal and back, to a comparison, to Help: each takes this page down and builds it anew.
+    before.unmount();
+    renderWith(client);
+
+    const unknown = await said();
+    expect(unknown).toHaveTextContent('The close is taking longer than the exchange waits before it answers');
+    // Not a market that could be closed afresh, under a new key.
+    expect(await button('Close the market')).toBeDisabled();
+    expect(await button('Halt trading')).toBeDisabled();
+    // Coming back is not an answer arriving: focus is left where the page put it.
+    expect(screen.getByRole('heading', { name: 'Market' })).not.toHaveFocus();
+
+    fireEvent.click(within(unknown).getByRole('button', { name: 'Ask again' }));
+    expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
+    expect(keys(server)).toHaveLength(2);
+    expect(keys(server)[1]).toBe(keys(server)[0]);
+  });
+
+  it('keeps an unfinished close and its count through leaving the page', async () => {
+    const { server, state } = exchange('OPEN');
+    server.on(`POST ${CLOSE}`, () => {
+      state.market = market('CLOSED');
+      return closes(server).length === 1
+        ? { status: 503, problem: { status: 503, code: 'MARKET_CLOSE_UNFINISHED', detail: 'unfinished', restingOrders: 4200 } }
+        : { status: 200, json: closedAnswer };
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const before = renderWith(client);
+    await confirmClose();
+    expect(await said()).toHaveTextContent('The market is closed, but at most 4,200 orders still rest.');
+    before.unmount();
+    renderWith(client);
+
+    expect(await said()).toHaveTextContent('The market is closed, but at most 4,200 orders still rest.');
+    expect(await screen.findByRole('region', { name: 'This market has ended' })).toHaveTextContent(
+      'At most 4,200 orders still rest, with their holds',
+    );
+    fireEvent.click(await button("Ask for the close's answer"));
+    expect(await screen.findByText(/^The market is closed\. 1,234 resting orders were cancelled/)).toBeInTheDocument();
+    expect(new Set(keys(server)).size).toBe(1);
+  });
+
+  it('goes on with a close that was on its way when the page was left, and shows its answer on coming back', async () => {
+    const { server, state } = exchange('OPEN');
+    const later = answerLater();
+    server.on(`POST ${CLOSE}`, () => later.reply);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const before = renderWith(client);
+    await confirmClose();
+    await waitFor(() => expect(closes(server)).toHaveLength(1));
+    before.unmount();
+
+    // Back while it is still on its way: said so, and no second close on offer.
+    const during = renderWith(client);
+    expect(await screen.findByText(/^Closing the market…/)).toBeInTheDocument();
+    for (const name of ['Close the market', 'Halt trading']) {
+      expect(await button(name)).toBeDisabled();
+    }
+    during.unmount();
+
+    // Answered with no page there to show it.
+    state.market = market('CLOSED');
+    later.answer({ status: 200, json: closedAnswer });
+    await waitFor(() => expect(client.getQueryState(['market'])?.isInvalidated).toBe(true));
+    renderWith(client);
+    expect(await screen.findByText('The market is closed. 1,234 resting orders were cancelled, and 1 bot run ended.')).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'This market has ended' })).toHaveTextContent(
+      'Every order that still rested was cancelled and its hold released.',
+    );
+    expect(closes(server)).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: 'Market' })).not.toHaveFocus();
+  });
+
+  it("keeps a close to the session and the market it was sent in", async () => {
+    const NEXT = '10000000-0000-0000-0000-000000000002';
+    const { server, state } = exchange('OPEN');
+    server.on(`POST ${CLOSE}`, { status: 503, problem: { status: 503, code: 'TRADING_UNAVAILABLE', detail: 'Trading is unavailable' } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const before = renderWith(client);
+    await confirmClose();
+    expect(await said()).toHaveTextContent('Trading is unavailable');
+    before.unmount();
+
+    // Another session's page, as after signing out and in, starts with nothing: the cache went with the session.
+    const other = renderPage();
+    expect(await button('Close the market')).toBeEnabled();
+    expect(within(screen.getByRole('region', { name: 'Market' })).queryByRole('alert')).toBeNull();
+    other.unmount();
+
+    // And another market is not the one that close was sent to.
+    state.market = { ...market('OPEN'), simulationId: NEXT };
+    await client.invalidateQueries({ queryKey: ['market'] });
+    renderWith(client);
+    await waitFor(async () => expect(await button('Close the market')).toBeEnabled());
+    expect(within(screen.getByRole('region', { name: 'Market' })).queryByRole('alert')).toBeNull();
+  });
+
+  it('lets the next command take the place of a refused close, also after leaving the page', async () => {
+    const { server, state } = exchange('OPEN');
+    server
+      .on(`POST ${CLOSE}`, { status: 409, problem: { status: 409, code: 'IDEMPOTENCY_CONFLICT', detail: 'The key was used for another command' } })
+      .on('POST /api/v1/admin/market/halt', () => {
+        state.market = market('HALTED');
+        return { status: 200, json: { state: 'HALTED', commandSequence: '9' } };
+      });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const before = renderWith(client);
+    await confirmClose();
+    expect(await screen.findByText('The key was used for another command')).toBeInTheDocument();
+
+    fireEvent.click(await button('Halt trading'));
+    expect(await screen.findByText('Trading is halted. Cancels still work.')).toBeInTheDocument();
+    expect(screen.queryByText('The key was used for another command')).toBeNull();
+    before.unmount();
+    renderWith(client);
+    await button('Resume trading');
+    expect(screen.queryByText('The key was used for another command')).toBeNull();
+  });
+
+  it('says what an unfinished close left as an upper bound: one order, none counted, or no count at all', async () => {
+    const { server, state } = exchange('HALTED');
+    server.on(`POST ${CLOSE}`, () => {
+      state.market = market('CLOSED');
+      return { status: 503, problem: { status: 503, code: 'MARKET_CLOSE_UNFINISHED', detail: 'unfinished', restingOrders: 1 } };
+    });
+    renderPage();
+
+    await confirmClose();
+    expect(await said()).toHaveTextContent(
+      'The market is closed, but at most 1 order still rests. The exchange has stopped trading and cancels it when it is restarted.',
+    );
+    expect(await screen.findByRole('region', { name: 'This market has ended' })).toHaveTextContent(
+      'At most 1 order still rests, with its hold',
+    );
+
+    expect(unfinishedText(1)).toContain("The count is the exchange's own from when it stopped; fewer may rest.");
+    expect(unfinishedText(12000)).toMatch(/^The market is closed, but at most 12,000 orders still rest\. .* cancels them when it is restarted\./);
+    // No count given: nothing to bound, and nothing said of a count.
+    expect(unfinishedText(null)).toBe(
+      'The market is closed, but some orders still rest. The exchange has stopped trading and cancels them when it is restarted.',
+    );
+    // None counted is not "at most 0 orders": the close is unfinished all the same, and the restart finishes it.
+    expect(unfinishedText(0)).toBe(
+      'The market is closed and the exchange counted no order still resting, but the close did not finish. The exchange has stopped trading and finishes the close when it is restarted.',
+    );
+  });
+
+  it('says so when trading is unavailable, without claiming the market closed or did not', async () => {
+    const { server } = exchange('OPEN');
+    server.on(`POST ${CLOSE}`, {
+      status: 503,
+      problem: { status: 503, code: 'TRADING_UNAVAILABLE', detail: 'Trading is unavailable' },
+    });
+    renderPage();
+
+    await confirmClose();
+    const unavailable = await said();
+    expect(unavailable).toHaveTextContent(
+      'Trading is unavailable: the exchange has stopped taking commands, so whether the market closed is not known here.',
+    );
+    expect(unavailable).not.toHaveTextContent('The market is closed');
+    expect(screen.getByText('Open', { selector: '.state-badge' })).toBeInTheDocument();
+    expect(await button('Close the market')).toBeDisabled();
+
+    fireEvent.click(within(unavailable).getByRole('button', { name: 'Ask again' }));
+    await waitFor(() => expect(closes(server)).toHaveLength(2));
+    expect(keys(server)[1]).toBe(keys(server)[0]);
+  });
+
+  it('retries a close the busy exchange never queued under the same key', async () => {
+    const { server, state } = exchange('OPEN');
+    server.on(`POST ${CLOSE}`, () => {
+      if (closes(server).length === 1) {
+        return { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY', detail: 'busy' } };
+      }
+      state.market = market('CLOSED');
+      return { status: 200, json: { ...closedAnswer, canceledOrders: 0, endedRuns: 0 } };
+    });
+    renderPage();
+
+    await confirmClose();
+    expect(await screen.findByText(/Not confirmed: the exchange was busy or did not answer/)).toBeInTheDocument();
+    fireEvent.click(await button('Retry'));
+
+    expect(await screen.findByText('The market is closed. No order was resting, and no bot run was going.')).toBeInTheDocument();
+    expect(keys(server)).toHaveLength(2);
+    expect(keys(server)[1]).toBe(keys(server)[0]);
+  });
+
+  it('leaves focus where the user moved it while the close was on its way', async () => {
+    const { server, state } = exchange('OPEN');
+    server.on(`POST ${CLOSE}`, () => {
+      state.market = market('CLOSED');
+      return { status: 200, json: closedAnswer };
+    });
+    renderPage();
+    await screen.findByRole('table', { name: 'Instruments' });
+
+    await confirmClose();
+    const elsewhere = screen.getByRole('button', { name: 'What are halted and closed?' });
+    elsewhere.focus();
+
+    expect(await screen.findByText(/^The market is closed\./)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Market' })).not.toHaveFocus();
+  });
+
+  it('goes on halting and resuming as before, one command at a time with the close', async () => {
+    const { server, state } = exchange('OPEN');
+    server.on('POST /api/v1/admin/market/halt', () => {
+      state.market = market('HALTED');
+      return { status: 200, json: { state: 'HALTED', commandSequence: '9' } };
+    });
+    renderPage();
+
+    fireEvent.click(await button('Halt trading'));
+    // While the halt is on its way, the close waits its turn.
+    expect(screen.getByRole('button', { name: 'Close the market' })).toBeDisabled();
+    expect(await screen.findByText('Trading is halted. Cancels still work.')).toBeInTheDocument();
+    await waitFor(async () => expect(await button('Close the market')).toBeEnabled());
+    expect(closes(server)).toHaveLength(0);
+  });
+});
+
+describe('the operator screen when the exchange names another simulation', () => {
+  beforeEach(() => resetSession());
+
+  const NEXT = '10000000-0000-0000-0000-000000000002';
+  /** The address the page is at, so what it keeps there can be read. */
+  function Address() {
+    return <span data-testid="address">{useLocation().search}</span>;
+  }
+
+  it('shows the new one at once, with nothing of the closed market left on the page', async () => {
+    const { server, state } = exchange('OPEN');
+    const finished = (n: number) =>
+      finishedRun({ runId: `20000000-0000-0000-0000-00000000000${n}`, startedAt: `2026-11-06T0${n}:00:00Z` });
+    state.runs = [finished(2), finished(1)];
+    state.tagged = { marketMakers: 2, noise: 3, momentum: 0 };
+    const account = (username: string) => ({
+      accountId: username,
+      username,
+      kind: 'TRADER',
+      cash: '1000.00',
+      holdings: [],
+      token: null,
+      strategy: null,
+    });
+    let accounts = [account('alice')];
+    server
+      .on('GET /api/v1/instruments', (request) => ({
+        status: 200,
+        json: { instruments: request.url.endsWith(NEXT) ? [] : [NOVA], feed: { state: 'LIVE', lag: 0 } },
+      }))
+      .on('GET /api/v1/admin/accounts', () => ({ status: 200, json: { accounts, nextCursor: null } }))
+      .on('GET /api/v1/admin/health', {
+        status: 200,
+        json: {
+          writer: { available: true, queueDepth: 0, queueCapacity: 256 },
+          lastMinute: { committed: 10, failed: 0, withinBudget: 10, refused: 0 },
+          outbox: { admitting: true, pendingEvents: 0, oldestPendingMillis: 0 },
+        },
+      })
+      .on('POST /api/v1/admin/market/close', () => {
+        state.market = market('CLOSED');
+        return { status: 200, json: { state: 'CLOSED', commandSequence: '8', canceledOrders: 3, endedRuns: 1 } };
+      });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={['/operator?compare=20000000-0000-0000-0000-000000000002']}>
+          <OperatorPage />
+          <Address />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+
+    fireEvent.click(await button('Close the market'));
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Close the market for good' }));
+    const ended = await screen.findByRole('region', { name: 'This market has ended' });
+    expect(await within(ended).findByText('Every order that still rested was cancelled and its hold released.')).toBeInTheDocument();
+    expect(await screen.findByText('The market is closed. 3 resting orders were cancelled, and 1 bot run ended.')).toBeInTheDocument();
+    expect(await screen.findByRole('region', { name: 'Health' })).toBeInTheDocument();
+    expect(await screen.findByRole('rowheader', { name: 'alice' })).toBeInTheDocument();
+    expect(await screen.findByRole('rowheader', { name: 'NOVA' })).toBeInTheDocument();
+    expect(await screen.findByText('5 bots')).toBeInTheDocument();
+    expect(await screen.findByRole('checkbox', { name: /started 02:00:00/ })).toBeChecked();
+    expect(screen.getByTestId('address')).toHaveTextContent('compare=');
+
+    // Another operator, or this one, starts the next simulation: it has nothing yet.
+    state.market = { ...market('SETUP'), simulationId: NEXT, commandSequence: '1' };
+    state.runs = [];
+    state.tagged = { marketMakers: 0, noise: 0, momentum: 0 };
+    accounts = [];
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    expect(await screen.findByText('Setup', { selector: '.state-badge' })).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'This market has ended' })).toBeNull();
+    // Neither the close's answer, kept for its own market, nor anything the closed market listed.
+    expect(screen.queryByText(/^The market is closed\./)).toBeNull();
+    expect(screen.queryByText(/cancelled and its hold released/)).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Health' })).toBeNull();
+    expect(screen.queryByRole('rowheader', { name: 'NOVA' })).toBeNull();
+    expect(screen.queryByRole('rowheader', { name: 'alice' })).toBeNull();
+    expect(screen.queryByText('5 bots')).toBeNull();
+    expect(screen.queryByRole('checkbox', { name: /started 0/ })).toBeNull();
+    expect(screen.getByTestId('address')).not.toHaveTextContent('compare=');
+    // The new market's own, read for it: its setup forms, and its empty lists.
+    expect(await screen.findByText('No instruments yet.')).toBeInTheDocument();
+    expect(await screen.findByText('No accounts yet.')).toBeInTheDocument();
+    expect(await screen.findByText('No bots yet')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Start run' })).toBeDisabled();
+    expect(screen.queryByRole('table', { name: 'Recent runs' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Add instrument' })).toBeEnabled();
+    expect(await button('Open market')).toHaveAccessibleDescription('Add at least one instrument first.');
+  });
+
+  it('drops what was typed in the simulation before, and keeps it through a close', async () => {
+    const { state } = exchange('SETUP');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+    const symbol = await screen.findByRole('textbox', { name: 'Symbol' });
+    fireEvent.change(symbol, { target: { value: 'KEPT' } });
+
+    // The same simulation, read again: what is being typed stays.
+    state.market = { ...market('SETUP'), commandSequence: '9' };
+    await client.invalidateQueries({ queryKey: ['market'] });
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Symbol' })).toHaveValue('KEPT'));
+
+    state.market = { ...market('SETUP'), simulationId: NEXT, commandSequence: '1' };
+    await client.invalidateQueries({ queryKey: ['market'] });
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Symbol' })).toHaveValue(''));
+  });
+});
+
+describe('starting a new simulation on the operator screen', () => {
+  beforeEach(() => resetSession());
+
+  const NEXT = '10000000-0000-0000-0000-000000000002';
+  const START = '/api/v1/admin/simulations';
+  const starts = (server: ReturnType<typeof exchange>['server']) =>
+    server.requests.filter((request) => request.method === 'POST' && request.url === START);
+  const keys = (server: ReturnType<typeof exchange>['server']) =>
+    starts(server).map((request) => request.headers['Idempotency-Key']);
+  const panel = () => screen.findByRole('region', { name: 'Start a new simulation' });
+  const nameField = () => screen.getByRole('textbox', { name: 'Name' });
+  /** Types a name and presses the button. */
+  const startAs = async (name: string) => {
+    const form = await screen.findByRole('form', { name: /^Start (a new|the first) simulation$/ });
+    fireEvent.change(within(form).getByRole('textbox', { name: 'Name' }), { target: { value: name } });
+    fireEvent.click(within(form).getByRole('button', { name: 'Start simulation' }));
+  };
+  const started = (name: string) => ({
+    status: 201,
+    json: { simulationId: NEXT, name, state: 'SETUP', commandSequence: '1' },
+  });
+  const newMarket = (name: string | null): MarketStatus => ({
+    ...market('SETUP'),
+    simulationId: NEXT,
+    name,
+    commandSequence: '1',
+  });
+
+  it('offers a new simulation on a closed market, under the panel that says it has ended, and says what it means', async () => {
+    exchange('CLOSED');
+    renderPage();
+
+    const start = await panel();
+    expect(start).toHaveTextContent(
+      'A fresh market, in setup, with its own instruments, accounts and bots to set up again: nothing is copied from this one. Trader logins stay.',
+    );
+    expect(start).toHaveTextContent('This market and its history are kept, but these screens then show the new one.');
+    expect(within(start).getByRole('textbox', { name: 'Name' })).toHaveAccessibleDescription(
+      "1 to 80 characters, different from every earlier simulation's name. Traders see it at the top of their screens.",
+    );
+    expect(within(start).getByRole('button', { name: 'What is new simulation?' })).toBeInTheDocument();
+    expect(within(start).getByRole('button', { name: 'Start simulation' })).toBeEnabled();
+
+    // Nowhere else: not while the market is still being set up, open or halted.
+    for (const state of ['SETUP', 'OPEN', 'HALTED'] as const) {
+      cleanup();
+      exchange(state);
+      renderPage();
+      await screen.findByRole('region', { name: 'Market' });
+      expect(screen.queryByRole('form', { name: /^Start/ })).toBeNull();
+      expect(screen.queryByRole('region', { name: /^Start/ })).toBeNull();
+    }
+  });
+
+  it("starts under a key with the name as kept, and is the new simulation's setup page at once", async () => {
+    const { server, state } = exchange('CLOSED');
+    let statusReads = 0;
+    server
+      .on('GET /api/v1/market', () => {
+        statusReads += 1;
+        // Once the start has answered, the status is not read back in this test: the page has it from the answer.
+        return state.market.state === 'SETUP' ? new Promise<never>(() => {}) : { status: 200, json: state.market };
+      })
+      .on(`POST ${START}`, () => {
+        state.market = newMarket('Thursday seminar');
+        return started('Thursday seminar');
+      });
+    renderPage();
+
+    await startAs('  Thursday seminar  ');
+
+    expect(await screen.findByText('Setup', { selector: '.state-badge' })).toBeInTheDocument();
+    const notice = screen.getByRole('region', { name: 'A new simulation' });
+    expect(notice).toHaveTextContent(
+      'Thursday seminar has started, in setup. Nothing was copied from the market before: add its instruments, fund the traders again and create its bots. Trader logins are kept.',
+    );
+    const control = screen.getByRole('region', { name: 'Market' });
+    expect(within(control).getByText('Name', { selector: 'dt' }).nextElementSibling).toHaveTextContent('Thursday seminar');
+    expect(within(control).getByText('Last command', { selector: 'dt' }).nextElementSibling).toHaveTextContent('1');
+    expect(screen.queryByRole('region', { name: 'This market has ended' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Start a new simulation' })).toBeNull();
+    expect(screen.getByRole('form', { name: 'Add an instrument' })).toBeInTheDocument();
+    expect(statusReads).toBeGreaterThan(1);
+
+    expect(starts(server)).toHaveLength(1);
+    expect(starts(server)[0]?.body).toEqual({ name: 'Thursday seminar' });
+    expect(keys(server)[0]).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('says a refusal for a market that has not closed in its own words, on the page of that market', async () => {
+    const { server, state } = exchange('CLOSED');
+    server.on(`POST ${START}`, () => {
+      // Another operator was quicker.
+      state.market = newMarket('Their seminar');
+      return {
+        status: 409,
+        problem: { status: 409, code: 'SIMULATION_NOT_CLOSED', state: 'SETUP', commandSequence: '1', detail: 'Not closed' },
+      };
+    });
+    renderPage();
+
+    await startAs('Our seminar');
+
+    const notice = await screen.findByRole('region', { name: 'A new simulation' });
+    expect(within(notice).getByRole('alert')).toHaveTextContent(
+      'Nothing was started: a simulation is already being set up. This page now shows it; set that one up instead.',
+    );
+    const control = screen.getByRole('region', { name: 'Market' });
+    await waitFor(() =>
+      expect(within(control).getByText('Name', { selector: 'dt' }).nextElementSibling).toHaveTextContent('Their seminar'),
+    );
+    expect(screen.queryByText(/Our seminar/)).toBeNull();
+  });
+
+  it('says a refusal for an open or halted market that has not closed on that market\'s page too', async () => {
+    for (const other of ['OPEN', 'HALTED'] as const) {
+      cleanup();
+      const { server, state } = exchange('CLOSED');
+      server.on(`POST ${START}`, () => {
+        // This page was out of date: another operator had started a simulation, and opened it.
+        state.market = { ...newMarket('Their seminar'), state: other, openedAt: '2026-11-06T09:00:00Z', commandSequence: '5' };
+        return {
+          status: 409,
+          problem: { status: 409, code: 'SIMULATION_NOT_CLOSED', state: other, commandSequence: '5', detail: 'Not closed' },
+        };
+      });
+      renderPage();
+
+      await startAs('Our seminar');
+
+      const notice = await screen.findByRole('region', { name: 'A new simulation' });
+      expect(within(notice).getByRole('alert')).toHaveTextContent(
+        `Nothing was started: a simulation that has not closed is ${other === 'OPEN' ? 'open' : 'halted'}. This page now shows it; close it before starting another.`,
+      );
+      expect(await screen.findByText(other === 'OPEN' ? 'Open' : 'Halted', { selector: '.state-badge' })).toBeInTheDocument();
+      expect(screen.queryByRole('region', { name: 'Start a new simulation' })).toBeNull();
+    }
+  });
+
+  it('lets go of an unanswered start once the page has shown another simulation, and sends the name typed then', async () => {
+    const { server, state } = exchange('CLOSED');
+    const THIRD = '10000000-0000-0000-0000-000000000003';
+    server.on(`POST ${START}`, (request) => {
+      if ((request.body as { name: string }).name === 'Friday') {
+        // Friday commits, but its answer is lost.
+        state.market = newMarket('Friday');
+        return { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN' } };
+      }
+      state.market = { ...market('SETUP'), simulationId: THIRD, name: 'Saturday', commandSequence: '1' };
+      return { status: 201, json: { simulationId: THIRD, name: 'Saturday', state: 'SETUP', commandSequence: '1' } };
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+    await startAs('Friday');
+
+    // The page becomes Friday's. Its operator never asks again: they set it up, open it and close it, on this page.
+    const notice = await screen.findByRole('region', { name: 'A new simulation' });
+    await within(notice).findByRole('button', { name: 'Ask again' });
+    state.market = { ...newMarket('Friday'), state: 'OPEN', openedAt: '2026-11-06T09:00:00Z', commandSequence: '5' };
+    await client.invalidateQueries({ queryKey: ['market'] });
+    expect(await screen.findByText('Open', { selector: '.state-badge' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'A new simulation' })).toHaveTextContent('has not given its answer');
+    state.market = {
+      ...newMarket('Friday'),
+      state: 'CLOSED',
+      openedAt: '2026-11-06T09:00:00Z',
+      closedAt: '2026-11-06T16:00:00Z',
+      commandSequence: '9',
+    };
+    await client.invalidateQueries({ queryKey: ['market'] });
+
+    // Friday's own ended page offers a start of its own, which is not the one sent from the market before.
+    const start = await panel();
+    expect(nameField()).toBeEnabled();
+    expect(within(start).queryByRole('alert')).toBeNull();
+    await startAs('Saturday');
+
+    expect(await screen.findByRole('region', { name: 'A new simulation' })).toHaveTextContent('Saturday has started, in setup.');
+    expect(starts(server).map((request) => request.body)).toEqual([{ name: 'Friday' }, { name: 'Saturday' }]);
+    expect(new Set(keys(server)).size).toBe(2);
+  });
+
+  it('leaves the page of a simulation that has moved on as it is when an earlier start is answered again', async () => {
+    const { server, state } = exchange('CLOSED');
+    let answered = false;
+    server.on(`POST ${START}`, () => {
+      state.market = newMarket('Friday');
+      return answered ? started('Friday') : { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN' } };
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+    await startAs('Friday');
+    await within(await screen.findByRole('region', { name: 'A new simulation' })).findByRole('button', { name: 'Ask again' });
+
+    // Friday started, and has been opened since; the page shows it, with the start still unanswered.
+    state.market = { ...newMarket('Friday'), state: 'OPEN', openedAt: '2026-11-06T09:00:00Z', commandSequence: '5' };
+    await client.invalidateQueries({ queryKey: ['market'] });
+    const notice = await screen.findByRole('region', { name: 'A new simulation' });
+    expect(await screen.findByText('Open', { selector: '.state-badge' })).toBeInTheDocument();
+    // From here on, the page has only what the start's answer would give it.
+    server.on('GET /api/v1/market', () => new Promise<never>(() => {}));
+
+    answered = true;
+    fireEvent.click(within(notice).getByRole('button', { name: 'Ask again' }));
+
+    expect(await within(notice).findByText('The start sent from here started this simulation, Friday.')).toBeInTheDocument();
+    expect(screen.getByText('Open', { selector: '.state-badge' })).toBeInTheDocument();
+    expect(screen.queryByText('Setup', { selector: '.state-badge' })).toBeNull();
+    expect(new Set(keys(server)).size).toBe(1);
+  });
+
+  it('takes focus to what became of the start, as the button that sent it is disabled or gone', async () => {
+    const { server, state } = exchange('CLOSED');
+    let answered = false;
+    server.on(`POST ${START}`, () => {
+      if (!answered) {
+        return { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN' } };
+      }
+      state.market = newMarket('Monday');
+      return started('Monday');
+    });
+    renderPage();
+
+    await startAs('Monday');
+    const start = await panel();
+    await waitFor(() => expect(within(start).getByRole('button', { name: 'Ask again' })).toHaveFocus());
+
+    answered = true;
+    fireEvent.click(within(start).getByRole('button', { name: 'Ask again' }));
+    const heading = await screen.findByRole('heading', { name: 'A new simulation' });
+    await waitFor(() => expect(heading).toHaveFocus());
+    expect(heading).toHaveAccessibleDescription(/^Monday has started, in setup\. Nothing was copied/);
+  });
+
+  it('marks the name a refusal is about, keeps it, and starts again under a new key', async () => {
+    const { server, state } = exchange('CLOSED');
+    let answer: { status: number; problem?: unknown; json?: unknown } = {
+      status: 409,
+      problem: { status: 409, code: 'SIMULATION_NAME_TAKEN', commandSequence: '9', detail: 'Name taken' },
+    };
+    server.on(`POST ${START}`, () => answer);
+    renderPage();
+
+    await startAs('Monday');
+    expect(await within(await panel()).findByRole('alert')).toHaveTextContent(
+      'Nothing was started: another simulation already has this name, whatever its case. Choose another name.',
+    );
+    expect(nameField()).toHaveAttribute('aria-invalid', 'true');
+    expect(nameField()).toHaveFocus();
+    expect(nameField()).toHaveValue('Monday');
+
+    // The exchange checks the name, as for every form here: its own words for the field.
+    answer = {
+      status: 400,
+      problem: {
+        status: 400,
+        code: 'VALIDATION_FAILED',
+        detail: 'The simulation request is invalid',
+        errors: [{ field: 'name', code: 'INVALID_NAME', message: 'name must be 1 to 80 characters' }],
+      },
+    };
+    await startAs(' ');
+    await waitFor(async () =>
+      expect(within(await panel()).getByRole('alert')).toHaveTextContent('name must be 1 to 80 characters'),
+    );
+    expect(nameField()).toHaveAttribute('aria-invalid', 'true');
+    expect(starts(server)[1]?.body).toEqual({ name: '' });
+
+    server.on(`POST ${START}`, () => {
+      state.market = newMarket('Tuesday');
+      return started('Tuesday');
+    });
+    await startAs('Tuesday');
+    expect(await screen.findByRole('region', { name: 'A new simulation' })).toHaveTextContent('Tuesday has started');
+    // A refused key is spent: each attempt had its own.
+    expect(new Set(keys(server)).size).toBe(3);
+  });
+
+  it('asks again under the same key and name when the answer did not come, and only then', async () => {
+    const { server, state } = exchange('CLOSED');
+    const answers = [
+      { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN', detail: 'Unknown' } },
+      { status: 503, problem: { status: 503, code: 'TRADING_UNAVAILABLE', detail: 'Unavailable' } },
+      { status: 503, problem: { status: 503, code: 'EXCHANGE_BUSY', detail: 'Busy' } },
+    ];
+    server.on(`POST ${START}`, () => {
+      const next = answers.shift();
+      if (next !== undefined) {
+        return next;
+      }
+      state.market = newMarket('Wednesday');
+      return started('Wednesday');
+    });
+    renderPage();
+
+    await startAs('Wednesday');
+    const start = await panel();
+    expect(await within(start).findByRole('alert')).toHaveTextContent(
+      'The start did not answer in time, so whether the simulation started is not known yet. Asking again sends the same key and name, so it can never start twice.',
+    );
+    // Nothing else can be sent meanwhile: the name stays as it was sent.
+    expect(nameField()).toBeDisabled();
+    expect(within(start).getByRole('button', { name: 'Start simulation' })).toBeDisabled();
+
+    fireEvent.click(within(start).getByRole('button', { name: 'Ask again' }));
+    expect(await within(start).findByText(/^Trading is unavailable: the exchange has stopped taking commands/)).toBeInTheDocument();
+    fireEvent.click(within(start).getByRole('button', { name: 'Ask again' }));
+    expect(await within(start).findByText(/^Not confirmed: the exchange was busy/)).toBeInTheDocument();
+    fireEvent.click(within(start).getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByRole('region', { name: 'A new simulation' })).toHaveTextContent('Wednesday has started');
+    expect(new Set(keys(server)).size).toBe(1);
+    expect(starts(server).map((request) => request.body)).toEqual(Array(4).fill({ name: 'Wednesday' }));
+  });
+
+  it('says on the new page when a simulation started while the start sent from here had no answer', async () => {
+    const { server, state } = exchange('CLOSED');
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    let answered = false;
+    server.on(`POST ${START}`, () => {
+      state.market = newMarket('Friday');
+      return answered ? started('Friday') : { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN' } };
+    });
+    renderWith(client);
+
+    await startAs('Friday');
+    // The start committed though its answer was lost: the next read of the status shows the new simulation.
+    await client.invalidateQueries({ queryKey: ['market'] });
+    const notice = await screen.findByRole('region', { name: 'A new simulation' });
+    expect(within(notice).getByRole('alert')).toHaveTextContent(
+      "A new simulation has started, but the start sent from here has not given its answer, so whether it is this one is not known. Asking again sends the same key and name: it returns that start's answer and never starts another.",
+    );
+    answered = true;
+    fireEvent.click(within(notice).getByRole('button', { name: 'Ask again' }));
+    expect(await within(notice).findByText(/^Friday has started, in setup\./)).toBeInTheDocument();
+    expect(new Set(keys(server)).size).toBe(1);
+  });
+
+  it('forgets an unanswered start when the page is left, since another can never start twice', async () => {
+    const { server } = exchange('CLOSED');
+    server.on(`POST ${START}`, { status: 504, problem: { status: 504, code: 'COMMAND_OUTCOME_UNKNOWN' } });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const first = renderWith(client);
+    await startAs('Saturday');
+    await within(await panel()).findByRole('button', { name: 'Ask again' });
+    first.unmount();
+
+    renderWith(client);
+    expect(await panel()).not.toHaveTextContent('did not answer in time');
+    expect(nameField()).toBeEnabled();
+    await startAs('Saturday');
+    await within(await panel()).findByRole('button', { name: 'Ask again' });
+    expect(new Set(keys(server)).size).toBe(2);
+  });
+
+  it('offers the first simulation by name on a stack with no market, beside adding an instrument, and keeps the page', async () => {
+    const { server, state } = exchange('NOT_SET_UP', []);
+    server.on(`POST ${START}`, () => {
+      state.market = newMarket('Opening day');
+      return started('Opening day');
+    });
+    renderPage();
+
+    const first = await screen.findByRole('region', { name: 'Start the first simulation' });
+    expect(first).toHaveTextContent('A market by name, in setup. Or add an instrument below: that creates a market too, with no name.');
+    expect(await button('Open market')).toHaveAccessibleDescription(
+      'Start a simulation or add an instrument first; either creates the market.',
+    );
+    // Typed into the instrument form before the market is named: the page that names it goes on with it.
+    fireEvent.change(screen.getByRole('textbox', { name: 'Symbol' }), { target: { value: 'NOVA' } });
+
+    await startAs('Opening day');
+
+    expect(await screen.findByRole('region', { name: 'A new simulation' })).toHaveTextContent('Opening day has started, in setup.');
+    expect(screen.queryByRole('region', { name: 'Start the first simulation' })).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Symbol' })).toHaveValue('NOVA');
+    expect(starts(server)[0]?.body).toEqual({ name: 'Opening day' });
+  });
+
+  it('says nothing of a start on the page of a later market', async () => {
+    const { server, state } = exchange('CLOSED');
+    server.on(`POST ${START}`, () => {
+      state.market = newMarket('Sunday');
+      return started('Sunday');
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWith(client);
+    await startAs('Sunday');
+    await screen.findByRole('region', { name: 'A new simulation' });
+
+    // Sunday opens and closes: its own ended page, with the form empty and no word of the start that made it.
+    state.market = { ...newMarket('Sunday'), state: 'CLOSED', closedAt: '2026-11-08T16:00:00Z', openedAt: '2026-11-08T09:00:00Z' };
+    await client.invalidateQueries({ queryKey: ['market'] });
+    const start = await panel();
+    expect(screen.queryByRole('region', { name: 'A new simulation' })).toBeNull();
+    expect(within(start).queryByRole('status')).toBeNull();
+    expect(nameField()).toHaveValue('');
   });
 });

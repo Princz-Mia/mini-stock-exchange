@@ -19,6 +19,8 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.SpringBootTest.WebEnvironment;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
+import org.springframework.core.MethodParameter;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandlerMapping;
 
 import com.mia_princz.mse.contracts.events.MarketSnapshot;
@@ -68,6 +70,30 @@ class ApiContractIT {
 		assertThat(served).isEqualTo(CONTRACT.operations("market-data"));
 	}
 
+	/** Every query parameter a route reads is in the contract under its operation, and the other way round. */
+	@Test
+	void servedQueryParametersAndTheContractsAreTheSame() {
+		Set<String> served = new TreeSet<>();
+		mappings.getHandlerMethods().forEach((info, handler) -> {
+			for (MethodParameter parameter : handler.getMethodParameters()) {
+				RequestParam query = parameter.getParameterAnnotation(RequestParam.class);
+				if (query == null) {
+					continue;
+				}
+				String name = query.name().isEmpty() ? parameter.getParameter().getName() : query.name();
+				info.getPathPatternsCondition().getPatterns()
+					.stream()
+					.map((pattern) -> pattern.getPatternString())
+					.filter((path) -> path.startsWith("/api/") || path.startsWith("/internal/"))
+					.forEach((path) -> info.getMethodsCondition().getMethods()
+						.forEach((method) -> served
+							.add(method.name() + " " + OpenApiContract.blankVariables(path) + "?" + name)));
+			}
+		});
+
+		assertThat(served).isEqualTo(CONTRACT.queryParameters("market-data"));
+	}
+
 	@Test
 	void marketReadsMatchTheContract() throws Exception {
 		UUID instrument = UUID.randomUUID();
@@ -77,6 +103,9 @@ class ApiContractIT {
 		snapshots.apply(named);
 		// Before its first trade: no last price, an empty tape and no book.
 		snapshots.apply(Snapshots.untraded(UUID.randomUUID(), 1));
+		// A venue that has closed: the list and its book name the state.
+		UUID closed = UUID.randomUUID();
+		snapshots.apply(Snapshots.closed(closed, 2));
 		for (long sequence = 1; sequence <= 3; sequence++) {
 			trades.apply(Trades.trade(instrument, sequence));
 		}
@@ -85,8 +114,14 @@ class ApiContractIT {
 		String book = "/api/v1/instruments/{instrumentId}/book";
 		String tape = "/api/v1/instruments/{instrumentId}/trades";
 
-		check("/api/v1/instruments", "/api/v1/instruments", 200);
+		String list = "/api/v1/instruments";
+		check(list, list, 200);
+		// One simulation's list by its id, a simulation never heard of, which has none, and an id that is not one.
+		check(list, list + "?simulationId=" + Snapshots.SIMULATION, 200);
+		check(list, list + "?simulationId=" + UUID.randomUUID(), 200);
+		check(list, list + "?simulationId=nope", 400);
 		check(book, path(book, instrument), 200);
+		check(book, path(book, closed), 200);
 		check(book, path(book, instrument) + "?depth=99", 400);
 		check(book, path(book, UUID.randomUUID()), 404);
 		check(tape, path(tape, instrument) + "?limit=2", 200);

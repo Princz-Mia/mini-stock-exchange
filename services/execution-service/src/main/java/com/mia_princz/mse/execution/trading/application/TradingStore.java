@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import com.mia_princz.mse.execution.trading.domain.BookOrder;
@@ -73,14 +74,54 @@ public interface TradingStore {
 	record ExistingOrder(UUID id, UUID accountId, UUID instrumentId, String state, long working) {
 	}
 
-	/** Whether a market has been set up yet. Before that there is nothing to trade or rebuild. */
+	/** Whether any market has been set up yet, closed or not. Before that there is nothing to load or rebuild. */
 	boolean hasSimulation();
 
 	/** Creates the market in SETUP with its issuance account, already claimed by this writer. Returns the epoch. */
 	long createMarket(UUID simulationId, UUID issuanceAccountId);
 
-	/** Locks the market row for the rest of the transaction; every trading command starts here. */
+	/**
+	 * Starts a simulation in SETUP with its name and its issuance account, owned by a writer at {@code writerEpoch},
+	 * with its first command sequence, 1, already taken by the command that starts it.
+	 */
+	void startMarket(UUID simulationId, UUID issuanceAccountId, String name, long writerEpoch);
+
+	/**
+	 * Locks the current simulation's row for the rest of the transaction: the one not closed or, once every one is
+	 * closed, the newest. Taking over the market starts here.
+	 */
 	Market lockMarket();
+
+	/**
+	 * The current simulation's ID as this statement sees it. Asked once {@link #lockMarket} has returned: a locking
+	 * read that waited for another transaction returns the row it chose before it waited, and never a row that
+	 * transaction added.
+	 */
+	UUID currentSimulation();
+
+	/**
+	 * Locks the simulation's row for the rest of the transaction if {@code writerEpoch} still owns it, without taking a
+	 * command sequence. Empty when another writer has claimed the market since.
+	 */
+	Optional<Market> lockOwnedMarket(UUID simulationId, long writerEpoch);
+
+	/**
+	 * Gives a closed simulation up for good: its writer epoch becomes 0, which no writer ever holds, so that no
+	 * process that still believes it owns the simulation can open a command in it again.
+	 */
+	void retireMarket(UUID simulationId, long writerEpoch);
+
+	/** Whether a simulation has this name, ignoring case. */
+	boolean simulationNameTaken(String name);
+
+	/**
+	 * Every stored answer under the key's principal and idempotency key, in any simulation, oldest simulation first.
+	 * Each is read as {@code type} only when its route and hash match the key's, and is null otherwise.
+	 */
+	<T> List<StoredResult<T>> storedInAnySimulation(CommandKey key, Class<T> type);
+
+	/** The same, leaving out the answers stored in {@code simulationId}: the ones a command opened there cannot find. */
+	<T> List<StoredResult<T>> storedInOtherSimulations(UUID simulationId, CommandKey key, Class<T> type);
 
 	/** Takes over the market: increments the writer epoch, so a previous writer's next transaction is refused. */
 	long claimWriterEpoch(UUID simulationId);
@@ -96,6 +137,19 @@ public interface TradingStore {
 
 	/** Moves the market to {@code state}; the first move to OPEN also records when the market opened. */
 	void updateMarketState(UUID simulationId, String state);
+
+	/**
+	 * Closes the market at {@code closedAt}, for good. When it opened stays as it is, so the database refuses this for
+	 * a market that never opened.
+	 */
+	void closeMarket(UUID simulationId, Instant closedAt);
+
+	/** The close that closed a market, as its audit row has it: who sent it, and its sequence. */
+	record AppliedClose(UUID actorUserId, long commandSequence) {
+	}
+
+	/** The market's applied close. Empty if it was never closed by a command. */
+	Optional<AppliedClose> appliedClose(UUID simulationId);
 
 	/** Records an operator action and its outcome. The correlation ID is the command's idempotency key. */
 	void insertAudit(UUID simulationId, UUID actorUserId, String action, String outcome, UUID correlationId,
@@ -191,6 +245,14 @@ public interface TradingStore {
 	 */
 	void endUnfinishedBotRuns(UUID simulationId, long endSequence, Instant endedAt);
 
+	/**
+	 * Ends the simulation's runs as its market closes at {@code sequence}, and returns how many it ended. A run not
+	 * yet ended ends there, by the close: stopped if it was still running, its window closed at the close's sequence
+	 * with each of its instruments' newest trade sequence. No worker confirms it. Every run, whenever it ended, is
+	 * also recorded as stopped, so that a worker's later heartbeat is answered as for a finished run.
+	 */
+	int endBotRunsAtClose(UUID simulationId, long sequence, Instant at);
+
 	/** Every bot is created with its strategy; bots made untagged before it was required keep a null one. */
 	void insertBotAccount(UUID simulationId, UUID accountId, String displayName, BotStrategy strategy);
 
@@ -200,8 +262,20 @@ public interface TradingStore {
 	/** Whether the account is a bot in this market. */
 	boolean isBotAccount(UUID simulationId, UUID accountId);
 
+	/** Every account that trades in this simulation: its traders' and its bots'. */
+	Set<UUID> tradingAccounts(UUID simulationId);
+
+	/** Whether the account trades in this simulation: a trader's or a bot's account of it. */
+	boolean tradesIn(UUID simulationId, UUID accountId);
+
 	/** Revokes the account's active tokens; how many there were. A revoked token stays revoked. */
 	int revokeApiTokens(UUID accountId, Instant at);
+
+	/** Revokes every active token of the simulation's bots, in one statement; how many there were. */
+	int revokeBotTokens(UUID simulationId, Instant at);
+
+	/** The simulation's bot accounts. */
+	List<UUID> botAccounts(UUID simulationId);
 
 	/**
 	 * Funds a new account from the issuance account in one balanced GENESIS batch, creates its cash and position rows,
@@ -224,8 +298,11 @@ public interface TradingStore {
 	/** Each account with open or partially filled orders, and how many, to check the writer's own count. */
 	Map<UUID, Integer> restingOrdersByAccount(UUID simulationId);
 
-	/** Reads the order without a lock: only the writer changes orders. */
-	Optional<ExistingOrder> findOrder(UUID orderId);
+	/**
+	 * Reads the simulation's order without a lock: only the writer changes orders. An order of another simulation is
+	 * not found, whatever its state: the writer's books say nothing about it.
+	 */
+	Optional<ExistingOrder> findOrder(UUID simulationId, UUID orderId);
 
 	/**
 	 * Writes a transaction's collected rows, one statement per kind (more only if a kind has more rows than one

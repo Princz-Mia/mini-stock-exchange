@@ -332,7 +332,16 @@ function InstrumentRow({
 }
 
 /** The catalogue and, while the market is being set up, a form to add to it and a way to edit or delete each entry. */
-export function InstrumentSetup({ instruments, editable }: { instruments: readonly Instrument[]; editable: boolean }) {
+export function InstrumentSetup({
+  instruments,
+  editable,
+  closed = false,
+}: {
+  instruments: readonly Instrument[];
+  editable: boolean;
+  /** The market has closed: the catalogue is what it was, and stays. */
+  closed?: boolean;
+}) {
   const client = useQueryClient();
   const [symbol, setSymbol] = useState('');
   const [price, setPrice] = useState('');
@@ -462,7 +471,11 @@ export function InstrumentSetup({ instruments, editable }: { instruments: readon
           )}
         </form>
       ) : (
-        <p className="muted">The catalogue is frozen once the market opens.</p>
+        <p className="muted">
+          {closed
+            ? 'The market has closed, so nothing can be added or changed. The instruments stay as they were.'
+            : 'The catalogue is frozen once the market opens.'}
+        </p>
       )}
       <CommandStatus
         outcome={command.outcome}

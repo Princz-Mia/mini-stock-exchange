@@ -126,7 +126,7 @@ describe('How this exchange works', () => {
     }
   });
 
-  it('explains the order terms with the orders, the money terms with cash and shares, and halts on their own', () => {
+  it('explains the order terms with the orders, the money terms with cash and shares, and a halt and a close on their own', () => {
     render(<HowItWorks />);
     const section = (name: string) => screen.getByRole('region', { name });
     for (const term of ['limit', 'protected', 'partial'] as const) {
@@ -136,5 +136,38 @@ describe('How this exchange works', () => {
       expect(section('Your cash and shares')).toHaveTextContent(GLOSSARY[term].definition);
     }
     expect(section('When trading is halted')).toHaveTextContent(GLOSSARY.halted.definition);
+    expect(section('When the market has closed')).toHaveTextContent(GLOSSARY.closed.definition);
+    expect(section('Starting again')).toHaveTextContent(GLOSSARY.simulation.definition);
+    // A market's whole life is in the introduction: set up, opened, halted and resumed, closed, and the next one.
+    expect(section('A simulated market')).toHaveTextContent(
+      'can halt and resume it, and in the end closes it for good, then starts a new one if there is more to trade',
+    );
+  });
+
+  it('says what a new simulation keeps and what it sets up again', () => {
+    expect(GLOSSARY.simulation.term).toBe('New simulation');
+    for (const said of [
+      'Once a market has closed',
+      'a fresh market in setup, with its own instruments, accounts and bots, all set up again',
+      'Logins stay, but each trader needs a new account in it.',
+      'The closed market and its history are kept, and the screens show the new one.',
+    ]) {
+      expect(GLOSSARY.simulation.definition).toContain(said);
+    }
+  });
+
+  it('tells a halt, which ends, from a close, which does not', () => {
+    expect(GLOSSARY.halted.definition).toContain('Trading goes on when the operator resumes the market.');
+    expect(GLOSSARY.closed.term).toBe('Closed');
+    for (const said of [
+      'ended the market for good',
+      'No order is taken any more',
+      // What a close does, not that it is done: a market reads as closed before its last order is cancelled.
+      'The close cancels every order that was still open and releases what it had reserved.',
+      'Portfolios, orders and trades stay readable',
+      'A closed market never opens again.',
+    ]) {
+      expect(GLOSSARY.closed.definition).toContain(said);
+    }
   });
 });

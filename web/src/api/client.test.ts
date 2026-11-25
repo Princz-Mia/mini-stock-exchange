@@ -1,11 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { fakeServer } from '../test/fakeServer';
 import { ApiError, api, isRefusal, pollEvery, resetSession } from './client';
 
 describe('api client', () => {
   beforeEach(() => resetSession());
-  afterEach(() => resetSession());
+  afterEach(() => {
+    resetSession();
+    vi.useRealTimers();
+  });
 
   it('sends reads without a CSRF token', async () => {
     const server = fakeServer().on('GET /api/v1/instruments', {
@@ -34,6 +37,21 @@ describe('api client', () => {
     expect(login?.headers['X-CSRF-TOKEN']).toBe('t1');
     expect(login?.body).toEqual({ username: 'trader', password: 'secret' });
     expect(logout?.headers['X-CSRF-TOKEN']).toBe('t2');
+  });
+
+  it("reads the exchange's clock from an answer about the bot runs, and falls back to the browser's", async () => {
+    vi.setSystemTime(new Date('2026-11-06T10:06:02.500Z'));
+    const reply = { status: 200, json: { runs: [], nextCursor: null } };
+    const server = fakeServer().on('GET /api/v1/admin/bot-runs', {
+      ...reply,
+      headers: { Date: 'Fri, 06 Nov 2026 10:00:02 GMT' },
+    });
+    expect(await api.botRuns()).toEqual({ runs: [], nextCursor: null, answeredAt: Date.parse('2026-11-06T10:00:02Z') });
+
+    server.on('GET /api/v1/admin/bot-runs', reply);
+    expect((await api.botRuns()).answeredAt).toBe(Date.parse('2026-11-06T10:06:02.500Z'));
+    server.on('GET /api/v1/admin/bot-runs', { ...reply, headers: { Date: 'not a date' } });
+    expect((await api.botRuns()).answeredAt).toBe(Date.parse('2026-11-06T10:06:02.500Z'));
   });
 
   it('turns a problem response into an ApiError with its code', async () => {

@@ -11,42 +11,63 @@ import { groupInteger, utcTime } from '../format';
 import {
   activeRun,
   averageRate,
+  elapsedSeconds,
+  leftRunning,
+  ranForSeconds,
+  ranForText,
   type RunForm,
   runRequest,
   STATUS_LABELS,
   shortfallText,
   startBlocked,
+  stopRecordedByClose,
   statusClass,
   strategiesText,
   taggedSplit,
+  timeLeftText,
   workerText,
 } from './runView';
 import { populationText } from './strategies';
 import { CommandStatus } from './CommandStatus';
 import { useCommand } from './useCommand';
-import { comparability, MAX_COMPARED, parseRunIds, withTick } from './compare';
+import { comparability, durationText, MAX_COMPARED, parseRunIds, withTick } from './compare';
 import { SimulatorSettings } from './SimulatorSettings';
 
 type Typed = Partial<Omit<RunForm, 'instrumentIds'>> & { instrumentIds?: readonly string[] };
+type TextField = Exclude<keyof RunForm, 'instrumentIds' | 'untilStopped'>;
 
+// A run ends by itself after an hour unless the operator says otherwise: one with no end is easy to forget.
 const DEFAULTS = {
   seed: '',
   commandsPerSecond: '4.00',
   maxOrderQuantity: '10',
   maxPosition: '100',
-  durationMinutes: '',
+  durationMinutes: '60',
+  untilStopped: false,
 };
 
 /**
  * Bot runs: the one that is running with its worker and activity, a form to start the next, and every run a page at a
  * time. Everything shown is what Execution committed and what the worker last reported. The current run is refetched
- * every two seconds; the history every five, and at once whenever the newest run changes, so the two agree.
+ * every two seconds; the history every five, and at once whenever the newest run changes, so the two agree. How long
+ * the run has been going is counted up to the last answer, on the exchange's clock as that answer gave it: it moves
+ * with each refetch, needs no timer of its own, and does not depend on the browser's clock.
  */
-export function BotRuns({ market, instruments }: { market: MarketStatus['state']; instruments: readonly Instrument[] }) {
+export function BotRuns({
+  market,
+  closedAt,
+  instruments,
+}: {
+  market: MarketStatus['state'];
+  /** When the market closed, or null while it has not: the close leaves its time on runs it did not end. */
+  closedAt: string | null;
+  instruments: readonly Instrument[];
+}) {
   const runs = useQuery({ queryKey: ['bot-runs'], queryFn: api.botRuns, refetchInterval: pollEvery(2_000) });
   const population = useQuery({ queryKey: ['bots'], queryFn: api.botPopulation });
   const list = runs.data?.runs ?? [];
   const active = activeRun(list);
+  const now = runs.data?.answeredAt ?? runs.dataUpdatedAt;
   const history = usePagedList({
     table: 'runs',
     queryKey: ['bot-runs', 'history'],
@@ -88,7 +109,7 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
       },
       { replace: true },
     );
-  const columns = [compareColumn(picked, pick), ...RUN_COLUMNS];
+  const columns = [compareColumn(picked, pick), STARTED_COLUMN, ranForColumn(now), ...RUN_COLUMNS, endedColumn(closedAt)];
   // The screen's own address goes along, so coming back keeps the table's page size and order.
   const from = useLocation().search;
 
@@ -103,7 +124,10 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
       {runs.isPending ? (
         <p className="muted">Loading…</p>
       ) : active !== undefined ? (
-        <ActiveRun run={active} />
+        <ActiveRun run={active} now={now} />
+      ) : market === 'CLOSED' ? (
+        // No form: nothing in it could be sent. The runs the market had stay below, with their comparison.
+        <p className="muted">The market has closed, so no run can start. Its runs stay listed, and can still be compared.</p>
       ) : (
         <StartForm
           market={market}
@@ -143,7 +167,7 @@ export function BotRuns({ market, instruments }: { market: MarketStatus['state']
   );
 }
 
-function ActiveRun({ run }: { run: BotRun }) {
+function ActiveRun({ run, now }: { run: BotRun; now: number }) {
   const client = useQueryClient();
   const send = useCallback(
     async (runId: string, key: string) => {
@@ -158,6 +182,8 @@ function ActiveRun({ run }: { run: BotRun }) {
   const command = useCommand(send);
   const stopping = run.desiredState === 'STOPPED';
   const rate = averageRate(run);
+  const timeLeft = timeLeftText(run, now);
+  const forgotten = leftRunning(run, now);
   const { activity, config } = run;
 
   return (
@@ -170,12 +196,19 @@ function ActiveRun({ run }: { run: BotRun }) {
           type="button"
           className="primary danger"
           disabled={stopping || command.outcome.kind === 'sending' || command.unresolved}
-          aria-describedby={stopping ? 'stop-hint' : undefined}
+          aria-describedby={stopping ? 'stop-hint' : forgotten ? 'left-running' : undefined}
           onClick={() => void command.run(run.runId)}
         >
           Stop run
         </button>
       </div>
+      {/* The words never change while it shows, so a screen reader says it once, not with every refetch. */}
+      {forgotten && (
+        <p id="left-running" className="chart-note" role="status">
+          <strong>Running for more than a day with no end time.</strong> It keeps trading until someone stops it, and
+          takes up again after every restart. Select Stop run to end it.
+        </p>
+      )}
       {stopping && (
         <p id="stop-hint" className="muted">
           A stop was asked for at {run.stopRequestedAt === null ? 'its end time' : utcTime(run.stopRequestedAt)}; the
@@ -192,8 +225,16 @@ function ActiveRun({ run }: { run: BotRun }) {
         <dd className="num">{config.seed}</dd>
         <dt>Started</dt>
         <dd>{utcTime(run.startedAt)}</dd>
+        <dt>Elapsed</dt>
+        <dd>{durationText(elapsedSeconds(run, now))}</dd>
         <dt>Ends</dt>
         <dd>{run.endsAt === null ? 'When stopped' : utcTime(run.endsAt)}</dd>
+        {timeLeft !== null && (
+          <>
+            <dt>Time left</dt>
+            <dd>{timeLeft}</dd>
+          </>
+        )}
         <dt>Last heartbeat</dt>
         <dd>{run.worker.heartbeatAt === null ? 'None yet' : utcTime(run.worker.heartbeatAt)}</dd>
         <dt>Simulator</dt>
@@ -286,7 +327,7 @@ function StartForm({
   };
   const blocked =
     unavailable ?? startBlocked(market, undefined, population?.byStrategy) ?? shortfallText(form, population?.byStrategy);
-  const field = (name: keyof Omit<RunForm, 'instrumentIds'>) => ({
+  const field = (name: TextField) => ({
     value: form[name],
     onChange: (event: { target: { value: string } }) => setTyped({ ...typed, [name]: event.target.value }),
   });
@@ -345,11 +386,44 @@ function StartForm({
             Seed
             <input {...field('seed')} inputMode="numeric" placeholder="Chosen for you" />
           </label>
-          <label>
-            Duration in minutes
-            <input {...field('durationMinutes')} inputMode="numeric" placeholder="Until stopped" />
-          </label>
         </div>
+        <fieldset className="choices run-length">
+          <legend>Run length</legend>
+          <div className="run-length-choice">
+            <label>
+              <input
+                type="radio"
+                name="run-length"
+                checked={!form.untilStopped}
+                onChange={() => setTyped({ ...typed, untilStopped: false })}
+                aria-describedby="run-length-timed"
+              />
+              For a set time
+            </label>
+            <p id="run-length-timed" className="muted">
+              Ends by itself after the minutes given, from 1 to 1440 (24 hours).
+            </p>
+            <label className="run-length-minutes">
+              Duration in minutes
+              <input {...field('durationMinutes')} inputMode="numeric" disabled={form.untilStopped} />
+            </label>
+          </div>
+          <div className="run-length-choice">
+            <label>
+              <input
+                type="radio"
+                name="run-length"
+                checked={form.untilStopped}
+                onChange={() => setTyped({ ...typed, untilStopped: true })}
+                aria-describedby="run-length-open"
+              />
+              Until I stop it
+            </label>
+            <p id="run-length-open" className="muted">
+              Keeps trading until someone selects Stop run, and takes up again after every restart.
+            </p>
+          </div>
+        </fieldset>
         {instruments.length > 0 && (
           <fieldset className="choices">
             <legend>Instruments</legend>
@@ -401,13 +475,21 @@ function StartForm({
   );
 }
 
-/** When a run ended, or where it stands while it has not. */
-function ended(run: BotRun): string {
+/**
+ * When a run ended, or where it stands while it has not. A run the market's close ended says so: its time is the
+ * close's, not a stop its worker confirmed. A run that had ended before the close, with no worker confirming, stays
+ * not confirmed, though the close has since recorded its own time on it.
+ */
+function ended(run: BotRun, closedAt: string | null): string {
   const failures = run.activity.stopFailures > 0 ? ` · ${groupInteger(run.activity.stopFailures)} not canceled` : '';
-  if (run.stoppedAt !== null) {
-    return utcTime(run.stoppedAt) + failures;
+  if (run.stoppedAt !== null && !stopRecordedByClose(run, closedAt)) {
+    return utcTime(run.stoppedAt) + (run.window.endedBy === 'MARKET_CLOSE' ? ' · Market close' : '') + failures;
   }
   return (run.status === 'STOPPED' ? 'Not confirmed' : STATUS_LABELS[run.status]) + failures;
+}
+
+function endedColumn(closedAt: string | null): Column<BotRun> {
+  return { key: 'ended', header: 'Ended', cell: (run) => ended(run, closedAt) };
 }
 
 /** The settings the run's simulator reported, collapsed: the table is drawn only while open. */
@@ -484,14 +566,29 @@ function compareColumn(picked: readonly string[], pick: (runId: string, on: bool
   };
 }
 
+/**
+ * How long each run lasted, right after its start: on a phone, where the table scrolls inside its panel, both are in
+ * view before any scrolling. A run that is not over is counted to now, the time of the last answer about the current
+ * run, as its own readout is.
+ */
+function ranForColumn(now: number): Column<BotRun> {
+  return {
+    key: 'ran',
+    header: 'Ran for',
+    cell: (run) => ranForText(run, now),
+    sortValue: (run) => ranForSeconds(run, now),
+  };
+}
+
+const STARTED_COLUMN: Column<BotRun> = {
+  key: 'started',
+  header: 'Started',
+  rowHeader: true,
+  cell: (run) => utcTime(run.startedAt),
+  sortValue: (run) => run.startedAt,
+};
+
 const RUN_COLUMNS: readonly Column<BotRun>[] = [
-  {
-    key: 'started',
-    header: 'Started',
-    rowHeader: true,
-    cell: (run) => utcTime(run.startedAt),
-    sortValue: (run) => run.startedAt,
-  },
   { key: 'bots', header: 'Bots', cell: (run) => strategiesText(run.config.strategies) },
   {
     key: 'placed',
@@ -507,5 +604,4 @@ const RUN_COLUMNS: readonly Column<BotRun>[] = [
     cell: (run) => groupInteger(run.activity.canceled),
     sortValue: (run) => run.activity.canceled,
   },
-  { key: 'ended', header: 'Ended', cell: ended },
 ];

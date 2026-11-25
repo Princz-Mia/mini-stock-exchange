@@ -104,7 +104,8 @@ class MarketController {
 			long volume, long tradeCount, String vwap, List<TrendPointView> trend, Feed feed) {
 	}
 
-	record Instruments(List<InstrumentView> instruments, Feed feed) {
+	/** {@code simulationId} is the simulation the list is of; null when none was asked for and none is known. */
+	record Instruments(String simulationId, List<InstrumentView> instruments, Feed feed) {
 	}
 
 	/** {@code sourceCommandSequence} is the market revision: a higher one is newer. */
@@ -218,15 +219,22 @@ class MarketController {
 				feed(marketFeed));
 	}
 
+	/**
+	 * One simulation's instruments: the one asked for, or the current one. Instruments of other simulations are not
+	 * listed, but every read by instrument id still serves them.
+	 */
 	@GetMapping
-	Instruments instruments() {
-		List<MarketQueries.Instrument> listed = queries.instruments();
+	Instruments instruments(@RequestParam(required = false) String simulationId) {
+		MarketQueries.Listing listing = queries.instruments(simulationId == null ? null : simulation(simulationId));
+		List<MarketQueries.Instrument> listed = listing.instruments();
 		Map<UUID, MarketQueries.Session> sessions = queries
 			.sessions(listed.stream().map(MarketQueries.Instrument::instrumentId).toList());
-		return new Instruments(listed.stream()
-			.map((instrument) -> view(instrument,
-					sessions.getOrDefault(instrument.instrumentId(), MarketQueries.Session.NONE), feed(tradeFeed)))
-			.toList(), feed(marketFeed));
+		return new Instruments(listing.simulationId() == null ? null : listing.simulationId().toString(),
+				listed.stream()
+					.map((instrument) -> view(instrument,
+							sessions.getOrDefault(instrument.instrumentId(), MarketQueries.Session.NONE), feed(tradeFeed)))
+					.toList(),
+				feed(marketFeed));
 	}
 
 	@GetMapping("/{instrumentId}/book")
@@ -277,6 +285,19 @@ class MarketController {
 	@ExceptionHandler(MissingServletRequestParameterException.class)
 	ResponseEntity<ProblemDetail> missing(MissingServletRequestParameterException ex) {
 		return problem(ApiException.invalid(ex.getParameterName(), "REQUIRED", ex.getParameterName() + " is required"));
+	}
+
+	/**
+	 * Read here rather than by the framework, which takes an empty value of an optional parameter for none: a client
+	 * that sent an empty id would be shown the current simulation in place of the one it meant.
+	 */
+	private static UUID simulation(String value) {
+		try {
+			return UUID.fromString(value);
+		}
+		catch (IllegalArgumentException ex) {
+			throw ApiException.invalid("simulationId", "INVALID_VALUE", "simulationId has an invalid value");
+		}
 	}
 
 	private static String nullablePrice(Long cents) {

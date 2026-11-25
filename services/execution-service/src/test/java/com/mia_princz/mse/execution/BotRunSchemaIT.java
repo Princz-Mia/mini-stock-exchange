@@ -89,6 +89,30 @@ class BotRunSchemaIT {
 		});
 	}
 
+	/** As a market's close ends a run: stopped, with its window ended by the close at the close's own sequence. */
+	@Test
+	void aRunTheMarketCloseEndedIsAccepted() {
+		String end = """
+				UPDATE bot_run SET desired_state = 'STOPPED', stop_requested_at = now(), stopped_at = now(),
+				    stop_sequence = 9, end_sequence = 9, ended_at = now(), ended_by = ? WHERE id = ?""";
+		db.inRolledBackTransaction((f) -> {
+			UUID run = run(f, f.simulation(), "1.00");
+			f.jdbc.update(end, "MARKET_CLOSE", run);
+			assertThat(f.jdbc.queryForObject("SELECT ended_by FROM bot_run WHERE id = ?", String.class, run))
+				.isEqualTo("MARKET_CLOSE");
+		});
+		db.inRolledBackTransaction((f) -> {
+			UUID run = run(f, f.simulation(), "1.00");
+			assertFails(CHECK_VIOLATION, () -> f.jdbc.update(end, "OPERATOR", run));
+		});
+		// Like every end but the one recorded before windows were kept, it needs its sequence.
+		db.inRolledBackTransaction((f) -> {
+			UUID run = run(f, f.simulation(), "1.00");
+			assertFails(CHECK_VIOLATION,
+					() -> f.jdbc.update("UPDATE bot_run SET ended_by = 'MARKET_CLOSE' WHERE id = ?", run));
+		});
+	}
+
 	@Test
 	void theRateIsPositiveAndBounded() {
 		db.inRolledBackTransaction((f) -> assertFails(CHECK_VIOLATION, () -> run(f, f.simulation(), "0.00")));

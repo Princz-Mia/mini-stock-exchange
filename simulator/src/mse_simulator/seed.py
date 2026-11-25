@@ -11,6 +11,11 @@ answers instead of doing anything twice, and a seed interrupted halfway finishes
 market that is already open or halted was set up before, by the seed or by hand, and is left alone.
 So is a closed one: starting a new market after a close is the operator's step, not the seed's.
 
+The seed never sets up a simulation an operator started. It acts when no market exists, and it goes
+on with a market in SETUP only if that market has no name: one made by the first setup command,
+which is how the seed itself makes it. A simulation an operator started has a name, and is theirs
+to set up.
+
     python -m mse_simulator.seed
 
 The trader is added as the operator adds one on the setup screen, with MSE_DEMO_TRADER_PASSWORD. A
@@ -89,8 +94,9 @@ class Operator:
         # The token rotates with the session at login.
         self._refresh_csrf()
 
-    def market_state(self) -> str:
-        return self._http.get("/api/v1/market").raise_for_status().json()["state"]
+    def market(self) -> dict[str, Any]:
+        """The market's status: its state, and the name of its simulation if it was given one."""
+        return self._http.get("/api/v1/market").raise_for_status().json()
 
     def command(self, path: str, step: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         """Sends a command until it has a final answer, always under the step's own key."""
@@ -121,15 +127,23 @@ class Operator:
 
 
 def seed(operator: Operator, bots: int, trader_password: str) -> str:
-    """Sets the market up and opens it, unless it is already running or closed. Returns what it
-    did."""
+    """Sets the market up and opens it, unless it is already running or closed, or an operator
+    started it. Returns what it did."""
     operator.sign_in()
-    state = operator.market_state()
+    market = operator.market()
+    state = market["state"]
     if state in {"OPEN", "HALTED"}:
         return f"the market is already {state.lower()}; nothing to do"
     if state == "CLOSED":
         # Setup commands are refused on a closed market, and a new one is the operator's to start.
         return "the market is closed; the demo seed starts no new one, so nothing to do"
+    name = market.get("name")
+    if state == "SETUP" and name is not None:
+        # A market the seed made, or one it was interrupted in, has no name.
+        return (
+            f"the simulation in setup ({name}) was started by an operator;"
+            " the demo seed sets up only a market of its own, so nothing to do"
+        )
     ids: dict[str, UUID] = {}
     for symbol, price in INSTRUMENTS.items():
         created = operator.command(

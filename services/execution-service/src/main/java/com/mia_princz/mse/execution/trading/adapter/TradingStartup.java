@@ -46,6 +46,8 @@ public final class TradingStartup implements ApplicationRunner, HealthIndicator 
 		if (!ownership.tryAcquire()) {
 			throw new IllegalStateException("Another execution-service instance owns the market; refusing to start");
 		}
+		// A closed market is still the market: the writer loads it, so that it answers commands as closed and a setup
+		// command can't start another one by accident. Only a database with no simulation at all has nothing to load.
 		if (!store.hasSimulation()) {
 			engine.startEmpty();
 			state = State.NO_SIMULATION;
@@ -60,12 +62,16 @@ public final class TradingStartup implements ApplicationRunner, HealthIndicator 
 		if (!ownership.isHeld()) {
 			return Health.down().withDetail("reason", "writer ownership lost").build();
 		}
-		return switch (state) {
-			case STARTING -> Health.down().withDetail("reason", "starting").build();
-			case NO_SIMULATION -> Health.up().withDetail("market", "not set up").build();
-			case TRADING -> writer.isAvailable() ? Health.up().build()
-					: Health.down().withDetail("reason", "writer halted").build();
-		};
+		if (state == State.STARTING) {
+			return Health.down().withDetail("reason", "starting").build();
+		}
+		// A process that started with no market takes commands too, the ones that set one up first, so its writer is
+		// watched like any other's.
+		if (!writer.isAvailable()) {
+			return Health.down().withDetail("reason", "writer halted").build();
+		}
+		return state == State.NO_SIMULATION ? Health.up().withDetail("market", "not set up").build()
+				: Health.up().build();
 	}
 
 }

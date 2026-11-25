@@ -83,8 +83,8 @@ export const TOURS: Record<TourRole, TourScript> = {
         anchor: 'section[aria-labelledby="market-title"]',
         title: 'Market state',
         body:
-          'Open, halt and resume the market. Instruments, accounts and bots are set up before it opens, and it opens ' +
-          'once.',
+          'Open, halt and resume the market, and in the end close it. Instruments, accounts and bots are set up ' +
+          'before it opens; it opens once, and closing it is final. After a close, a new simulation starts afresh.',
       },
       {
         anchor: 'section[aria-labelledby="instruments-title"]',
@@ -110,7 +110,9 @@ export const TOURS: Record<TourRole, TourScript> = {
       {
         anchor: 'section[aria-labelledby="runs-title"]',
         title: 'Bot runs',
-        body: 'Start a run once the market is open, choosing how many bots of each kind trade and how fast, and stop it.',
+        body:
+          'Start a run once the market is open, choosing how many bots of each kind trade, how fast and for how ' +
+          'long, and stop it.',
       },
       {
         anchor: 'section[aria-labelledby="health-title"]',

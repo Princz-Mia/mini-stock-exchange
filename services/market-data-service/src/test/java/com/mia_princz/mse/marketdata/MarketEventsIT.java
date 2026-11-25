@@ -95,6 +95,25 @@ class MarketEventsIT {
 		}
 	}
 
+	/** The snapshot that closes a venue reaches an open stream like any other, and the frame says CLOSED. */
+	@Test
+	void aClosedVenueReachesTheStream() throws Exception {
+		UUID instrument = UUID.randomUUID();
+		publish(Snapshots.snapshot(instrument, 1, 2));
+		waitForMarket(instrument);
+
+		try (Stream<String> lines = open(instrument)) {
+			BlockingQueue<Event> received = read(lines);
+			assertThat(next(received, "market").data().get("venueState").asString()).isEqualTo("OPEN");
+
+			publish(Snapshots.closed(instrument, 2));
+
+			Event last = marketAt(received, 1, 2);
+			assertThat(last.data().get("venueState").asString()).isEqualTo("CLOSED");
+			assertThat(last.data().get("lastPrice").asString()).isEqualTo("100.00");
+		}
+	}
+
 	@Test
 	void quietStreamCarriesHeartbeatsWithTheFeedState() throws Exception {
 		UUID instrument = UUID.randomUUID();

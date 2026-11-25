@@ -12,13 +12,17 @@ export type CommandOutcome<T> =
    * kept for refusals that carry more than words, such as the holders of an instrument in use.
    */
   | { kind: 'refused'; code: string; message: string; problem: Problem | null }
-  /** No final answer (busy, timed out, unreachable). Retrying resends the same request under the same key. */
-  | { kind: 'unresolved' };
+  /**
+   * No final answer (busy, timed out, unreachable). Retrying resends the same request under the same key. The problem
+   * is what the exchange said, if it said anything: a command that may take long tells a wait that ran out from an
+   * exchange that has stopped.
+   */
+  | { kind: 'unresolved'; problem: Problem | null };
 
 const randomKey = () => crypto.randomUUID();
 
 /** The server's own words: its detail, plus each field's message for an invalid request. */
-function describe(error: ApiError): string {
+export function describe(error: ApiError): string {
   const fields = error.problem?.errors ?? [];
   return fields.length === 0 ? error.message : fields.map((field) => field.message).join('; ');
 }
@@ -50,7 +54,7 @@ export function useCommand<A, T>(send: (args: A, key: string) => Promise<T>, new
           pending.current = null;
           setOutcome({ kind: 'refused', code: error.code ?? 'REFUSED', message: describe(error), problem: error.problem });
         } else {
-          setOutcome({ kind: 'unresolved' });
+          setOutcome({ kind: 'unresolved', problem: error instanceof ApiError ? error.problem : null });
         }
         return undefined;
       } finally {
@@ -71,5 +75,16 @@ export function useCommand<A, T>(send: (args: A, key: string) => Promise<T>, new
     [attempt],
   );
 
-  return { outcome, run, retry, unresolved: outcome.kind === 'unresolved' };
+  /**
+   * Lets go of an unresolved command, so that the next one gets a new key: only for one the caller knows has been
+   * settled since, one way or the other. A command on its way is kept.
+   */
+  const forget = useCallback(() => {
+    if (!inFlight.current) {
+      pending.current = null;
+      setOutcome({ kind: 'idle' });
+    }
+  }, []);
+
+  return { outcome, run, retry, forget, unresolved: outcome.kind === 'unresolved' };
 }

@@ -13,6 +13,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 
@@ -91,6 +92,16 @@ public final class JdbcTradingStore implements TradingStore {
 			SELECT e.batch_id FROM ledger_entry e JOIN journal_batch b ON b.id = e.batch_id
 			WHERE b.simulation_id = ? GROUP BY e.batch_id, e.instrument_id HAVING sum(e.delta) <> 0 LIMIT 20""";
 
+	/**
+	 * A key's stored answers in every simulation, by each simulation's own key index: one probe for each simulation,
+	 * however many answers it has stored.
+	 */
+	private static final String STORED_BY_KEY = """
+			SELECT r.route, r.request_hash, r.response_body::text AS body
+			FROM simulation s JOIN command_result r
+			    ON r.simulation_id = s.id AND r.principal_id = ? AND r.idempotency_key = ?
+			""";
+
 	private final JdbcClient jdbc;
 
 	private final JsonMapper json;
@@ -129,14 +140,86 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public void startMarket(UUID simulationId, UUID issuanceAccountId, String name, long writerEpoch) {
+		expectOne(jdbc.sql("""
+				INSERT INTO simulation (id, state, writer_epoch, name, last_command_sequence)
+				VALUES (?, 'SETUP', ?, ?, 1)""")
+			.params(simulationId, writerEpoch, name)
+			.update(), "insert simulation");
+		expectOne(jdbc.sql("""
+				INSERT INTO account (id, simulation_id, kind, display_name) VALUES (?, ?, 'ISSUANCE', 'Issuance')""")
+			.params(issuanceAccountId, simulationId)
+			.update(), "insert issuance account");
+	}
+
+	@Override
 	public Market lockMarket() {
 		return jdbc.sql("""
 				SELECT id, state, writer_epoch, max_open_orders_per_account, max_open_orders_total, max_fills_per_command
-				FROM simulation FOR UPDATE""")
-			.query((row, index) -> new Market(row.getObject("id", UUID.class), row.getString("state"),
-					row.getLong("writer_epoch"), row.getInt("max_open_orders_per_account"),
-					row.getInt("max_open_orders_total"), row.getInt("max_fills_per_command")))
+				FROM simulation %s FOR UPDATE""".formatted(CurrentSimulation.FIRST))
+			.query((row, index) -> market(row))
 			.single();
+	}
+
+	@Override
+	public UUID currentSimulation() {
+		return jdbc.sql("SELECT id FROM simulation " + CurrentSimulation.FIRST).query(UUID.class).single();
+	}
+
+	@Override
+	public Optional<Market> lockOwnedMarket(UUID simulationId, long writerEpoch) {
+		return jdbc.sql("""
+				SELECT id, state, writer_epoch, max_open_orders_per_account, max_open_orders_total, max_fills_per_command
+				FROM simulation WHERE id = ? AND writer_epoch = ? FOR UPDATE""")
+			.params(simulationId, writerEpoch)
+			.query((row, index) -> market(row))
+			.optional();
+	}
+
+	private static Market market(java.sql.ResultSet row) throws java.sql.SQLException {
+		return new Market(row.getObject("id", UUID.class), row.getString("state"), row.getLong("writer_epoch"),
+				row.getInt("max_open_orders_per_account"), row.getInt("max_open_orders_total"),
+				row.getInt("max_fills_per_command"));
+	}
+
+	@Override
+	public void retireMarket(UUID simulationId, long writerEpoch) {
+		expectOne(jdbc.sql("""
+				UPDATE simulation SET writer_epoch = 0 WHERE id = ? AND writer_epoch = ? AND state = 'CLOSED'""")
+			.params(simulationId, writerEpoch)
+			.update(), "retire the closed simulation");
+	}
+
+	@Override
+	public boolean simulationNameTaken(String name) {
+		return jdbc.sql("SELECT EXISTS (SELECT 1 FROM simulation WHERE lower(name) = lower(?))")
+			.param(name)
+			.query(Boolean.class)
+			.single();
+	}
+
+	@Override
+	public <T> List<StoredResult<T>> storedInAnySimulation(CommandKey key, Class<T> type) {
+		return stored(jdbc.sql(STORED_BY_KEY + "ORDER BY s.created_at, s.id")
+			.params(key.principalId(), key.idempotencyKey()), key, type);
+	}
+
+	@Override
+	public <T> List<StoredResult<T>> storedInOtherSimulations(UUID simulationId, CommandKey key, Class<T> type) {
+		return stored(jdbc.sql(STORED_BY_KEY + "WHERE s.id <> ? ORDER BY s.created_at, s.id")
+			.params(key.principalId(), key.idempotencyKey(), simulationId), key, type);
+	}
+
+	private <T> List<StoredResult<T>> stored(JdbcClient.StatementSpec statement, CommandKey key, Class<T> type) {
+		return statement
+			.query((row, index) -> {
+				String route = row.getString("route");
+				byte[] hash = row.getBytes("request_hash");
+				// Another route's answer need not fit this route's type; the caller refuses it as a conflict.
+				return new StoredResult<>(route, hash,
+						key.sameRequest(route, hash) ? json.readValue(row.getString("body"), type) : null);
+			})
+			.list();
 	}
 
 	@Override
@@ -198,8 +281,8 @@ public final class JdbcTradingStore implements TradingStore {
 		problems.addAll(jdbc.sql("""
 				SELECT i.symbol, i.last_trade_sequence, coalesce(t.newest, 0) AS newest
 				FROM instrument i
-				LEFT JOIN (SELECT instrument_id, max(trade_sequence) AS newest FROM trades GROUP BY instrument_id) t
-				    ON t.instrument_id = i.id
+				LEFT JOIN (SELECT instrument_id, max(trade_sequence) AS newest FROM trades
+				    WHERE simulation_id = :simulation GROUP BY instrument_id) t ON t.instrument_id = i.id
 				WHERE i.simulation_id = :simulation AND i.last_trade_sequence <> coalesce(t.newest, 0)""")
 			.param("simulation", simulationId)
 			.query((row, index) -> "Instrument " + row.getString("symbol") + " has last trade sequence "
@@ -245,6 +328,23 @@ public final class JdbcTradingStore implements TradingStore {
 		expectOne(jdbc.sql("UPDATE simulation SET state = ?, opened_at = COALESCE(opened_at, now()) WHERE id = ?")
 			.params(state, simulationId)
 			.update(), "update market state");
+	}
+
+	@Override
+	public void closeMarket(UUID simulationId, Instant closedAt) {
+		expectOne(jdbc.sql("UPDATE simulation SET state = 'CLOSED', closed_at = ? WHERE id = ?")
+			.params(Timestamp.from(closedAt), simulationId)
+			.update(), "close market");
+	}
+
+	@Override
+	public Optional<AppliedClose> appliedClose(UUID simulationId) {
+		return jdbc.sql("""
+				SELECT actor_user_id, command_sequence FROM audit_log
+				WHERE simulation_id = ? AND action = 'MARKET_CLOSE' AND outcome = 'APPLIED'""")
+			.param(simulationId)
+			.query((row, index) -> new AppliedClose(row.getObject(1, UUID.class), row.getLong(2)))
+			.optional();
 	}
 
 	@Override
@@ -466,6 +566,39 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public int endBotRunsAtClose(UUID simulationId, long sequence, Instant at) {
+		Timestamp closedAt = Timestamp.from(at);
+		// The runs first, then their instruments: the order the worker's confirmation takes its locks in. A run its
+		// operator had already asked to stop keeps that stop's sequence. A clock set back since a run started must not
+		// make its end fall before its start, which the table refuses.
+		List<UUID> ended = jdbc.sql("""
+				UPDATE bot_run SET stop_sequence = coalesce(stop_sequence, ?), end_sequence = ?,
+				    ended_by = 'MARKET_CLOSE', ended_at = GREATEST(?, started_at)
+				WHERE simulation_id = ? AND ended_by IS NULL
+				RETURNING id""")
+			.params(sequence, sequence, closedAt, simulationId)
+			.query(UUID.class)
+			.list();
+		if (!ended.isEmpty()) {
+			jdbc.sql("""
+					UPDATE bot_run_instrument r SET end_trade_sequence = i.last_trade_sequence
+					FROM instrument i
+					WHERE r.run_id = ANY(?::uuid[]) AND i.simulation_id = r.simulation_id AND i.id = r.instrument_id""")
+				.param(ended.stream().map(UUID::toString).toArray(String[]::new))
+				.update();
+		}
+		// Then every run no worker has confirmed is recorded as stopped, now: the ones just ended, and any that ended
+		// earlier (by the next start, or before windows were kept) and keep that end.
+		jdbc.sql("""
+				UPDATE bot_run SET desired_state = 'STOPPED', stop_requested_at = coalesce(stop_requested_at, ?),
+				    stopped_at = ?
+				WHERE simulation_id = ? AND stopped_at IS NULL""")
+			.params(closedAt, closedAt, simulationId)
+			.update();
+		return ended.size();
+	}
+
+	@Override
 	public void insertBotAccount(UUID simulationId, UUID accountId, String displayName, BotStrategy strategy) {
 		// clock_timestamp, not the transaction's now(): bots made by one command then list in the order they were made.
 		expectOne(jdbc.sql("""
@@ -492,10 +625,44 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
+	public Set<UUID> tradingAccounts(UUID simulationId) {
+		return jdbc.sql("SELECT id FROM account WHERE simulation_id = ? AND kind <> 'ISSUANCE'")
+			.param(simulationId)
+			.query(UUID.class)
+			.set();
+	}
+
+	@Override
+	public boolean tradesIn(UUID simulationId, UUID accountId) {
+		return jdbc
+			.sql("SELECT EXISTS (SELECT 1 FROM account WHERE simulation_id = ? AND id = ? AND kind <> 'ISSUANCE')")
+			.params(simulationId, accountId)
+			.query(Boolean.class)
+			.single();
+	}
+
+	@Override
 	public int revokeApiTokens(UUID accountId, Instant at) {
 		return jdbc.sql("UPDATE api_token SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL")
 			.params(Timestamp.from(at), accountId)
 			.update();
+	}
+
+	@Override
+	public int revokeBotTokens(UUID simulationId, Instant at) {
+		return jdbc.sql("""
+				UPDATE api_token t SET revoked_at = ? FROM account a
+				WHERE a.id = t.account_id AND a.simulation_id = ? AND t.revoked_at IS NULL""")
+			.params(Timestamp.from(at), simulationId)
+			.update();
+	}
+
+	@Override
+	public List<UUID> botAccounts(UUID simulationId) {
+		return jdbc.sql("SELECT id FROM account WHERE simulation_id = ? AND kind = 'BOT'")
+			.param(simulationId)
+			.query(UUID.class)
+			.list();
 	}
 
 	@Override
@@ -613,9 +780,11 @@ public final class JdbcTradingStore implements TradingStore {
 	}
 
 	@Override
-	public Optional<ExistingOrder> findOrder(UUID orderId) {
-		return jdbc.sql("SELECT id, account_id, instrument_id, state, working_quantity FROM orders WHERE id = ?")
-			.param(orderId)
+	public Optional<ExistingOrder> findOrder(UUID simulationId, UUID orderId) {
+		return jdbc.sql("""
+				SELECT id, account_id, instrument_id, state, working_quantity FROM orders
+				WHERE id = ? AND simulation_id = ?""")
+			.params(orderId, simulationId)
 			.query((row, index) -> new ExistingOrder(row.getObject("id", UUID.class),
 					row.getObject("account_id", UUID.class), row.getObject("instrument_id", UUID.class),
 					row.getString("state"), row.getLong("working_quantity")))
@@ -876,6 +1045,7 @@ public final class JdbcTradingStore implements TradingStore {
 	/**
 	 * Cancels orders the book held for their owners, after the transaction's fills of them, each guarded by what the
 	 * book said: still resting, the owner's, with exactly that quantity working. A row that differs halts the writer.
+	 * A market's close cancels through here too, many orders at once.
 	 */
 	private void cancelOrders(List<WriteSet.Cancel> cancels) {
 		for (List<WriteSet.Cancel> chunk : chunks(cancels, 4)) {

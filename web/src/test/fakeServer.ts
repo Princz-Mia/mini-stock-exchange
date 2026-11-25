@@ -7,12 +7,13 @@ export interface Recorded {
   body: unknown;
 }
 
-type Reply = { status: number; json?: unknown; problem?: unknown };
-type Handler = (request: Recorded) => Reply;
+type Reply = { status: number; json?: unknown; problem?: unknown; headers?: Record<string, string> };
+type Handler = (request: Recorded) => Reply | Promise<Reply>;
 
 /**
  * Stands in for the backend in component tests: routes `METHOD /path` (query string ignored) to handlers and
- * records every request, so tests can check what the client really sent.
+ * records every request, so tests can check what the client really sent. A handler may answer later, by returning a
+ * promise, for a request that is to stay on its way while the test looks at the page.
  */
 export function fakeServer() {
   const routes = new Map<string, Handler>();
@@ -26,7 +27,8 @@ export function fakeServer() {
     const request = { method, url, headers, body };
     requests.push(request);
     const handler = routes.get(`${method} ${url.split('?')[0]}`);
-    const reply = handler === undefined ? { status: 404, problem: { status: 404, code: 'NOT_MOCKED' } } : handler(request);
+    const reply =
+      handler === undefined ? { status: 404, problem: { status: 404, code: 'NOT_MOCKED' } } : await handler(request);
     if (reply.problem !== undefined) {
       return new Response(JSON.stringify(reply.problem), {
         status: reply.status,
@@ -36,7 +38,7 @@ export function fakeServer() {
     if (reply.json !== undefined) {
       return new Response(JSON.stringify(reply.json), {
         status: reply.status,
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...reply.headers },
       });
     }
     return new Response(null, { status: reply.status });

@@ -1,20 +1,45 @@
 import { describe, expect, it } from 'vitest';
 
-import type { Instrument } from '../api/types';
-import { botRun } from '../test/botRun';
+import type { BotRun, Instrument } from '../api/types';
+import { botRun, finishedRun } from '../test/botRun';
 import { noTrades } from '../test/fakeStream';
 import { seeded } from '../test/seeded';
 import {
   activeRun,
   averageRate,
+  elapsedSeconds,
+  LEFT_RUNNING_AFTER_SECONDS,
+  leftRunning,
+  ranForSeconds,
+  ranForText,
+  remainingSeconds,
   type RunForm,
   runRequest,
   shortfallText,
   startBlocked,
+  stopRecordedByClose,
   strategiesText,
   taggedSplit,
+  timeLeftText,
   workerText,
 } from './runView';
+
+/** The fixture run started at 10:00:00 on 6 November; this is that many seconds later. */
+function after(seconds: number): number {
+  return Date.parse('2026-11-06T10:00:00Z') + seconds * 1000;
+}
+
+/** The same moment as the exchange writes it. */
+function at(seconds: number): string {
+  return new Date(after(seconds)).toISOString();
+}
+
+/** The window of a run the next start ended, that long after the fixture run's start. */
+function endedByNextStart(seconds: number): BotRun['window'] {
+  return { startSequence: '41', stopSequence: null, endSequence: '900', endedBy: 'NEXT_START', endedAt: at(seconds) };
+}
+
+const NO_WORKER = { workerId: null, heartbeatAt: null, leaseExpiresAt: null };
 
 function tagged(marketMakers: number, noise: number, momentum: number, untagged = 0) {
   return { marketMakers, noise, momentum, untagged };
@@ -54,7 +79,8 @@ function form(overrides: Partial<RunForm> = {}): RunForm {
     commandsPerSecond: '4.00',
     maxOrderQuantity: '10',
     maxPosition: '100',
-    durationMinutes: '',
+    durationMinutes: '60',
+    untilStopped: false,
     instrumentIds: [NOVA.instrumentId, ORBT.instrumentId],
     ...overrides,
   };
@@ -83,9 +109,231 @@ describe('the bot run view', () => {
     }
   });
 
+  it('counts whole seconds from the start, whatever the worker last reported, and never below zero', () => {
+    expect(elapsedSeconds(botRun(), after(0))).toBe(0);
+    expect(elapsedSeconds(botRun(), after(0.999))).toBe(0);
+    expect(elapsedSeconds(botRun(), after(750))).toBe(750);
+    // The fixture's worker last reported 80 seconds in; a run whose worker is lost keeps ageing.
+    expect(elapsedSeconds(botRun({ status: 'STALE' }), after(13 * 86_400))).toBe(13 * 86_400);
+    expect(elapsedSeconds(botRun({ worker: { workerId: null, heartbeatAt: null, leaseExpiresAt: null } }), after(9))).toBe(9);
+    // A browser clock behind the exchange's.
+    expect(elapsedSeconds(botRun(), after(-30))).toBe(0);
+  });
+
+  it('counts down to a timed run\'s end, and has nothing to count for a run with no end', () => {
+    const timed = botRun({ endsAt: '2026-11-06T11:00:00Z' });
+    expect(remainingSeconds(timed, after(0))).toBe(3_600);
+    expect(remainingSeconds(timed, after(750))).toBe(2_850);
+    expect(remainingSeconds(timed, after(3_599.5))).toBe(1);
+    expect(remainingSeconds(timed, after(3_600))).toBe(0);
+    expect(remainingSeconds(timed, after(3_700))).toBe(0);
+    expect(remainingSeconds(botRun(), after(750))).toBeNull();
+
+    expect(timeLeftText(timed, after(750))).toBe('47 min 30 s');
+    expect(timeLeftText(timed, after(3_599.5))).toBe('1 s');
+    expect(timeLeftText(botRun(), after(750))).toBeNull();
+    // Once the operator has asked for a stop, the end time decides nothing.
+    expect(timeLeftText({ ...timed, status: 'STOPPING', desiredState: 'STOPPED' }, after(750))).toBeNull();
+    expect(timeLeftText({ ...timed, status: 'STOPPED' }, after(3_700))).toBeNull();
+  });
+
+  it('leaves it to the exchange to say a timed run has reached its end, whatever the clock reads', () => {
+    const timed = botRun({ endsAt: '2026-11-06T11:00:00Z' });
+    // Past its end the exchange shows the run as stopping, and as still wanting to run until its worker confirms.
+    const overdue: BotRun = { ...timed, status: 'STOPPING' };
+    expect(overdue.desiredState).toBe('RUNNING');
+    expect(timeLeftText(overdue, after(3_604))).toBe('Ending now');
+    // A clock half a minute behind the exchange's would still count 30 seconds.
+    expect(timeLeftText(overdue, after(3_570))).toBe('Ending now');
+    // A clock ahead of the exchange's is past the end while the run is running: it has not ended, so a second is left.
+    for (const status of ['STARTING', 'RUNNING', 'STALE'] as const) {
+      expect(timeLeftText({ ...timed, status }, after(3_600))).toBe('1 s');
+      expect(timeLeftText({ ...timed, status }, after(3_600 + 360))).toBe('1 s');
+    }
+    // Six minutes ahead on a two-minute run that has just started: not over from its first second.
+    const short = botRun({ endsAt: '2026-11-06T10:02:00Z' });
+    expect(remainingSeconds(short, after(362))).toBe(0);
+    expect(timeLeftText(short, after(362))).toBe('1 s');
+  });
+
+  it('takes a run for forgotten only with no end, no stop asked for, and more than a day behind it', () => {
+    const day = LEFT_RUNNING_AFTER_SECONDS;
+    expect(day).toBe(86_400);
+    expect(leftRunning(botRun(), after(day - 1))).toBe(false);
+    expect(leftRunning(botRun(), after(day))).toBe(false);
+    expect(leftRunning(botRun(), after(day + 1))).toBe(true);
+    expect(leftRunning(botRun(), after(13 * day))).toBe(true);
+    // Its worker lost, it still trades again as soon as one takes over.
+    expect(leftRunning(botRun({ status: 'STALE' }), after(day + 1))).toBe(true);
+    // A timed run ends by itself, even while its end is overdue.
+    expect(leftRunning(botRun({ endsAt: '2026-11-07T10:00:00Z' }), after(day + 1))).toBe(false);
+    expect(leftRunning(botRun({ endsAt: '2026-11-06T11:00:00Z' }), after(2 * day))).toBe(false);
+    expect(leftRunning(botRun({ status: 'STOPPING', desiredState: 'STOPPED' }), after(2 * day))).toBe(false);
+  });
+
+  it('never takes a timed run for forgotten, and always one with no end past a day', () => {
+    const draw = seeded(1123);
+    for (let i = 0; i < 500; i++) {
+      const elapsed = draw(3 * 86_400);
+      const minutes = 1 + draw(1_440);
+      const timed = botRun({ endsAt: new Date(after(minutes * 60)).toISOString() });
+      expect(leftRunning(timed, after(elapsed))).toBe(false);
+      expect(leftRunning(botRun(), after(elapsed))).toBe(elapsed > 86_400);
+      // The time gone and the time left make the run's length, until it is due.
+      expect(elapsedSeconds(timed, after(elapsed)) + (remainingSeconds(timed, after(elapsed)) ?? 0)).toBe(
+        Math.max(elapsed, minutes * 60),
+      );
+    }
+  });
+
+  it("gives the history a stopped run's length, and the time so far of one that is not over", () => {
+    // Its worker confirmed the stop ten minutes in; now does not matter.
+    expect(ranForText(finishedRun(), after(5 * 86_400))).toBe('10 min');
+    expect(ranForSeconds(finishedRun(), after(5 * 86_400))).toBe(600);
+    // Stopped half an hour in with its worker gone: the worker's last report stands in, 80 seconds in.
+    const unconfirmed = botRun({ status: 'STOPPED', desiredState: 'STOPPED', stopRequestedAt: at(1_800) });
+    expect(ranForText(unconfirmed, after(5 * 86_400))).toBe('About 1 min 20 s');
+    expect(ranForSeconds(unconfirmed, after(5 * 86_400))).toBe(80);
+    const unknown = botRun({ status: 'STOPPED', desiredState: 'STOPPED', stopRequestedAt: at(1_800), worker: NO_WORKER });
+    expect(ranForText(unknown, after(600))).toBe('Unknown');
+    expect(ranForSeconds(unknown, after(600))).toBe(-1);
+    // Not over: from its start to now, not to its worker's last report.
+    expect(ranForText(botRun(), after(750))).toBe('12 min 30 s so far');
+    expect(ranForSeconds(botRun(), after(750))).toBe(750);
+    expect(ranForText(botRun({ status: 'STALE' }), after(13 * 86_400 + 4 * 3_600))).toBe('13 d 4 h so far');
+    expect(ranForSeconds(botRun({ status: 'STOPPING', desiredState: 'STOPPED' }), after(750))).toBe(750);
+  });
+
+  it("keeps a run the next start ended at its own length, not the time until that start", () => {
+    const now = after(9 * 86_400);
+    const reads = (run: BotRun) => [ranForText(run, now), ranForSeconds(run, now)];
+    // No end, its worker lost 80 seconds in, stopped half an hour in with no worker to confirm.
+    const stopped = botRun({ status: 'STOPPED', desiredState: 'STOPPED', stopRequestedAt: at(1_800) });
+    expect(reads(stopped)).toEqual(['About 1 min 20 s', 80]);
+    // Three days later the next run starts and ends its window: the row reads as it did.
+    const ended = { ...stopped, window: endedByNextStart(3 * 86_400) };
+    expect(reads(ended)).toEqual(['About 1 min 20 s', 80]);
+    // Its worker comes back after that and confirms: the stop asked for bounds it, not the late report.
+    const lateReport = at(3 * 86_400 + 600);
+    const confirmedLate = {
+      ...ended,
+      stoppedAt: lateReport,
+      worker: { workerId: 'sim-1', heartbeatAt: lateReport, leaseExpiresAt: lateReport },
+    };
+    expect(reads(confirmedLate)).toEqual(['About 30 min', 1_800]);
+
+    // A 60-minute run no worker ever took. Nothing was reported, so nothing is known, before the next start and after.
+    const never = botRun({ status: 'STOPPED', endsAt: at(3_600), worker: NO_WORKER });
+    expect(reads(never)).toEqual(['Unknown', -1]);
+    // The next start asks the overdue run to stop as of its end time, then ends its window.
+    const neverEnded: BotRun = {
+      ...never,
+      desiredState: 'STOPPED',
+      stopRequestedAt: at(3_600),
+      window: endedByNextStart(3 * 86_400),
+    };
+    expect(reads(neverEnded)).toEqual(['Unknown', -1]);
+
+    // A timed run whose worker last reported two seconds before its end, and never confirmed.
+    const reported = (seconds: number) => ({ workerId: 'sim-1', heartbeatAt: at(seconds), leaseExpiresAt: at(seconds + 15) });
+    const timed = botRun({ status: 'STOPPED', endsAt: at(3_600), worker: reported(3_598) });
+    expect(reads(timed)).toEqual(['About 59 min 58 s', 3_598]);
+    const timedEnded: BotRun = {
+      ...timed,
+      desiredState: 'STOPPED',
+      stopRequestedAt: at(3_600),
+      window: endedByNextStart(2 * 86_400),
+    };
+    expect(reads(timedEnded)).toEqual(['About 59 min 58 s', 3_598]);
+    // One whose worker reported once more past the end, settling: the run's limit bounds it.
+    expect(reads({ ...timedEnded, worker: reported(3_603) })).toEqual(['About 1 h 0 min', 3_600]);
+    // An hour's run stopped ten minutes in, its worker reporting once more five seconds later and never confirming:
+    // the stop asked for bounds it, not the end time it would have had.
+    const cutShort: BotRun = { ...timed, desiredState: 'STOPPED', stopRequestedAt: at(600), worker: reported(605) };
+    expect(reads(cutShort)).toEqual(['About 10 min', 600]);
+    expect(reads({ ...cutShort, window: endedByNextStart(86_400) })).toEqual(['About 10 min', 600]);
+
+    // A confirmed stop is exact, to the confirmation.
+    expect(reads(finishedRun())).toEqual(['10 min', 600]);
+  });
+
+  it("tells the close's record of a stop from a stop of the run itself", () => {
+    const closedAt = at(7_200);
+    const recorded = { status: 'STOPPED', desiredState: 'STOPPED', stopRequestedAt: closedAt, stoppedAt: closedAt } as const;
+    const window = (endedBy: BotRun['window']['endedBy']): BotRun['window'] => ({
+      startSequence: '41',
+      stopSequence: null,
+      endSequence: endedBy === 'NOT_KEPT' ? null : '900',
+      endedBy,
+      endedAt: endedBy === 'NOT_KEPT' ? null : at(3_600),
+    });
+    // Ended before the close with no worker confirming: the time on it is the market's, not the run's.
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('NEXT_START') }), closedAt)).toBe(true);
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('NOT_KEPT') }), closedAt)).toBe(true);
+    // The same moment, written with its fraction or in another offset.
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('NEXT_START') }), '2026-11-06T12:00:00.000Z')).toBe(true);
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('NEXT_START') }), '2026-11-06T13:00:00+01:00')).toBe(true);
+    // The run the close itself ended: that time is its end.
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('MARKET_CLOSE') }), closedAt)).toBe(false);
+    // A worker's confirmation is the run's own, whenever it came.
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('WORKER') }), closedAt)).toBe(false);
+    expect(stopRecordedByClose(finishedRun(), closedAt)).toBe(false);
+    // Confirmed late by its worker, at another time than the close.
+    expect(stopRecordedByClose(botRun({ ...recorded, stoppedAt: at(7_199), window: window('NEXT_START') }), closedAt)).toBe(false);
+    // No stop recorded, or a market that has not closed.
+    expect(stopRecordedByClose(botRun({ ...recorded, stoppedAt: null, window: window('NEXT_START') }), closedAt)).toBe(false);
+    expect(stopRecordedByClose(botRun({ ...recorded, window: window('NEXT_START') }), null)).toBe(false);
+    expect(stopRecordedByClose(botRun(), closedAt)).toBe(false);
+  });
+
+  it("keeps a run's length when a market's close records a stop on it that it never had", () => {
+    const now = after(9 * 86_400);
+    const reported = (seconds: number) => ({ workerId: 'sim-1', heartbeatAt: at(seconds), leaseExpiresAt: at(seconds + 15) });
+    // An hour's run from before windows were kept: its worker reported once more past its end and never confirmed,
+    // and nobody asked it to stop.
+    const old = botRun({
+      status: 'STOPPED',
+      desiredState: 'STOPPED',
+      endsAt: at(3_600),
+      worker: reported(3_603),
+      window: { startSequence: '41', stopSequence: null, endSequence: null, endedBy: 'NOT_KEPT', endedAt: null },
+    });
+    expect([ranForText(old, now), ranForSeconds(old, now)]).toEqual(['About 1 h 0 min', 3_600]);
+    // Days later the market closes and records a stop asked for, and a stop, at its own time.
+    const closedAt = at(5 * 86_400);
+    const closed = { ...old, stopRequestedAt: closedAt, stoppedAt: closedAt };
+    expect([ranForText(closed, now), ranForSeconds(closed, now)]).toEqual(['About 1 h 0 min', 3_600]);
+  });
+
+  it('never counts an unconfirmed run past its stop, its end time or its last report, whenever the next run started', () => {
+    const draw = seeded(2311);
+    for (let i = 0; i < 500; i++) {
+      const own = 1 + draw(100_000);
+      const report = 1 + draw(200_000);
+      const next = own + draw(10 * 86_400);
+      // A timed run is stopped at its end time, or by the operator up to two hours before it.
+      const timed = draw(2) === 1;
+      const run = botRun({
+        status: 'STOPPED',
+        desiredState: 'STOPPED',
+        endsAt: timed ? at(own + draw(2) * draw(7_200)) : null,
+        stopRequestedAt: at(own),
+        worker: { workerId: 'sim-1', heartbeatAt: at(report), leaseExpiresAt: at(report + 15) },
+      });
+      const ended = { ...run, window: endedByNextStart(next) };
+      const seconds = ranForSeconds(ended, after(next + 60));
+      expect(seconds).toBe(Math.min(own, report));
+      // The next run's start changes nothing about it.
+      expect(ranForSeconds(run, after(next + 60))).toBe(seconds);
+      expect(ranForText(ended, after(next + 60))).toBe(ranForText(run, after(own + 60)));
+      expect(ranForText(ended, after(next + 60))).toMatch(/^About /);
+    }
+  });
+
   it('says why a run cannot start: the market first, then the active run, then the bots', () => {
     expect(startBlocked('SETUP', botRun(), tagged(0, 0, 0))).toBe('Bots trade only once the market has opened.');
     expect(startBlocked('NOT_SET_UP', undefined, tagged(1, 3, 1))).toBe('Bots trade only once the market has opened.');
+    expect(startBlocked('CLOSED', undefined, tagged(1, 3, 1))).toBe('The market has closed; bots no longer trade.');
     expect(startBlocked('OPEN', botRun(), tagged(0, 0, 0))).toBe('A run is active; one runs at a time. Stop it first.');
     expect(startBlocked('HALTED', undefined, tagged(0, 0, 0))).toBe('There are no bots; they are created during setup.');
     expect(startBlocked('OPEN', undefined, tagged(0, 0, 0, 4))).toBe(
@@ -152,6 +400,7 @@ describe('the bot run view', () => {
         commandsPerSecond: '4.00',
         maxOrderQuantity: 10,
         maxPosition: 100,
+        durationMinutes: 60,
       },
     });
     expect(
@@ -169,6 +418,38 @@ describe('the bot run view', () => {
         instrumentIds: [ORBT.instrumentId],
       },
     });
+  });
+
+  it('sends no duration only for a run chosen to last until stopped, whatever the minutes field still holds', () => {
+    const sent = (overrides: Partial<RunForm>) => {
+      const built = runRequest(form(overrides), [NOVA, ORBT]);
+      return 'request' in built ? built.request : built;
+    };
+    expect(sent({ untilStopped: true })).not.toHaveProperty('durationMinutes');
+    expect(sent({ untilStopped: true, durationMinutes: '' })).not.toHaveProperty('durationMinutes');
+    expect(sent({ untilStopped: true, durationMinutes: 'soon' })).toEqual({
+      marketMakers: 1,
+      noise: 2,
+      momentum: 0,
+      commandsPerSecond: '4.00',
+      maxOrderQuantity: 10,
+      maxPosition: 100,
+    });
+    expect(sent({ durationMinutes: ' 1440 ' })).toHaveProperty('durationMinutes', 1440);
+    // A set time with no minutes is never read as no end. The limits, 1 to 1440, are the exchange's to refuse.
+    expect(sent({ durationMinutes: '' })).toEqual({ error: 'Duration must be a whole number.' });
+    expect(sent({ durationMinutes: '  ' })).toEqual({ error: 'Duration must be a whole number.' });
+    expect(sent({ durationMinutes: '0' })).toHaveProperty('durationMinutes', 0);
+  });
+
+  it('always sends the minutes of a set time, and never any for a run until stopped', () => {
+    const draw = seeded(60);
+    for (let i = 0; i < 300; i++) {
+      const minutes = draw(2_000);
+      const untilStopped = draw(2) === 1;
+      const built = runRequest(form({ untilStopped, durationMinutes: String(minutes) }), [NOVA, ORBT]);
+      expect('request' in built && built.request.durationMinutes).toBe(untilStopped ? undefined : minutes);
+    }
   });
 
   it('refuses a form that the exchange could only misread', () => {

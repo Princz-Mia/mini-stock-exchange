@@ -30,6 +30,7 @@ import org.springframework.web.bind.annotation.RestController;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 
+import com.mia_princz.mse.execution.trading.adapter.CurrentSimulation;
 import com.mia_princz.mse.execution.trading.application.BotRunResult;
 import com.mia_princz.mse.execution.trading.application.CommandKey;
 import com.mia_princz.mse.execution.trading.application.StartBotRun;
@@ -116,6 +117,8 @@ class BotRunController {
 		ApiException refused = switch (result.status()) {
 			case NO_MARKET, NOT_OPEN -> new ApiException(HttpStatus.CONFLICT, "MARKET_NOT_OPEN",
 					"Bots run only while the market is open or halted");
+			case MARKET_CLOSED -> new ApiException(HttpStatus.CONFLICT, "MARKET_CLOSED",
+					"The market has closed; no bot run starts in it");
 			case RUN_ACTIVE -> new ApiException(HttpStatus.CONFLICT, "RUN_ACTIVE",
 					"A bot run is already running; stop it first");
 			case NOT_ENOUGH_BOTS -> notEnoughBots(result.shortfall());
@@ -170,8 +173,9 @@ class BotRunController {
 	/**
 	 * The run's commands in the command sequence: from its start to its end. {@code stopSequence} is the operator's
 	 * stop command, if there was one; {@code endSequence} stays null until the run is finished, and {@code endedBy}
-	 * says how it ended: WORKER, NEXT_START, or NOT_KEPT for a run recorded before windows were kept. {@code endedAt}
-	 * is when it ended, set with the end: the worker's confirmation, or the next run's start.
+	 * says how it ended: WORKER, NEXT_START, MARKET_CLOSE, or NOT_KEPT for a run recorded before windows were kept.
+	 * {@code endedAt} is when it ended, set with the end: the worker's confirmation, the next run's start, or the
+	 * market's close.
 	 */
 	record Window(String startSequence, String stopSequence, String endSequence, String endedBy, Instant endedAt) {
 	}
@@ -254,7 +258,10 @@ class BotRunController {
 		return new RunDetail(view, figures(runId));
 	}
 
-	/** Runs in the given order, at most {@code limit}: one if {@code only} is given, else a page after the cursor. */
+	/**
+	 * The current simulation's runs in the given order, at most {@code limit}: one if {@code only} is given, else a
+	 * page after the cursor.
+	 */
 	private List<RunView> views(UUID only, Cursors.RunPosition after, PageOrder direction, int limit) {
 		Instant now = clock.instant();
 		record Row(UUID id, String desired, Instant startedAt, Instant endsAt, Instant stopRequestedAt,
@@ -266,11 +273,11 @@ class BotRunController {
 				    max_order_quantity, max_position, worker_id, heartbeat_at, lease_expires_at, placed, canceled,
 				    rejected, errors, in_flight, stop_failures, start_sequence, stop_sequence, end_sequence, ended_by,
 				    ended_at
-				FROM bot_run%1$s
+				FROM bot_run WHERE simulation_id = %3$s%1$s
 				ORDER BY started_at %2$s, id %2$s LIMIT :limit""".formatted(
-				only != null ? " WHERE id = :only"
-						: after == null ? "" : " WHERE (started_at, id) " + direction.after() + " (:afterAt, :afterId)",
-				direction.direction()))
+				only != null ? " AND id = :only"
+						: after == null ? "" : " AND (started_at, id) " + direction.after() + " (:afterAt, :afterId)",
+				direction.direction(), CurrentSimulation.ID))
 			.param("only", only)
 			.param("afterAt", after == null ? null : Timestamp.from(after.startedAt()))
 			.param("afterId", after == null ? null : after.id())

@@ -90,6 +90,29 @@ final class OpenApiContract {
 		return operations;
 	}
 
+	/** The query parameters of the operations under a tag, as {@code METHOD /path/{}?name}. */
+	Set<String> queryParameters(String tag) {
+		Set<String> parameters = new TreeSet<>();
+		for (Map.Entry<String, JsonNode> path : document.get("paths").properties()) {
+			for (Map.Entry<String, JsonNode> operation : path.getValue().properties()) {
+				for (JsonNode operationTag : operation.getValue().path("tags")) {
+					if (!operationTag.asString().equals(tag)) {
+						continue;
+					}
+					for (JsonNode parameter : operation.getValue().path("parameters")) {
+						JsonNode declared = parameter.has("$ref") ? document.at(parameter.get("$ref").asString().substring(1))
+								: parameter;
+						if (declared.get("in").asString().equals("query")) {
+							parameters.add(operation.getKey().toUpperCase() + " " + blankVariables(path.getKey()) + "?"
+									+ declared.get("name").asString());
+						}
+					}
+				}
+			}
+		}
+		return parameters;
+	}
+
 	static String blankVariables(String path) {
 		return path.replaceAll("\\{[^}]+}", "{}");
 	}

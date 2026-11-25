@@ -8,6 +8,7 @@ import { Tour } from '../help/Tour';
 import { TOURS } from '../help/tours';
 import { useTour } from '../help/useTour';
 import { FillNotice, FillWatch, useFillNotices } from './FillNotice';
+import { fundingMoment, useMarketStatus } from './market';
 import { ThemeSwitch } from './ThemeSwitch';
 import { useAccountEvents } from './useAccountEvents';
 
@@ -81,8 +82,13 @@ function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout
   // Trading: the user's own account is on screen. An operator who also trades sees none of it while operating.
   const trading = trader && mode === 'TRADING';
   const notices = useFillNotices();
-  // The trader's own change notifications while trading; each may bring a fill to tell them about.
-  useAccountEvents(trading, undefined, notices.check);
+  // Which market this is, by the name it was started with; a market with none, or a status that can't be read, is
+  // just the simulation.
+  const market = useMarketStatus().data;
+  const name = market?.name ?? null;
+  // The trader's own change notifications while trading; each may bring a fill to tell them about. A stream refused
+  // for want of an account in the market is opened again once one may have been created.
+  useAccountEvents(trading, undefined, notices.check, fundingMoment(market));
   const help = useRef<HTMLButtonElement>(null);
   const shown = useRef(tour.showing);
   // When a tour closes, focus goes to Help, where it can be found again, rather than to the top of the page.
@@ -96,7 +102,10 @@ function SignedIn({ identity, logout, loggingOut }: { identity: Identity; logout
     <div className="shell">
       <header className="topbar">
         <span className="brand">Mini Stock Exchange</span>
-        <span className="context-badge">Simulation · Virtual funds</span>
+        {/* Only the name is cut short on a narrow screen: that the funds are virtual always shows. */}
+        <span className="context-badge" title={name ?? undefined}>
+          <span className="context-name">{name ?? 'Simulation'}</span> <span className="context-funds">· Virtual funds</span>
+        </span>
         {trader && operator && <ModeSwitch mode={mode} />}
         <nav aria-label="Main">
           {trading ? (

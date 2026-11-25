@@ -146,7 +146,16 @@ function UnfundedTraders({ onFund, busy }: { onFund: (username: string) => void;
  * Funded accounts, traders and bots, with what they started with and, during setup, forms to add a trader and to
  * fund one that has no account yet.
  */
-export function AccountSetup({ instruments, editable }: { instruments: readonly Instrument[]; editable: boolean }) {
+export function AccountSetup({
+  instruments,
+  editable,
+  closed = false,
+}: {
+  instruments: readonly Instrument[];
+  editable: boolean;
+  /** The market has closed: the accounts are listed with what they started with, and nothing more is granted. */
+  closed?: boolean;
+}) {
   const client = useQueryClient();
   const accounts = usePagedList({
     table: 'accounts',
@@ -260,7 +269,11 @@ export function AccountSetup({ instruments, editable }: { instruments: readonly 
           </fieldset>
         </form>
       ) : (
-        <p className="muted">Endowments are frozen once the market opens; nothing is granted after that.</p>
+        <p className="muted">
+          {closed
+            ? 'The market has closed, so no trader can be added or funded. The accounts stay listed with what they started with.'
+            : 'Endowments are frozen once the market opens; nothing is granted after that.'}
+        </p>
       )}
       <div id={outcomeId}>
         <CommandStatus

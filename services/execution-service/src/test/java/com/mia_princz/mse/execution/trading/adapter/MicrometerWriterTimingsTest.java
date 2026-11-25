@@ -21,7 +21,7 @@ class MicrometerWriterTimingsTest {
 
 		for (String name : new String[] { "mse.writer.queue.wait", "mse.writer.begin", "mse.writer.work",
 				"mse.writer.commit", "mse.writer.apply" }) {
-			for (String command : new String[] { "place", "cancel", "other", "run" }) {
+			for (String command : new String[] { "place", "cancel", "other", "run", "close" }) {
 				assertThat(meters.find(name).tag("command", command).timer()).as(name + " " + command).isNotNull();
 			}
 		}

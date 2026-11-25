@@ -27,3 +27,10 @@ const timeFormat = new Intl.DateTimeFormat('en-GB', {
 export function utcTime(iso: string): string {
   return `${timeFormat.format(new Date(iso))} UTC`;
 }
+
+const dateFormat = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+
+/** "5 Nov 2026, 16:00:00 UTC": for a moment that may be read days later, such as when a market closed. */
+export function utcDateTime(iso: string): string {
+  return `${dateFormat.format(new Date(iso))}, ${utcTime(iso)}`;
+}
