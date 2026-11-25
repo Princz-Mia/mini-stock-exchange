@@ -49,7 +49,7 @@ export const LIST_POLL_MS = 5_000;
  *
  * A closed market's list is read no more once market data has caught up with it: the catalogue is frozen and nothing
  * trades, so nothing this page shows of it can change. Until then the feed it reports may still be behind, with the
- * close's own last events.
+ * close's own last events. A read that failed is asked again, whatever the list read before it said.
  */
 export function instrumentPace(client: QueryClient, simulation: string | null, closed = false) {
   return (query: { state: { data: Instruments | undefined; error: unknown } }): number | false => {
@@ -61,7 +61,7 @@ export function instrumentPace(client: QueryClient, simulation: string | null, c
       return WAITING_POLL_MS;
     }
     const feed = query.state.data?.feed;
-    return closed && feed?.state === 'LIVE' && feed.lag === 0 ? false : LIST_POLL_MS;
+    return closed && feed?.state === 'LIVE' && feed.lag === 0 && query.state.error == null ? false : LIST_POLL_MS;
   };
 }
 

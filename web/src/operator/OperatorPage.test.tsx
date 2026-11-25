@@ -3757,11 +3757,20 @@ describe('what the operator screen reads again of a closed market', () => {
     state.runs = [finishedRun()];
     let list = feed;
     let trades = behind;
+    // While set, the reads that stop once closed fail as a proxy does for a moment.
+    let down = false;
+    const failing = { status: 502, problem: { status: 502, code: 'BAD_GATEWAY', detail: 'Bad gateway' } };
     server
       .on('GET /api/v1/admin/health', { status: 200, json: HEALTH })
-      .on('GET /api/v1/instruments', () => ({ status: 200, json: { instruments: [NOVA], feed: list } }))
-      .on(`GET ${CANDLES}`, () => ({ status: 200, json: candles(trades) }));
-    const view = renderPage();
+      .on('GET /api/v1/instruments', () =>
+        down ? failing : { status: 200, json: { instruments: [NOVA], feed: list } },
+      )
+      .on(`GET ${CANDLES}`, () => (down ? failing : { status: 200, json: candles(trades) }))
+      .on('GET /api/v1/admin/bot-runs', () =>
+        down ? failing : { status: 200, json: { runs: state.runs, nextCursor: null } },
+      );
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const view = renderWith(client);
     await screen.findByRole('table', { name: 'Recent runs' });
     await screen.findByText('Taking commands');
     await waitFor(() => expect(reads(server)[CANDLES]).toBeGreaterThan(0));
@@ -3769,7 +3778,11 @@ describe('what the operator screen reads again of a closed market', () => {
     return {
       server,
       view,
+      client,
       wait,
+      fail: (on: boolean) => {
+        down = on;
+      },
       catchUp: () => {
         list = { state: 'LIVE', lag: 0 };
         trades = 0;
@@ -3797,6 +3810,34 @@ describe('what the operator screen reads again of a closed market', () => {
       }
       view.unmount();
       vi.useRealTimers();
+    }
+  });
+
+  it("reads a closed market's runs, list and analytics again after a failed read, until one comes back", async () => {
+    const { server, view, client, wait, fail } = await opened('CLOSED');
+    // The operator comes back to the page while the proxy fails for a moment: the reads as the page opens fail.
+    fail(true);
+    view.unmount();
+    renderWith(client);
+    await wait(10);
+    expect(await screen.findByText('The bot runs could not be loaded.')).toBeInTheDocument();
+    expect(await screen.findByText('The runs could not be refreshed; showing the last page loaded.')).toBeInTheDocument();
+    const failed = reads(server);
+
+    fail(false);
+    await wait(11_000);
+    const back = reads(server);
+    for (const path of ['/api/v1/admin/bot-runs', '/api/v1/instruments', CANDLES]) {
+      expect(back[path], path).toBeGreaterThan(failed[path]!);
+    }
+    expect(screen.queryByText('The bot runs could not be loaded.')).toBeNull();
+    expect(screen.queryByText(/The runs could not be refreshed/)).toBeNull();
+    expect(screen.queryByText(/Market data is not reachable/)).toBeNull();
+    // Read again, and caught up: nothing more is asked.
+    await wait(11_000);
+    const later = reads(server);
+    for (const path of ['/api/v1/admin/bot-runs', '/api/v1/instruments', CANDLES]) {
+      expect(later[path], path).toBe(back[path]);
     }
   });
 
