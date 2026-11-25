@@ -139,7 +139,6 @@ describe('an operator command kept beside the cache', () => {
     act(() => result.current.run('halt'));
     await waitFor(() => expect(halts()).toHaveLength(2));
     expect(new Set(halts().map((request) => request.headers['Idempotency-Key'])).size).toBe(2);
-    await waitFor(() => expect(result.current.after).toBe('halt'));
   });
 
   it('holds a done command until the query that shows what it did has been read since its answer', async () => {

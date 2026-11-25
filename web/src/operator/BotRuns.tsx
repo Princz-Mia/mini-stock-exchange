@@ -238,8 +238,8 @@ type StartRun = ReturnType<typeof useStartRun>;
 
 /**
  * What became of a start. One with no answer is said to have gone through once a run is read as going; one refused
- * because a run is going is said as an earlier start having gone through, the operator's own when one went
- * unanswered here.
+ * because a run is going is said as an earlier start having gone through, whoever's it was. A start with no answer is
+ * never followed by one under a new key while it is open, so a refusal is never the operator's own earlier start.
  */
 function StartStatus({ start, active }: { start: StartRun; active: boolean }) {
   const { outcome } = start;
@@ -253,9 +253,7 @@ function StartStatus({ start, active }: { start: StartRun; active: boolean }) {
   if (outcome.kind === 'refused' && outcome.code === 'RUN_ACTIVE' && active) {
     return (
       <p role="alert" className="outcome outcome-rejected">
-        {start.after !== undefined
-          ? 'Your earlier start already went through: a run is going, so nothing new was started.'
-          : 'A run is already going: an earlier start already went through, so nothing new was started.'}
+        A run is already going: an earlier start already went through, so nothing new was started.
       </p>
     );
   }

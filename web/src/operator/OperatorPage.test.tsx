@@ -4394,6 +4394,31 @@ describe('a market opened for a set time, on the operator screen', () => {
     expect(within(panel).getByText('5 Nov 2026, 11:00:00 UTC')).toBeInTheDocument();
   });
 
+  it('no longer says the market is open once it has closed at its set time while the page was left', async () => {
+    const { server, state } = exchange('SETUP');
+    server.on(`POST ${OPEN}`, () => {
+      state.market = opened(CLOSES_AT);
+      return { status: 200, json: { state: 'OPEN', commandSequence: '8', closesAt: CLOSES_AT } };
+    });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const first = renderWith(client);
+    const length = await screen.findByRole('group', { name: 'Market length' });
+    fireEvent.click(within(length).getByRole('radio', { name: 'For a set time' }));
+    await waitFor(async () => expect(await button('Open market')).toBeEnabled());
+    fireEvent.click(await button('Open market'));
+    const said = 'The market is open. The exchange closes it by itself at 5 Nov 2026, 11:00:00 UTC.';
+    expect(await screen.findByText(said)).toBeInTheDocument();
+
+    // The operator looks at another page, and the exchange closes the market at its set time meanwhile.
+    first.unmount();
+    state.market = { ...opened(CLOSES_AT), state: 'CLOSED', closedAt: CLOSES_AT, closedOnSchedule: true };
+    renderWith(client);
+
+    const panel = await marketPanel();
+    await waitFor(() => expect(within(panel).getByRole('status')).toHaveTextContent('Closed'));
+    expect(screen.queryByText(said)).toBeNull();
+  });
+
   it('says why a set time cannot be sent, and does not send it', async () => {
     const { server } = exchange('SETUP');
     renderPage();
@@ -4795,6 +4820,65 @@ describe('operator commands across leaving the page', () => {
     await waitFor(async () => expect(await button('Resume trading')).toBeEnabled());
     expect(await button('Halt trading')).toBeDisabled();
     expect(sent(server, HALT)).toHaveLength(1);
+  });
+
+  it("no longer says trading is halted once another operator has resumed it while the page was left", async () => {
+    const { server, state } = exchange('OPEN');
+    server.on(`POST ${HALT}`, () => {
+      state.market = market('HALTED');
+      return { status: 200, json: { state: 'HALTED', commandSequence: '9' } };
+    });
+    const client = newClient();
+    const first = renderWith(client);
+    fireEvent.click(await button('Halt trading'));
+    expect(await screen.findByText('Trading is halted. Cancels still work.')).toBeInTheDocument();
+    await waitFor(async () => expect(await button('Resume trading')).toBeEnabled());
+
+    first.unmount();
+    state.market = market('OPEN');
+    renderWith(client);
+
+    await waitFor(async () => expect(await button('Halt trading')).toBeEnabled());
+    expect(screen.queryByText('Trading is halted. Cancels still work.')).toBeNull();
+  });
+
+  it("never calls a halt refused for a market halted again the operator's own earlier halt", async () => {
+    const { server, state } = exchange('OPEN');
+    let halts = 0;
+    server.on(`POST ${HALT}`, () => {
+      halts += 1;
+      state.market = market('HALTED');
+      return halts === 1
+        ? unknown
+        : {
+            status: 409,
+            problem: {
+              status: 409,
+              code: 'MARKET_TRANSITION_NOT_ALLOWED',
+              state: 'HALTED',
+              detail: 'The market is HALTED; it cannot halt from there',
+            },
+          };
+    });
+    const client = newClient();
+    const first = renderWith(client);
+    fireEvent.click(await button('Halt trading'));
+    const settled = 'Your earlier halt already went through: trading is halted.';
+    expect(await screen.findByText(settled)).toBeInTheDocument();
+
+    // Another operator resumes; back on the page, that halt says nothing any more, and Halt is offered again.
+    first.unmount();
+    state.market = market('OPEN');
+    renderWith(client);
+    await waitFor(async () => expect(await button('Halt trading')).toBeEnabled());
+    expect(screen.queryByText(settled)).toBeNull();
+    // Meanwhile a third operator halts it, so this halt is refused: that is not the first halt going through.
+    fireEvent.click(await button('Halt trading'));
+
+    const said = 'Trading is already halted: an earlier halt already went through, so this one changed nothing.';
+    expect(await screen.findByText(said)).toHaveAttribute('role', 'alert');
+    expect(screen.queryByText(/^Your earlier halt/)).toBeNull();
+    expect(new Set(sent(server, HALT).map((request) => request.headers['Idempotency-Key'])).size).toBe(2);
   });
 
   describe("a run's stop", () => {

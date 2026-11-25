@@ -46,8 +46,6 @@ export interface KeptCommand<A, T, N = undefined> {
    * operator did the same, and either way nothing is left to send. The next command gets a new key.
    */
   settled: boolean;
-  /** This command took the place of one whose answer never came and that the exchange's state settled: its args. */
-  after: A | undefined;
 }
 
 const slotKey = (slot: CommandSlot) => ['operator-command', slot] as const;
@@ -78,7 +76,7 @@ function readAgain(client: QueryClient, confirmedBy: QueryKey | undefined): numb
 async function sendKept<A, T, N>(
   client: QueryClient,
   slot: CommandSlot,
-  turn: Pick<KeptCommand<A, T, N>, 'scope' | 'key' | 'args' | 'asks' | 'note' | 'after'>,
+  turn: Pick<KeptCommand<A, T, N>, 'scope' | 'key' | 'args' | 'asks' | 'note'>,
   send: (args: A, key: string) => Promise<T>,
   note: Noting<T, N> | undefined,
   confirmedBy: QueryKey | undefined,
@@ -187,8 +185,7 @@ export function useOperatorCommand<A, T, N = undefined>(
       if (kept !== null && isOpen(kept)) {
         void sendKept(client, slot, { ...kept, asks: kept.asks + 1 }, send, note, confirmedBy);
       } else {
-        const after = kept !== null && kept.outcome.kind === 'unresolved' ? kept.args : undefined;
-        const turn = { scope, key: crypto.randomUUID(), args, asks: 1, note: undefined, after };
+        const turn = { scope, key: crypto.randomUUID(), args, asks: 1, note: undefined };
         void sendKept(client, slot, turn, send, note, confirmedBy);
       }
       redraw();
@@ -232,8 +229,6 @@ export function useOperatorCommand<A, T, N = undefined>(
     note: mine?.note,
     asks: mine?.asks ?? 0,
     answeredAt: mine?.answeredAt ?? null,
-    /** The args of an earlier command of this kind whose answer never came, which the state settled. */
-    after: mine?.after,
     /** No answer, and nothing the exchange has shown since says it applied: Retry sends it again. */
     unresolved: outcome.kind === 'unresolved' && !settled,
     /** No answer, but the exchange's state shows what it asked for. */
