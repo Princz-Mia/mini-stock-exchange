@@ -93,7 +93,23 @@ interface Options {
   idempotencyKey?: string;
 }
 
-async function request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, options: Options = {}): Promise<T> {
+type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
+
+async function request<T>(method: Method, path: string, options: Options = {}): Promise<T> {
+  return (await answer<T>(method, path, options)).data;
+}
+
+/**
+ * When the exchange sent a response, on its own clock: the Date header, in epoch milliseconds to the whole second. The
+ * browser's clock stands in where there is none. The times in an answer are the exchange's, and a browser's clock can
+ * be minutes away from it, so what is counted from them is counted to this.
+ */
+function sentAt(response: Response): number {
+  const sent = Date.parse(response.headers.get('Date') ?? '');
+  return Number.isNaN(sent) ? Date.now() : sent;
+}
+
+async function answer<T>(method: Method, path: string, options: Options = {}): Promise<{ data: T; sentAt: number }> {
   const headers: Record<string, string> = { Accept: 'application/json' };
   if (method !== 'GET') {
     const token = await csrfToken();
@@ -115,7 +131,7 @@ async function request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: strin
   if (!response.ok) {
     throw new ApiError(response.status, type.includes('problem+json') ? (data as Problem) : null);
   }
-  return data as T;
+  return { data: data as T, sentAt: sentAt(response) };
 }
 
 function query(params: Record<string, string | number | boolean | undefined>): string {
@@ -224,8 +240,14 @@ export const api = {
   provisionBots: (bots: BotsRequest, idempotencyKey: string) =>
     request<BotsCreated>('POST', '/api/v1/admin/bots', { body: bots, idempotencyKey }),
 
-  /** The newest runs first, with what their workers last reported. */
-  botRuns: () => request<BotRunList>('GET', `/api/v1/admin/bot-runs${query({ limit: 10 })}`),
+  /**
+   * The newest runs first, with what their workers last reported, and when the exchange answered, on its own clock:
+   * how long a run has been going is counted to that.
+   */
+  botRuns: async (): Promise<BotRunList & { answeredAt: number }> => {
+    const { data, sentAt } = await answer<BotRunList>('GET', `/api/v1/admin/bot-runs${query({ limit: 10 })}`);
+    return { ...data, answeredAt: sentAt };
+  },
 
   /** Every run, a page at a time. */
   botRunPage: (cursor: string | undefined, limit: number, order: ListOrder) =>

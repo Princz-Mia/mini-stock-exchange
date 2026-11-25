@@ -53,21 +53,32 @@ def test_the_manifest_holds_the_strategy_defaults_and_nothing_else(monkeypatch) 
     assert set(reported["runtime"]) == {"python", "numpy"}
     assert reported["strategies"] == {
         "MARKET_MAKER": {
-            "halfSpreadTicks": 2,
-            "skewTicks": 1,
-            "requoteTicks": 2,
+            "halfSpreadBp": 10.0,
+            "skewBp": 10.0,
+            "requoteBp": 5.0,
             "quoteLifetimeSeconds": 30.0,
         },
-        "NOISE": {"spreadTicks": 5, "maxOpenOrders": 5, "quoteLifetimeSeconds": 10.0},
+        "NOISE": {
+            "spreadBp": 30.0,
+            "valuePull": 0.25,
+            "maxOpenOrders": 5,
+            "quoteLifetimeSeconds": 10.0,
+        },
         "MOMENTUM": {
-            "shortPolls": 5,
-            "longPolls": 20,
-            "threshold": 0.001,
-            "cooldownSeconds": 5.0,
+            "shortPolls": 10,
+            "longPolls": 60,
+            "threshold": 0.002,
+            "minTicks": 2.0,
+            "follow": 0.25,
+            "reachBp": 20.0,
+            "cooldownSeconds": 15.0,
             "orderLifetimeSeconds": 10.0,
         },
     }
     assert reported["defaults"] == {
+        "fairValueHalfLifeHours": 4.0,
+        "fairValueVolatility": 0.015,
+        "viewSpreadBp": 20.0,
         "marketPollSeconds": 1.0,
         "maxDataAgeSeconds": 2.0,
         "maxInFlight": 32,
@@ -77,9 +88,12 @@ def test_the_manifest_holds_the_strategy_defaults_and_nothing_else(monkeypatch) 
 
 
 def test_a_changed_setting_shows_in_the_manifest() -> None:
-    changed = manifest(settings(maker_half_spread_ticks=4, momentum_threshold=0.002))
-    assert changed["strategies"]["MARKET_MAKER"]["halfSpreadTicks"] == 4
-    assert changed["strategies"]["MOMENTUM"]["threshold"] == 0.002
+    changed = manifest(
+        settings(maker_half_spread_bp=4, momentum_threshold=0.004, fair_value_volatility=0.03)
+    )
+    assert changed["strategies"]["MARKET_MAKER"]["halfSpreadBp"] == 4
+    assert changed["strategies"]["MOMENTUM"]["threshold"] == 0.004
+    assert changed["defaults"]["fairValueVolatility"] == 0.03
     assert changed != manifest(settings())
 
 

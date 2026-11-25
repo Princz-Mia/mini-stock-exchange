@@ -127,11 +127,15 @@ describe('a run for a comparison', () => {
     expect(plannedDuration(finishedRun({ endsAt: '2026-11-06T11:00:00Z' }))).toBe('1 h 0 min');
   });
 
-  it('writes lengths in hours, minutes and seconds', () => {
+  it('writes lengths in days, hours, minutes and seconds', () => {
     expect(durationText(45)).toBe('45 s');
     expect(durationText(750)).toBe('12 min 30 s');
     expect(durationText(720)).toBe('12 min');
     expect(durationText(3_900)).toBe('1 h 5 min');
+    expect(durationText(86_399)).toBe('23 h 59 min');
+    expect(durationText(86_400)).toBe('1 d 0 h');
+    // From 10 November 10:00 to 23 November 14:30.
+    expect(durationText(13 * 86_400 + 4 * 3_600 + 30 * 60)).toBe('13 d 4 h');
   });
 
   it('achieved the commands answered in its window over how long it ran', () => {
