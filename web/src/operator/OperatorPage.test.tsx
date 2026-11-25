@@ -504,15 +504,11 @@ describe('the operator screen', () => {
 
     it('shows at once as waiting for market data, and the list is read quickly until it has it', async () => {
       const { server } = exchange('SETUP');
-      // Market Data has it a little after the exchange answers: later than the read straight after the answer.
-      let listedFrom: number | null = null;
-      server.on('GET /api/v1/instruments', () =>
-        listOf(listedFrom !== null && Date.now() >= listedFrom ? [NOVA, ORBT] : [NOVA]),
-      );
-      server.on('POST /api/v1/admin/instruments', () => {
-        listedFrom = Date.now() + 600;
-        return { status: 201, json: ORBT_ADDED };
-      });
+      // Market Data has it a little after the exchange answers: later than the read straight after the answer, and
+      // only once the test says so, however long the page takes to draw.
+      let listed = false;
+      server.on('GET /api/v1/instruments', () => listOf(listed ? [NOVA, ORBT] : [NOVA]));
+      server.on('POST /api/v1/admin/instruments', { status: 201, json: ORBT_ADDED });
       renderPage();
 
       const form = await screen.findByRole('form', { name: 'Add an instrument' });
@@ -532,28 +528,35 @@ describe('the operator screen', () => {
       expect(within(form).queryByRole('button', { name: 'ORBT 50.00' })).toBeNull();
 
       // Listed within a second or so, not five seconds after the read that missed it.
+      listed = true;
       expect(await screen.findByRole('button', { name: 'Edit ORBT' }, { timeout: 2_000 })).toBeInTheDocument();
       expect(screen.queryByText('Added, waiting for market data')).toBeNull();
       // Then back to the usual pace.
       const reads = () => server.requests.filter((request) => request.url === LIST).length;
-      const listed = reads();
+      const settled = reads();
       await pause(1_200);
-      expect(reads()).toBe(listed);
+      expect(reads()).toBe(settled);
     });
 
     it('says so when market data takes longer than usual, and goes back to the usual pace', async () => {
       const { server } = exchange('SETUP');
       const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-      // Answered nearly twenty seconds ago, and still not listed.
-      client.setQueryData(
-        ['instruments-added'],
-        [{ ...ORBT_ADDED, scope: SIMULATION, answeredAt: Date.now() - WAITING_FAST_FOR_MS + 300 }],
-      );
       renderWith(client);
+      await screen.findByRole('table', { name: 'Instruments' });
+      // Once the page is drawn, however long that took: answered nearly twenty seconds ago, and still not listed. The
+      // list is read again, as after an add, so that it is read quickly from here.
+      act(() => {
+        client.setQueryData(
+          ['instruments-added'],
+          [{ ...ORBT_ADDED, scope: SIMULATION, answeredAt: Date.now() - WAITING_FAST_FOR_MS + 2_000 }],
+        );
+        void client.invalidateQueries({ queryKey: ['instruments'] });
+      });
 
+      // Drawn at the cache's next tick, well within the two seconds left.
       expect(await screen.findByText('Added, waiting for market data')).toBeInTheDocument();
       expect(
-        await screen.findByText('Added; market data is taking longer than usual to list it', undefined, { timeout: 1_500 }),
+        await screen.findByText('Added; market data is taking longer than usual to list it', undefined, { timeout: 4_000 }),
       ).toBeInTheDocument();
       // At most one more quick read, the one already timed when the time ran out; then the usual pace.
       await pause(500);
