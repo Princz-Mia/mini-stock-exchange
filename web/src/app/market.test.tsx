@@ -44,6 +44,27 @@ function marketData() {
   });
 }
 
+/**
+ * Market Data, whose own current list is of the given simulation and holds OWN, answered once `held` settles; asked by
+ * id, it answers with an instrument named after that simulation.
+ */
+function currentOf(simulation: string, held: Promise<void> = Promise.resolve()) {
+  return fakeServer().on('GET /api/v1/instruments', async (request) => {
+    const asked = new URLSearchParams(request.url.split('?')[1] ?? '').get('simulationId');
+    if (asked === null) {
+      await held;
+    }
+    return {
+      status: 200,
+      json: {
+        simulationId: asked ?? simulation,
+        instruments: [{ instrumentId: `i-${asked ?? 'own'}`, symbol: asked === null ? 'OWN' : `OF-${asked}` }],
+        feed: { state: 'LIVE', lag: 0 },
+      },
+    };
+  });
+}
+
 function withClient(client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -68,24 +89,76 @@ describe('whose instruments are listed', () => {
 describe('the instrument list', () => {
   beforeEach(() => resetSession());
 
-  it('is not asked for before the status is known, then by the simulation the status names', async () => {
-    const server = marketData();
+  it('is asked of Market Data while the status is on its way, shown only once the status names its simulation', async () => {
+    const server = currentOf(FIRST);
     const { wrapper } = withClient();
-    const { result, rerender } = renderHook(({ market }) => useInstruments(market), {
-      wrapper,
-      initialProps: { market: WAITING as Parameters<typeof useInstruments>[0] },
-    });
+    const seen: string[][] = [];
+    const { result, rerender } = renderHook(
+      ({ market }) => {
+        const list = useInstruments(market);
+        seen.push(symbols(list));
+        return list;
+      },
+      { wrapper, initialProps: { market: WAITING as Parameters<typeof useInstruments>[0] } },
+    );
 
-    // Long enough for a request to have gone out, had one been made.
+    // At the same time as the status, not after it; and nothing of it shown while whose it is is not known.
+    await waitFor(() => expect(server.requests.map((request) => request.url)).toEqual(['/api/v1/instruments']));
     await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
-    expect(server.requests).toHaveLength(0);
-    expect(result.current).toEqual({ instruments: [], feed: undefined, isPending: true, isError: false });
+    expect(result.current).toEqual({
+      instruments: [],
+      feed: undefined,
+      isPending: true,
+      isError: false,
+      updatedAt: undefined,
+      refused: false,
+    });
+    expect(seen.every((each) => each.length === 0)).toBe(true);
 
+    // The status names that very simulation: its list is on screen at once, and read again by id.
     rerender({ market: read(status(FIRST)) });
+    expect(symbols(result.current)).toEqual(['OWN']);
     await waitFor(() => expect(symbols(result.current)).toEqual([`OF-${FIRST}`]));
-    expect(server.requests.map((request) => request.url)).toEqual([`/api/v1/instruments?simulationId=${FIRST}`]);
+    expect(server.requests.at(-1)?.url).toBe(`/api/v1/instruments?simulationId=${FIRST}`);
     expect(result.current.feed).toEqual({ state: 'LIVE', lag: 0 });
-    expect(result.current.isPending).toBe(false);
+  });
+
+  it('waits for that early read when it is still on its way, and asks again by id only if it is of another simulation', async () => {
+    for (const [current, named] of [
+      [FIRST, FIRST],
+      [SECOND, FIRST],
+    ] as const) {
+      let answer: (() => void) | undefined;
+      const server = currentOf(current, new Promise<void>((resolve) => (answer = resolve)));
+      const { wrapper } = withClient();
+      const seen: string[][] = [];
+      const { result, rerender, unmount } = renderHook(
+        ({ market }) => {
+          const list = useInstruments(market);
+          seen.push(symbols(list));
+          return list;
+        },
+        { wrapper, initialProps: { market: WAITING as Parameters<typeof useInstruments>[0] } },
+      );
+      await waitFor(() => expect(server.requests).toHaveLength(1));
+
+      rerender({ market: read(status(named)) });
+      await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+      expect(server.requests).toHaveLength(1);
+      act(() => answer?.());
+      if (current === named) {
+        // One request in all: the list as it came, as soon as the slower of the two had answered.
+        await waitFor(() => expect(symbols(result.current)).toEqual(['OWN']));
+        await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
+        expect(server.requests.map((request) => request.url)).toEqual(['/api/v1/instruments']);
+      } else {
+        // Another simulation's list is never shown under this one's name.
+        await waitFor(() => expect(symbols(result.current)).toEqual([`OF-${named}`]));
+        expect(server.requests.at(-1)?.url).toBe(`/api/v1/instruments?simulationId=${named}`);
+        expect(seen.some((each) => each.includes('OWN'))).toBe(false);
+      }
+      unmount();
+    }
   });
 
   it('is read again when the simulation changes, with nothing of the one before shown meanwhile', async () => {
@@ -133,10 +206,17 @@ describe('the instrument list', () => {
 
     await act(() => new Promise((resolve) => setTimeout(resolve, 20)));
     expect(server.requests).toHaveLength(0);
-    expect(result.current).toEqual({ instruments: [], feed: undefined, isPending: false, isError: false });
+    expect(result.current).toEqual({
+      instruments: [],
+      feed: undefined,
+      isPending: false,
+      isError: false,
+      updatedAt: undefined,
+      refused: false,
+    });
   });
 
-  it("asks Market Data for its own current simulation only when the exchange's status could not be read", async () => {
+  it("asks Market Data for its own current simulation when the exchange's status could not be read", async () => {
     const server = marketData();
     const { wrapper } = withClient();
     const { result, rerender } = renderHook(({ market }) => useInstruments(market), {

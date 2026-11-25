@@ -3,6 +3,7 @@ import { useQueries, useQuery } from '@tanstack/react-query';
 import { api, pollEvery } from '../api/client';
 import type { Candles, Feed, HealthSummary, Instrument } from '../api/types';
 import { FEED_LABELS } from '../app/FeedStatus';
+import { SkeletonRows } from '../app/Skeleton';
 import { groupInteger } from '../format';
 
 /** One line of the panel: what it measures, its value, and a warning in words when it needs attention. */
@@ -147,20 +148,44 @@ export function useHealthSummary() {
 }
 
 /**
- * How trading is keeping up, beside the market controls. Execution's figures refresh every two seconds; the analytics'
- * freshness, read from one minute of each instrument's candles, every ten.
+ * Whether an instrument's analytics have caught up with every trade, live: on a closed market, where nothing trades
+ * any more, nothing about them can change after that.
  */
-export function HealthPanel({ instruments, feed }: { instruments: readonly Instrument[]; feed: FeedReading }) {
+export function analyticsCaughtUp(candles: Candles | undefined): boolean {
+  return candles !== undefined && candles.freshness.tradesBehind === 0 && candles.freshness.feed.state === 'LIVE';
+}
+
+/**
+ * How trading is keeping up, beside the market controls. Execution's figures refresh every two seconds; the analytics'
+ * freshness, read from one minute of each instrument's candles, every ten. On a closed market an instrument's
+ * analytics are read no more once caught up and read without failing. Execution's figures still are: its writer can stop, and the close's own
+ * events are still being published for a moment.
+ */
+export function HealthPanel({
+  instruments,
+  feed,
+  closed = false,
+}: {
+  instruments: readonly Instrument[];
+  feed: FeedReading;
+  closed?: boolean;
+}) {
   const summary = useHealthSummary();
   const candles = useQueries({
     queries: instruments.map((instrument) => ({
       queryKey: ['health-candles', instrument.instrumentId],
-      queryFn: () => {
+      queryFn: ({ signal }: { signal: AbortSignal }) => {
         const now = Date.now();
         const to = new Date(Math.floor(now / 60_000) * 60_000 + 60_000);
-        return api.candles(instrument.instrumentId, new Date(to.getTime() - 60_000).toISOString(), to.toISOString());
+        return api.candles(
+          instrument.instrumentId,
+          new Date(to.getTime() - 60_000).toISOString(),
+          to.toISOString(),
+          { signal },
+        );
       },
-      refetchInterval: pollEvery(10_000),
+      refetchInterval: (query: { state: { data: Candles | undefined; error: unknown } }) =>
+        closed && analyticsCaughtUp(query.state.data) && query.state.error == null ? false : pollEvery(10_000)(query),
     })),
   });
   const analytics = worstAnalytics(
@@ -179,7 +204,7 @@ export function HealthPanel({ instruments, feed }: { instruments: readonly Instr
           Trading health is not reachable: Execution may be down.
         </p>
       ) : summary.data === undefined ? (
-        <p className="muted">Loading…</p>
+        <SkeletonRows rows={5} />
       ) : (
         <dl className="health">
           {healthFigures(summary.data, feed, analytics).map((figure) => (

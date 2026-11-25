@@ -97,7 +97,8 @@ export function QualityCharts({ runs }: { runs: readonly ChartedRun[] }) {
       const ready = detail !== undefined && comparability(detail.run) === 'FINISHED' && trades(detail);
       return {
         queryKey: ['market-quality', instrument, window?.startSequence, window?.endSequence],
-        queryFn: () => api.marketQuality(instrument!, window!.startSequence, window!.endSequence!),
+        queryFn: ({ signal }: { signal: AbortSignal }) =>
+          api.marketQuality(instrument!, window!.startSequence, window!.endSequence!, { signal }),
         enabled: ready === true,
         // A finished window's minutes don't change once Market Data has them all: asked again while its feed is
         // behind, and for a minute after the window ended, as its last snapshots may still be on their way.

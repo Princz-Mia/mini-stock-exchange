@@ -316,12 +316,12 @@ for (const size of SIZES) {
       await capture(page, size, 'terminal-feed-stale');
       await page.context().close();
 
-      // The live stream can't connect.
+      // The live stream can't connect: the page says it is trying again, and keeps trying.
       const offline = await at(browser, size, 'trader', async (fresh) => {
         await fresh.route('**/api/v1/market-events*', (route) => route.abort());
       });
       await openTerminal(offline);
-      await expect(offline.getByRole('status').filter({ hasText: 'Connecting' })).toBeVisible();
+      await expect(offline.getByRole('status').filter({ hasText: 'Reconnecting' })).toBeVisible();
       await expect(offline.getByText('Waiting for the live market…')).toHaveCount(2);
       await capture(offline, size, 'terminal-stream-lost');
       await offline.context().close();
@@ -446,8 +446,23 @@ for (const size of SIZES) {
       await capture(empty, size, 'portfolio-no-holdings');
       await empty.context().close();
 
-      const down = await at(browser, size, 'trader');
-      await down.route(/\/api\/v1\/portfolio$/, problem(503, 'TRADING_UNAVAILABLE'));
+      // Read, then not answered: the page keeps the balances and says when they were read, at the next poll.
+      const behind = await at(browser, size, 'trader');
+      await behind.getByRole('link', { name: 'Portfolio' }).click();
+      await expect(behind.getByRole('region', { name: 'Summary' })).toBeVisible();
+      await behind.route(/\/api\/v1\/portfolio$/, problem(503, 'TRADING_UNAVAILABLE'));
+      await expect(behind.getByRole('status').filter({ hasText: /^Last updated \d\d:\d\d:\d\d UTC, retrying$/ })).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(behind.getByRole('region', { name: 'Summary' })).toBeVisible();
+      await expect(behind.getByRole('alert')).toHaveCount(0);
+      await capture(behind, size, 'portfolio-behind');
+      await behind.context().close();
+
+      // Never read: there is nothing to keep, so the page says the portfolio is not reachable.
+      const down = await at(browser, size, 'trader', async (fresh) => {
+        await fresh.route(/\/api\/v1\/portfolio$/, problem(503, 'TRADING_UNAVAILABLE'));
+      });
       await down.getByRole('link', { name: 'Portfolio' }).click();
       await expect(down.getByRole('alert')).toContainText('Your portfolio is not reachable');
       await capture(down, size, 'portfolio-unreachable');

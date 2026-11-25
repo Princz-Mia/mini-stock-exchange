@@ -165,7 +165,12 @@ export function AddTraderForm({ instruments }: { instruments: readonly Instrumen
         </fieldset>
       </form>
       <div id={outcomeId}>
-        <CommandStatus outcome={command.outcome} done={addedText} onRetry={() => void command.retry()} />
+        <CommandStatus
+          outcome={command.outcome}
+          action="Adding the trader"
+          done={addedText}
+          onRetry={() => void command.retry()}
+        />
       </div>
     </>
   );
