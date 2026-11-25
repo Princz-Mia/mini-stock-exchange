@@ -51,3 +51,8 @@ class Pacer:
     def refund(self) -> None:
         """A step sent nothing: its command credit returns, its step credit does not."""
         self._commands = min(self._commands_cap, self._commands + 1)
+
+    def charge(self) -> None:
+        """A step sent a second command: its credit is spent too, below zero if it must be, so
+        the steps after it wait until the rate has paid for it."""
+        self._commands -= 1

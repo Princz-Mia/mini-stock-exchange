@@ -15,6 +15,7 @@ from mse_simulator.strategy import (
     OpenOrder,
     Place,
     Positions,
+    Replace,
     affordable,
     oldest_stale,
 )
@@ -42,10 +43,13 @@ class MarketMaker:
     the bot's own idea of the value, moved ``skew_bp`` down for each quote size the bot is long and
     up for each it is short: a long maker quotes lower to sell down, a short one higher. Because
     it quotes around a value and not around the current price, it buys below that value and sells
-    above it wherever the market goes, which is what pulls the market back. Old quotes are
-    cancelled before new ones are placed, so at most one quote per side rests; quotes still near
-    their target stay put. It never quotes more than it holds or than the run's position limit
-    allows."""
+    above it wherever the market goes, which is what pulls the market back. A quote past its
+    lifetime is replaced in the same step that cancels it, by the side that has no quote, the
+    cancelled side last: a maker whose turns come further apart than the lifetime then alternates
+    its bid and its ask instead of only ever bidding, and one with closer turns keeps both. Other
+    old quotes are cancelled before new ones are placed, so at most one quote per side rests;
+    quotes still near their target stay put. It never quotes more than it holds or than the run's
+    position limit allows."""
 
     def __init__(
         self,
@@ -70,20 +74,40 @@ class MarketMaker:
         now: float,
     ) -> Intent | None:
         stale = oldest_stale(orders, now, self._config.quote_lifetime)
-        if stale is not None:
-            return stale
         if not tradable:
-            return None
+            # Cancelling is allowed while new exposure pauses; a replacement is not.
+            return stale
         if self._instrument is None:
             self._instrument = self._pick(market.instruments)
         instrument = next(
             (item for item in market.instruments if item.instrument_id == self._instrument), None
         )
         if instrument is None:
-            return None
+            return stale
         bid, ask = self.quotes(instrument, holdings, market.instruments)
         if bid >= ask:
-            return None
+            return stale
+        if stale is not None:
+            # With turns further apart than the lifetime every turn finds a stale quote: a cancel
+            # alone would use up each turn, and the side placed after it would always be the bid.
+            left = [order for order in orders if order.order_id != stale.order_id]
+            gone = next(
+                (
+                    order.side
+                    for order in orders
+                    if order.order_id == stale.order_id and order.instrument_id == self._instrument
+                ),
+                None,
+            )
+            if any(
+                self._off(order, bid, ask, instrument.tick)
+                for order in left
+                if order.instrument_id == self._instrument
+            ):
+                # A quote left off its target could cross the new one: it goes first, next turn.
+                return stale
+            fresh = self._missing(instrument, bid, ask, holdings, left, market, last=gone)
+            return stale if fresh is None else Replace(stale, fresh)
         mine = [order for order in orders if order.instrument_id == self._instrument]
         for side in SIDES:
             # Newest first: the newest quote on a side is the one kept.
@@ -96,7 +120,22 @@ class MarketMaker:
                 return Cancel(quotes[-1].order_id)
             if quotes and self._off(quotes[0], bid, ask, instrument.tick):
                 return Cancel(quotes[0].order_id)
-        for side in SIDES:
+        return self._missing(instrument, bid, ask, holdings, orders, market)
+
+    def _missing(
+        self,
+        instrument: Instrument,
+        bid: int,
+        ask: int,
+        holdings: Holdings,
+        orders: list[OpenOrder],
+        market: MarketView,
+        last: str | None = None,
+    ) -> Place | None:
+        """The first side with no quote that the bot can afford, in the usual order but ``last``
+        tried last."""
+        mine = [order for order in orders if order.instrument_id == instrument.instrument_id]
+        for side in sorted(SIDES, key=lambda side: side == last):
             if any(order.side == side for order in mine):
                 continue
             limit = bid if side == "BUY" else ask

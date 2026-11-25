@@ -544,8 +544,8 @@ public final class JdbcTradingStore implements TradingStore {
 	@Override
 	public int assignOldestBots(UUID runId, UUID simulationId, BotStrategy strategy, int count) {
 		return jdbc.sql("""
-				INSERT INTO bot_assignment (run_id, account_id, account_kind, strategy)
-				SELECT ?, id, 'BOT', bot_strategy FROM account
+				INSERT INTO bot_assignment (run_id, account_id, account_kind, strategy, account_created_at)
+				SELECT ?, id, 'BOT', bot_strategy, created_at FROM account
 				WHERE simulation_id = ? AND kind = 'BOT' AND bot_strategy = ?
 				ORDER BY created_at, id LIMIT ?""")
 			.params(runId, simulationId, strategy.name(), count)

@@ -5,7 +5,10 @@ same public and authenticated API as people use.
 
 - **Control:** with `MSE_SIMULATOR_TOKEN`, the worker polls Execution for its assignment and holds the run's
   lease with a heartbeat that reports cumulative totals. One worker holds a run at a time; `MSE_WORKER_ID`
-  (default: the host name) names it. Without the token the bots stay idle.
+  (default: the host name) names it. Without the token the bots stay idle. Each heartbeat also says where the
+  worker is with the run: `LOADING` so many bots of so many while it reads their token files and builds them, 500
+  at a time, then `TRADING`. Among the totals are the bots' steps that could place nothing new, by why: market data
+  too old or not live, the market not open, or another reason, such as none of the run's instruments listed yet.
 - **Credentials:** one `<accountId>.token` file per bot, written once by the exchange when the operator
   provisions bots. Compose mounts that volume read-only at `/run/mse/bot-tokens`. The assignment names each
   bot's file, never its token.
@@ -37,14 +40,21 @@ same public and authenticated API as people use.
   - **Market maker:** one bid and one ask on one instrument, ten basis points either side of a reservation
     price: the bot's idea of the value, leaning against its inventory. It quotes around the value, not around
     the current price, so it buys below the value and sells above it wherever the market is. The run's makers
-    take its instruments in turn. Quotes that drift too far from their target, or would cross the other side,
-    are cancelled before new ones go in.
+    take its instruments in turn. A quote older than 30 seconds is cancelled and replaced in the same step,
+    with a quote for the side that has none, the cancelled side last: a maker whose turns come further apart
+    than that, as in a large run, then bids and asks in turn instead of only bidding, and one with closer
+    turns keeps both. The replacement is a command of its own for the run's rate. Quotes that drift too far
+    from their target, or would cross the other side, are cancelled before new ones go in.
   - **Momentum:** short and long moving averages of each instrument's price, sampled once per market poll for
     all momentum bots and started afresh after a halt. Past a threshold, the side is drawn with a bias toward
     the trend, never more than three orders in four. An order takes the best opposite quote only if it is
     within twenty basis points of the price and rests otherwise, one order at a time with a cooldown.
   - **Noise:** limit orders on the run's instruments, a random side, up to thirty basis points either side of
     a centre: the market's price moved a quarter of the way toward the bot's idea of the value.
+- **Market view:** one view of the public market for all of a run's bots, polled every second: the phase and the
+  simulation from Execution, then that simulation's instruments and quotes from Market Data. It asks for the
+  simulation by its id, so a new simulation's bots see its instruments as soon as Market Data has them, even while
+  Market Data still takes the one before for current.
 - **Stop:** once the run is stopped or out of time, no new orders; every command in flight gets its final
   answer, every open order of the run's bots is cancelled (each one that can't be is reported), and the
   worker confirms the stop. A worker that stops without that leaves the run to the next one.
@@ -60,7 +70,8 @@ same public and authenticated API as people use.
   call per bot, and a single revoked bot does not fail at every turn. The worker's log counts such bots.
 - **Safety:** a command keeps its idempotency key until the exchange answers it finally, so a retry after a busy,
   timed-out, rate-limited or lost answer can't apply twice. New orders pause while the market isn't open or market data
-  isn't live and recent.
+  isn't live and recent: at most two seconds old, counted from when the poll's answers arrived, so a slow poll does
+  not by itself make fresh data look old.
 
 ```powershell
 uv sync --frozen; uv run --frozen ruff check .; uv run --frozen pytest -q

@@ -66,6 +66,9 @@ class Run:
         values: FairValues = runner._values
         self.fair: list[dict[UUID, float]] = []
         self.market.on_poll += [runner._signal.observe, values.observe, self._record(values)]
+        # The makers' quotes resting at each poll: (bids, asks).
+        self.maker_quotes: list[tuple[int, int]] = []
+        self.market.on_poll.append(self._count_maker_quotes)
         # Every momentum order with the market view its bot saw.
         self.momentum_orders: list[tuple[Place, MarketView]] = []
         self.market.on_place.append(self._watch)
@@ -83,6 +86,15 @@ class Run:
         return lambda view: self.fair.append(
             {item.instrument_id: values.of(item.instrument_id) for item in view.instruments}
         )
+
+    def _count_maker_quotes(self, view: MarketView) -> None:
+        sides = [
+            order.side
+            for account in self.market.accounts
+            if isinstance(account.strategy, MarketMaker)
+            for order in account.orders.values()
+        ]
+        self.maker_quotes.append((sides.count("BUY"), sides.count("SELL")))
 
     def _watch(self, account: Account, intent: Place, view: MarketView) -> None:
         if isinstance(account.strategy, MomentumBot):
@@ -171,6 +183,23 @@ def test_a_market_maker_keeps_both_sides_of_its_instrument_quoted() -> None:
                 if item == instrument
             ]
             assert sum(sides) / len(sides) > 0.66, (seed, instrument)
+
+
+def test_makers_keep_asks_in_the_book_when_their_turns_come_slower_than_their_quotes_last() -> None:
+    """400 bots at 4 commands a second: a bot that acts gets a turn about once a minute, twice the
+    makers' 30 s quote lifetime, so every maker's turn finds its last quote stale. A maker used to
+    cancel it, bid again at its next turn, and never ask, and the book leaned to the bids. Now it
+    replaces the stale quote in the same step, bid and ask in turn: after the first minutes most
+    makers have a quote resting, and a good share of them are asks: about 23 asks beside 34 bids
+    from the 80 makers on this seed, where none rested before."""
+    population = ["MARKET_MAKER"] * 80 + ["NOISE"] * 240 + ["MOMENTUM"] * 80
+    run = Run(seed=1, commands=4_000, population=population)
+    settled = run.maker_quotes[300:]
+    assert len(settled) > 600
+    bids = sum(bid for bid, _ in settled) / len(settled)
+    asks = sum(ask for _, ask in settled) / len(settled)
+    assert asks > 10 and bids > 10, (bids, asks)
+    assert bids + asks > 45, "most of the 80 makers have a quote resting"
 
 
 def test_a_cheap_instrument_trades_like_a_dear_one() -> None:

@@ -1602,7 +1602,29 @@ export interface components {
                 readonly errors: number;
                 readonly inFlight: number;
                 readonly stopFailures: number;
+                /**
+                 * Format: int64
+                 * @description The bots' steps that could place nothing new because the market data was too old or not live;
+                 *     pausedMarketNotOpen because the market was not open; pausedOther for another reason, such as none of
+                 *     the run's instruments listed yet. As the worker last reported them; 0 from a worker that reports
+                 *     none.
+                 */
+                readonly pausedStaleData: number;
+                /** Format: int64 */
+                readonly pausedMarketNotOpen: number;
+                /** Format: int64 */
+                readonly pausedOther: number;
             };
+            /**
+             * @description Where the worker is with the run, as its last heartbeat said: LOADING while it reads the bots' token
+             *     files and builds the bots, botsLoaded of botsTotal so far, then TRADING. Null until a worker reports it.
+             */
+            readonly progress: {
+                /** @enum {string} */
+                readonly phase: "LOADING" | "TRADING";
+                readonly botsLoaded: number;
+                readonly botsTotal: number;
+            } | null;
             /**
              * @description The run's commands in the command sequence, from its start to its end. stopSequence is the operator's stop
              *     command, if there was one. endSequence is null until the run is finished. endedBy says how it ended:
@@ -1761,6 +1783,7 @@ export interface components {
                     readonly workerId: string | null;
                     readonly leaseExpiresAt: components["schemas"]["Timestamp"] | null;
                 };
+                /** @description The run's cumulative totals, which a worker taking it over continues from. */
                 readonly totals: {
                     /** Format: int64 */
                     readonly placed: number;
@@ -1770,6 +1793,12 @@ export interface components {
                     readonly rejected: number;
                     /** Format: int64 */
                     readonly errors: number;
+                    /** Format: int64 */
+                    readonly pausedStaleData: number;
+                    /** Format: int64 */
+                    readonly pausedMarketNotOpen: number;
+                    /** Format: int64 */
+                    readonly pausedOther: number;
                 };
             };
         };
@@ -1803,6 +1832,29 @@ export interface components {
              */
             readonly stopped: boolean;
             readonly manifest?: components["schemas"]["SimulatorManifest"];
+            /**
+             * @description Where the worker is with the run: LOADING while it reads the bots' token files and builds the bots,
+             *     then TRADING. Given with botsLoaded and botsTotal. Optional: a heartbeat without it still holds the run,
+             *     which then shows no progress.
+             * @enum {string}
+             */
+            readonly phase?: "LOADING" | "TRADING";
+            /** @description The bots built so far, at most botsTotal. */
+            readonly botsLoaded?: number;
+            /** @description The bots the worker has to build. */
+            readonly botsTotal?: number;
+            /**
+             * Format: int64
+             * @description Cumulative for the run, like the totals: the bots' steps that could place nothing new because the
+             *     market data was too old or not live. pausedMarketNotOpen counts those because the market was not open,
+             *     and pausedOther those for any other reason, such as none of the run's instruments listed yet. Each is
+             *     optional, and one left out is taken as unchanged.
+             */
+            readonly pausedStaleData?: number;
+            /** Format: int64 */
+            readonly pausedMarketNotOpen?: number;
+            /** Format: int64 */
+            readonly pausedOther?: number;
         };
         readonly SimulatorHeartbeat: {
             readonly runId: components["schemas"]["Uuid"];
