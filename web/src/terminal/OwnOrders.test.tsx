@@ -223,4 +223,12 @@ describe('outcome', () => {
     expect(outcome(order({ state: 'CANCELED', reason: 'SOMETHING_NEW' }))).toBe('Canceled · SOMETHING_NEW');
     expect(outcome(order({ state: 'CANCELED', reason: 'IOC_REMAINDER_CANCELED' }))).toBe('Canceled · the rest found no match');
   });
+
+  it('says the market closed for an order that still rested then, with what had filled', () => {
+    expect(outcome(order({ state: 'CANCELED', reason: 'MARKET_CLOSED' }))).toBe('Canceled · the market closed');
+    expect(outcome(order({ state: 'CANCELED', filledQuantity: 4, canceledQuantity: 6, reason: 'MARKET_CLOSED' }))).toBe(
+      'Canceled · 4 of 10 filled · the market closed',
+    );
+    expect(outcome(order({ state: 'REJECTED', reason: 'MARKET_CLOSED' }))).toBe('Rejected · MARKET_CLOSED');
+  });
 });

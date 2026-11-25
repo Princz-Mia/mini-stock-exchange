@@ -22,7 +22,9 @@ public record BotRunResult(Status status, UUID runId, int bots, long commandSequ
 
 	public enum Status {
 
-		STARTED, STOPPED, NO_MARKET, NOT_OPEN, RUN_ACTIVE, NOT_ENOUGH_BOTS, UNKNOWN_INSTRUMENT, NOT_FOUND, NOT_RUNNING
+		STARTED, STOPPED, NO_MARKET, NOT_OPEN,
+		/** The market has closed: no run will ever start in it, unlike one that has not opened yet. */
+		MARKET_CLOSED, RUN_ACTIVE, NOT_ENOUGH_BOTS, UNKNOWN_INSTRUMENT, NOT_FOUND, NOT_RUNNING
 
 	}
 
@@ -33,7 +35,7 @@ public record BotRunResult(Status status, UUID runId, int bots, long commandSequ
 			case STOPPED -> 200;
 			case UNKNOWN_INSTRUMENT, NOT_ENOUGH_BOTS -> 422;
 			case NOT_FOUND -> 404;
-			case NO_MARKET, NOT_OPEN, RUN_ACTIVE, NOT_RUNNING -> 409;
+			case NO_MARKET, NOT_OPEN, MARKET_CLOSED, RUN_ACTIVE, NOT_RUNNING -> 409;
 		};
 	}
 

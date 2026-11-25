@@ -462,11 +462,14 @@ function StartForm({
   );
 }
 
-/** When a run ended, or where it stands while it has not. */
+/**
+ * When a run ended, or where it stands while it has not. A run the market's close ended says so: its time is the
+ * close's, not a stop its worker confirmed.
+ */
 function ended(run: BotRun): string {
   const failures = run.activity.stopFailures > 0 ? ` · ${groupInteger(run.activity.stopFailures)} not canceled` : '';
   if (run.stoppedAt !== null) {
-    return utcTime(run.stoppedAt) + failures;
+    return utcTime(run.stoppedAt) + (run.window.endedBy === 'MARKET_CLOSE' ? ' · Market close' : '') + failures;
   }
   return (run.status === 'STOPPED' ? 'Not confirmed' : STATUS_LABELS[run.status]) + failures;
 }

@@ -82,8 +82,8 @@ public final class BotTokenFilter extends OncePerRequestFilter {
 		}
 		// The writer rewrites the simulation's row with every run, and while a long snapshot (a backup's) is open the
 		// old versions stay and every read of the row walks them all. So a request never reads it: the writer's own ID
-		// is compared. Only while the writer has none that is not closed (no market yet, startup still rebuilding it, or
-		// a closed market, which no bot trades in) is the row read.
+		// is compared. Only while the writer has none that is not closed (no market yet, startup still rebuilding it,
+		// or a closed market, which no bot trades in) is the row read.
 		UUID simulation = writerSimulation.get();
 		byte[] hash = ApiTokens.hash(token);
 		return (simulation != null ? jdbc.sql(TOKEN + "?").params(hash, simulation)

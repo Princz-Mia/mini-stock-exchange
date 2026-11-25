@@ -88,15 +88,19 @@ class TradingQueries {
 	 * The trading phase as the writer last committed it, for the current simulation. Empty before a market has been
 	 * set up.
 	 */
-	record MarketStatus(UUID simulationId, String state, Instant openedAt, long commandSequence) {
+	record MarketStatus(UUID simulationId, String state, Instant openedAt, Instant closedAt, long commandSequence) {
 	}
 
 	Optional<MarketStatus> market() {
-		return jdbc.sql("SELECT id, state, opened_at, last_command_sequence FROM simulation " + CurrentSimulation.FIRST)
+		return jdbc
+			.sql("SELECT id, state, opened_at, closed_at, last_command_sequence FROM simulation "
+					+ CurrentSimulation.FIRST)
 			.query((row, index) -> {
 				Timestamp openedAt = row.getTimestamp("opened_at");
+				Timestamp closedAt = row.getTimestamp("closed_at");
 				return new MarketStatus(row.getObject("id", UUID.class), row.getString("state"),
-						openedAt == null ? null : openedAt.toInstant(), row.getLong("last_command_sequence"));
+						openedAt == null ? null : openedAt.toInstant(), closedAt == null ? null : closedAt.toInstant(),
+						row.getLong("last_command_sequence"));
 			})
 			.optional();
 	}
@@ -336,9 +340,11 @@ class TradingQueries {
 
 	/** A key is per simulation: the same one may have another answer in an older, closed simulation. */
 	Optional<StoredCommand> command(UUID principalId, UUID idempotencyKey) {
-		return jdbc.sql("""
-				SELECT route, response_body::text AS body FROM command_result
-				WHERE simulation_id = %s AND principal_id = ? AND idempotency_key = ?""".formatted(CurrentSimulation.ID))
+		return jdbc
+			.sql("""
+					SELECT route, response_body::text AS body FROM command_result
+					WHERE simulation_id = %s AND principal_id = ? AND idempotency_key = ?"""
+				.formatted(CurrentSimulation.ID))
 			.params(principalId, idempotencyKey)
 			.query((row, index) -> new StoredCommand(row.getString("route"), row.getString("body")))
 			.optional();

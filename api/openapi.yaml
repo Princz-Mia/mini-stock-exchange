@@ -243,8 +243,9 @@ paths:
         '422':
           description: |
             Rejected and committed, with the reason as code: INSUFFICIENT_CASH, INSUFFICIENT_SHARES,
-            MARKET_NOT_OPEN, ORDER_LIMIT_EXCEEDED, EXECUTION_LIMIT_EXCEEDED; plus orderId and commandSequence.
-            UNKNOWN_INSTRUMENT is not committed.
+            MARKET_NOT_OPEN, MARKET_CLOSED, ORDER_LIMIT_EXCEEDED, EXECUTION_LIMIT_EXCEEDED; plus orderId and
+            commandSequence. MARKET_NOT_OPEN may pass (the market is being set up, or is halted); MARKET_CLOSED is
+            final, so trying again later gains nothing. UNKNOWN_INSTRUMENT is not committed.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -834,7 +835,9 @@ paths:
         '403':
           description: Not an operator, or missing CSRF token. No body.
         '409':
-          description: MARKET_NOT_OPEN or RUN_ACTIVE (committed and audited once a market exists), or IDEMPOTENCY_CONFLICT.
+          description: |
+            MARKET_NOT_OPEN, MARKET_CLOSED (final: no run starts in a closed market) or RUN_ACTIVE (committed and
+            audited once a market exists), or IDEMPOTENCY_CONFLICT.
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -1019,6 +1022,79 @@ paths:
           $ref: '#/components/responses/Unavailable'
         '504':
           $ref: '#/components/responses/OutcomeUnknown'
+
+  /api/v1/admin/market/close:
+    post:
+      tags: [execution]
+      operationId: closeMarket
+      summary: Close the market for good. Every resting order is canceled and every bot run ends.
+      description: |
+        Operator only. Sequenced on the writer and audited, and needs an idempotency key: a retry with the same
+        key returns the first answer, even a refusal. Allowed from OPEN and from HALTED. CLOSED is final: no
+        transition leads out of it, and a market still in SETUP is not closed.
+
+        From this command's sequence on, an order is rejected with MARKET_CLOSED and no bot run starts. In the
+        same transaction every bot run that has not ended ends (endedBy MARKET_CLOSE), every bot token is revoked,
+        and each instrument's last snapshot says CLOSED. Every resting order is canceled with the reason
+        MARKET_CLOSED and its hold released: the first of them with the close, the rest in further transactions,
+        each with a command sequence of its own, before any other command runs. Nothing is deleted: portfolios,
+        orders, trades, accounts and runs stay readable.
+
+        The answer comes once no order rests. A close with very many resting orders can take longer than the
+        request waits; it then answers 504 and goes on. No lookup by key serves a close, since
+        /api/v1/commands/{key} answers for orders and cancels only: send the same key again, which waits for the
+        close and returns its answer.
+
+        A close is never left half done by a running exchange. If one of the later transactions fails, it is tried
+        again; if the orders still cannot all be canceled, trading stops and the answer is 503
+        MARKET_CLOSE_UNFINISHED. The request gets that answer if it is still waiting, and so does every close sent
+        from then until the exchange restarts, so a key that was answered 504 finds out as well. The market is
+        CLOSED by then, so nothing is to be sent again: the exchange cancels the orders that still rest when it
+        restarts, before it takes any command, and the key that closed the market then returns the close's answer.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          description: Applied. The market is CLOSED from this command's sequence on, and no order rests.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MarketClosed' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '401':
+          description: No session. No body.
+        '403':
+          description: Not an operator, or missing CSRF token. No body.
+        '409':
+          description: |
+            MARKET_TRANSITION_NOT_ALLOWED (committed and audited, with the market's current state: SETUP, or
+            CLOSED for a market closed before), MARKET_NOT_SET_UP (nothing committed), or IDEMPOTENCY_CONFLICT.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: |
+            EXCHANGE_BUSY (not queued; retry with the same key), TRADING_UNAVAILABLE, or MARKET_CLOSE_UNFINISHED:
+            the close committed, so the market is CLOSED, its bot runs have ended and its bot tokens are revoked,
+            but not every resting order could be canceled, and trading has stopped. The problem carries state
+            (CLOSED), the close's commandSequence, restingOrders and this request's commandKey. restingOrders is
+            an upper bound: the exchange's own count when trading stopped, and a transaction whose outcome it
+            could not learn may have canceled some of them already. Every close is answered this way until the
+            exchange restarts, which finishes the close. EXCHANGE_BUSY and TRADING_UNAVAILABLE have Retry-After;
+            MARKET_CLOSE_UNFINISHED has none, since nothing is to be sent again.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '504':
+          description: |
+            COMMAND_OUTCOME_UNKNOWN. The close did not answer in time and may still be going on. Not to be looked
+            up by commandKey, which no route does for a close: send the same key again. It returns the close's
+            answer once the close is done, or 503 MARKET_CLOSE_UNFINISHED if trading stopped for it.
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
 
   /internal/exports/trades:
     get:
@@ -1487,6 +1563,12 @@ components:
         commandSequence: { $ref: '#/components/schemas/Sequence' }
         commandKey: { $ref: '#/components/schemas/Uuid' }
         reason: { type: string }
+        restingOrders:
+          type: integer
+          minimum: 0
+          description: |
+            With MARKET_CLOSE_UNFINISHED, at most how many orders a closed market still had resting when trading
+            stopped. The exchange's own count; fewer may rest, by up to one transaction of the close.
         usage: { $ref: '#/components/schemas/InstrumentUsage' }
         shortfall: { $ref: '#/components/schemas/BotShortfall' }
     FieldError:
@@ -1596,7 +1678,12 @@ components:
         workingQuantity: { type: integer, format: int64 }
         canceledQuantity: { type: integer, format: int64 }
         state: { type: string, enum: [OPEN, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED] }
-        reason: { type: [string, 'null'] }
+        reason:
+          type: [string, 'null']
+          description: |
+            Why the order was canceled or rejected, or null. A canceled order says CANCELED_BY_OWNER,
+            IOC_REMAINDER_CANCELED, SELF_TRADE_PREVENTED or MARKET_CLOSED (it still rested when the market closed);
+            a rejected one carries its rejection code.
         version:
           $ref: '#/components/schemas/Sequence'
           description: Increases with every change to the order.
@@ -2181,17 +2268,19 @@ components:
             The run's commands in the command sequence, from its start to its end. stopSequence is the operator's stop
             command, if there was one. endSequence is null until the run is finished. endedBy says how it ended:
             WORKER (its worker confirmed the stop, after every command of the run), NEXT_START (the next run started
-            first, after its worker had gone quiet or when it never had one), or NOT_KEPT (recorded before windows were
-            kept, so it has no end).
+            first, after its worker had gone quiet or when it never had one), MARKET_CLOSE (the market closed while
+            the run had not ended; the close is its last command, and its stop too unless it was stopped before), or
+            NOT_KEPT (recorded before windows were kept, so it has no end).
           properties:
             startSequence: { $ref: '#/components/schemas/Sequence' }
             stopSequence: { oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }] }
             endSequence: { oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }] }
-            endedBy: { type: [string, 'null'], enum: [WORKER, NEXT_START, NOT_KEPT, null] }
+            endedBy: { type: [string, 'null'], enum: [WORKER, NEXT_START, MARKET_CLOSE, NOT_KEPT, null] }
             endedAt:
               description: |
-                When the window ended: when its worker confirmed the stop, or when the next run started. Null until
-                then, and for a run recorded before windows were kept. A run's length is from startedAt to this.
+                When the window ended: when its worker confirmed the stop, when the next run started, or when the
+                market closed. Null until then, and for a run recorded before windows were kept. A run's length is
+                from startedAt to this.
               oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
         manifest:
           description: What the worker reported about itself with the run; null until a worker reports one.
@@ -2481,7 +2570,10 @@ components:
     MarketStatus:
       type: object
       additionalProperties: false
-      required: [state, simulationId, openedAt, commandSequence]
+      required: [state, simulationId, openedAt, closedAt, commandSequence]
+      description: |
+        The current simulation's phase: the one that is not closed or, after a close, the one closed last, until
+        another is set up.
       properties:
         state:
           type: string
@@ -2492,6 +2584,9 @@ components:
         openedAt:
           oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
           description: When the market first opened; null in SETUP.
+        closedAt:
+          oneOf: [{ $ref: '#/components/schemas/Timestamp' }, { type: 'null' }]
+          description: When the market closed; null unless the state is CLOSED.
         commandSequence:
           oneOf: [{ $ref: '#/components/schemas/Sequence' }, { type: 'null' }]
           description: The last committed command's sequence.
@@ -2503,6 +2598,24 @@ components:
       properties:
         state: { type: string, enum: [OPEN, HALTED] }
         commandSequence: { $ref: '#/components/schemas/Sequence' }
+
+    MarketClosed:
+      type: object
+      additionalProperties: false
+      required: [state, commandSequence, canceledOrders, endedRuns]
+      properties:
+        state: { type: string, enum: [CLOSED] }
+        commandSequence:
+          $ref: '#/components/schemas/Sequence'
+          description: The close's own sequence. The transactions that cancel the rest of the orders follow it.
+        canceledOrders:
+          type: integer
+          minimum: 0
+          description: How many orders rested when the market closed. None of them rests once this answer is given.
+        endedRuns:
+          type: integer
+          minimum: 0
+          description: How many bot runs the close ended.
 
     Feed:
       type: object

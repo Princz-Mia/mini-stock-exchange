@@ -122,7 +122,7 @@ describe('signing in', () => {
     signedIn('operator', ['OPERATOR'])
       .on('GET /api/v1/market', {
         status: 200,
-        json: { state: 'NOT_SET_UP', simulationId: null, openedAt: null, commandSequence: null },
+        json: { state: 'NOT_SET_UP', simulationId: null, openedAt: null, closedAt: null, commandSequence: null },
       })
       .on('GET /api/v1/instruments', { status: 200, json: { instruments: [], feed: { state: 'LIVE', lag: 0 } } })
       .on('GET /api/v1/admin/accounts', { status: 200, json: { accounts: [], nextCursor: null } });

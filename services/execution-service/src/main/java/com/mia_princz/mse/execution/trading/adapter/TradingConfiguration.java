@@ -24,6 +24,7 @@ import com.mia_princz.mse.execution.trading.application.BotCredentials;
 import com.mia_princz.mse.execution.trading.application.CommandWriter;
 import com.mia_princz.mse.execution.trading.application.TradingEngine;
 import com.mia_princz.mse.execution.trading.application.TradingStore;
+import com.mia_princz.mse.execution.trading.domain.RestingOrders;
 
 @Configuration(proxyBeanMethods = false)
 class TradingConfiguration {
@@ -88,11 +89,13 @@ class TradingConfiguration {
 
 	@Bean
 	TradingEngine tradingEngine(TradingStore store, WriterConnections connections, CommandWriter writer, Clock clock,
-			BotCredentials botCredentials, AccountChanges accountChanges, MeterRegistry meters) {
+			BotCredentials botCredentials, AccountChanges accountChanges, MeterRegistry meters,
+			@Value("${mse.market.close-chunk-orders:" + TradingEngine.CLOSE_CHUNK_ORDERS + "}") int closeChunkOrders) {
 		// The store and the transactions share the writer's data source, so a command's statements join its transaction.
 		return new TradingEngine(store,
 				new SpringTransactionRunner(new JdbcTransactionManager(connections.dataSource())), writer, clock,
-				botCredentials, accountChanges, new MicrometerWriterTimings(meters), System::nanoTime);
+				botCredentials, accountChanges, new MicrometerWriterTimings(meters), System::nanoTime,
+				new RestingOrders(), closeChunkOrders);
 	}
 
 	@Bean(destroyMethod = "close")

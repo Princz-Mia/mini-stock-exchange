@@ -113,7 +113,7 @@ describe('terminal', () => {
   it('pauses new orders while the market is halted, but still lets the trader cancel', async () => {
     const server = market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'HALTED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '9' },
+      json: { state: 'HALTED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
     });
     renderTerminal();
 
@@ -132,7 +132,7 @@ describe('terminal', () => {
   it("has a part for every step of the trader's tour, but the Portfolio link, which is in the top bar", async () => {
     market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '9' },
+      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
     });
     renderTerminal();
     await screen.findByRole('region', { name: 'Order · NOVA' });
@@ -144,7 +144,7 @@ describe('terminal', () => {
   it('explains a halt beside its badge, but not a market that has not opened yet', async () => {
     market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'SETUP', simulationId: 's', openedAt: null, commandSequence: '2' },
+      json: { state: 'SETUP', simulationId: 's', openedAt: null, closedAt: null, commandSequence: '2' },
     });
     renderTerminal();
     await screen.findByRole('region', { name: 'Order · NOVA' });
@@ -155,7 +155,13 @@ describe('terminal', () => {
   it('shows a closed market as closed and takes no new orders', async () => {
     const server = market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'CLOSED', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '12' },
+      json: {
+        state: 'CLOSED',
+        simulationId: 's',
+        openedAt: '2026-11-04T09:00:00Z',
+        closedAt: '2026-11-04T17:00:00Z',
+        commandSequence: '12',
+      },
     });
     renderTerminal();
 
@@ -173,7 +179,7 @@ describe('terminal', () => {
   it('takes orders once the market is open', async () => {
     market().on('GET /api/v1/market', {
       status: 200,
-      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', commandSequence: '9' },
+      json: { state: 'OPEN', simulationId: 's', openedAt: '2026-11-04T09:00:00Z', closedAt: null, commandSequence: '9' },
     });
     renderTerminal();
 
@@ -394,6 +400,18 @@ describe('terminal', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Not enough available cash');
     expect(screen.getByLabelText('Shares')).toHaveValue('500');
+  });
+
+  it('says the market has closed when an order reaches it just after the close', async () => {
+    // The page still shows the market open: the close came after its last poll.
+    market().on('POST /api/v1/orders', {
+      status: 422,
+      problem: { status: 422, code: 'MARKET_CLOSED', orderId: '00000000-0000-0000-0000-0000000000ac', commandSequence: '9' },
+    });
+    renderTerminal();
+    fireEvent.click(await screen.findByRole('button', { name: 'Buy NOVA' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The market has closed and takes no more orders.');
   });
 
   it('offers to retry the very same order when the exchange is busy, and locks the fields', async () => {

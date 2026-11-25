@@ -507,7 +507,7 @@ for (const size of SIZES) {
       const page = await at(browser, size, 'operator', async (fresh) => {
         await fresh.route(/\/api\/v1\/market$/, (route) =>
           route.fulfill({
-            json: { state: 'SETUP', simulationId: '10000000-0000-0000-0000-000000000001', openedAt: null, commandSequence: '7' },
+            json: { state: 'SETUP', simulationId: '10000000-0000-0000-0000-000000000001', openedAt: null, closedAt: null, commandSequence: '7' },
           }),
         );
         await fresh.route(/\/api\/v1\/instruments$/, async (route) => {
@@ -612,7 +612,7 @@ for (const size of SIZES) {
       const page = await at(browser, size, 'operator', async (fresh) => {
         await fresh.route(/\/api\/v1\/market$/, (route) =>
           route.fulfill({
-            json: { state: 'SETUP', simulationId: '10000000-0000-0000-0000-000000000001', openedAt: null, commandSequence: '7' },
+            json: { state: 'SETUP', simulationId: '10000000-0000-0000-0000-000000000001', openedAt: null, closedAt: null, commandSequence: '7' },
           }),
         );
         await fresh.route(/\/api\/v1\/admin\/instruments\/[0-9a-f-]+$/, (route) => {

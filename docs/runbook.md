@@ -86,7 +86,8 @@ In PowerShell, write the folder as `"${PWD}\backups\20261109T220342Z:/backup"`. 
 **Its writer halted.** Look for `halted the writer` in its log. The writer stops when the database and the in-memory book might disagree:
 - a commit whose outcome is unknown;
 - another process claiming the market;
-- a committed change the book couldn't apply.
+- a committed change the book couldn't apply;
+- a market close that committed and then couldn't cancel every resting order (see below).
 
 Commands answer `503 TRADING_UNAVAILABLE` meanwhile, and nothing more is written. **Restart it:**
 
@@ -101,6 +102,24 @@ A new process takes writer ownership, rebuilds every book from the database and 
 Find what changed the database outside Execution. If it can't be explained, restore the last backup taken before it.
 
 **Another instance owns the market.** `refusing to start` means one Execution is already running against the database; only one may.
+
+**It stopped while the market was closing.** Nothing to do. A close cancels resting orders 5,000 to a transaction, and the market is closed from the first one. If Execution stops before the last, the next start cancels the rest before it takes commands, and logs `Finished the market's close at startup` with how many. A start that finds none left to cancel logs no such line. Every start on a closed market also removes its bots' token files, in case the close stopped before it had.
+
+**A close answered `504 COMMAND_OUTCOME_UNKNOWN`.** The request waited 45 seconds and the close had not answered. No lookup by key serves a close, so send the same key again:
+- **`200`:** the close is done, and this is its answer.
+- **`504` again:** it is still going on.
+- **`503 MARKET_CLOSE_UNFINISHED` or `503 TRADING_UNAVAILABLE`:** Execution stopped trading meanwhile. Restart it, as the next entry says.
+
+A close that can't finish usually shows this way first. With the database away, each further attempt at a transaction waits up to 30 seconds for a connection, so the close gives up after about a minute, when the request has stopped waiting.
+
+**A close answered `503 MARKET_CLOSE_UNFINISHED`,** at once or when its key was sent again after a `504`. Restart Execution. The market is closed: its runs have ended and its bot tokens are revoked, but orders may still rest with their holds. `restingOrders` in the answer is an upper bound: it is Execution's own count when it stopped, and up to one transaction of the close (5,000 orders) fewer may rest in the database. A transaction of the close failed three times in a row (the database was away, say), or its outcome could not be known, and Execution stopped trading. What shows it:
+- `docker compose ps` has Execution unhealthy. Its health check answers only `DOWN`, without a reason.
+- The Health panel's Writer line says "Halted".
+- The log has an `ERROR` line with `halted the writer`, the close's sequence, the count and the cause. Execution writes it when it stops, whether or not a request was still waiting for the answer.
+
+Every close sent before the restart gets this answer again; other commands get `503 TRADING_UNAVAILABLE`. Nothing needs sending again. The restart cancels the rest before it takes commands, as above, and the key that closed the market then returns the close's answer. If the restart fails with `The market's close could not be finished`, the cause in the log is what to fix first.
+
+A close can also halt the writer in its very first transaction, when the outcome of that commit is unknown. Then nobody knows yet whether the market closed: the log line says `halted the writer in its own transaction`, and every command, a close too, answers `503 TRADING_UNAVAILABLE`. Restart Execution and send the close's key again. It returns the close's answer if the market had closed, and closes it if not.
 
 ## A command's outcome is unknown
 

@@ -122,8 +122,8 @@ stateDiagram-v2
   OPEN --> PARTIALLY_FILLED: some filled
   OPEN --> FILLED
   PARTIALLY_FILLED --> FILLED
-  OPEN --> CANCELED: owner cancels
-  PARTIALLY_FILLED --> CANCELED: owner cancels the rest
+  OPEN --> CANCELED: owner cancels, or the market closes
+  PARTIALLY_FILLED --> CANCELED: owner cancels the rest, or the market closes
 ```
 
 Orders keep `quantity = filled + working + canceled`.
@@ -139,11 +139,22 @@ stateDiagram-v2
   SETUP --> OPEN: operator opens, once
   OPEN --> HALTED: operator halts
   HALTED --> OPEN: operator resumes
+  OPEN --> CLOSED: operator closes
+  HALTED --> CLOSED: operator closes
+  CLOSED --> [*]
 ```
 
 **In each state:**
 - **SETUP:** instruments, trader accounts and bots are configured. Each batch of bots is tagged with a strategy (market maker, noise or momentum), fixed once the bot exists. An instrument's reference price and display name can still be changed, and an instrument nothing uses yet can be deleted: no account was given its shares and no order named it. Nothing trades. Once the market opens, the catalogue is frozen; a database trigger refuses a change or a delete outside SETUP too.
 - **HALTED:** keeps the books. Cancels are accepted, new orders aren't.
+- **CLOSED:** final. Nothing rests and nothing trades: an order is rejected with `MARKET_CLOSED`, no bot run starts, and no transition leads out. Nothing is deleted, so portfolios, orders, trades, accounts and runs stay readable.
+
+**Closing** is one command on the writer, allowed from OPEN and from HALTED, that nothing else comes between:
+- **In its own transaction,** at its sequence: the state and the time it closed; every bot run that had not ended ends there, with no worker to confirm it; every bot token is revoked; and each instrument's snapshot says `CLOSED`, its last price being its final one.
+- **Every resting order is cancelled** with the reason `MARKET_CLOSED` and its hold released, exactly as its owner's cancel would. The first 5,000 go with the close; the rest follow in further transactions of 5,000, each with its own sequence, stored answer and audit row, because all of them in one would hold the writer for one very large commit. The books change after each commit, as for every command. Orders not yet cancelled keep their holds, so the market reconciles between two of them.
+- **If the process stops in between,** the next one finishes cancelling while it starts, before it takes a command. A restart finds the closed market and loads it like any other, so that it goes on answering as closed, and removes its bots' token files if the close had not.
+- **A running writer never keeps a market half closed.** One of the later transactions that fails and rolls back is tried again, three times in all. If the orders still cannot all be cancelled, the writer halts, as it does whenever it can't trust what it holds, and the restart finishes the close. So a writer that takes commands for a closed market has nothing resting.
+- **A close that halted is on record and is answered, whoever is still waiting.** The request waits 45 seconds and then answers `504`, and a close that can't finish may take longer than that to give up. So the writer itself logs the halt, with the close's sequence, how many orders its books still hold and the cause, and keeps the unfinished close. Health goes down, and every close sent until the restart is answered `503 MARKET_CLOSE_UNFINISHED`: the request that closed, if it is still waiting, and its key sent again after a `504`. The count in the answer is an upper bound, because a transaction whose outcome is unknown may have cancelled up to 5,000 of those orders already. Other commands are answered `503 TRADING_UNAVAILABLE`.
 
 ## Data
 
@@ -266,7 +277,7 @@ The main decisions, each with its consequences and the condition for revisiting 
 | F03 | Matching | Price then acceptance sequence; the resting order's price; partial fills; self-trade prevention (`domain/OrderBook`) |
 | F04 | Accounting | Reservations, executions, transfers and releases as balanced ledger batches in one transaction; no negative balances, enforced by checks and reconciled at startup |
 | F05 | Terminal | Live depth, tape and chart from the public stream; ticket, own orders, holdings and cash from REST, refreshed by the private stream; a notice when a resting order fills; under Help, a tour for each role, shown once by itself, and a "How this exchange works" page; term tips that explain the market's words where they appear |
-| F06 | Market control | Instruments, endowments and bots in SETUP; open, halt and resume as sequenced, audited commands |
+| F06 | Market control | Instruments, endowments and bots in SETUP; open, halt, resume and close as sequenced, audited commands |
 | F07 | Simulation | Market-maker, noise and momentum bots; seeded runs with rate, limits and duration; heartbeats and activity telemetry; each run's window of command sequences; figures per instrument and strategy, computed once a run finishes (`RunFigures`); the simulator's manifest with each run; two to four finished runs compared side by side, with their market quality from Market Data |
 | F08 | Analytics | Outbox, Kafka and Avro, the Flink job, Kafka again, then PostgreSQL candles, reconciled exactly with the trade export |
 | F09 | Reliability | Idempotent commands; restart rebuild and reconciliation; bounded queue and rate limits; outbox admission; analytics isolated from trading; backup and restore |

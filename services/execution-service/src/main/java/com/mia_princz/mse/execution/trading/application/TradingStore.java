@@ -101,6 +101,19 @@ public interface TradingStore {
 	/** Moves the market to {@code state}; the first move to OPEN also records when the market opened. */
 	void updateMarketState(UUID simulationId, String state);
 
+	/**
+	 * Closes the market at {@code closedAt}, for good. When it opened stays as it is, so the database refuses this for
+	 * a market that never opened.
+	 */
+	void closeMarket(UUID simulationId, Instant closedAt);
+
+	/** The close that closed a market, as its audit row has it: who sent it, and its sequence. */
+	record AppliedClose(UUID actorUserId, long commandSequence) {
+	}
+
+	/** The market's applied close. Empty if it was never closed by a command. */
+	Optional<AppliedClose> appliedClose(UUID simulationId);
+
 	/** Records an operator action and its outcome. The correlation ID is the command's idempotency key. */
 	void insertAudit(UUID simulationId, UUID actorUserId, String action, String outcome, UUID correlationId,
 			long commandSequence);
@@ -195,6 +208,14 @@ public interface TradingStore {
 	 */
 	void endUnfinishedBotRuns(UUID simulationId, long endSequence, Instant endedAt);
 
+	/**
+	 * Ends the simulation's runs as its market closes at {@code sequence}, and returns how many it ended. A run not
+	 * yet ended ends there, by the close: stopped if it was still running, its window closed at the close's sequence
+	 * with each of its instruments' newest trade sequence. No worker confirms it. Every run, whenever it ended, is
+	 * also recorded as stopped, so that a worker's later heartbeat is answered as for a finished run.
+	 */
+	int endBotRunsAtClose(UUID simulationId, long sequence, Instant at);
+
 	/** Every bot is created with its strategy; bots made untagged before it was required keep a null one. */
 	void insertBotAccount(UUID simulationId, UUID accountId, String displayName, BotStrategy strategy);
 
@@ -212,6 +233,12 @@ public interface TradingStore {
 
 	/** Revokes the account's active tokens; how many there were. A revoked token stays revoked. */
 	int revokeApiTokens(UUID accountId, Instant at);
+
+	/** Revokes every active token of the simulation's bots, in one statement; how many there were. */
+	int revokeBotTokens(UUID simulationId, Instant at);
+
+	/** The simulation's bot accounts. */
+	List<UUID> botAccounts(UUID simulationId);
 
 	/**
 	 * Funds a new account from the issuance account in one balanced GENESIS batch, creates its cash and position rows,
