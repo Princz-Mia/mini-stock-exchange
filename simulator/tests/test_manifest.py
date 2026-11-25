@@ -78,6 +78,7 @@ def test_the_manifest_holds_the_strategy_defaults_and_nothing_else(monkeypatch) 
     assert reported["defaults"] == {
         "fairValueHalfLifeHours": 4.0,
         "fairValueVolatility": 0.015,
+        "narrowBookBp": 100.0,
         "viewSpreadBp": 20.0,
         "marketPollSeconds": 1.0,
         "maxDataAgeSeconds": 2.0,
@@ -89,11 +90,17 @@ def test_the_manifest_holds_the_strategy_defaults_and_nothing_else(monkeypatch) 
 
 def test_a_changed_setting_shows_in_the_manifest() -> None:
     changed = manifest(
-        settings(maker_half_spread_bp=4, momentum_threshold=0.004, fair_value_volatility=0.03)
+        settings(
+            maker_half_spread_bp=4,
+            momentum_threshold=0.004,
+            fair_value_volatility=0.03,
+            narrow_book_bp=250,
+        )
     )
     assert changed["strategies"]["MARKET_MAKER"]["halfSpreadBp"] == 4
     assert changed["strategies"]["MOMENTUM"]["threshold"] == 0.004
     assert changed["defaults"]["fairValueVolatility"] == 0.03
+    assert changed["defaults"]["narrowBookBp"] == 250
     assert changed != manifest(settings())
 
 
