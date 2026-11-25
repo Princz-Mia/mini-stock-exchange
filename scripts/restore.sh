@@ -11,8 +11,10 @@
 #   3. mark every outbox event unpublished again, so the relay republishes the whole history in order;
 #   4. empty Market Data's projections and checkpoints, and delete Kafka's and Flink's volumes;
 #   5. recreate the topics, and start again whatever was running before.
-# Market Data and the candles then rebuild from the republished events. This deletes data: it asks first unless
-# --yes is given. Revoking a bot's token after the backup was taken is undone by restoring it; revoke it again.
+# Market Data and the candles then rebuild from the republished events, every simulation's: the manifest's
+# outbox_events counts them all, while its other figures are the current simulation's. This deletes data: it asks
+# first unless --yes is given. Revoking a bot's token after the backup was taken is undone by restoring it; revoke
+# it again.
 # Execution checks the whole ledger before it trades again, which takes minutes on a large database: the last step
 # waits up to --wait-timeout seconds (default 1800) for everything to be healthy.
 set -euo pipefail

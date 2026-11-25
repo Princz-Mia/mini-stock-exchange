@@ -14,8 +14,12 @@ class FakeExchange:
     """Just enough of Execution: a CSRF token per session, operator login, and setup commands that
     remember their answer per idempotency key, as the real ones do."""
 
-    def __init__(self, state: str = "NOT_SET_UP", users: set[str] | None = None) -> None:
+    def __init__(
+        self, state: str = "NOT_SET_UP", users: set[str] | None = None, name: str | None = None
+    ) -> None:
         self.state = state
+        # What the operator who started the simulation called it; none for one nobody started.
+        self.name = name
         # Trader logins that exist already, from an earlier configuration.
         self.users = set(users or ())
         self.traders: list[dict] = []
@@ -35,7 +39,7 @@ class FakeExchange:
             self.signed_in = body == {"username": "operator", "password": "secret"}
             return httpx.Response(200 if self.signed_in else 401, json={"username": "operator"})
         if path == "/api/v1/market":
-            return httpx.Response(200, json={"state": self.state})
+            return httpx.Response(200, json={"state": self.state, "name": self.name})
         assert self.signed_in and request.headers["X-CSRF-TOKEN"] == "t"
         idempotency = request.headers["Idempotency-Key"]
         if path in self.busy:
@@ -182,6 +186,50 @@ def test_a_closed_market_is_left_alone_in_one_line() -> None:
     assert exchange.applied == [], "no setup command is sent to be refused"
     assert exchange.state == "CLOSED"
     assert done == "the market is closed; the demo seed starts no new one, so nothing to do"
+
+
+def test_a_simulation_an_operator_started_is_left_alone_in_one_line() -> None:
+    exchange = FakeExchange("SETUP", name="Thursday seminar")
+
+    done = seed(operator(exchange), bots=20, trader_password=TRADER_PASSWORD)
+
+    assert exchange.applied == [], "nothing is added to a simulation that is somebody's"
+    assert exchange.state == "SETUP"
+    assert done == (
+        "the simulation in setup (Thursday seminar) was started by an operator;"
+        " the demo seed sets up only a market of its own, so nothing to do"
+    )
+    assert "\n" not in done
+
+
+def test_a_market_in_setup_that_nobody_named_is_the_seeds_own_and_is_finished() -> None:
+    # Made by the first setup command, of this seed or of one stopped halfway: no name.
+    exchange = FakeExchange("SETUP")
+
+    seed(operator(exchange), bots=2, trader_password=TRADER_PASSWORD)
+
+    assert exchange.applied.count("/api/v1/admin/instruments") == len(INSTRUMENTS)
+    assert exchange.state == "OPEN"
+
+
+def test_an_exchange_that_reports_no_name_is_seeded_as_before() -> None:
+    # An older Execution's status has no name at all, which reads as none given.
+    exchange = FakeExchange("SETUP")
+
+    def without_name(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/market":
+            return httpx.Response(200, json={"state": exchange.state})
+        return exchange(request)
+
+    http = httpx.Client(base_url="http://execution", transport=httpx.MockTransport(without_name))
+
+    seed(
+        Operator(http, "secret", sleep=lambda seconds: None),
+        bots=1,
+        trader_password=TRADER_PASSWORD,
+    )
+
+    assert exchange.state == "OPEN"
 
 
 def test_a_refused_field_is_named_in_the_error() -> None:

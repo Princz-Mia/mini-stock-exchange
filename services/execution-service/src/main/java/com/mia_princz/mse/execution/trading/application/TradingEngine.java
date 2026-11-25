@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
@@ -54,6 +55,9 @@ import com.mia_princz.mse.execution.trading.domain.Side;
  * so each gets the answer it would get alone. Any other command is a transaction of its own, except closing the
  * market, which cancels every resting order and takes one transaction for each part of them. If anything leaves the
  * books and the database possibly out of step, the writer halts.
+ * <p>
+ * The engine writes for one simulation at a time. Starting a new one, once the last has closed, moves it over after
+ * the start has committed: it then holds nothing of the simulation before.
  */
 public final class TradingEngine {
 
@@ -74,6 +78,9 @@ public final class TradingEngine {
 	 * no request ever comes by.
 	 */
 	static final String SWEEP = "MARKET_CLOSE_SWEEP";
+
+	/** The audit action of starting a simulation. */
+	static final String START = "SIMULATION_START";
 
 	/** How many times a later part of a close's sweep is tried before the writer gives the close up. */
 	static final int SWEEP_ATTEMPTS = 3;
@@ -110,6 +117,8 @@ public final class TradingEngine {
 
 	private final AccountChanges accountChanges;
 
+	private final SimulationChanges simulationChanges;
+
 	private final WriterTimings timings;
 
 	private final LongSupplier nanoTime;
@@ -132,7 +141,10 @@ public final class TradingEngine {
 	/** Each instrument's newest trades for its snapshots, kept like the books: changed only after a commit. */
 	private final Map<UUID, Tape> tapes = new HashMap<>();
 
-	/** Accounts known to trade in this market: all of them at startup, later ones as they are found. */
+	/**
+	 * Accounts known to trade in this market: all of them at startup, then each one a setup command creates, once
+	 * that has committed; any other is looked up the first time it sends an order.
+	 */
 	private final Set<UUID> accounts = new HashSet<>();
 
 	/**
@@ -216,6 +228,14 @@ public final class TradingEngine {
 	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
 			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings, LongSupplier nanoTime,
 			RestingOrders resting, int closeChunkOrders, RetryPause retryPause) {
+		this(store, transactions, writer, clock, botCredentials, accountChanges, timings, nanoTime, resting,
+				closeChunkOrders, retryPause, SimulationChanges.NONE);
+	}
+
+	/** {@code simulationChanges} hears of each simulation this engine moves to, once it has. */
+	public TradingEngine(TradingStore store, TransactionRunner transactions, CommandWriter writer, Clock clock,
+			BotCredentials botCredentials, AccountChanges accountChanges, WriterTimings timings, LongSupplier nanoTime,
+			RestingOrders resting, int closeChunkOrders, RetryPause retryPause, SimulationChanges simulationChanges) {
 		if (closeChunkOrders < 1) {
 			throw new IllegalArgumentException(
 					"A close cancels at least one order per transaction: " + closeChunkOrders);
@@ -229,6 +249,7 @@ public final class TradingEngine {
 		this.clock = clock;
 		this.botCredentials = botCredentials;
 		this.accountChanges = accountChanges;
+		this.simulationChanges = simulationChanges;
 		this.timings = timings;
 		this.nanoTime = nanoTime;
 	}
@@ -241,10 +262,15 @@ public final class TradingEngine {
 	 * by it, as closed. A closed market that still has resting orders was closed by a process that stopped before it
 	 * had cancelled them all; they are cancelled here, before any command is admitted. That process may also have
 	 * stopped after its last order and before it removed the bot token files, so those are removed here too.
+	 * <p>
+	 * Whatever this engine held before is replaced, not added to: started again in place after the current simulation
+	 * has changed, it keeps no book, instrument or tape of the one it held, and says so to whoever keeps something
+	 * for the simulation before.
 	 */
 	public void start() {
+		UUID previous = simulationId;
 		transactions.inTransaction(() -> {
-			Market market = store.lockMarket();
+			Market market = lockCurrentMarket();
 			UUID simulation = market.simulationId();
 			long epoch = store.claimWriterEpoch(simulation);
 			Map<UUID, OrderBook> rebuilt = new HashMap<>();
@@ -271,16 +297,23 @@ public final class TradingEngine {
 			if (!problems.isEmpty()) {
 				throw new ReconciliationException(problems);
 			}
+			Set<UUID> trading = store.tradingAccounts(simulation);
 			simulationId = simulation;
 			writerEpoch = epoch;
 			closed = "CLOSED".equals(market.state());
+			books.clear();
 			books.putAll(rebuilt);
+			catalogue.clear();
 			catalogue.putAll(rebuiltCatalogue);
+			tapes.clear();
 			tapes.putAll(rebuiltTapes);
 			accounts.clear();
-			accounts.addAll(store.tradingAccounts(simulation));
+			accounts.addAll(trading);
 			return null;
 		});
+		if (previous != null && !previous.equals(simulationId)) {
+			tellSimulationChanged(previous);
+		}
 		if (closed) {
 			if (restingOrders() > 0) {
 				finishInterruptedClose();
@@ -290,6 +323,23 @@ public final class TradingEngine {
 			discardBotTokens();
 		}
 		started = true;
+	}
+
+	/**
+	 * Locks the row of the simulation that is current once the lock is held. The locking read chooses its row before
+	 * it waits for whoever holds it, and after the wait it sees that row as it was left, but not a row added meanwhile.
+	 * So when the writer it takes over from committed the start of a new simulation during the wait, the row this
+	 * holds is the one that start retired, and claiming it would make this the writer of a simulation that is over
+	 * while the other writer kept the new one unfenced. The choice is therefore read again under the lock, and made
+	 * again until the row held is the current one. From then on it stays the current one for the rest of the
+	 * transaction: a start locks the current row before it adds another.
+	 */
+	private Market lockCurrentMarket() {
+		Market market = store.lockMarket();
+		while (!market.simulationId().equals(store.currentSimulation())) {
+			market = store.lockMarket();
+		}
+		return market;
 	}
 
 	/**
@@ -407,6 +457,24 @@ public final class TradingEngine {
 			}
 		});
 		return answer;
+	}
+
+	/**
+	 * Starts a new simulation, in SETUP with its name and its own issuance account, once the current one has closed;
+	 * with no simulation at all it starts the first. The start is the new simulation's first command: sequence 1, its
+	 * stored answer and its audit row are the new simulation's. In the same transaction the closed simulation's row is
+	 * locked while this writer still owns it and its writer epoch is set to 0, which no writer ever holds, so nothing
+	 * can open a command in it again; the new simulation takes this writer's epoch.
+	 * <p>
+	 * Nothing in memory changes before the commit. After it the engine writes for the new simulation and holds
+	 * nothing of the closed one: no book, instrument, tape, count of resting orders or account.
+	 * <p>
+	 * While a simulation that has not closed exists, or when another simulation has the name, the start is refused,
+	 * as a command of the simulation that is current. A start's key is looked up in every simulation, so its first
+	 * answer, started or refused, is its answer for good: sent again after later starts, it starts nothing.
+	 */
+	public CompletableFuture<SimulationStart> startSimulation(CommandKey key, StartSimulation command) {
+		return submit(() -> processStartSimulation(key, command));
 	}
 
 	/**
@@ -938,8 +1006,9 @@ public final class TradingEngine {
 	/**
 	 * Whether the account trades in this market. An account of another simulation, a closed one, has balances and may
 	 * still hold a credential, but an order from it would be written into this market's books under the wrong owner, so
-	 * it is refused before any transaction. Startup reads the market's accounts, so an order costs nothing more; only
-	 * an account made since then is looked up, once, since accounts never leave a simulation.
+	 * it is refused before any transaction. Startup reads the market's accounts and every setup command adds the ones
+	 * it creates, so an order costs nothing more; an account that came any other way is looked up, once, since accounts
+	 * never leave a simulation.
 	 */
 	private boolean tradesHere(UUID accountId) {
 		if (accounts.contains(accountId)) {
@@ -1041,11 +1110,128 @@ public final class TradingEngine {
 		timings.record(WriterTimings.Phase.COMMIT, kind, marks[3] - marks[2]);
 	}
 
+	/** The start's answer and, when this transaction started a simulation, its ID and the epoch it was given. */
+	private record Started(SimulationStart result, UUID simulationId, long writerEpoch) {
+	}
+
+	private SimulationStart processStartSimulation(CommandKey key, StartSimulation command) {
+		Started started;
+		try {
+			started = timed("other", () -> startSimulationInTransaction(key, command));
+		}
+		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
+			throw new WriterHaltException("Trading state may differ from the database", ex);
+		}
+		if (started.simulationId() != null) {
+			UUID previous = simulationId;
+			try {
+				moveTo(started.simulationId(), started.writerEpoch());
+			}
+			catch (RuntimeException | Error ex) {
+				// Committed, so the database's current simulation is the new one whatever this engine still holds.
+				throw new WriterHaltException("A committed start of a simulation could not be applied", ex);
+			}
+			LOG.info("Simulation {} started, named '{}'; the simulation before it: {}", started.simulationId(),
+					started.result().name(), previous == null ? "none" : previous);
+			tellSimulationChanged(previous);
+		}
+		return started.result();
+	}
+
+	/**
+	 * The start, in one transaction. With a current simulation, its row is locked first, by this writer's epoch, so a
+	 * writer that no longer owns it stops here. A refusal is then an ordinary command of that simulation. A start
+	 * retires the closed row and writes the new simulation with everything its first command leaves, under the new
+	 * simulation's ID; this engine's own state is not touched here.
+	 */
+	private Started startSimulationInTransaction(CommandKey key, StartSimulation command) {
+		Market current = null;
+		if (simulationId != null) {
+			current = store.lockOwnedMarket(simulationId, writerEpoch).orElseThrow(StaleWriterException::new);
+		}
+		String name = command.name().value();
+		// In every simulation, not only the current one, where a later command's key is looked up: after another
+		// start this key's answer is out of that lookup's reach, and the same request would start one more.
+		List<TradingStore.StoredResult<SimulationStart>> stored = store.storedInAnySimulation(key,
+				SimulationStart.class);
+		if (!stored.isEmpty()) {
+			return new Started(stored.stream()
+				.filter((prior) -> key.sameRequest(prior.route(), prior.requestHash()))
+				.findFirst()
+				.orElseThrow(() -> new IdempotencyConflictException(key))
+				.result(), null, 0);
+		}
+		SimulationStart.Status refusal = current != null && !"CLOSED".equals(current.state())
+				? SimulationStart.Status.NOT_CLOSED
+				: store.simulationNameTaken(name) ? SimulationStart.Status.NAME_TAKEN : null;
+		if (refusal != null) {
+			if (current == null) {
+				throw new IllegalStateException("A simulation is named " + name + ", but this writer holds none");
+			}
+			long sequence = open(key, SimulationStart.class).sequence();
+			store.insertAudit(simulationId, command.actorUserId(), START, "NOT_ALLOWED", key.idempotencyKey(), sequence);
+			return new Started(remember(key, 409, new SimulationStart(refusal, null, name, current.state(), sequence)),
+					null, 0);
+		}
+		long epoch = 1;
+		if (current != null) {
+			// A running writer never holds a closed market with orders resting; a new simulation's first snapshot must
+			// come after the closed one's last, so this is checked and not assumed.
+			if (restingOrders() > 0) {
+				throw new IllegalStateException("The closed simulation still has " + restingOrders()
+						+ " orders resting; a new one starts only after its close has finished");
+			}
+			store.retireMarket(simulationId, writerEpoch);
+			epoch = writerEpoch;
+		}
+		store.startMarket(command.simulationId(), UUID.randomUUID(), name, epoch);
+		store.insertAudit(command.simulationId(), command.actorUserId(), START, "APPLIED", key.idempotencyKey(), 1);
+		SimulationStart result = new SimulationStart(SimulationStart.Status.STARTED, command.simulationId(), name,
+				"SETUP", 1);
+		// Stored in the new simulation, which this transaction's other rows are not written for.
+		WriteSet first = new WriteSet();
+		first.result(key, 201, result, 1);
+		store.flush(command.simulationId(), first);
+		return new Started(result, command.simulationId(), epoch);
+	}
+
+	/**
+	 * Moves this engine to a simulation that has just been started, after the commit: everything it held belongs to
+	 * the simulation before, so all of it goes. The new simulation has no instrument, order or account yet. The ID is
+	 * set before the closed flag is cleared, so that a reader on another thread never takes the closed simulation for
+	 * one that is not.
+	 */
+	private void moveTo(UUID simulation, long epoch) {
+		books.clear();
+		catalogue.clear();
+		tapes.clear();
+		resting.clear();
+		accounts.clear();
+		writerEpoch = epoch;
+		simulationId = simulation;
+		closed = false;
+	}
+
+	/**
+	 * Tells whoever keeps something per account, instrument or run that the simulation before is gone. What they keep
+	 * is only ever read for an account of the current simulation, so one that cannot forget leaves memory used and
+	 * nothing wrong: it is logged, and the writer goes on.
+	 */
+	private void tellSimulationChanged(UUID previous) {
+		try {
+			simulationChanges.started(previous, simulationId);
+		}
+		catch (RuntimeException ex) {
+			LOG.warn("What was kept for simulation {} could not all be dropped", previous, ex);
+		}
+	}
+
 	/**
 	 * Creates the market, in SETUP with its issuance account, the first time something is set up. This commits on
 	 * its own: an empty market in SETUP is a valid state, and the command that needed it then runs normally. Only
 	 * while no simulation exists at all: startup loads the current one even if it is closed, and a setup command is
-	 * then refused by it, as for any market not in SETUP, instead of quietly starting another.
+	 * then refused by it, as for any market not in SETUP, instead of quietly starting another. Starting a simulation
+	 * by name is the other way to the first market, and the only way to a later one.
 	 */
 	private void ensureMarket() {
 		if (simulationId != null) {
@@ -1209,13 +1395,27 @@ public final class TradingEngine {
 	}
 
 	private AccountResult processProvision(CommandKey key, ProvisionAccount command) {
+		AccountResult result;
 		try {
 			ensureMarket();
-			return timed("other", () -> provisionInTransaction(key, command));
+			result = timed("other", () -> provisionInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
+		if (result.accountId() != null) {
+			knownToTrade(List.of(result.accountId()));
+		}
+		return result;
+	}
+
+	/**
+	 * Adds accounts a setup command has just committed to the ones known to trade here, so that their first orders
+	 * are not looked up on the writer thread. Only after the commit: an account of a transaction that rolled back
+	 * does not exist.
+	 */
+	private void knownToTrade(Collection<UUID> created) {
+		accounts.addAll(created);
 	}
 
 	private AccountResult provisionInTransaction(CommandKey key, ProvisionAccount command) {
@@ -1252,13 +1452,18 @@ public final class TradingEngine {
 	}
 
 	private TraderResult processAddTrader(CommandKey key, AddTrader command) {
+		TraderResult result;
 		try {
 			ensureMarket();
-			return timed("other", () -> addTraderInTransaction(key, command));
+			result = timed("other", () -> addTraderInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
+		if (result.accountId() != null) {
+			knownToTrade(List.of(result.accountId()));
+		}
+		return result;
 	}
 
 	/**
@@ -1301,14 +1506,21 @@ public final class TradingEngine {
 				command.accountId(), cash, command.holdings(), sequence));
 	}
 
+	/** The answer and, when this transaction made the bots, their accounts; none for a refusal or a stored answer. */
+	private record ProvisionedBots(BotsResult result, List<UUID> accounts) {
+	}
+
 	private BotsResult processBots(CommandKey key, ProvisionBots command) {
+		ProvisionedBots provisioned;
 		try {
 			ensureMarket();
-			return timed("other", () -> botsInTransaction(key, command));
+			provisioned = timed("other", () -> botsInTransaction(key, command));
 		}
 		catch (CommitOutcomeUnknownException | StaleWriterException | TradingStore.OutOfStepException ex) {
 			throw new WriterHaltException("Trading state may differ from the database", ex);
 		}
+		knownToTrade(provisioned.accounts());
+		return provisioned.result();
 	}
 
 	/**
@@ -1328,11 +1540,11 @@ public final class TradingEngine {
 	 * Each bot gets its own genesis batch and token. Tokens are handed over before commit; if the transaction then
 	 * fails, the stray tokens belong to accounts that never existed, so they authenticate nothing.
 	 */
-	private BotsResult botsInTransaction(CommandKey key, ProvisionBots command) {
+	private ProvisionedBots botsInTransaction(CommandKey key, ProvisionBots command) {
 		TradingStore.Opening<BotsResult> opening = open(key, BotsResult.class);
 		Market market = opening.market();
 		if (opening.prior().isPresent()) {
-			return replay(key, opening.prior().get());
+			return new ProvisionedBots(replay(key, opening.prior().get()), List.of());
 		}
 		long sequence = opening.sequence();
 		int population = store.botCount(simulationId);
@@ -1347,19 +1559,22 @@ public final class TradingEngine {
 			store.insertAudit(simulationId, command.actorUserId(), "BOT_PROVISION", "NOT_ALLOWED", key.idempotencyKey(),
 					sequence);
 			int status = refusal == BotsResult.Status.UNKNOWN_INSTRUMENT ? 422 : 409;
-			return remember(key, status, new BotsResult(refusal, 0, null, null, population, command.strategy().name(), sequence));
+			return new ProvisionedBots(remember(key, status,
+					new BotsResult(refusal, 0, null, null, population, command.strategy().name(), sequence)), List.of());
 		}
+		List<UUID> created = new ArrayList<>(command.count());
 		for (int number = population + 1; number <= population + command.count(); number++) {
 			UUID account = UUID.randomUUID();
+			created.add(account);
 			store.insertBotAccount(simulationId, account, ProvisionBots.name(number), command.strategy());
 			store.insertGenesis(simulationId, account, "BOT", sequence, command.cashCents(), command.holdings());
 			store.insertApiToken(UUID.randomUUID(), account, botCredentials.issue(account));
 		}
 		store.insertAudit(simulationId, command.actorUserId(), "BOT_PROVISION", "APPLIED", key.idempotencyKey(),
 				sequence);
-		return remember(key, 201, new BotsResult(BotsResult.Status.CREATED, command.count(),
+		return new ProvisionedBots(remember(key, 201, new BotsResult(BotsResult.Status.CREATED, command.count(),
 				ProvisionBots.name(population + 1), ProvisionBots.name(population + command.count()),
-				population + command.count(), command.strategy().name(), sequence));
+				population + command.count(), command.strategy().name(), sequence)), created);
 	}
 
 	private TokenRevocation processRevoke(CommandKey key, RevokeBotToken command) {
@@ -1526,6 +1741,10 @@ public final class TradingEngine {
 	}
 
 	private MarketTransition controlInTransaction(CommandKey key, MarketControl command) {
+		Optional<MarketTransition> elsewhere = answeredInAnotherSimulation(key, MarketTransition.class);
+		if (elsewhere.isPresent()) {
+			return elsewhere.get();
+		}
 		TradingStore.Opening<MarketTransition> opening = open(key, MarketTransition.class);
 		Market market = opening.market();
 		if (opening.prior().isPresent()) {
@@ -1548,6 +1767,28 @@ public final class TradingEngine {
 		store.insertAudit(simulationId, command.actorUserId(), action.auditName(), "APPLIED", key.idempotencyKey(),
 				sequence);
 		return remember(key, 200, new MarketTransition(MarketTransition.Status.APPLIED, action.to(), sequence));
+	}
+
+	/**
+	 * The answer a transition's key was given in a simulation before this one, if it was given one there. Opening,
+	 * halting, resuming and closing are sent with no body, so nothing in the request says which market it means, and
+	 * a key that was answered in an earlier simulation can only be that command sent again: for a close whose answer
+	 * was lost, that is exactly what its caller was told to do. It gets the answer it was first given, and this
+	 * market, which nobody meant, stays as it is. Any other use of such a key is a conflict.
+	 * <p>
+	 * Read before the command is opened, so it takes no sequence here; only this writer stores answers, so nothing
+	 * can add one between this and the opening.
+	 */
+	private <T> Optional<T> answeredInAnotherSimulation(CommandKey key, Class<T> type) {
+		List<TradingStore.StoredResult<T>> stored = store.storedInOtherSimulations(simulationId, key, type);
+		if (stored.isEmpty()) {
+			return Optional.empty();
+		}
+		return Optional.of(stored.stream()
+			.filter((prior) -> key.sameRequest(prior.route(), prior.requestHash()))
+			.findFirst()
+			.orElseThrow(() -> new IdempotencyConflictException(key))
+			.result());
 	}
 
 	/** The market's instruments in symbol order: the order their snapshots are written in. */
@@ -1637,8 +1878,9 @@ public final class TradingEngine {
 					+ "longest {} ms; {} bot runs ended", result.commandSequence(), result.canceledOrders(),
 					times.transactions, times.total / 1_000_000, times.longest / 1_000_000, result.endedRuns());
 		}
-		// Closed by this command, or by this key's first attempt in a process that stopped before it tidied up.
-		if (result.status() == MarketClosing.Status.CLOSED) {
+		// Closed by this command, or by this key's first attempt in a process that stopped before it tidied up. Not
+		// for a key that closed a simulation before this one, while this one runs: the files here are its bots'.
+		if (closed && result.status() == MarketClosing.Status.CLOSED) {
 			discardBotTokens();
 		}
 		return result;
@@ -1651,6 +1893,10 @@ public final class TradingEngine {
 	 * between the parts.
 	 */
 	private Closing closeInTransaction(CommandKey key, MarketControl command) {
+		Optional<MarketClosing> elsewhere = answeredInAnotherSimulation(key, MarketClosing.class);
+		if (elsewhere.isPresent()) {
+			return new Closing(elsewhere.get(), null);
+		}
 		TradingStore.Opening<MarketClosing> opening = open(key, MarketClosing.class);
 		Market market = opening.market();
 		if (opening.prior().isPresent()) {
@@ -2061,6 +2307,7 @@ public final class TradingEngine {
 			case MarketTransition transition -> transition.commandSequence();
 			case MarketClosing closing -> closing.commandSequence();
 			case MarketSweep sweep -> sweep.commandSequence();
+			case SimulationStart start -> start.commandSequence();
 			case InstrumentResult instrument -> instrument.commandSequence();
 			case InstrumentEdit edit -> edit.commandSequence();
 			case InstrumentDeletion deletion -> deletion.commandSequence();

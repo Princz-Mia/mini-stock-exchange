@@ -7,7 +7,8 @@
 #
 # Without --to, the backup goes to backups/<UTC time>/. It holds execution_db.dump (pg_dump's custom format, taken
 # from one consistent snapshot, so trading can go on meanwhile) and manifest.txt, whose figures come from that same
-# snapshot. Run it against the stack Compose started with the same project name and env file.
+# snapshot: the current simulation's sequences and trades, named current_simulation_*, and how many simulations and
+# outbox events the database holds. Run it against the stack Compose started with the same project name and env file.
 set -euo pipefail
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -35,7 +36,7 @@ figures=$(compose exec -T postgres sh /tmp/backup-execution-db.sh)
 compose cp postgres:/tmp/execution_db.dump "$target/execution_db.dump" > /dev/null
 compose exec -T postgres rm -f /tmp/execution_db.dump /tmp/backup-execution-db.sh
 
-# The snapshot's time first, then the commit of this checkout, then the snapshot's counts.
+# The snapshot's time first, then the commit of this checkout, then the snapshot's figures.
 {
   printf '%s\n' "$figures" | head -n 1
   echo "commit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"

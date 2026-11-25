@@ -170,6 +170,7 @@ class MarketCloseIT {
 		JsonNode market = JSON.readTree(new TestBrowser(port).get("/api/v1/market").body());
 		assertThat(market.get("state").asString()).isEqualTo("CLOSED");
 		assertThat(market.get("simulationId").asString()).isEqualTo(story.simulation().toString());
+		assertThat(market.get("name").isNull()).as("nobody named it: the first setup command created it").isTrue();
 		assertThat(market.get("openedAt").isNull()).isFalse();
 		assertThat(market.get("closedAt").isNull()).isFalse();
 		assertThat(jdbc.queryForObject("SELECT state || ' ' || (closed_at >= opened_at) FROM simulation WHERE id = ?",

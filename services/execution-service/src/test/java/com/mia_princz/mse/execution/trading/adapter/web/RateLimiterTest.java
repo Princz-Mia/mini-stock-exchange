@@ -157,6 +157,27 @@ class RateLimiterTest {
 		}
 	}
 
+	/** Forgetting every key gives each its whole allowance back and leaves nothing kept. */
+	@Test
+	void clearingForgetsEveryKey() {
+		FakeClock clock = new FakeClock(0);
+		RateLimiter limiter = new RateLimiter(2, () -> clock.now);
+		UUID first = UUID.randomUUID();
+		UUID second = UUID.randomUUID();
+		assertThat(limiter.acquire(first)).isZero();
+		assertThat(limiter.acquire(first)).isZero();
+		assertThat(limiter.acquire(first)).as("the burst is spent").isPositive();
+		assertThat(limiter.acquire(second)).isZero();
+		assertThat(limiter.size()).isEqualTo(2);
+
+		limiter.clear();
+
+		assertThat(limiter.size()).isZero();
+		assertThat(limiter.acquire(first)).isZero();
+		assertThat(limiter.acquire(first)).isZero();
+		assertThat(limiter.size()).isEqualTo(1);
+	}
+
 	/** However the commands are spread, no second admits more than one second's burst plus that second's rate. */
 	@Test
 	void noWindowAdmitsMoreThanTheRateAllows() {

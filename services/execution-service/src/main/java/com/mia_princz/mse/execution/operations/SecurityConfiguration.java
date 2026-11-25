@@ -146,7 +146,8 @@ class SecurityConfiguration {
 						"/api/v1/admin/health")
 				.hasRole("OPERATOR")
 				.requestMatchers(HttpMethod.POST, "/api/v1/admin/market/open", "/api/v1/admin/market/halt",
-						"/api/v1/admin/market/resume", "/api/v1/admin/market/close", "/api/v1/admin/instruments",
+						"/api/v1/admin/market/resume", "/api/v1/admin/market/close", "/api/v1/admin/simulations",
+						"/api/v1/admin/instruments",
 						"/api/v1/admin/accounts", "/api/v1/admin/traders", "/api/v1/admin/bots", "/api/v1/admin/bot-runs",
 						"/api/v1/admin/bot-runs/*/stop", "/api/v1/admin/bots/*/revoke-token")
 				.hasRole("OPERATOR")

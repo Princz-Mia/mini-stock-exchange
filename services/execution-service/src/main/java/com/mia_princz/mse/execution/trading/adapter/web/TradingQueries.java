@@ -86,19 +86,21 @@ class TradingQueries {
 
 	/**
 	 * The trading phase as the writer last committed it, for the current simulation. Empty before a market has been
-	 * set up.
+	 * set up. {@code name} is what the operator who started the simulation called it, null for one that the first
+	 * setup command created.
 	 */
-	record MarketStatus(UUID simulationId, String state, Instant openedAt, Instant closedAt, long commandSequence) {
+	record MarketStatus(UUID simulationId, String name, String state, Instant openedAt, Instant closedAt,
+			long commandSequence) {
 	}
 
 	Optional<MarketStatus> market() {
 		return jdbc
-			.sql("SELECT id, state, opened_at, closed_at, last_command_sequence FROM simulation "
+			.sql("SELECT id, name, state, opened_at, closed_at, last_command_sequence FROM simulation "
 					+ CurrentSimulation.FIRST)
 			.query((row, index) -> {
 				Timestamp openedAt = row.getTimestamp("opened_at");
 				Timestamp closedAt = row.getTimestamp("closed_at");
-				return new MarketStatus(row.getObject("id", UUID.class), row.getString("state"),
+				return new MarketStatus(row.getObject("id", UUID.class), row.getString("name"), row.getString("state"),
 						openedAt == null ? null : openedAt.toInstant(), closedAt == null ? null : closedAt.toInstant(),
 						row.getLong("last_command_sequence"));
 			})

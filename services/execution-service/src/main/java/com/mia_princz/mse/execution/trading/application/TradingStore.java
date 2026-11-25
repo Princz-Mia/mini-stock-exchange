@@ -81,10 +81,47 @@ public interface TradingStore {
 	long createMarket(UUID simulationId, UUID issuanceAccountId);
 
 	/**
+	 * Starts a simulation in SETUP with its name and its issuance account, owned by a writer at {@code writerEpoch},
+	 * with its first command sequence, 1, already taken by the command that starts it.
+	 */
+	void startMarket(UUID simulationId, UUID issuanceAccountId, String name, long writerEpoch);
+
+	/**
 	 * Locks the current simulation's row for the rest of the transaction: the one not closed or, once every one is
 	 * closed, the newest. Taking over the market starts here.
 	 */
 	Market lockMarket();
+
+	/**
+	 * The current simulation's ID as this statement sees it. Asked once {@link #lockMarket} has returned: a locking
+	 * read that waited for another transaction returns the row it chose before it waited, and never a row that
+	 * transaction added.
+	 */
+	UUID currentSimulation();
+
+	/**
+	 * Locks the simulation's row for the rest of the transaction if {@code writerEpoch} still owns it, without taking a
+	 * command sequence. Empty when another writer has claimed the market since.
+	 */
+	Optional<Market> lockOwnedMarket(UUID simulationId, long writerEpoch);
+
+	/**
+	 * Gives a closed simulation up for good: its writer epoch becomes 0, which no writer ever holds, so that no
+	 * process that still believes it owns the simulation can open a command in it again.
+	 */
+	void retireMarket(UUID simulationId, long writerEpoch);
+
+	/** Whether a simulation has this name, ignoring case. */
+	boolean simulationNameTaken(String name);
+
+	/**
+	 * Every stored answer under the key's principal and idempotency key, in any simulation, oldest simulation first.
+	 * Each is read as {@code type} only when its route and hash match the key's, and is null otherwise.
+	 */
+	<T> List<StoredResult<T>> storedInAnySimulation(CommandKey key, Class<T> type);
+
+	/** The same, leaving out the answers stored in {@code simulationId}: the ones a command opened there cannot find. */
+	<T> List<StoredResult<T>> storedInOtherSimulations(UUID simulationId, CommandKey key, Class<T> type);
 
 	/** Takes over the market: increments the writer epoch, so a previous writer's next transaction is refused. */
 	long claimWriterEpoch(UUID simulationId);

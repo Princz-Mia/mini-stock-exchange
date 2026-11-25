@@ -11,14 +11,18 @@ import org.springframework.security.core.Authentication;
 import org.springframework.stereotype.Component;
 
 import com.mia_princz.mse.execution.identity.BotPrincipal;
+import com.mia_princz.mse.execution.trading.application.SimulationChanges;
 
 /**
  * Each account's trading commands per second, checked before a command reaches the writer: one rate for bots, a higher
  * one for people. A refused command is never queued and creates nothing, so the same key can be sent again after
  * Retry-After.
+ * <p>
+ * An account belongs to one simulation, so when another simulation starts none of the accounts kept here sends a
+ * command again, and they are all forgotten.
  */
 @Component
-class AccountRateLimit {
+class AccountRateLimit implements SimulationChanges {
 
 	private final Limit bots;
 
@@ -40,6 +44,17 @@ class AccountRateLimit {
 					"This account sent too many trading commands; nothing was queued, retry the same key in a moment")
 				.retryAfter((int) Math.max(1, TimeUnit.NANOSECONDS.toSeconds(wait + TimeUnit.SECONDS.toNanos(1) - 1)));
 		}
+	}
+
+	@Override
+	public void started(UUID previousSimulationId, UUID simulationId) {
+		bots.limiter.clear();
+		people.limiter.clear();
+	}
+
+	/** How many accounts have a rate kept, bots and people together. */
+	int accountsKept() {
+		return bots.limiter.size() + people.limiter.size();
 	}
 
 	private record Limit(RateLimiter limiter, Counter refused) {

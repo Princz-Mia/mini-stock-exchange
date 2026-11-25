@@ -6,7 +6,8 @@
 #
 # Without -To, the backup goes to backups\<UTC time>\. It holds execution_db.dump (pg_dump's custom format, taken
 # from one consistent snapshot, so trading can go on meanwhile) and manifest.txt, whose figures come from that same
-# snapshot. Run it against the stack Compose started with the same project name and env file.
+# snapshot: the current simulation's sequences and trades, named current_simulation_*, and how many simulations and
+# outbox events the database holds. Run it against the stack Compose started with the same project name and env file.
 param([string]$Project, [string]$EnvFile = '.env', [string]$To)
 
 $ErrorActionPreference = 'Stop'
@@ -34,7 +35,7 @@ Invoke-Compose @('exec', '-T', 'postgres', 'rm', '-f', '/tmp/execution_db.dump',
 
 $commit = (& git rev-parse --short HEAD 2>$null)
 if (-not $commit) { $commit = 'unknown' }
-# The snapshot's time first, then the commit of this checkout, then the snapshot's counts.
+# The snapshot's time first, then the commit of this checkout, then the snapshot's figures.
 $manifest = @($figures[0], "commit=$commit") + @($figures | Select-Object -Skip 1)
 # Plain ASCII lines, so the bash restore reads the same manifest.
 [IO.File]::WriteAllLines((Join-Path (Resolve-Path $To) 'manifest.txt'), $manifest)
