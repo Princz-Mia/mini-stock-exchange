@@ -2,13 +2,14 @@
 
 A simulated, browser-based stock exchange. People and Python bots trade virtual cash and shares through the same API and rules, and prices emerge from executions against a price-time-priority limit order book. No real money or external market data is involved.
 
-**Status:** under Docker Compose the whole loop works end to end: traders and bots place and cancel orders, the engine matches and settles them, and the terminal, portfolio and operator screen show the results.
+**Status:** under Docker Compose the whole loop works end to end: traders and bots place and cancel orders, the engine matches and settles them, and the terminal, portfolio and operator screen show the results. Each market is a simulation that is set up, opened, closed for good and followed by the next, with the closed ones kept.
 
 ## What it does
 
+- **Simulations.** A fresh stack has no market: the operator sets one up and opens it, to trade until it is closed or for a set time from 5 minutes to 30 days, after which the exchange closes it by itself. A close cancels every resting order and ends any bot run, and what the market left stays readable. The next simulation then starts by name, in setup, with its own instruments and accounts, while the closed one stays as it closed. A demo market can be prepared on the first start instead, and is left in setup for the operator to open.
 - **Trading.** A price chart drawn as candles, a line or an area, with volume. Each instrument's change since trading began, a trend line and its best bid and ask in the watchlist, and the selected one's figures (change, bid, ask, spread, high, low, volume, VWAP) above the chart. Holdings with an estimated average cost and unrealized P/L, and the order and execution history, filtered and paged. Open and recent orders in a panel under the market, a notice when an order fills, and open orders cancelled from the same list, even while trading is halted. Light and dark themes, or the system's.
 - **Operating.** A Health panel on the operator screen. In setup, the operator changes an instrument's name and reference price, deletes an instrument nothing uses yet, and adds trader logins. An instrument just added shows in the list at once, marked as waiting for market data, from the exchange's own answer, until Market Data lists it, which normally takes well under a second; a symbol already listed or just added is stopped before it is sent, and a refused add goes as soon as the form changes, or can be dismissed. An open or halted market is closed for good from the same screen, after a confirmation, and is then shown as ended, read-only, with a form that starts the next simulation by name. One login can hold both the operator and the trader role, and moves between them with the Trading / Operating switch in the top bar.
-- **Bots.** Any number of bots is created in one go during setup, in the background, with its progress on every operator's screen. Each bot is tagged with a strategy. A bot run's command rate across its bots can be set up to 2,000 a second, within each bot account's own limit. Each run keeps its window, its figures and the manifest its simulator reported, and two to four finished runs can be compared side by side.
+- **Bots.** Any number of bots is created in one go during setup, in the background, with its progress on every operator's screen. Each bot is tagged with a strategy. A bot run's command rate across its bots can be set up to 2,000 a second, within each bot account's own limit, and the operator screen shows the run's progress: loading its bots, with a bar, then trading, and for a timed run the time gone of its length. Each run keeps its window, its figures and the manifest its simulator reported, and two to four finished runs can be compared side by side.
 - **Help.** A tour on first sign-in, a Help page on how the exchange works, and short tips on terms where they appear.
 
 ## Architecture
@@ -115,12 +116,12 @@ Each trader's account may send ten trading commands (places and cancels) a secon
 Each version tag publishes its images to GitHub Container Registry. To run one without building, check out its tag and start it with the release override:
 
 ```bash
-git checkout v0.2.1
+git checkout v0.3.0
 ./scripts/init-env.sh
-MSE_VERSION=v0.2.1 docker compose -f compose.yaml -f compose.release.yaml --profile full up -d --no-build --wait
+MSE_VERSION=v0.3.0 docker compose -f compose.yaml -f compose.release.yaml --profile full up -d --no-build --wait
 ```
 
-In PowerShell, set the version first with `$env:MSE_VERSION = 'v0.2.1'`. The images are `ghcr.io/princz-mia/mini-stock-exchange/<image>:<version>` for `execution-service`, `market-data-service`, `web`, `simulator` and `analytics-job`.
+In PowerShell, set the version first with `$env:MSE_VERSION = 'v0.3.0'`. The images are `ghcr.io/princz-mia/mini-stock-exchange/<image>:<version>` for `execution-service`, `market-data-service`, `web`, `simulator` and `analytics-job`.
 
 ## Develop
 
