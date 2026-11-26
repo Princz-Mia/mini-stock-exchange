@@ -475,7 +475,7 @@ try {
         Assert-ClassVersion 'services\execution-service\target\classes' 'com.mia_princz.mse.execution.ExecutionServiceApplication' 69
         Assert-ClassVersion 'services\market-data-service\target\classes' 'com.mia_princz.mse.marketdata.MarketDataServiceApplication' 69
         Assert-ClassVersion 'analytics-job\target\analytics-job.jar' 'com.mia_princz.mse.analytics.AnalyticsJob' 61
-        Assert-ClassVersion 'event-contracts\target\event-contracts-0.2.1.jar' 'com.mia_princz.mse.contracts.events.TradeExecuted' 61
+        Assert-ClassVersion 'event-contracts\target\event-contracts-0.3.0.jar' 'com.mia_princz.mse.contracts.events.TradeExecuted' 61
     }
 
     Step 'Frontend: npm ci, API contract, typecheck, lint, test, build' {

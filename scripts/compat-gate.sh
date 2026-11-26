@@ -148,7 +148,7 @@ maven_verify() {
     class_version services/execution-service/target/classes com.mia_princz.mse.execution.ExecutionServiceApplication 69 &&
     class_version services/market-data-service/target/classes com.mia_princz.mse.marketdata.MarketDataServiceApplication 69 &&
     class_version analytics-job/target/analytics-job.jar com.mia_princz.mse.analytics.AnalyticsJob 61 &&
-    class_version event-contracts/target/event-contracts-0.2.1.jar com.mia_princz.mse.contracts.events.TradeExecuted 61
+    class_version event-contracts/target/event-contracts-0.3.0.jar com.mia_princz.mse.contracts.events.TradeExecuted 61
 }
 
 frontend() {
